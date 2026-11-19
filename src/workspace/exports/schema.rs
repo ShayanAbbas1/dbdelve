@@ -212,7 +212,13 @@ pub(super) fn export_schema(
             let again = own
                 .export_sequences(schema, &request.tables)
                 .map_err(|error| refused(format!("could not read its sequences: {error}")))?;
-            if let Some(reason) = sequence_refusal(request, &again) {
+            if let Some(reason) = sequence_refusal(request, &again).or_else(|| {
+                (request.structure && redefined(&sequences, &again)).then(|| {
+                    "its sequences were changed while it was written, so the file would \
+                     create them as they were and set them as they are. Export it again."
+                        .to_string()
+                })
+            }) {
                 return Err(refused(reason));
             }
             for statement in &again.values {
@@ -246,6 +252,17 @@ pub(super) fn cycle_refusal(cyclic: &[String]) -> String {
         "{} reference each other or themselves, so no order of them runs back.",
         cyclic.join(", ")
     )
+}
+
+/// Whether `again`, read after the rows, names other sequences than `first`,
+/// which the file created them from, or defines one otherwise: a sequence a
+/// default took up meanwhile would be set and never created, one dropped
+/// created and never set, and a `MAXVALUE` raised and passed would be set
+/// beyond the one created. Only the values may have moved.
+fn redefined(first: &Sequences, again: &Sequences) -> bool {
+    first.before_tables != again.before_tables
+        || first.identity != again.identity
+        || first.owned_by != again.owned_by
 }
 
 /// Why the rows cannot be written with where their sequences stand: a
@@ -600,6 +617,34 @@ mod tests {
         let ordered = dependency_order("s", own);
         assert_eq!(ordered.order, names(&["employees"]));
         assert_eq!(ordered.cyclic, names(&["employees"]));
+    }
+
+    #[test]
+    fn sequences_redefined_between_the_reads_are_told_from_moved_ones() {
+        let first = Sequences {
+            before_tables: names(&["CREATE SEQUENCE s MAXVALUE 10;"]),
+            owned_by: names(&["ALTER SEQUENCE s OWNED BY t.id;"]),
+            values: names(&["SELECT setval('s', 5, true);"]),
+            ..Sequences::default()
+        };
+        let moved = Sequences {
+            values: names(&["SELECT setval('s', 9, true);"]),
+            ..first.clone()
+        };
+        assert!(!redefined(&first, &moved));
+        let raised = Sequences {
+            before_tables: names(&["CREATE SEQUENCE s MAXVALUE 100;"]),
+            values: names(&["SELECT setval('s', 50, true);"]),
+            ..first.clone()
+        };
+        assert!(redefined(&first, &raised));
+        let taken_up = Sequences {
+            before_tables: names(&["CREATE SEQUENCE s MAXVALUE 10;", "CREATE SEQUENCE u;"]),
+            ..first.clone()
+        };
+        assert!(redefined(&first, &taken_up));
+        let dropped = Sequences::default();
+        assert!(redefined(&first, &dropped));
     }
 
     #[test]
