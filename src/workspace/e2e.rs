@@ -12110,21 +12110,69 @@ enum SsmCleanupScenario {
     Disconnect,
 }
 
+// Opt in only for lifecycle tests that must act while a real process is running.
+thread_local! {
+    pub(super) static THREADED_BLOCKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+pub(super) fn threaded_work<T: Send + 'static>(
+    executor: &gpui::BackgroundExecutor,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> gpui::Task<T> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = send.send(work());
+    });
+    // Only the test thread wakes GPUI's deterministic scheduler.
+    executor.spawn(std::future::poll_fn(move |cx| match receive.try_recv() {
+        Ok(result) => std::task::Poll::Ready(result),
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            cx.waker().wake_by_ref();
+            std::thread::yield_now();
+            std::task::Poll::Pending
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => panic!("test worker panicked"),
+    }))
+}
+
 // These tests run only disposable shell tools: no AWS credentials or network.
 #[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
 fn ssm_cleanup_lifecycle(cx: &mut TestAppContext, scenario: SsmCleanupScenario) {
     use std::os::unix::fs::PermissionsExt;
+    struct ThreadedBlocking;
+    impl ThreadedBlocking {
+        fn new() -> Self {
+            THREADED_BLOCKING.set(true);
+            Self
+        }
+    }
+    impl Drop for ThreadedBlocking {
+        fn drop(&mut self) {
+            THREADED_BLOCKING.set(false);
+        }
+    }
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
         cx.executor().allow_parking();
+        let _threaded = ThreadedBlocking::new();
         let root = store::dbdelve_directory().unwrap().join("fake-ssm");
         std::fs::create_dir_all(&root).unwrap();
         let aws = root.join("aws");
         let plugin = root.join("session-manager-plugin");
         let started = root.join("started");
         let release = root.join("release-cleanup");
+        let opening = matches!(
+            scenario,
+            SsmCleanupScenario::ClosedFormTest
+                | SsmCleanupScenario::Reconnect
+                | SsmCleanupScenario::Disconnect
+        );
+        let startup = if opening {
+            "while :; do sleep 1; done"
+        } else {
+            "exit 1"
+        };
         std::fs::write(&aws, format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo aws-cli/2.0.0; exit; fi\nif [ \"$2\" = terminate-session ]; then while [ ! -e '{}' ]; do sleep 0.01; done; exit 1; fi\necho 'Starting session with SessionId: lifecycle-session'\ntouch '{}'\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo aws-cli/2.0.0; exit; fi\nif [ \"$2\" = terminate-session ]; then while [ ! -e '{}' ]; do sleep 0.01; done; exit 1; fi\necho 'Starting session with SessionId: lifecycle-session'\ntouch '{}'\n{startup}\n",
             release.display().to_string().replace('\'', "'\\''"),
             started.display().to_string().replace('\'', "'\\''"),
         )).unwrap();
@@ -12166,7 +12214,9 @@ fn ssm_cleanup_lifecycle(cx: &mut TestAppContext, scenario: SsmCleanupScenario) 
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !started.exists() {
-            settle(cx);
+            // Drain one task at a time: run_until_parked waits for the deliberately
+            // running connect job, preventing the test from cancelling it.
+            cx.executor().tick();
             assert!(
                 std::time::Instant::now() < deadline,
                 "fake CLI did not start"
@@ -12174,6 +12224,19 @@ fn ssm_cleanup_lifecycle(cx: &mut TestAppContext, scenario: SsmCleanupScenario) 
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         workspace.update_in(cx, |workspace, window, cx| {
+            if opening {
+                if form_test {
+                    assert!(matches!(
+                        workspace.form.as_ref().unwrap().test,
+                        Some(crate::connection_form::ConnectionTest::Running(..))
+                    ));
+                } else {
+                    assert!(matches!(
+                        workspace.profile().unwrap().state,
+                        ProfileState::Connecting { .. }
+                    ));
+                }
+            }
             match scenario {
                 SsmCleanupScenario::ClosedFormTest => {
                     workspace.form = None;
@@ -12190,7 +12253,7 @@ fn ssm_cleanup_lifecycle(cx: &mut TestAppContext, scenario: SsmCleanupScenario) 
         });
         std::fs::write(release, "").unwrap();
         loop {
-            settle(cx);
+            cx.executor().tick();
             if workspace.read_with(cx, |workspace, _| !workspace.cleanup_notices.is_empty()) {
                 break;
             }
@@ -12200,6 +12263,7 @@ fn ssm_cleanup_lifecycle(cx: &mut TestAppContext, scenario: SsmCleanupScenario) 
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        settle(cx);
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.cleanup_notices.len(), 1);
             assert_eq!(
