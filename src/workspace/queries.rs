@@ -3345,21 +3345,17 @@ impl Workspace {
                                                 if grid.rows_id() == *rows_id {
                                                     for (row, cells) in rows {
                                                         grid.clear_sent(*row, cells);
-                                                        let read = written_rows
+                                                        let placed = written_rows
                                                             .iter()
                                                             .find(|(step, _)| {
                                                                 step_rows.get(*step)
                                                                     == Some(&Some(*row))
                                                             })
-                                                            .and_then(|(_, read)| {
-                                                                match read.rows.as_slice() {
-                                                                    [one] => Some(one.clone()),
-                                                                    _ => None,
-                                                                }
+                                                            .is_some_and(|(_, read)| {
+                                                                grid.place_read_back(
+                                                                    *row, read, cells,
+                                                                )
                                                             });
-                                                        let placed = read.is_some_and(|read| {
-                                                            grid.replace_row(*row, read)
-                                                        });
                                                         if !placed {
                                                             grid.write_sent(*row, cells);
                                                         }
@@ -4766,11 +4762,12 @@ fn verified_message(
 ///
 /// An index into rows that were reordered while the send was out names
 /// another row, so nothing is placed or cleared by it then. A row named by
-/// every value is placed as well: its read finds it by the values it was
-/// sent, so what lands is those values as the server stores them, and the
-/// row's next send names it by them. Reading the whole relation instead would
-/// drop an input open on another row, and with other rows' edits staged it is
-/// held back, leaving the row named by values it no longer has.
+/// every value is placed as well, when its read holds exactly the values it
+/// was sent: the row's next send names it by them. Reading the whole relation
+/// instead would drop an input open on another row, and with other rows'
+/// edits staged it is held back, leaving the row named by values it no longer
+/// has. A read holding others may be another row that already held the sent
+/// values, so the relation is read instead ([`ResultGrid::place_read_back`]).
 fn land_row(
     grid: &mut ResultGrid,
     (row, rows_id, sent): (usize, u64, &[(usize, NewValue)]),
@@ -4787,14 +4784,10 @@ fn land_row(
         );
     }
     match read {
-        Some(Ok(mut read)) if read.rows.len() == 1 => {
-            if grid.replace_row(row, read.rows.remove(0)) {
-                grid.clear_sent(row, sent);
-                (status, false)
-            } else {
-                grid.clear_sent(row, sent);
-                (status, true)
-            }
+        Some(Ok(read)) if read.rows.len() == 1 => {
+            let placed = grid.place_read_back(row, &read, sent);
+            grid.clear_sent(row, sent);
+            (status, !placed)
         }
         Some(Ok(read)) if read.rows.is_empty() => {
             grid.clear_sent(row, sent);
@@ -5557,30 +5550,40 @@ mod tests {
         }
 
         // A row named by every value is found again by the values it was
-        // sent: its one-row read is placed where it stood, as the server
-        // stores it, and the relation is not read again.
-        let (mut grid, sent) = edited_as(db::RowMatch::EveryColumn { fixed: Vec::new() });
-        let rows_id = grid.rows_id();
-        let stored = QueryResult {
+        // sent: a one-row read holding exactly them is placed where it stood,
+        // and the relation is not read again.
+        let stored = |n: &str| QueryResult {
+            columns: vec![column("n"), column("id"), column("name")],
             rows: crate::db::rows(vec![vec![
+                Some(n.into()),
                 Some("1".into()),
                 Some("robin".into()),
-                Some("7".into()),
             ]]),
             ..QueryResult::default()
         };
+        let (mut grid, sent) = edited_as(db::RowMatch::EveryColumn { fixed: Vec::new() });
+        let rows_id = grid.rows_id();
         let (_, reread) = land_row(
             &mut grid,
             (0, rows_id, &sent),
-            Some(Ok(stored)),
+            Some(Ok(stored("1"))),
             "ok".into(),
         );
         assert!(!reread, "the relation is not read again");
         assert_eq!(grid.cell(0, 1), Some("robin"));
-        assert_eq!(
-            grid.cell(0, 2),
-            Some("7"),
-            "the row holds what the server stores"
+        assert_eq!(grid.cell(0, 2), Some("1"));
+
+        // One holding another value may be another row that already held the
+        // sent ones: it is not placed, and the relation is read instead.
+        let (mut grid, sent) = edited_as(db::RowMatch::EveryColumn { fixed: Vec::new() });
+        let rows_id = grid.rows_id();
+        let (_, reread) = land_row(
+            &mut grid,
+            (0, rows_id, &sent),
+            Some(Ok(stored("7"))),
+            "ok".into(),
         );
+        assert!(reread, "the relation is read again");
+        assert_eq!(grid.cell(0, 1), Some("wren"), "nothing is placed");
     }
 }

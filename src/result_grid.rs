@@ -3104,6 +3104,71 @@ impl ResultGrid {
         true
     }
 
+    /// Puts the one row `read` holds, a read-back of `row` after `sent` was
+    /// written to it, where `row` stands: the read is the table's `SELECT *`,
+    /// so each of the grid's columns takes the read's column of the same real
+    /// name, never the one at its position. `false`, with nothing changed,
+    /// when the read is not one row or lacks a column the grid shows.
+    ///
+    /// A row named by every value is read back by the values it was sent, and
+    /// a trigger that stored others leaves that read finding another row that
+    /// already held them: such a row is placed only when the read holds
+    /// exactly the row as sent.
+    pub fn place_read_back(
+        &mut self,
+        row: usize,
+        read: &db::QueryResult,
+        sent: &[(usize, NewValue)],
+    ) -> bool {
+        let ([fetched], Some(edit), Some(held)) = (
+            read.rows.as_slice(),
+            &self.result.edit,
+            self.result.rows.get(row),
+        ) else {
+            return false;
+        };
+        let documents = self.engine.syntax() == db::Syntax::Mongo;
+        let mut cells: Vec<db::Cell> = Vec::with_capacity(self.result.columns.len());
+        for (col, column) in self.result.columns.iter().enumerate() {
+            let name = match edit.columns.get(col) {
+                Some(Some(name)) => name,
+                _ if documents => &column.name,
+                _ => return false,
+            };
+            let mut found = read
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, read)| &read.name == name);
+            let (Some((at, _)), None) = (found.next(), found.next()) else {
+                return false;
+            };
+            cells.push(fetched.get(at).map(str::to_owned));
+        }
+        if matches!(edit.row_match, db::RowMatch::EveryColumn { .. }) {
+            let as_sent = cells.iter().enumerate().all(|(col, cell)| {
+                let expected = match sent.iter().find(|(sent, _)| *sent == col) {
+                    Some((_, NewValue::Value(text))) => Some(text.to_string()),
+                    Some((_, NewValue::Null)) => None,
+                    Some((_, NewValue::Bytes(bytes))) => match self.engine.bytes_text(bytes) {
+                        Some(text) => Some(text),
+                        None => return false,
+                    },
+                    Some((_, NewValue::Default)) => return false,
+                    None => held.get(col).map(str::to_owned),
+                };
+                *cell == expected
+            });
+            if !as_sent {
+                return false;
+            }
+        }
+        match db::Row::try_from(cells) {
+            Ok(placed) => self.replace_row(row, placed),
+            Err(_) => false,
+        }
+    }
+
     /// One entry per changed row, in the order the rows were first edited, with
     /// every changed column of that row in a single `SET`.
     ///
@@ -5947,6 +6012,90 @@ mod tests {
         let fetched = db::Row::new([Some("7"), Some("x"), Some("y")]).unwrap();
         assert!(!grid.replace_row(2, fetched));
         assert_eq!(grid.result.rows, before);
+    }
+
+    /// A query's columns in another order than its table's: the read-back,
+    /// the table's `SELECT *`, is placed by name, so the next edit of the row
+    /// still names it by its own key.
+    #[test]
+    fn a_read_back_is_placed_by_column_name_and_the_next_edit_keeps_its_key() {
+        let mut grid = ResultGrid::new(
+            QueryResult {
+                columns: vec![column("v"), column("id")],
+                rows: rows(vec![
+                    vec![Some("7".into()), Some("1".into())],
+                    vec![Some("1".into()), Some("8".into())],
+                ]),
+                edit: Some(EditTarget {
+                    schema: "main".into(),
+                    table: "t".into(),
+                    columns: vec![Some("v".into()), Some("id".into())],
+                    keys: vec![1],
+                    ..Default::default()
+                }),
+                ..QueryResult::default()
+            },
+            Mode::ReadWrite,
+        );
+        let read = QueryResult {
+            columns: vec![column("id"), column("v")],
+            rows: rows(vec![vec![Some("1".into()), Some("8".into())]]),
+            ..QueryResult::default()
+        };
+
+        assert!(grid.place_read_back(0, &read, &[(0, value("8"))]));
+
+        assert_eq!(grid.cell(0, 0), Some("8"));
+        assert_eq!(grid.cell(0, 1), Some("1"));
+        assert!(grid.set_pending(0, 0, value("9")));
+        let next = grid.pending_row(0).expect("row 0 is edited");
+        assert_eq!(next.keys, vec![("id".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    fn a_read_back_missing_a_shown_column_or_not_one_row_is_not_placed() {
+        let mut grid = editable_grid();
+        let before = grid.result.rows.clone();
+        let read = |names: &[&str], held: Vec<Vec<Option<String>>>| QueryResult {
+            columns: names.iter().map(|name| column(name)).collect(),
+            rows: rows(held),
+            ..QueryResult::default()
+        };
+        // `total` is computed in the query: no column of the table is it.
+        let whole = read(
+            &["id", "body", "total"],
+            vec![vec![Some("7".into()), Some("x".into()), Some("1".into())]],
+        );
+        assert!(!grid.place_read_back(0, &whole, &[]));
+        assert_eq!(grid.result.rows, before);
+
+        let mut keyed = every_column_grid(db::RowMatch::EveryColumn { fixed: Vec::new() });
+        let two = read(
+            &["a", "b", "c"],
+            vec![
+                vec![Some("1".into()), Some("q".into()), Some("x".into())],
+                vec![Some("1".into()), Some("q".into()), Some("x".into())],
+            ],
+        );
+        assert!(!keyed.place_read_back(0, &two, &[(1, value("q"))]));
+    }
+
+    /// A row named by every value is read back by the values it was sent. One
+    /// holding others is another row that already held the sent values, or
+    /// the row as a trigger rewrote it: either way not placed.
+    #[test]
+    fn a_row_named_by_every_value_is_placed_only_as_it_was_sent() {
+        let mut grid = every_column_grid(db::RowMatch::EveryColumn { fixed: Vec::new() });
+        let read = |b: &str, c: &str| QueryResult {
+            columns: vec![column("c"), column("b"), column("a")],
+            rows: rows(vec![vec![Some(c.into()), Some(b.into()), Some("1".into())]]),
+            ..QueryResult::default()
+        };
+
+        assert!(!grid.place_read_back(0, &read("q", "rewritten"), &[(1, value("q"))]));
+        assert_eq!(grid.cell(0, 2), Some("x"));
+        assert!(grid.place_read_back(0, &read("q", "x"), &[(1, value("q"))]));
+        assert_eq!(grid.cell(0, 1), Some("q"));
     }
 
     #[test]
