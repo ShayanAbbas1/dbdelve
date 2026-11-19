@@ -104,6 +104,16 @@ struct Pending {
     stopped: bool,
 }
 
+impl Pending {
+    fn can_retry(&self) -> bool {
+        !self.worker
+            && self.config.is_some()
+            && self.record.result.session.is_some()
+            && self.record.result.outcome != Outcome::MissingId
+            && self.record.phase != Phase::Confirmed
+    }
+}
+
 type Runner = dyn Fn(&SsmTunnel, &str) -> Outcome + Send + Sync;
 struct Inner {
     pending: Mutex<Vec<Pending>>,
@@ -155,11 +165,7 @@ impl Manager {
             .iter()
             .map(|p| {
                 let mut record = p.record.clone();
-                record.can_retry = !p.worker
-                    && p.config.is_some()
-                    && record.result.session.is_some()
-                    && record.result.outcome != Outcome::MissingId
-                    && record.phase != Phase::Confirmed;
+                record.can_retry = p.can_retry();
                 record
             })
             .collect()
@@ -216,12 +222,7 @@ impl Manager {
         let Some(p) = pending.get_mut(id) else {
             return false;
         };
-        if p.worker
-            || p.config.is_none()
-            || p.record.result.session.is_none()
-            || p.record.result.outcome == Outcome::MissingId
-            || p.record.phase == Phase::Confirmed
-        {
+        if !p.can_retry() {
             return false;
         }
         p.worker = true;
@@ -291,7 +292,7 @@ impl Manager {
             let mut pending = self.0.pending.lock().unwrap();
             let p = &mut pending[id];
             p.record.result.outcome = outcome;
-            if outcome == Outcome::Confirmed || p.stopped || outcome != Outcome::Transient {
+            if p.stopped || outcome != Outcome::Transient {
                 p.worker = false;
                 p.record.phase = if outcome == Outcome::Confirmed {
                     Phase::Confirmed
@@ -321,6 +322,10 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
     #[test]
     fn cleanup_classifies_only_recognized_failures() {
         for (diagnostic, expected) in [
@@ -365,44 +370,38 @@ mod tests {
             Outcome::Unconfirmed
         );
     }
-}
 
-#[cfg(test)]
-mod retry_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn result(outcome: Outcome) -> super::super::CleanupResult {
-        super::super::CleanupResult {
+    fn result(outcome: Outcome) -> CleanupResult {
+        CleanupResult {
             outcome,
             session: Some("alice-123".into()),
             profile: Some("original".into()),
             region: Some("ap-northeast-1".into()),
         }
     }
-    fn config() -> super::super::SsmTunnel {
-        super::super::SsmTunnel {
+    fn config() -> SsmTunnel {
+        SsmTunnel {
             profile: Some("original".into()),
             ..Default::default()
         }
     }
     fn wait(manager: &Manager, predicate: impl Fn(&Record) -> bool) {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let until = Instant::now() + Duration::from_secs(2);
         loop {
             if predicate(&manager.records()[0]) {
                 return;
             }
             assert!(
-                std::time::Instant::now() < until,
+                Instant::now() < until,
                 "cleanup did not settle: {:?}",
                 manager.records()
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
     #[test]
     fn transient_retries_are_bounded_and_dismiss_does_not_abandon_them() {
-        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
         let manager = Manager::with_runner(
             move |config, session| {
@@ -411,7 +410,7 @@ mod retry_tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 Outcome::Transient
             },
-            [std::time::Duration::from_millis(2); 3],
+            [Duration::from_millis(2); 3],
         );
         manager.add(result(Outcome::Transient), Some(config()));
         manager.dismiss(0);
@@ -426,10 +425,7 @@ mod retry_tests {
     }
     #[test]
     fn authentication_permission_unknown_and_missing_id_never_auto_retry() {
-        let manager = Manager::with_runner(
-            |_, _| panic!("unexpected retry"),
-            [std::time::Duration::ZERO; 3],
-        );
+        let manager = Manager::with_runner(|_, _| panic!("unexpected retry"), [Duration::ZERO; 3]);
         for outcome in [
             Outcome::AuthenticationRequired,
             Outcome::PermissionDenied,
@@ -446,32 +442,62 @@ mod retry_tests {
         assert!(!manager.retry(3));
     }
     #[test]
+    fn retry_pauses_on_nontransient_failure_and_manual_retry_can_recover() {
+        for outcome in [
+            Outcome::AuthenticationRequired,
+            Outcome::PermissionDenied,
+            Outcome::Unconfirmed,
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let manager = Manager::with_runner(
+                move |_, _| {
+                    if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                        outcome
+                    } else {
+                        Outcome::Confirmed
+                    }
+                },
+                [Duration::ZERO; 3],
+            );
+            manager.add(result(Outcome::Transient), Some(config()));
+            wait(&manager, |r| r.phase == Phase::Paused);
+            let record = &manager.records()[0];
+            assert_eq!(record.result.outcome, outcome);
+            assert!(record.can_retry);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(manager.retry(0));
+            wait(&manager, |r| r.phase == Phase::Confirmed);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert!(!manager.records()[0].can_retry);
+            assert!(!manager.retry(0));
+        }
+    }
+    #[test]
     fn stop_wakes_scheduled_retry_and_success_wins_over_stop_in_flight() {
         let scheduled = Manager::with_runner(
             |_, _| panic!("stopped retry ran"),
-            [std::time::Duration::from_secs(60); 3],
+            [Duration::from_secs(60); 3],
         );
         scheduled.add(result(Outcome::Transient), Some(config()));
         scheduled.stop(0);
         wait(&scheduled, |r| r.phase == Phase::Stopped);
 
         for outcome in [Outcome::Confirmed, Outcome::Transient] {
-            let (started, start) = std::sync::mpsc::channel();
-            let (finish, finished) = std::sync::mpsc::channel();
-            let finished = std::sync::Mutex::new(finished);
+            let (started, start) = mpsc::channel();
+            let (finish, finished) = mpsc::channel();
+            let finished = Mutex::new(finished);
             let manager = Manager::with_runner(
                 move |_, _| {
                     started.send(()).unwrap();
                     finished.lock().unwrap().recv().unwrap();
                     outcome
                 },
-                [std::time::Duration::ZERO; 3],
+                [Duration::ZERO; 3],
             );
             manager.add(result(Outcome::AuthenticationRequired), Some(config()));
             assert!(manager.retry(0));
-            start
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap();
+            start.recv_timeout(Duration::from_secs(1)).unwrap();
             assert!(!manager.retry(0));
             manager.stop(0);
             finish.send(()).unwrap();
