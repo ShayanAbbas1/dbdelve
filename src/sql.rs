@@ -71,7 +71,7 @@ impl Buffer {
                 .into_iter()
                 .flat_map(|batch| tsql_statements(sql, batch))
                 .collect(),
-            Syntax::Sql => statements_in(sql),
+            Syntax::Sql => statements_in(&as_grammar_reads(engine, sql)),
             Syntax::Mongo => crate::mql::statements(sql),
             Syntax::Redis => crate::redis_cmd::statements(sql),
         };
@@ -2056,6 +2056,50 @@ fn trim_range(sql: &str, range: Range<usize>) -> Option<Range<usize>> {
     let trailing = slice.len() - slice.trim_end().len();
     let trimmed = (range.start + leading)..(range.end - trailing);
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// `sql` blanked, byte for byte, wherever the engine's tokenizer reads a
+/// comment or a string the grammar would read otherwise: a `#` or `//`
+/// comment, and the inside of a literal or quoted name holding a backslash.
+///
+/// The grammar knows only `--` comments and doubled quotes. On MySQL a `'` in
+/// `# don't` or the `\'` of `'O\'Brien'` opened a string it never closed, so
+/// every `;` after it separated nothing and the rest of the buffer ran as one
+/// statement. Blanked to the same length, every range still points into `sql`.
+fn as_grammar_reads(engine: Engine, sql: &str) -> Cow<'_, str> {
+    let Some(dialect) = dialect(engine) else {
+        return Cow::Borrowed(sql);
+    };
+    // A buffer still being typed may stop tokenizing at an open quote; what
+    // came before it is blanked all the same.
+    let (tokens, _) = located_prefix(dialect.as_ref(), sql);
+    let mut masked: Option<Vec<u8>> = None;
+    for (token, range) in tokens {
+        let text = &sql[range.clone()];
+        let blank = match token {
+            Token::Whitespace(Whitespace::SingleLineComment { prefix, .. }) if prefix != "--" => {
+                range
+            }
+            Token::Whitespace(_) => continue,
+            _ if text.contains('\\') => match text.find(['\'', '"', '`']) {
+                Some(quote) if text.len() >= quote + 2 => range.start + quote + 1..range.end - 1,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let bytes = masked.get_or_insert_with(|| sql.as_bytes().to_vec());
+        for byte in &mut bytes[blank] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    // Every byte of a span is overwritten, continuation bytes included, and
+    // spans begin and end on characters, so what is left is still UTF-8.
+    match masked.map(String::from_utf8) {
+        Some(Ok(masked)) => Cow::Owned(masked),
+        _ => Cow::Borrowed(sql),
+    }
 }
 
 fn statements_in(sql: &str) -> Vec<Range<usize>> {
@@ -5494,6 +5538,63 @@ mod tests {
         let selection = second..third + "SELECT 3".len() / 2;
         let ranges = queued_statements(Engine::Postgres, sql, Some(selection));
         assert_eq!(queued_texts(sql, &ranges), vec!["SELECT 2", "SELECT 3"]);
+    }
+
+    /// Issue #298: a selection of the INSERT ran every statement after it.
+    #[test]
+    fn a_mysql_selection_stops_at_its_last_statement_past_a_backslash_escape() {
+        let sql = "SELECT 1;\nINSERT INTO t (a) VALUES ('O\\'Brien');\nSELECT 2;\nSELECT 3;";
+        let insert = sql.find("INSERT").unwrap();
+        let selection = insert - 3..sql.find("SELECT 2").unwrap();
+        let ranges = queued_statements(Engine::MySql, sql, Some(selection));
+        assert_eq!(
+            queued_texts(sql, &ranges),
+            vec!["SELECT 1", "INSERT INTO t (a) VALUES ('O\\'Brien')"]
+        );
+    }
+
+    #[test]
+    fn a_mysql_hash_comment_holds_no_quote_and_no_statement() {
+        let sql = "SELECT 1;\n# it's a comment; still one\nSELECT 2;\nSELECT 3;";
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let ranges = queued_statements(engine, sql, None);
+            assert_eq!(
+                queued_texts(sql, &ranges),
+                vec!["SELECT 1", "SELECT 2", "SELECT 3"],
+                "{engine:?}"
+            );
+        }
+    }
+
+    /// Blanking is for finding boundaries only: what runs is the buffer's own
+    /// text, comment and escape included.
+    #[test]
+    fn a_mysql_statement_runs_with_its_comment_and_escapes_as_typed() {
+        let sql = "SELECT 'a\\\\', \"b\\\"c\", # it's\n  2;\nSELECT 3;";
+        let ranges = queued_statements(Engine::MySql, sql, None);
+        assert_eq!(
+            queued_texts(sql, &ranges),
+            vec!["SELECT 'a\\\\', \"b\\\"c\", # it's\n  2", "SELECT 3"]
+        );
+    }
+
+    #[test]
+    fn a_snowflake_slash_comment_holds_no_quote() {
+        let sql = "SELECT 1;\n// don't\nSELECT 2;";
+        let ranges = queued_statements(Engine::Snowflake, sql, None);
+        assert_eq!(queued_texts(sql, &ranges), vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    /// Postgres reads neither: a backslash is a plain character in a standard
+    /// string and `#` is an operator.
+    #[test]
+    fn a_postgres_buffer_reads_backslashes_and_hashes_as_postgres_does() {
+        let sql = "SELECT 'a\\';\nSELECT 1 # 2;\nSELECT 3;";
+        let ranges = queued_statements(Engine::Postgres, sql, None);
+        assert_eq!(
+            queued_texts(sql, &ranges),
+            vec!["SELECT 'a\\'", "SELECT 1 # 2", "SELECT 3"]
+        );
     }
 
     #[test]
