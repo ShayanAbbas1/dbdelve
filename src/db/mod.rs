@@ -182,12 +182,19 @@ impl GraphCancel {
 /// with: it was dropped unsent, so the server never saw it.
 pub(crate) const CANCELLED_UNSENT: &str = "Cancelled before it was sent.";
 
+/// What a SQL Server statement a Cancel reached while it waited for its
+/// session fails with: dropped unsent, as [`CANCELLED_UNSENT`] is.
+pub(crate) const CANCELLED_QUEUED: &str =
+    "Cancelled before it started: nothing was sent to the server.";
+
 /// Whether `error` says the statement never reached the server: a Cancel
-/// dropped it before its turn ([`CANCELLED_UNSENT`]), or the binding put back
-/// ahead of it failed ([`unplaced`]). What it would have changed on the
-/// session, a transaction's end among it, did not happen.
+/// dropped it before its turn ([`CANCELLED_UNSENT`], [`CANCELLED_QUEUED`]), or
+/// the binding put back ahead of it failed ([`unplaced`]). What it would have
+/// changed on the session, a transaction's end among it, did not happen.
 pub(crate) fn sent_nothing(error: &DbError) -> bool {
-    error.message == CANCELLED_UNSENT || error.message.starts_with(UNPLACED)
+    error.message == CANCELLED_UNSENT
+        || error.message == CANCELLED_QUEUED
+        || error.message.starts_with(UNPLACED)
 }
 
 const UNPLACED: &str = "The statement was not sent:";

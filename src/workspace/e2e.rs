@@ -25791,6 +25791,21 @@ fn an_end_of_the_transaction_dropped_unsent_leaves_it_open(cx: &mut TestAppConte
             "a ROLLBACK the server never saw ended nothing"
         );
         assert_eq!(recorded_statements(&workspace, cx), listed);
+        // SQL Server's words for one a Cancel reached while it waited for the
+        // session say the same.
+        let queued = crate::db::DbError {
+            message: crate::db::CANCELLED_QUEUED.into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.end_landed("COMMIT", true, false, Some(&queued));
+        });
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "a COMMIT cancelled while queued ended nothing"
+        );
+        assert_eq!(recorded_statements(&workspace, cx), listed);
 
         // One the server refused, on an engine that says the transaction is
         // gone then, ended it; so did one whose session was lost.

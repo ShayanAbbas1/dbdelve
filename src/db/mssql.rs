@@ -1243,9 +1243,7 @@ impl Connection {
             position: None,
         })?;
         if cancelled {
-            return Err(plain_error(
-                "Cancelled before it started: nothing was sent to the server.".into(),
-            ));
+            return Err(plain_error(super::CANCELLED_QUEUED.into()));
         }
         connected?;
         Ok(guard)
@@ -6029,6 +6027,8 @@ mod tests {
             "{}",
             error.message
         );
+        // So a COMMIT dropped this way leaves the transaction recorded open.
+        assert!(crate::db::sent_nothing(&error));
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
