@@ -239,11 +239,13 @@ impl Workspace {
     /// reads, and a new buffer rather than whichever one happens to be behind
     /// an object tab. `keep_rows` because transaction control returns no rows
     /// and clearing the grid under it would look like the data went away.
+    /// Never a tab bound to another database: it runs on that database's
+    /// session, and the transaction these control is the profile's own.
     fn run_in_buffer(&mut self, statement: String, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .profile()
             .and_then(|profile| profile.session.active_query_tab())
-            .is_none()
+            .is_none_or(|tab| tab.binding.is_some())
         {
             self.new_query(&NewQuery, window, cx);
         }
