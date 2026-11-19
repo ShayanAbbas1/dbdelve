@@ -24774,6 +24774,44 @@ fn lowering_the_mode_below_the_script_reconnects_and_says_why(cx: &mut TestAppCo
     });
 }
 
+/// A script cleared while connected still has its statements on the live
+/// connection, which replays them on every later session: lowering the mode
+/// below them reconnects as it would for the saved script.
+#[gpui::test]
+fn lowering_the_mode_below_the_script_the_connection_ran_reconnects(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_behaviour("e2e", crate::session::Behaviour::default(), cx);
+        });
+        settle(cx);
+        let before = generation_of(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::ReadWrite);
+            assert!(profile.generation > before, "the profile reconnected");
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+            let connection = profile.connection().expect("it connected");
+            assert_ne!(cache_size(&connection).as_deref(), Some("4000"));
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn lowering_the_mode_to_one_the_script_passes_keeps_the_session(cx: &mut TestAppContext) {
     use crate::sql::Mode;
