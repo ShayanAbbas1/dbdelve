@@ -26454,6 +26454,60 @@ fn auto_from_manual_asks_to_commit_or_roll_back_and_lists_the_transactions_state
     });
 }
 
+#[gpui::test]
+fn manual_is_not_read_when_its_begin_is_not_sent(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        // A run that cannot start: a real disconnect would clear the switch.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().state = ProfileState::Idle;
+        });
+        toggle_auto_commit(cx);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(
+            auto_commit && !open,
+            "the switch did not read Manual over a session still autocommitting"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.notice.as_deref(),
+                Some("The BEGIN was not sent, so auto-commit is still on.")
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn manual_is_read_once_its_begin_is_sent_and_kept_once_it_lands(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_auto_commit(&crate::actions::ToggleAutoCommit, window, cx)
+            })
+        });
+        // Sent and not yet answered: Manual, with the transaction marked open.
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit && open);
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            let tab = profile.session.active;
+            assert_eq!(profile.session.manual_after_begin, Some(tab));
+        });
+        settle(cx);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit && open, "a BEGIN that landed keeps Manual");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.manual_after_begin,
+                None
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// Manual's Commit sends its `COMMIT` with the next `BEGIN` behind it. When
 /// the `COMMIT` fails and the transaction stays open, as SQLite keeps one a
 /// deferred foreign key fails, the record still lists the work it holds.

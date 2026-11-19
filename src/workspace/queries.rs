@@ -2585,6 +2585,9 @@ impl Workspace {
         // unsent, and until then a role change or an edit is still refused
         // inside the transaction it may not have ended.
         let mut ending = None;
+        // When this submission set the transaction state as it went: what
+        // Manual's `BEGIN` takes back if a Cancel drops it unsent.
+        let mut published = None;
         // Not a bound tab's: what it leaves is left on the session of its
         // database, which is not the profile's own.
         if !generated
@@ -2607,6 +2610,7 @@ impl Workspace {
                 if let Some(open) = leaves.transaction {
                     profile.in_transaction = open;
                     profile.transaction_sends += 1;
+                    published = Some(profile.transaction_sends);
                 }
             }
             profile.session_changed |= leaves.settings;
@@ -3140,6 +3144,18 @@ impl Workspace {
                             match reopens {
                                 true => profile.reopen_landed(sent, lost, error),
                                 false => profile.end_landed(sent, *lone, lost, error),
+                            }
+                        }
+                        if profile.session.manual_after_begin == Some(tab) {
+                            profile.session.manual_after_begin = None;
+                            // Dropped unsent, it opened nothing: the session
+                            // is still autocommitting, and the switch says so.
+                            if matches!(&result, Err(error) if crate::db::sent_nothing(error)) {
+                                profile.auto_commit = true;
+                                if published.is_some_and(|at| !profile.superseded(at)) {
+                                    profile.in_transaction = false;
+                                    profile.transaction_statements.clear();
+                                }
                             }
                         }
                         if profile.session.auto_after_end == Some(tab) {
