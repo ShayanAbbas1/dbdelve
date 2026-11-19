@@ -17,6 +17,7 @@ on:
       - "dev/**"
       - ".config/nextest.toml"
       - ".github/workflows/ci.yml"
+      - "rust-toolchain.toml"
   push:
     branches: [main]
     paths:
@@ -31,6 +32,7 @@ on:
       - "dev/**"
       - ".config/nextest.toml"
       - ".github/workflows/ci.yml"
+      - "rust-toolchain.toml"
 
 # Only main saves: the repository gets 10 GB of cache, and every job on every
 # branch saving its own 0.5-2 GB copy evicted main's within the hour, so most

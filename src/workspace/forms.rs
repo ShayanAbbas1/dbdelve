@@ -1714,7 +1714,15 @@ impl Workspace {
     pub(crate) fn render_discard_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let pending = self.profile()?.session.pending_discard.as_ref()?;
+        let held = 1 + pending.also.len();
         let (title, sentence) = match pending.row {
+            _ if held > 1 => (
+                "Close tabs",
+                format!(
+                    "{held} tabs have cell edits that have not been applied. \
+                     Closing them discards them."
+                ),
+            ),
             Some(_) => pending.then.discards_refused_row(),
             None => pending.then.discards(),
         };

@@ -245,6 +245,7 @@ actions!(
         SearchEverything,
         CycleMode,
         CloseTab,
+        CloseAllTabs,
         ToggleSidebar,
         ToggleResults,
         ToggleRowPanel,

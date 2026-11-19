@@ -1746,15 +1746,7 @@ impl Session {
     pub(crate) fn grids(&self) -> impl Iterator<Item = &Entity<TableState<ResultGrid>>> {
         self.queries
             .iter()
-            .flat_map(|tab| {
-                std::iter::once(&tab.results)
-                    .chain(tab.lent.iter().map(|(grid, _)| grid))
-                    .chain(
-                        tab.queue
-                            .iter()
-                            .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
-                    )
-            })
+            .flat_map(QueryTab::grids)
             .chain(self.objects.iter().filter_map(|tab| match &tab.body {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
@@ -1974,7 +1966,8 @@ impl AfterEdits {
 
 /// An action held up by the unapplied-edits question, and what to do once the
 /// edits are gone. One slot: the prompt covers the tab, so no second action can
-/// be raised behind it.
+/// be raised behind it. Close All Tabs holds the other tabs it found edits in
+/// as `also`, closed with `tab` when the edits go.
 pub(crate) struct PendingDiscard {
     pub(crate) tab: Tab,
     pub(crate) then: AfterEdits,
@@ -1982,6 +1975,9 @@ pub(crate) struct PendingDiscard {
     /// is over: Discard drops its edits and no other row's, which are sent as
     /// the action meets them. `None` for a draft, all of whose edits go.
     pub(crate) row: Option<usize>,
+    /// The other tabs Close All Tabs found edits in, discarded and closed
+    /// with `tab`. Empty for every other action.
+    pub(crate) also: Vec<Tab>,
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a
@@ -3055,6 +3051,16 @@ pub(crate) fn runs_at_once(engine: Engine, mode: Mode, statements: &[&str]) -> b
 }
 
 impl QueryTab {
+    fn grids(&self) -> impl Iterator<Item = &Entity<TableState<ResultGrid>>> {
+        std::iter::once(&self.results)
+            .chain(self.lent.iter().map(|(grid, _)| grid))
+            .chain(
+                self.queue
+                    .iter()
+                    .flat_map(|queue| queue.done.iter().map(|finished| &finished.grid)),
+            )
+    }
+
     /// Whether the results pane offers Data and Plan to flip between.
     pub(crate) fn flips_to_plan(&self) -> bool {
         self.plan.as_ref().is_some_and(|plan| !plan.typed)

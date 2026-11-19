@@ -346,6 +346,7 @@ pub enum Command {
     ImportRows,
     ImportRowsFromClipboard,
     CloseObject(u64),
+    CloseAllTabs,
     /// Stage a `NULL`, the empty string or `DEFAULT` on the active cell. The
     /// rows are how the gestures stop being folklore; the cell menu dispatches
     /// the same actions.
@@ -1802,6 +1803,7 @@ impl Palette {
                                         label.font_weight(FontWeight::MEDIUM)
                                     })
                                     .when(item.mono, |label| label.font_family(mono.clone()))
+                                    .debug_selector(|| format!("palette-label-{}", item.label))
                                     .child(highlighted(item.label.clone(), &ranges, t)),
                             )
                             .children(item.detail.clone().map(|detail| {
@@ -4564,6 +4566,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     }
     items.extend(appearance_items(overrides));
     items.extend(workspace.update.iter().flat_map(update_items));
+    if !profile.session.strip_tabs().is_empty() {
+        items.push(bound(
+            command("Close all tabs", icon::CLOSE, Command::CloseAllTabs, TAB),
+            "close_all_tabs",
+        ));
+    }
     // One row rather than a Show/Hide pair: the palette is built from the
     // session, which does not know whether the column is folded.
     items.push(bound(

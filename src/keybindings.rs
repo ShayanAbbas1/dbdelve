@@ -26,7 +26,7 @@ use gpui_component::input::ShowCompletions;
 
 use crate::{
     actions::{
-        AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab,
+        AcceptCompletion, AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseAllTabs, CloseTab,
         CollapseAllSchemas, CommandPalette, ConfirmDialog, CopyCell, CopyDiagnostics, CopyPlan,
         CopyResults, CopyRow, CopyRows, CopySelection, CycleMode, DeleteRow, DiagramFindNext,
         DiagramFindPick, DiagramFindPrevious, DiagramFocusDown, DiagramFocusLeft,
@@ -165,6 +165,8 @@ registry! {
     ("new_connection", "New Connection", None, ["secondary-shift-n"], NewConnection),
     ("new_project", "New Project", None, [], NewProject),
     ("close_tab", "Close Tab", None, ["secondary-w"], CloseTab),
+    // Zed's chord for closing every item in a pane.
+    ("close_all_tabs", "Close All Tabs", None, ["secondary-k w"], CloseAllTabs),
     ("refresh_relation", "Refresh Rows", None, ["secondary-r"], RefreshRelation),
     ("refresh_connection", "Refresh Schema", None, ["secondary-shift-r"], RefreshConnection),
     ("next_tab", "Next Tab", None, ["ctrl-tab"], NextTab),

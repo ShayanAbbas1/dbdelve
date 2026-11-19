@@ -493,8 +493,26 @@ impl Workspace {
     /// the frame this runs in. Focus goes back to the front for the reason
     /// `searched` gives.
     fn drop_row_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let inputs = self.stage_row_inputs(cx);
+        if inputs
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            refocus_front_later(window, cx);
+        }
+        self.row_panel.inputs = None;
+    }
+
+    /// Stage whatever Edit mode's inputs hold that is not staged yet, and hand
+    /// back the inputs. A close needs this before it asks whether a tab is
+    /// clean: the chip's button and the chords take no focus, so no blur comes
+    /// to stage a draft before the tab is gone.
+    fn stage_row_inputs(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<Entity<gpui_component::input::TextareaState>> {
         let Some(inputs) = self.row_panel.inputs.as_ref() else {
-            return;
+            return Vec::new();
         };
         let inputs: Vec<_> = inputs
             .fields
@@ -505,13 +523,7 @@ impl Workspace {
         for input in &inputs {
             self.commit_row_input(input, cx);
         }
-        if inputs
-            .iter()
-            .any(|input| input.focus_handle(cx).is_focused(window))
-        {
-            refocus_front_later(window, cx);
-        }
-        self.row_panel.inputs = None;
+        inputs
     }
 
     /// Edit mode's input on a cell of the grid in front, if one is built.
@@ -1230,6 +1242,51 @@ impl Workspace {
         self.ask_before_close(tab, window, cx);
     }
 
+    /// Close every tab in the strip. The ones holding unapplied cell edits are
+    /// left for a single question once the rest have gone.
+    pub(crate) fn close_all_tabs(
+        &mut self,
+        _: &CloseAllTabs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.is_some() {
+            return;
+        }
+        self.stage_row_inputs(cx);
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let active = profile.session.active;
+        // The tab in front goes last: closing it earlier would bring each
+        // neighbour forward in turn, and a tab coming forward reads its
+        // snapshot and refreshes its rows only to be closed straight after.
+        let mut tabs = profile.session.strip_tabs();
+        tabs.sort_by_key(|tab| *tab == active);
+        let (dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
+            .into_iter()
+            .partition(|tab| self.has_unapplied_edits(*tab, cx));
+        for tab in clean {
+            self.close_now(tab, window, cx);
+        }
+        if dirty.is_empty() {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            // The tab in front, sorted last, is the one the prompt is over;
+            // the others go with it.
+            let mut also = dirty;
+            let tab = also.pop().expect("dirty is not empty");
+            profile.session.pending_discard = Some(PendingDiscard {
+                tab,
+                then: AfterEdits::Close { deleting: None },
+                row: None,
+                also,
+            });
+        }
+        cx.notify();
+    }
+
     /// Close a tab, asking first if it holds cell edits nobody has applied.
     ///
     /// Every gesture that takes a tab away comes through here -- `cmd+w`, the
@@ -1242,6 +1299,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.stage_row_inputs(cx);
         if !self.held_for_edits(tab, AfterEdits::Close { deleting: None }, cx) {
             self.close_now(tab, window, cx);
         }
@@ -1300,6 +1358,7 @@ impl Workspace {
                         tab,
                         then,
                         row: Some(row),
+                        also: Vec::new(),
                     });
                 }
                 cx.notify();
@@ -1328,6 +1387,7 @@ impl Workspace {
                 tab,
                 then,
                 row: None,
+                also: Vec::new(),
             });
         }
         cx.notify();
@@ -1372,14 +1432,27 @@ impl Workspace {
         }
     }
 
+    /// Staged edits, and drafts that never became one: an open cell input,
+    /// or a row panel field whose staging was refused. A close would lose
+    /// either without a word.
     pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
-        self.profile().is_some_and(|profile| {
-            profile
-                .session
-                .tab_grids(tab)
-                .iter()
-                .any(|grid| grid.read(cx).delegate().has_pending())
-        })
+        let Some(profile) = self.profile() else {
+            return false;
+        };
+        let grids = profile.session.tab_grids(tab).into_iter().any(|results| {
+            let grid = results.read(cx).delegate();
+            grid.has_pending() || grid.has_draft(cx)
+        });
+        let row_draft = self.row_panel.inputs.as_ref().is_some_and(|inputs| {
+            inputs.tab == tab
+                && inputs.profile == profile.id
+                && inputs
+                    .fields
+                    .iter()
+                    .flatten()
+                    .any(|field| field.input.read(cx).value().as_str() != field.seed.as_str())
+        });
+        grids || row_draft
     }
 
     /// Carry out a close that has been decided on.
@@ -1456,7 +1529,12 @@ impl Workspace {
         // one holding edits would put the action back in front of the prompt.
         let grids = self
             .profile()
-            .map(|profile| profile.session.tab_grids(discard.tab))
+            .map(|profile| {
+                std::iter::once(discard.tab)
+                    .chain(discard.also.iter().copied())
+                    .flat_map(|tab| profile.session.tab_grids(tab))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         for grid in grids {
             grid.update(cx, |table, cx| {
@@ -1471,6 +1549,12 @@ impl Workspace {
         }
         if let Some(profile) = self.profile_mut() {
             profile.session.drop_apply_review_of(discard.tab);
+            for tab in &discard.also {
+                profile.session.drop_apply_review_of(*tab);
+            }
+        }
+        for tab in discard.also {
+            self.close_now(tab, window, cx);
         }
         self.resume_after_edits(discard.tab, discard.then, window, cx);
         self.refocus_front();

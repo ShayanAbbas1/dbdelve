@@ -2677,6 +2677,18 @@ impl ResultGrid {
         self.staged(row, col, value.clone()).err()
     }
 
+    /// Whether the open input holds text other than what it was seeded with.
+    pub(crate) fn has_draft(&self, cx: &App) -> bool {
+        self.editing.as_ref().is_some_and(|editing| {
+            // Against the seed the input opened with, which a read landing
+            // while it is open does not move.
+            editing
+                .input
+                .as_ref()
+                .is_some_and(|open| open.input.read(cx).value().as_str() != open.seed.as_str())
+        })
+    }
+
     /// What the open input holds would be refused by [`Self::staging_refusal`].
     pub(crate) fn commit_refusal(&self, cx: &App) -> Option<&'static str> {
         let editing = self.editing.as_ref()?;

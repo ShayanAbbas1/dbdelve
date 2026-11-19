@@ -616,6 +616,108 @@ fn the_move_tab_chords_reorder_the_strip(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_close_all_chord_empties_the_strip(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let strip = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profile()
+                    .expect("a profile is open")
+                    .session
+                    .strip_tabs()
+            })
+        };
+        cx.simulate_keystrokes("secondary-t secondary-t");
+        settle(cx);
+        assert!(strip(cx).len() >= 3);
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(strip(cx), Vec::new());
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_row_panel_draft_keeps_its_tab_open_for_the_discard_question(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table fruit (id integer primary key, name text); \
+             insert into fruit values (1, 'apple');",
+        );
+        cx.simulate_input("select * from fruit");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "right");
+        press(cx, "secondary-shift-e");
+        let input = workspace.read_with(cx, |workspace, _| {
+            let inputs = workspace.row_panel.inputs.as_ref().expect("Edit mode");
+            inputs.fields[1]
+                .as_ref()
+                .expect("an input on the name")
+                .input
+                .clone()
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("pear", window, cx));
+        });
+        settle(cx);
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let discard = session
+                .pending_discard
+                .as_ref()
+                .expect("the draft is asked about");
+            assert_eq!(discard.tab, session.active);
+            assert!(discard.also.is_empty());
+            assert_eq!(session.strip_tabs(), vec![session.active]);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn text_typed_in_an_open_cell_keeps_its_tab_open_for_the_discard_question(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table fruit (id integer primary key, name text); \
+             insert into fruit values (1, 'apple');",
+        );
+        cx.simulate_input("select * from fruit");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        press(cx, "right");
+        press(cx, "enter");
+        cx.simulate_input("s");
+        settle(cx);
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let discard = session
+                .pending_discard
+                .as_ref()
+                .expect("the draft is asked about");
+            assert_eq!(discard.tab, session.active);
+            assert!(discard.also.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_command_palette_opens_on_the_welcome_surface(cx: &mut TestAppContext) {
     // A `PG*` connection from the environment opens in place of the welcome
     // surface, as CI's live-test job sets.
@@ -5219,6 +5321,90 @@ fn a_service_launch_does_not_reuse_a_profiles_explicit_port(cx: &mut TestAppCont
             workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
         quit(workspace, cx);
         assert_eq!(active, "inherited");
+    });
+}
+
+#[cfg(debug_assertions)]
+#[gpui::test]
+fn result_grid_scrollbars_stay_outside_the_viewport(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table nests (id integer primary key);
+             with recursive rows(n) as (values (1) union all select n + 1 from rows where n < 100)
+             insert into nests select n from rows;",
+        );
+        cx.executor().allow_parking();
+        let nests = explorer_row(&workspace, "relation-main\0nests", cx).center();
+        cx.simulate_click(nests, gpui::Modifiers::default());
+        settle(cx);
+
+        let viewport = cx
+            .debug_bounds("table-viewport")
+            .expect("the grid is drawn");
+        let horizontal = cx
+            .debug_bounds("table-scrollbar-horizontal")
+            .expect("the horizontal track is laid out");
+        let vertical = cx
+            .debug_bounds("table-scrollbar-vertical")
+            .expect("the vertical track is laid out");
+        assert_eq!(horizontal.top(), viewport.bottom());
+        assert_eq!(vertical.left(), viewport.right());
+        assert_eq!(horizontal.right(), vertical.left());
+        assert_eq!(vertical.bottom(), horizontal.top());
+
+        let row_height = gpui::px(theme::layout::grid(
+            gpui_component::Size::Medium.table_row_height().into(),
+        ));
+        // The gutter takes the body from eight whole rows down to seven.
+        let window_size = cx.update(|window, _| window.viewport_size());
+        let viewport_height = row_height * 9. - horizontal.size.height / 2.;
+        cx.simulate_resize(gpui::size(
+            window_size.width,
+            window_size.height + viewport_height - viewport.size.height,
+        ));
+        settle(cx);
+
+        let viewport = cx.debug_bounds("table-viewport").unwrap();
+        let grid = workspace.read_with(cx, |workspace, _| {
+            let tab = workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_object()
+                .unwrap();
+            let ObjectBody::Relation { results, .. } = &tab.body else {
+                panic!("expected the relation preview");
+            };
+            results.clone()
+        });
+        cx.update(|window, cx| {
+            grid.update(cx, |grid, cx| {
+                grid.focus_handle(cx).focus(window, cx);
+                grid.set_selected_cell(0, 0, cx);
+            });
+        });
+        settle(cx);
+        cx.simulate_keystrokes("pagedown");
+        settle(cx);
+        assert_eq!(
+            grid.read_with(cx, |grid, _| grid.selected_cell()),
+            Some((7, 0))
+        );
+
+        // Keep the table mounted to exercise the shared empty-table layout.
+        grid.update(cx, |grid, cx| {
+            drop(grid.delegate_mut().take_rows());
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(
+            cx.debug_bounds("table-viewport").unwrap().right(),
+            viewport.right()
+        );
+        assert!(cx.debug_bounds("table-scrollbar-vertical").is_none());
+
+        quit(workspace, cx);
     });
 }
 
@@ -11531,6 +11717,39 @@ fn palette_rows(
     cx.simulate_keystrokes("escape");
     settle(cx);
     rows
+}
+
+#[gpui::test]
+fn a_long_host_shortens_before_its_connections_name_in_the_palette(cx: &mut TestAppContext) {
+    // CI's live job sets `PG*`, whose profile would be put in front on launch.
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let host = format!("{}.example.com", "a-very-long-host-name".repeat(8));
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}[[profiles]]\nid = \"far\"\nname = \"Faraway\"\nhost = {host:?}\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"postgres\"\n",
+                sqlite_profile("e2e", "E2E", "")
+            ),
+        );
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::SwitchConnection), cx)
+        });
+        settle(cx);
+        let name = cx
+            .debug_bounds("palette-label-Faraway")
+            .expect("the connection's row is drawn");
+        assert!(
+            name.size.width > gpui::px(20.),
+            "the name keeps its width beside a host wider than the row: {name:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        quit(workspace, cx);
+    });
 }
 
 #[gpui::test]

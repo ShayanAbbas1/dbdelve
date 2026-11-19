@@ -2080,6 +2080,7 @@ impl Workspace {
                         deleting: Some(name),
                     },
                     row: None,
+                    also: Vec::new(),
                 });
             }
             cx.notify();
