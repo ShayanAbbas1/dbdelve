@@ -66,6 +66,12 @@ pub const IN_MEMORY: &str = ":memory:";
 /// the statement timeout fired it.
 pub const INTERRUPTED: &str = "INTERRUPT Error: Interrupted!";
 
+/// A verified apply whose statement timeout ran out between two of its
+/// statements, or while it waited for the connection.
+fn timed_out() -> DbError {
+    plain_error("The statement timeout ran out before the edit was saved.".into())
+}
+
 /// How DuckDB refuses a `ROLLBACK` with no transaction to end.
 const NO_TRANSACTION: &str = "no transaction is active";
 
@@ -374,11 +380,17 @@ impl Connection {
     /// The statement timeout, the way `sqlite.rs` arms its own: a thread that
     /// interrupts unless this is dropped first.
     fn deadline(&self) -> Option<Sender<()>> {
-        let limit = self.statement_timeout?;
+        self.deadline_from(Instant::now())
+    }
+
+    /// [`Self::deadline`] for a limit counted from `started`, firing when what
+    /// is left of it runs out.
+    fn deadline_from(&self, started: Instant) -> Option<Sender<()>> {
+        let left = self.statement_timeout?.saturating_sub(started.elapsed());
         let interrupt = self.interrupt.clone();
         let (sender, receiver) = channel::<()>();
         std::thread::spawn(move || {
-            if receiver.recv_timeout(limit) == Err(RecvTimeoutError::Timeout) {
+            if receiver.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
                 interrupt.interrupt();
             }
         });
@@ -442,8 +454,13 @@ impl Connection {
     /// re-reads and the writes: see [`super::run_verified`]. A count is the
     /// `Count` column DuckDB answers a write with, the rows the statement
     /// matched, and a write-write conflict surfaces at the statement
-    /// that met it, so it is a failure at that write. The statement timeout is
-    /// armed once for the sequence. `proceed` says no once a Cancel has come.
+    /// that met it, so it is a failure at that write. The statement timeout
+    /// runs once for the sequence, counted from the call, so time queued for
+    /// the lock counts. Its interrupt is armed only once the apply holds the
+    /// lock, where it can stop nothing but the apply, and the limit is checked
+    /// again before each statement, since an interrupt between two is not
+    /// seen by either; it is disarmed for the `ROLLBACK`, which then
+    /// completes. `proceed` says no once a Cancel has come.
     ///
     /// `bound` is [`Self::submit`]'s: the schema to put the session back on
     /// first, under the same lock, when the apply is a bound tab's.
@@ -453,7 +470,11 @@ impl Connection {
         proceed: &dyn Fn() -> bool,
         bound: Option<Option<&str>>,
     ) -> ApplyOutcome {
-        let _deadline = self.deadline();
+        let started = Instant::now();
+        let expired = || {
+            self.statement_timeout
+                .is_some_and(|limit| started.elapsed() >= limit)
+        };
         let failed = |error| ApplyOutcome::Failed {
             stage: ApplyStage::Begin,
             error,
@@ -467,6 +488,10 @@ impl Connection {
         if !proceed() {
             return failed(plain_error("Cancelled before it was sent.".into()));
         }
+        if expired() {
+            return failed(timed_out());
+        }
+        let deadline = std::cell::RefCell::new(self.deadline_from(started));
         if let Some(schema) = bound
             && let Err(error) = self.put_back(&connection, schema)
         {
@@ -476,6 +501,12 @@ impl Connection {
         // ends the transaction itself, and `run_verified` owns the rollback.
         // A `ROLLBACK` with no transaction to end is an error it ignores.
         let mut send = |sql: &str, sending: Sending| {
+            match sending {
+                Sending::Abandon => drop(deadline.take()),
+                Sending::Bracket if sql == "ROLLBACK" => drop(deadline.take()),
+                _ if expired() => return Err(timed_out()),
+                _ => {}
+            }
             if sending == Sending::Open && !connection.is_autocommit() {
                 return Err(super::in_a_transaction());
             }
@@ -2517,6 +2548,46 @@ mod tests {
         let error = connection.query(RUNAWAY, Fetch::default()).unwrap_err();
         assert_eq!(error.message, INTERRUPTED);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// An apply whose limit ran out while another statement held the
+    /// connection sends nothing, and its interrupt stops nothing of the
+    /// statement it waited behind.
+    #[test]
+    fn an_apply_that_timed_out_waiting_for_the_connection_sends_nothing() {
+        use crate::db::{ApplyOutcome, ApplyStage, StepKind, VerifiedStep};
+
+        let connection = Connection::open(IN_MEMORY, 1).unwrap();
+        connection
+            .query("CREATE TABLE t (id INTEGER)", Fetch::default())
+            .unwrap();
+        let insert = "INSERT INTO \"main\".\"t\" (\"id\") VALUES ('1')";
+        let steps = [VerifiedStep {
+            sql: crate::sql::generated_writes(Engine::DuckDb, insert)
+                .and_then(|mut statements| statements.pop())
+                .expect("the gate admits the insert"),
+            kind: StepKind::Insert,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        }];
+        let held = lock(&connection.connection).unwrap();
+        let applying = connection.clone();
+        let apply = std::thread::spawn(move || applying.apply_verified(&steps, &|| true, None));
+        std::thread::sleep(Duration::from_millis(1500));
+        let other = run(&held, "SELECT 1 AS still_running", Fetch::default());
+        drop(held);
+
+        assert!(other.is_ok(), "{other:?}");
+        assert_eq!(
+            apply.join().unwrap(),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: timed_out(),
+            }
+        );
+        assert_eq!(count(&connection), "0");
     }
 
     #[test]
