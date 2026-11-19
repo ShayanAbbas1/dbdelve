@@ -8270,11 +8270,11 @@ fn ssm_disconnect_delivers_failed_cleanup_notice(cx: &mut TestAppContext) {
         let (workspace, cx) = launch_on_sqlite(cx);
         let attempt = crate::db::ConnectAttempt::default();
         attempt.finish().unwrap();
-        let profile_index = workspace.update(cx, |workspace, _| {
+        let profile_index = workspace.update(cx, |workspace, cx| {
+            workspace.observe_ssm_cleanup(&attempt, cx);
             let index = workspace.active.unwrap();
             let profile = &mut workspace.profiles[index];
             assert!(matches!(profile.state, ProfileState::Connected(_)));
-            profile.cleanup_attempt = Some(attempt.clone());
             index
         });
         disconnect(cx);
@@ -8284,7 +8284,6 @@ fn ssm_disconnect_delivers_failed_cleanup_notice(cx: &mut TestAppContext) {
                 workspace.profiles[profile_index].state,
                 ProfileState::Idle
             ));
-            assert!(workspace.profiles[profile_index].cleanup_attempt.is_none());
             assert!(workspace.cleanup_notices.is_empty());
         });
         // Deliver after disconnect returns, as the background AWS request does.
@@ -8311,17 +8310,16 @@ fn ssm_disconnect_does_not_warn_after_successful_cleanup(cx: &mut TestAppContext
         let (workspace, cx) = launch_on_sqlite(cx);
         let attempt = crate::db::ConnectAttempt::default();
         attempt.finish().unwrap();
-        let profile_index = workspace.update(cx, |workspace, _| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.observe_ssm_cleanup(&attempt, cx);
             let index = workspace.active.unwrap();
             let profile = &mut workspace.profiles[index];
             assert!(matches!(profile.state, ProfileState::Connected(_)));
-            profile.cleanup_attempt = Some(attempt.clone());
             index
         });
         disconnect(cx);
         workspace.read_with(cx, |workspace, _| {
             assert!(workspace.active.is_none());
-            assert!(workspace.profiles[profile_index].cleanup_attempt.is_none());
         });
         attempt.report_cleanup(crate::db::ssm::CleanupResult {
             accepted: true,
@@ -8344,9 +8342,9 @@ fn ssm_disconnect_while_connecting_delivers_missing_session_notice(cx: &mut Test
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
         let attempt = crate::db::ConnectAttempt::default();
-        workspace.update(cx, |workspace, _| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.observe_ssm_cleanup(&attempt, cx);
             let profile = workspace.profile_mut().unwrap();
-            profile.cleanup_attempt = Some(attempt.clone());
             profile.state = ProfileState::Connecting {
                 _attempt: attempt.guard(),
             };
@@ -8388,7 +8386,6 @@ fn ssm_disconnect_delivers_cleanup_completed_before_subscription(cx: &mut TestAp
         let attempt = crate::db::ConnectAttempt::default();
         workspace.update(cx, |workspace, _| {
             let profile = workspace.profile_mut().unwrap();
-            profile.cleanup_attempt = Some(attempt.clone());
             profile.state = ProfileState::Connecting {
                 _attempt: attempt.guard(),
             };
@@ -8401,6 +8398,9 @@ fn ssm_disconnect_delivers_cleanup_completed_before_subscription(cx: &mut TestAp
             region: Some("test-region".into()),
         };
         attempt.report_cleanup(result.clone());
+        workspace.update(cx, |workspace, cx| {
+            workspace.observe_ssm_cleanup(&attempt, cx)
+        });
         disconnect(cx);
         settle(cx);
         workspace.read_with(cx, |workspace, _| {
@@ -12096,6 +12096,182 @@ fn a_stored_selection_waits_for_a_connection_that_loads_later(cx: &mut TestAppCo
             [a_birds, b_birds],
             "and join the selection once b has loaded"
         );
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+#[derive(Clone, Copy, Debug)]
+enum SsmCleanupScenario {
+    FailedConnect,
+    FailedFormTest,
+    ClosedFormTest,
+    Reconnect,
+    Disconnect,
+}
+
+// These tests run only disposable shell tools: no AWS credentials or network.
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+fn ssm_cleanup_lifecycle(cx: &mut TestAppContext, scenario: SsmCleanupScenario) {
+    use std::os::unix::fs::PermissionsExt;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.executor().allow_parking();
+        let root = store::dbdelve_directory().unwrap().join("fake-ssm");
+        std::fs::create_dir_all(&root).unwrap();
+        let aws = root.join("aws");
+        let plugin = root.join("session-manager-plugin");
+        let started = root.join("started");
+        let release = root.join("release-cleanup");
+        std::fs::write(&aws, format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo aws-cli/2.0.0; exit; fi\nif [ \"$2\" = terminate-session ]; then while [ ! -e '{}' ]; do sleep 0.01; done; exit 1; fi\necho 'Starting session with SessionId: lifecycle-session'\ntouch '{}'\nexit 1\n",
+            release.display().to_string().replace('\'', "'\\''"),
+            started.display().to_string().replace('\'', "'\\''"),
+        )).unwrap();
+        std::fs::write(&plugin, "#!/bin/sh\necho 1.2.3.4\n").unwrap();
+        for tool in [&aws, &plugin] {
+            std::fs::set_permissions(tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let config = ConnectionConfig::Postgres(crate::db::PostgresConfig {
+            server: crate::db::ServerConfig {
+                host: "never-contacted.example.test".into(),
+                user: "reader".into(),
+                password: "fake".into(),
+                ssm: Some(crate::db::SsmTunnel {
+                    target: "i-0123456789abcdef0".into(),
+                    aws_cli: Some(aws),
+                    session_manager_plugin: Some(plugin),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let form_test = matches!(
+            scenario,
+            SsmCleanupScenario::FailedFormTest | SsmCleanupScenario::ClosedFormTest
+        );
+        let original = workspace.update_in(cx, |workspace, window, cx| {
+            let index = workspace.active.unwrap();
+            let original = workspace.profiles[index].config.clone();
+            if form_test {
+                workspace.form = Some(ConnectionForm::new(Some(&config), window, cx));
+                workspace.test_connection(&gpui::ClickEvent::default(), window, cx);
+            } else {
+                workspace.profiles[index].config = config;
+                workspace.begin_connect(index, cx);
+            }
+            cx.notify();
+            original
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !started.exists() {
+            settle(cx);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake CLI did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            match scenario {
+                SsmCleanupScenario::ClosedFormTest => {
+                    workspace.form = None;
+                }
+                SsmCleanupScenario::Reconnect => {
+                    let index = workspace.active.unwrap();
+                    workspace.profiles[index].config = original;
+                    workspace.reconnect(index, cx);
+                }
+                SsmCleanupScenario::Disconnect => workspace.disconnect(&Disconnect, window, cx),
+                SsmCleanupScenario::FailedConnect | SsmCleanupScenario::FailedFormTest => {}
+            }
+            cx.notify();
+        });
+        std::fs::write(release, "").unwrap();
+        loop {
+            settle(cx);
+            if workspace.read_with(cx, |workspace, _| !workspace.cleanup_notices.is_empty()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cleanup notice missing for {scenario:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.cleanup_notices.len(), 1);
+            assert_eq!(
+                workspace.cleanup_notices[0].session.as_deref(),
+                Some("lifecycle-session")
+            );
+        });
+        // A later disconnect must not subscribe again or repeat the notice.
+        if workspace.read_with(cx, |workspace, _| workspace.active.is_some()) {
+            disconnect(cx);
+            settle(cx);
+        }
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.cleanup_notices.len(), 1)
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+#[gpui::test]
+fn ssm_cleanup_after_failed_connect(cx: &mut TestAppContext) {
+    ssm_cleanup_lifecycle(cx, SsmCleanupScenario::FailedConnect);
+}
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+#[gpui::test]
+fn ssm_cleanup_after_failed_form_test(cx: &mut TestAppContext) {
+    ssm_cleanup_lifecycle(cx, SsmCleanupScenario::FailedFormTest);
+}
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+#[gpui::test]
+fn ssm_cleanup_after_closed_form_test(cx: &mut TestAppContext) {
+    ssm_cleanup_lifecycle(cx, SsmCleanupScenario::ClosedFormTest);
+}
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+#[gpui::test]
+fn ssm_cleanup_after_reconnect(cx: &mut TestAppContext) {
+    ssm_cleanup_lifecycle(cx, SsmCleanupScenario::Reconnect);
+}
+#[cfg(all(unix, any(target_os = "macos", target_env = "gnu")))]
+#[gpui::test]
+fn ssm_cleanup_after_disconnect(cx: &mut TestAppContext) {
+    ssm_cleanup_lifecycle(cx, SsmCleanupScenario::Disconnect);
+}
+
+#[gpui::test]
+fn ssm_cleanup_survives_cancelling_a_running_form_test(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.observe_ssm_cleanup(&attempt, cx);
+            let mut form = ConnectionForm::new(None, window, cx);
+            let task = cx.spawn(async move |_, _| std::future::pending::<()>().await);
+            form.test = Some(crate::connection_form::ConnectionTest::Running(
+                task,
+                attempt.guard(),
+            ));
+            workspace.form = Some(form);
+        });
+        workspace.update(cx, |workspace, _| workspace.form = None);
+        assert!(attempt.is_cancelled());
+        attempt.report_cleanup(crate::db::ssm::CleanupResult {
+            accepted: false,
+            session: None,
+            profile: None,
+            region: None,
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.cleanup_notices.len(), 1);
+        });
         quit(workspace, cx);
     });
 }
