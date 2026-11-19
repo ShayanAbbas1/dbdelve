@@ -206,7 +206,7 @@ pub(super) fn export_schema(
                 out.write_all(b"\n").map_err(&failed)?;
             }
         }
-        if request.rows && !sequences.values.is_empty() {
+        if rereads_sequences(request, &sequences) {
             // Read again now the rows are, so a row another session added
             // meanwhile is behind where the file sets its sequence.
             let again = own
@@ -252,6 +252,14 @@ pub(super) fn cycle_refusal(cyclic: &[String]) -> String {
         "{} reference each other or themselves, so no order of them runs back.",
         cyclic.join(", ")
     )
+}
+
+/// Whether the sequences are read again after the rows: to set them, and,
+/// with the structure written, to learn whether one was taken up meanwhile,
+/// which the first read, empty or not, cannot say. Only Postgres has any to
+/// read, so elsewhere the second read costs nothing.
+fn rereads_sequences(request: &SchemaRequest, first: &Sequences) -> bool {
+    request.rows && (request.structure || !first.values.is_empty())
 }
 
 /// Whether `again`, read after the rows, names other sequences than `first`,
@@ -617,6 +625,29 @@ mod tests {
         let ordered = dependency_order("s", own);
         assert_eq!(ordered.order, names(&["employees"]));
         assert_eq!(ordered.cyclic, names(&["employees"]));
+    }
+
+    #[test]
+    fn sequences_are_read_again_when_one_could_have_been_taken_up() {
+        let request = |structure, rows| SchemaRequest {
+            tables: names(&["t"]),
+            structure,
+            rows,
+            partitioned: Vec::new(),
+        };
+        let none = Sequences::default();
+        let some = Sequences {
+            values: names(&["SELECT setval('s', 5, true);"]),
+            ..Sequences::default()
+        };
+        // With the structure, even an empty first read is checked again.
+        assert!(rereads_sequences(&request(true, true), &none));
+        assert!(rereads_sequences(&request(true, true), &some));
+        // Rows alone create nothing, so only the ones to set are read.
+        assert!(!rereads_sequences(&request(false, true), &none));
+        assert!(rereads_sequences(&request(false, true), &some));
+        // No rows, no values to set.
+        assert!(!rereads_sequences(&request(true, false), &some));
     }
 
     #[test]
