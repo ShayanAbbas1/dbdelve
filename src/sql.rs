@@ -2076,14 +2076,20 @@ fn as_grammar_reads(engine: Engine, sql: &str) -> Cow<'_, str> {
     let mut masked: Option<Vec<u8>> = None;
     for (token, range) in tokens {
         let text = &sql[range.clone()];
+        // A token's span is trusted only where the text under it is that
+        // token: inside a MySQL `/*! … */` the tokenizer places what it
+        // expands at the comment's own start, and blanking there would open
+        // the comment up instead.
         let blank = match token {
-            Token::Whitespace(Whitespace::SingleLineComment { prefix, .. }) if prefix != "--" => {
+            Token::Whitespace(Whitespace::SingleLineComment { prefix, .. })
+                if prefix != "--" && text.starts_with(prefix.as_str()) =>
+            {
                 range
             }
             Token::Whitespace(_) => continue,
-            _ if text.contains('\\') => match text.find(['\'', '"', '`']) {
-                Some(quote) if text.len() >= quote + 2 => range.start + quote + 1..range.end - 1,
-                _ => continue,
+            _ if text.contains('\\') => match quoted_interior(text) {
+                Some(inside) => range.start + inside.start..range.start + inside.end,
+                None => continue,
             },
             _ => continue,
         };
@@ -2100,6 +2106,16 @@ fn as_grammar_reads(engine: Engine, sql: &str) -> Cow<'_, str> {
         Some(Ok(masked)) => Cow::Owned(masked),
         _ => Cow::Borrowed(sql),
     }
+}
+
+/// Inside the quotes of a literal or quoted name spelled `'…'`, `"…"` or
+/// `` `…` ``, after a prefix like `E`, `N` or `_utf8`. `None` for anything
+/// else, a `$$` body among them, whose delimiters are not one quote.
+fn quoted_interior(text: &str) -> Option<Range<usize>> {
+    let quote = text.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+    let close = text[quote..].chars().next()?;
+    (matches!(close, '\'' | '"' | '`') && text.len() >= quote + 2 && text.ends_with(close))
+        .then(|| quote + 1..text.len() - 1)
 }
 
 fn statements_in(sql: &str) -> Vec<Range<usize>> {
@@ -5575,6 +5591,28 @@ mod tests {
         assert_eq!(
             queued_texts(sql, &ranges),
             vec!["SELECT 'a\\\\', \"b\\\"c\", # it's\n  2", "SELECT 3"]
+        );
+    }
+
+    #[test]
+    fn a_backslash_in_a_dollar_quoted_body_leaves_its_delimiters_alone() {
+        let sql = "SELECT 0;\nSELECT $$'C:\\tmp'$$;\nDELETE FROM t;";
+        let ranges = queued_statements(Engine::Postgres, sql, None);
+        assert_eq!(
+            queued_texts(sql, &ranges),
+            vec!["SELECT 0", "SELECT $$'C:\\tmp'$$", "DELETE FROM t"]
+        );
+    }
+
+    /// sqlparser places what it expands from a `/*! … */` at the comment's
+    /// own start, so blanking by those spans would open the comment up.
+    #[test]
+    fn a_mysql_executable_comment_stays_closed() {
+        let sql = "SELECT 0;\nSELECT /*! # don't\n1 */;\nSELECT 2;";
+        let ranges = queued_statements(Engine::MySql, sql, None);
+        assert_eq!(
+            queued_texts(sql, &ranges),
+            vec!["SELECT 0", "SELECT /*! # don't\n1 */", "SELECT 2"]
         );
     }
 
