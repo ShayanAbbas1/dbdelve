@@ -1035,6 +1035,14 @@ impl Workspace {
         }
         match editing {
             Some(id) => {
+                // A save that reconnects starts its connect in `save_profile`,
+                // which reads the script then: the new one, or the old one
+                // would run on the new target before anything noticed.
+                if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id)
+                    && profile.config.needs_reconnect(&config)
+                {
+                    profile.behaviour.startup_script = behaviour.startup_script.clone();
+                }
                 self.save_profile(&id, name, config, color, window, cx);
                 self.set_behaviour(&id, behaviour, cx);
                 if self.group_of(&id) != project.as_deref()

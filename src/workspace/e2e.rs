@@ -27548,6 +27548,46 @@ fn a_save_that_edits_the_script_and_reconnects_runs_the_new_script(cx: &mut Test
     });
 }
 
+/// A save that moves the profile and clears its script reconnects with no
+/// script: the old one never runs on the new target, where a write it made
+/// would stay whatever the landing did next.
+#[gpui::test]
+fn a_save_that_clears_the_script_and_reconnects_never_runs_the_old_one(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE audit (v TEXT);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"INSERT INTO audit VALUES ('old')\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        let other = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("other.db");
+        rusqlite::Connection::open(&other)
+            .and_then(|connection| connection.execute_batch("CREATE TABLE audit (v TEXT);"))
+            .expect("the second database creates");
+
+        save_script(&workspace, cx, "e2e", "", Some(other.display().to_string()));
+        let written: i64 = rusqlite::Connection::open(&other)
+            .and_then(|connection| {
+                connection.query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+            })
+            .expect("the audit table reads");
+        assert_eq!(written, 0, "the old script never ran on the new target");
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile is in front");
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// What a keep-alive round must leave as it found it: what the user can see
 /// of the profile in front.
 fn user_visible_state(
