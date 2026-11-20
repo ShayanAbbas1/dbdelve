@@ -26694,6 +26694,54 @@ fn a_begin_waits_for_another_tabs_commit_to_land(cx: &mut TestAppContext) {
     });
 }
 
+/// A queue whose `BEGIN` waits for another tab's `COMMIT` is stopped there,
+/// not left waiting for a result that is not coming.
+#[gpui::test]
+fn a_queue_whose_begin_waits_for_another_tab_is_stopped_there(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_query(&crate::actions::NewQuery, window, cx);
+            });
+            let editor = workspace
+                .read(cx)
+                .profile()
+                .and_then(|profile| profile.session.active_query_tab())
+                .expect("the new tab is in front")
+                .editor
+                .clone();
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.simulate_input("BEGIN; SELECT 2");
+        cx.simulate_keystrokes("secondary-a");
+        let (first, second) = workspace.read_with(cx, |workspace, _| {
+            let queries = &workspace.profile().unwrap().session.queries;
+            (queries[0].id, queries[1].id)
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(Tab::Query(first), window, cx);
+                workspace.execute_sql("COMMIT".into(), Tab::Query(first), cx);
+                workspace.activate_tab(Tab::Query(second), window, cx);
+                workspace.run_query(&crate::actions::RunQuery, window, cx);
+            });
+        });
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            let queue = session
+                .query_tab(second)
+                .and_then(|tab| tab.queue.as_ref())
+                .expect("the selection runs as a queue");
+            assert!(!queue.awaiting, "nothing is awaited");
+            assert!(queue.remaining.is_empty(), "the rest is not sent past it");
+        });
+        settle(cx);
+        quit(workspace, cx);
+    });
+}
+
 /// A pair whose `COMMIT` failed where the engine does not keep the
 /// transaction ended it, and the `BEGIN` behind it never ran: nothing is
 /// open, and Manual gives way to Auto.

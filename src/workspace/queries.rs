@@ -2333,6 +2333,9 @@ impl Workspace {
                     .into(),
             ));
             self.drop_parked(tab, refresh);
+            // A queue's statement: the rest of the selection is not sent past
+            // it, and what already ran stays on the strip.
+            self.stop_queue_on(tab, cx);
             cx.notify();
             return;
         }
