@@ -594,6 +594,21 @@ fn cleanup_deadline(
     }
 }
 
+// A timely exit marker can arrive while a pipe reader is still finishing.
+fn receive_cleanup_pipe<T>(
+    deadline: impl Fn() -> Instant,
+    mut receive: impl FnMut(Duration) -> Result<T, std::sync::mpsc::RecvTimeoutError>,
+) -> Option<T> {
+    loop {
+        let until = deadline();
+        match receive(until.saturating_duration_since(Instant::now())) {
+            Ok(value) => return Some(value),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if deadline() > until => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
 fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::Outcome {
     use cleanup::Outcome;
     let command_deadline = Instant::now() + timeout;
@@ -642,7 +657,7 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
         });
     }
     drop(send);
-    let (success, deadline) = loop {
+    let success = loop {
         let (deadline, timeout_outcome) =
             cleanup_deadline(command_deadline, *exited.lock().unwrap());
         if Instant::now() >= deadline {
@@ -650,7 +665,7 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
             return timeout_outcome;
         }
         match process.child.as_mut().unwrap().try_wait() {
-            Ok(Some(status)) => break (status.success(), deadline),
+            Ok(Some(status)) => break status.success(),
             Ok(None) => thread::sleep(Duration::from_millis(20)),
             Err(_) => return Outcome::Unconfirmed,
         }
@@ -658,8 +673,11 @@ fn run_cleanup(command: Command, session: &str, timeout: Duration) -> cleanup::O
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     for _ in 0..2 {
-        match receive.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok((is_stdout, Ok(bytes))) => {
+        match receive_cleanup_pipe(
+            || cleanup_deadline(command_deadline, *exited.lock().unwrap()).0,
+            |timeout| receive.recv_timeout(timeout),
+        ) {
+            Some((is_stdout, Ok(bytes))) => {
                 if is_stdout {
                     stdout = bytes;
                 } else {
@@ -840,6 +858,24 @@ mod tests {
             deadline + Duration::from_secs(1)
         );
     }
+    #[test]
+    fn cleanup_pipe_timeout_uses_exit_marker_recorded_during_wait() {
+        use std::sync::mpsc::RecvTimeoutError;
+        let command_deadline = Instant::now();
+        let exited = std::cell::Cell::new(None);
+        let result = receive_cleanup_pipe(
+            || cleanup_deadline(command_deadline, exited.get()).0,
+            |_| {
+                if exited.replace(Some(command_deadline)).is_none() {
+                    Err(RecvTimeoutError::Timeout)
+                } else {
+                    Ok("permission denied")
+                }
+            },
+        );
+        assert_eq!(result, Some("permission denied"));
+    }
+
     #[test]
     fn cleanup_pins_error_format_with_and_without_plugin() {
         let executable = std::env::current_exe().unwrap();
