@@ -933,7 +933,6 @@ impl Connection {
         }
         .map_err(|error| connect_error(&error, &self.server))?;
 
-        self.in_flight().socket = Some(socket);
         let mut session = Session {
             runtime,
             client,
@@ -946,6 +945,9 @@ impl Connection {
         // Session options last on a login are the script's: a login holds them
         // until the connection drops, so replaying here covers every one.
         run_startup(&mut session, &self.startup, &self.server.database)?;
+        // Only once the script ran: a login it failed is dropped here, and
+        // its socket with it, rather than kept open for a Cancel to find.
+        self.in_flight().socket = Some(socket);
         Ok(session)
     }
 
@@ -2762,27 +2764,66 @@ fn sets_rowcount(sql: &str) -> Option<bool> {
 /// The startup `statements` on `session`, the first error stopping the rest,
 /// kept as a user's own run is: a `SET ROWCOUNT` they leave in force is
 /// theirs, so no read caps over it, and a script that leaves the session on
-/// another database than `database` is moved back and refused
-/// ([`held_to_database`]), since the explorer and every statement dbdelve
-/// writes name `database`'s objects.
+/// another database than the one it started on, `database`, is moved back and
+/// refused, since the explorer and every statement dbdelve writes name
+/// `database`'s objects. Told apart by `DB_ID()`, not by name: on a
+/// case-sensitive server `Sales` and `sales` are two databases.
 fn run_startup(
     session: &mut Session,
     statements: &[String],
     database: &str,
 ) -> Result<(), DbError> {
+    let home = match statements.iter().any(|statement| mentions_use(statement)) {
+        true => Some(database_id(session)?),
+        false => None,
+    };
     for statement in statements {
-        ask(session, statement)?;
+        ask(session, statement).map_err(|error| startup_error(session, error))?;
         if let Some(set) = sets_rowcount(statement) {
             session.rowcount = set;
         }
     }
-    match statements.iter().any(|statement| mentions_use(statement)) {
-        true => held_to_database(session, database).map_err(|error| DbError {
-            message: format!("The startup script was refused. {}", error.message),
-            position: None,
-        }),
-        false => Ok(()),
+    let Some(home) = home else {
+        return Ok(());
+    };
+    if database_id(session)? == home {
+        return Ok(());
     }
+    // Refused either way; moved back so a session kept after the refusal is
+    // not left elsewhere.
+    let _ = ask(session, &format!("USE [{}]", database.replace(']', "]]")));
+    Err(plain_error(format!(
+        "The startup script was refused: it moved the session off database {database}, whose \
+         objects this connection's explorer and every statement dbdelve writes name."
+    )))
+}
+
+/// What a startup statement failed with, said where the session was lost and
+/// [`ask`] has no words for it: no `run_held` reports that here.
+fn startup_error(session: &Session, error: DbError) -> DbError {
+    if !error.message.is_empty() {
+        return error;
+    }
+    plain_error(match &session.lost {
+        Some(Lost::TimedOut) => format!(
+            "A startup statement ran past the {}-second statement timeout and was stopped by \
+             closing its connection.",
+            session.timeout
+        ),
+        Some(Lost::Panicked(message)) => message.clone(),
+        _ => "The connection was lost while the startup script ran.".into(),
+    })
+}
+
+/// The server's id of the database the session is on.
+fn database_id(session: &mut Session) -> Result<String, DbError> {
+    Ok(ask(session, "SELECT DB_ID()")?
+        .result
+        .rows
+        .first()
+        .and_then(|row| row.get(0))
+        .map(str::to_string)
+        .unwrap_or_default())
 }
 
 fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
@@ -5449,6 +5490,26 @@ mod tests {
             "{}",
             error.message
         );
+        // Told by id, not by a name in another case.
+        let error = live()
+            .with_startup(vec![format!(
+                "USE [{}]",
+                database.to_uppercase().replace(']', "]]")
+            )])
+            .err()
+            .map(|error| error.message);
+        let case_sensitive = live()
+            .query(
+                "SELECT CASE WHEN 'a' = 'A' THEN 0 ELSE 1 END",
+                Fetch::default(),
+            )
+            .unwrap()
+            .rows[0]
+            .get(0)
+            == Some("1");
+        if !case_sensitive {
+            assert_eq!(error, None, "the same database, spelled in another case");
+        }
         // One that comes back where it started is its own business.
         let scripted = connection
             .with_startup(vec![
@@ -5460,6 +5521,25 @@ mod tests {
             .query("SELECT DB_NAME()", Fetch::default())
             .unwrap();
         assert_eq!(here.rows[0].get(0), Some(database.as_str()));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_statement_past_the_timeout_says_so() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        let error = connection
+            .with_startup(vec!["WAITFOR DELAY '00:00:03'".into()])
+            .err()
+            .expect("the timeout stops it");
+        assert!(
+            error.message.contains("1-second statement timeout"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
