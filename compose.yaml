@@ -24,6 +24,9 @@ services:
 
   mysql:
     image: mysql:8.4
+    # Binary logging is on by default, and without this a user without SUPER
+    # can't create the triggers the live_ tests use.
+    command: --log-bin-trust-function-creators=1
     environment:
       MYSQL_DATABASE: dbdelve_dev
       MYSQL_USER: dbdelve

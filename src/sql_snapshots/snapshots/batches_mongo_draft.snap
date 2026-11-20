@@ -1,0 +1,32 @@
+---
+source: src/sql_snapshots.rs
+---
+
+[mongodb] mixed
+  |db.getCollection("accounts").deleteOne({_id: ObjectId("65a4f1c0ffffffffffffff01")});|
+  |db.getCollection("accounts").deleteOne({_id: ObjectId("65a4f1c0ffffffffffffff02")});|
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65a4f1c0ffffffffffffff03")}, {$set: {"Name": "it's"}});|
+  |db.getCollection("accounts").updateOne({_id: ObjectId("65a4f1c0ffffffffffffff04")}, {$set: {"Name": "b"}});|
+  |db.getCollection("accounts").insertOne({"id": 9, "Name": "a"});|
+  |db.getCollection("accounts").insertOne({"id": 9, "Name": "b"});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] marks only
+  |db.getCollection("accounts").deleteOne({_id: ObjectId("65a4f1c0ffffffffffffff01")});|
+  |db.getCollection("accounts").deleteOne({_id: ObjectId("65a4f1c0ffffffffffffff02")});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] adds only
+  |db.getCollection("accounts").insertOne({"id": 9, "Name": "a"});|
+  |db.getCollection("accounts").insertOne({"id": 9, "Name": "b"});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] an added document holding a null
+  |db.getCollection("accounts").insertOne({"id": 9, "Name": null});|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[mongodb] a mark with a null key
+  error: |dbdelve cannot name an edited row by its primary key.|
+
+[mongodb] empty
+  error: |There are no edits to apply.|

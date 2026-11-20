@@ -695,6 +695,25 @@ const BAND_CHROME_GAP: f32 = 0.04;
 const PALETTE_SELECTION_ALPHA: f32 = 0.28;
 const PALETTE_EDITED_ALPHA: f32 = 0.14;
 
+/// A row's state washes, thicker than the edited cell's: three washes have to
+/// read as three, and the thinner the wash the closer they all are to the
+/// plane under them. Held down by the AAA text test over each.
+const PALETTE_ADDED_ALPHA: f32 = 0.18;
+const PALETTE_UPDATED_ALPHA: f32 = 0.18;
+const PALETTE_DELETED_ALPHA: f32 = 0.18;
+
+/// How far, in 0-255 levels (`Srgb::distance`), an updated row has to stand
+/// from a selected one, from the same row selected, and from the amber cell
+/// wash inside it. The weakest pair that still reads as a different state at a
+/// glance, set as the titlebar pill's floor is. The importers move or drop a
+/// colour that lands inside it, and the theme tests hold every theme to it.
+pub(super) const ROW_WASH_FROM_SELECTION: f32 = 20.0;
+
+/// How far apart an added, an updated and a deleted row have to be: the
+/// project's "seen at all" floor, since the gutter mark and the struck text
+/// carry the state where a wash alone is faint.
+pub(super) const ROW_WASHES_APART: f32 = 8.0;
+
 /// Set from the light theme, where chrome is near-white and a tint over it is
 /// at its weakest: 0.22 is the lowest that still steps the pill clear of the
 /// 8-level floor a plane has to clear to be seen at all.
@@ -762,6 +781,19 @@ pub struct Theme {
     /// and a hue of its own, because the accent wash next to it already means
     /// "selected".
     pub edited: Rgba,
+    /// A grid row the user has added and not yet applied. A wash under the
+    /// row, in the hue `success` has, and not the cell wash `edited` paints:
+    /// that marks a value, this marks a row that does not exist yet.
+    pub added: Rgba,
+    /// A grid row holding changed cells. A wash under the whole row, blue
+    /// where `edited` is amber: the changed cells inside it keep their own
+    /// amber wash, and it is not the selection, which is also blue and which
+    /// paints over it.
+    pub updated: Rgba,
+    /// A grid row the user has marked for deletion. A wash under the row, in
+    /// the hue `danger` has; the row's struck-through text carries the same
+    /// state where colour does not.
+    pub deleted: Rgba,
 
     pub danger: Srgb,
     pub success: Srgb,
@@ -965,7 +997,15 @@ impl Theme {
             self.data_glass().flatten(chrome),
         ];
         let washed = planes.into_iter().flat_map(|plane| {
-            [self.selection, self.edited, self.element_active].map(|wash| wash.flatten(plane))
+            [
+                self.selection,
+                self.edited,
+                self.added,
+                self.updated,
+                self.deleted,
+                self.element_active,
+            ]
+            .map(|wash| wash.flatten(plane))
         });
         let luminance = |c: &Srgb| c.relative_luminance();
         let fills = planes.into_iter().chain(washed).chain([self.control]);
@@ -1414,6 +1454,11 @@ impl Theme {
             selection: Oklch::new(0.68, 0.15, 250.0).to_srgb().alpha(0.28),
             cursor: Oklch::new(0.72, 0.14, 250.0).to_srgb(),
             edited: Oklch::new(0.60, 0.15, 75.0).to_srgb().alpha(0.32),
+            added: Oklch::new(0.72, 0.15, 150.0).to_srgb().alpha(0.18),
+            // Cyan, not the blue `selection` is, so a row with changes never
+            // reads as a selected one.
+            updated: Oklch::new(0.68, 0.12, 205.0).to_srgb().alpha(0.18),
+            deleted: Oklch::new(0.70, 0.19, 25.0).to_srgb().alpha(0.14),
 
             danger: Oklch::new(0.70, 0.19, 25.0).to_srgb(),
             success: Oklch::new(0.72, 0.15, 150.0).to_srgb(),
@@ -1462,6 +1507,10 @@ impl Theme {
             selection: Oklch::new(0.52, 0.17, 250.0).to_srgb().alpha(0.20),
             cursor: Oklch::new(0.48, 0.18, 250.0).to_srgb(),
             edited: Oklch::new(0.80, 0.14, 75.0).to_srgb().alpha(0.30),
+            added: Oklch::new(0.52, 0.15, 150.0).to_srgb().alpha(0.18),
+            // Violet-blue, not the blue `selection` is.
+            updated: Oklch::new(0.60, 0.10, 280.0).to_srgb().alpha(0.14),
+            deleted: Oklch::new(0.52, 0.20, 25.0).to_srgb().alpha(0.16),
 
             danger: Oklch::new(0.52, 0.20, 25.0).to_srgb(),
             success: Oklch::new(0.52, 0.15, 150.0).to_srgb(),
@@ -1503,6 +1552,11 @@ impl Theme {
             selection: Srgb::from_hex(0x83a598).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0xebdbb2),
             edited: Srgb::from_hex(0xfabd2f).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0xb8bb26).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x2e6e77).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xff674f: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xdb452f).alpha(PALETTE_DELETED_ALPHA),
 
             // Lifted from #fb4934, as is the keyword.
             danger: Srgb::from_hex(0xff674f),
@@ -1541,6 +1595,11 @@ impl Theme {
             selection: Srgb::from_hex(0x076678).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x3c3836),
             edited: Srgb::from_hex(0xb57614).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x79740e).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x468689).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0x9d0006: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xffbeb4).alpha(PALETTE_DELETED_ALPHA),
 
             danger: Srgb::from_hex(0x9d0006),
             success: Srgb::from_hex(0x79740e),
@@ -1582,6 +1641,10 @@ impl Theme {
             selection: Srgb::from_hex(0xb4befe).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0xf5e0dc),
             edited: Srgb::from_hex(0xf9e2af).alpha(PALETTE_EDITED_ALPHA),
+            // Moved in Oklch lightness from 0xa6e3a1: text has to hold AAA over the wash.
+            added: Srgb::from_hex(0x87c282).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x2d85a7).alpha(PALETTE_UPDATED_ALPHA),
+            deleted: Srgb::from_hex(0xf38ba8).alpha(PALETTE_DELETED_ALPHA),
 
             danger: Srgb::from_hex(0xf38ba8),
             success: Srgb::from_hex(0xa6e3a1),
@@ -1622,6 +1685,11 @@ impl Theme {
             selection: Srgb::from_hex(0x7287fd).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0xdc8a78),
             edited: Srgb::from_hex(0xdf8e1d).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x319218).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x7bcfff).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xd10d38: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xff757a).alpha(PALETTE_DELETED_ALPHA),
 
             // Darkened from #d20f39 and #40a02b.
             danger: Srgb::from_hex(0xd10d38),
@@ -1666,6 +1734,11 @@ impl Theme {
             selection: Srgb::from_hex(0x4493f8).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x4493f8),
             edited: Srgb::from_hex(0xd29922).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x3fb950).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x1dacb4).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xfa534b: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xc00917).alpha(PALETTE_DELETED_ALPHA),
 
             // Lifted from #f85149, which falls under 4.5 on the glass chrome.
             danger: Srgb::from_hex(0xfa534b),
@@ -1704,6 +1777,11 @@ impl Theme {
             selection: Srgb::from_hex(0x0969da).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x0969da),
             edited: Srgb::from_hex(0x9a6700).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x1a7f37).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x358f96).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xd1242f: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xffb3ac).alpha(PALETTE_DELETED_ALPHA),
 
             danger: Srgb::from_hex(0xd1242f),
             success: Srgb::from_hex(0x1a7f37),
@@ -1743,6 +1821,12 @@ impl Theme {
             selection: Srgb::from_hex(0x7aa2f7).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0xc0caf5),
             edited: Srgb::from_hex(0xe0af68).alpha(PALETTE_EDITED_ALPHA),
+            // Moved in Oklch lightness from 0x9ece6a: text has to hold AAA over the wash.
+            added: Srgb::from_hex(0x8cbb57).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x1c77a3).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xf7768e: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xc64a65).alpha(PALETTE_DELETED_ALPHA),
 
             danger: Srgb::from_hex(0xf7768e),
             success: Srgb::from_hex(0x9ece6a),
@@ -1784,6 +1868,11 @@ impl Theme {
             selection: Srgb::from_hex(0x2e7de9).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x3760bf),
             edited: Srgb::from_hex(0x8c6c3e).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x587539).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x3c97bf).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xbb003a: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xee4861).alpha(PALETTE_DELETED_ALPHA),
 
             // Darkened from #f52a65.
             danger: Srgb::from_hex(0xbb003a),
@@ -1834,6 +1923,11 @@ impl Theme {
             selection: Srgb::from_hex(0xbd93f9).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0xf8f8f2),
             edited: Srgb::from_hex(0xf1fa8c).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x50fa7b).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x47a8ba).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xff7773: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xf16a67).alpha(PALETTE_DELETED_ALPHA),
 
             // Lifted from #ff5555.
             danger: Srgb::from_hex(0xff7773),
@@ -1874,6 +1968,9 @@ impl Theme {
             selection: Srgb::from_hex(0x644ac9).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x1f1f1f),
             edited: Srgb::from_hex(0x846e15).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x14710a).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x3b8fbd).alpha(PALETTE_UPDATED_ALPHA),
+            deleted: Srgb::from_hex(0xc33223).alpha(PALETTE_DELETED_ALPHA),
 
             // Darkened from #cb3a2a.
             danger: Srgb::from_hex(0xc33223),
@@ -1916,6 +2013,12 @@ impl Theme {
             selection: Srgb::from_hex(0x61afef).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x528bff),
             edited: Srgb::from_hex(0xe5c07b).alpha(PALETTE_EDITED_ALPHA),
+            // Moved in Oklch lightness from 0x98c379: text has to hold AAA over the wash.
+            added: Srgb::from_hex(0x8cb66d).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x047d89).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xe46f78: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xcf5c66).alpha(PALETTE_DELETED_ALPHA),
 
             // Lifted from #e06c75.
             danger: Srgb::from_hex(0xe46f78),
@@ -1946,16 +2049,23 @@ impl Theme {
             control: Srgb::from_hex(0xe5e5e6),
 
             // Darkened from #383a42, #696c77 and #a0a1a7; the editor's
-            // identifiers keep the first.
+            // identifiers keep the first. The faint ink was #909197, which
+            // is 3.01 over this page and so left no room for the wash of a
+            // deleted row under it; it is #84858b, 3.5.
             text: Srgb::from_hex(0x33353d),
             text_muted: Srgb::from_hex(0x5d606b),
-            text_faint: Srgb::from_hex(0x909197),
+            text_faint: Srgb::from_hex(0x84858b),
 
             accent: Srgb::from_hex(0x4078f2),
             on_accent: Srgb::from_hex(0xfafafa),
             selection: Srgb::from_hex(0x4078f2).alpha(PALETTE_SELECTION_ALPHA),
             cursor: Srgb::from_hex(0x526fff),
             edited: Srgb::from_hex(0xc18401).alpha(PALETTE_EDITED_ALPHA),
+            added: Srgb::from_hex(0x3b8c3b).alpha(PALETTE_ADDED_ALPHA),
+            updated: Srgb::from_hex(0x48b0ea).alpha(PALETTE_UPDATED_ALPHA),
+            // Moved in Oklch lightness from 0xc2352c: a deleted row's faint ink
+            // has to hold its floor over the wash.
+            deleted: Srgb::from_hex(0xff8172).alpha(PALETTE_DELETED_ALPHA),
 
             // Darkened from #e45649 and #50a14f.
             danger: Srgb::from_hex(0xc2352c),
@@ -2199,6 +2309,105 @@ mod tests {
                 t.edited.flatten(t.bg),
                 AAA_TEXT,
             );
+        }
+    }
+
+    #[test]
+    fn text_stays_legible_over_the_added_updated_and_deleted_washes_in_every_theme() {
+        // A row's state is a wash under its cells, never a colour on the
+        // values: the data is still read at the grid's own AAA.
+        for t in Theme::all() {
+            check(
+                t,
+                "text on an added row",
+                t.text,
+                t.added.flatten(t.bg),
+                AAA_TEXT,
+            );
+            check(
+                t,
+                "text on an updated row",
+                t.text,
+                t.updated.flatten(t.bg),
+                AAA_TEXT,
+            );
+            check(
+                t,
+                "text on a deleted row",
+                t.text,
+                t.deleted.flatten(t.bg),
+                AAA_TEXT,
+            );
+            // A deleted row's struck text is the faint ink.
+            check(
+                t,
+                "faint on a deleted row",
+                t.text_faint,
+                t.deleted.flatten(t.bg),
+                AA_LARGE,
+            );
+        }
+    }
+
+    /// What a row's washes have to hold in: every built-in theme and the Zed
+    /// defaults as the importer converts them, which is the one place a wash
+    /// is not tuned by hand.
+    fn every_theme_and_the_zed_defaults() -> Vec<Theme> {
+        let mut all = Theme::all();
+        all.extend(zed::bundled());
+        all
+    }
+
+    #[test]
+    fn the_updated_wash_stands_off_selection_even_with_selection_over_it() {
+        // A row with changes is read against a selected one, and a selected
+        // row with changes is read against the same row unselected.
+        for t in every_theme_and_the_zed_defaults() {
+            let updated = t.updated.flatten(t.bg);
+            let step = updated.distance(t.selection.flatten(t.bg));
+            assert!(
+                step >= ROW_WASH_FROM_SELECTION,
+                "{}: an updated row is {step:.1} off a selected one",
+                t.name
+            );
+            let step = t.selection.flatten(updated).distance(updated);
+            assert!(
+                step >= ROW_WASH_FROM_SELECTION,
+                "{}: selection over an updated row moves it {step:.1}",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn an_edited_cell_stands_off_an_updated_row_in_every_theme() {
+        for t in every_theme_and_the_zed_defaults() {
+            let updated = t.updated.flatten(t.bg);
+            let step = t.edited.flatten(updated).distance(updated);
+            assert!(
+                step >= ROW_WASH_FROM_SELECTION,
+                "{}: an edited cell is {step:.1} off the updated row it is in",
+                t.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_row_washes_stand_off_each_other_in_every_theme() {
+        for t in every_theme_and_the_zed_defaults() {
+            let [added, updated, deleted] =
+                [t.added, t.updated, t.deleted].map(|w| w.flatten(t.bg));
+            for (pair, step) in [
+                ("added and updated", added.distance(updated)),
+                ("added and deleted", added.distance(deleted)),
+                ("updated and deleted", updated.distance(deleted)),
+            ] {
+                assert!(
+                    step >= ROW_WASHES_APART,
+                    "{}: {pair} rows are {step:.1} apart",
+                    t.name
+                );
+            }
         }
     }
 
@@ -2652,6 +2861,9 @@ mod tests {
                     for (wash, over) in [
                         ("selected", t.selection),
                         ("edited", t.edited),
+                        ("added", t.added),
+                        ("updated", t.updated),
+                        ("deleted", t.deleted),
                         ("hovered", t.element_hover),
                         ("highlighted", t.element_active),
                     ] {

@@ -28,10 +28,11 @@ use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
 
 use super::{
-    Catalog, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, ForeignKey, Index,
-    IndexKind, NamedDefinition, QueryResult, Reference, RowBuilder, SchemaGraph, Stopped,
-    Structure, assemble_catalog, assemble_references, assemble_schema_graph, assemble_structure,
-    non_utf8_error, optional_cell, percent_decoded, plain_error, required_cell,
+    ApplyOutcome, ApplyStage, Catalog, Column, ColumnDefinition, DbError, EditTarget, Engine,
+    Fetch, ForeignKey, Index, IndexKind, NamedDefinition, QueryResult, Reference, RowBuilder,
+    RowMatch, SchemaGraph, Sending, Stopped, Structure, VerifiedStep, assemble_catalog,
+    assemble_references, assemble_schema_graph, assemble_structure, non_utf8_error, optional_cell,
+    percent_decoded, plain_error, required_cell,
 };
 
 /// The path out of a `sqlite:` or `file:` URL.
@@ -179,6 +180,59 @@ impl Connection {
         self.run(sql, false, Fetch::default())
     }
 
+    /// Applies `steps` as one verified sequence on this connection, which it
+    /// holds for the whole of it ([`super::run_verified`]): there is one
+    /// writer on a SQLite file, so nothing of this session's lands between the
+    /// re-reads and the writes. A count is `changes()`, which excludes what a
+    /// trigger or a foreign key wrote. The statement timeout is armed once for
+    /// the sequence. `proceed` says no once a Cancel has come.
+    pub fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        proceed: &dyn Fn() -> bool,
+    ) -> ApplyOutcome {
+        let _deadline = self.deadline();
+        let Ok(connection) = self.connection.lock() else {
+            return ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                ),
+            };
+        };
+        let mut send = |sql: &str, sending: Sending| {
+            // A transaction of the user's, open on this connection: the
+            // apply's `BEGIN` would fail inside it and its `ROLLBACK` end it.
+            if sending == Sending::Open && !connection.is_autocommit() {
+                return Err(super::in_a_transaction());
+            }
+            if sending == Sending::Abandon && connection.is_autocommit() {
+                return Ok(QueryResult::default());
+            }
+            let answer = ran(&connection, sql, Fetch::default()).map(|(result, _)| result);
+            #[cfg(test)]
+            if sending == Sending::Bracket
+                && sql == "COMMIT"
+                && answer.is_ok()
+                && tests::COMMIT_ANSWER_LOST.take()
+            {
+                return Err(plain_error(tests::LOST_ANSWER.into()));
+            }
+            answer
+        };
+        // A SQLite file has no socket to lose, and renders every cell the same
+        // way on both reads, so nothing is skipped and no `COMMIT` error means
+        // a lost session, but for the one a test stages.
+        super::run_verified(
+            Engine::Sqlite,
+            steps,
+            &mut send,
+            proceed,
+            &|_| false,
+            &answer_lost,
+        )
+    }
+
     fn run(&self, sql: &str, editable: bool, fetch: Fetch) -> Result<QueryResult, DbError> {
         // Armed before the lock rather than after it, so time spent queued
         // behind another statement on this connection counts against the limit
@@ -190,170 +244,55 @@ impl Connection {
         })?;
         let held = fetch.hold()?;
 
-        let mut result = QueryResult::default();
-        let mut probed = Vec::new();
-        // How long the kept rows took, once there were as many as the limit.
-        let mut filled = None;
-        let mut past_limit = false;
-
-        // Whether this submission is the one that opened a transaction, asked
-        // before it runs: a transaction the user began in an earlier run is
-        // theirs to finish, not dbdelve's to discard on their next typo.
-        let outside_a_transaction = connection.is_autocommit();
-
-        let outcome = (|| -> Result<(), DbError> {
-            // SQLite splits the submission itself, using the tail its own
-            // parser reports. dbdelve's tree-sitter grammar could have done it,
-            // but then a statement SQLite accepts and the grammar does not
-            // would become a statement dbdelve refuses to send — and what the
-            // user types goes to the engine verbatim.
-            let mut batch = Batch::new(&connection, sql);
-
-            // Timed from here, not from the call: one connection serialises a
-            // profile's queries, and time spent waiting behind the catalog load
-            // is not time spent on this statement.
-            let started = Instant::now();
-            let mut builder = RowBuilder::default();
-            while let Some(mut statement) =
-                batch.next().map_err(|error| query_error(&error, sql))?
-            {
-                // Both borrow the statement, and running it needs it mutably,
-                // so everything the description says is taken first.
-                let columns: Vec<Column> = statement
-                    .columns()
-                    .iter()
-                    .map(|column| Column {
-                        name: column.name().to_string(),
-                        // Lowercased because Postgres names its types in lower
-                        // case and both engines' tags appear in the same grid;
-                        // SQLite's is whatever case the `CREATE TABLE` used.
-                        data_type: column.decl_type().map(str::to_lowercase),
-                    })
-                    .collect();
-                let described: Vec<ProbedColumn> = statement
-                    .columns_with_metadata()
-                    .iter()
-                    .map(|column| ProbedColumn {
-                        schema: column.database_name().map(str::to_string),
-                        table: column.table_name().map(str::to_string),
-                        column: column.origin_name().map(str::to_string),
-                    })
-                    .collect();
-
-                // No columns is a command rather than a query, and only a
-                // command has rows to have affected.
-                if columns.is_empty() {
-                    statement
-                        .execute([])
-                        .map_err(|error| query_error(&error, sql))?;
-                    result.rows_affected = Some(connection.changes());
-                    continue;
-                }
-
-                // One selection can carry several statements, and the grid shows
-                // one result set, so each new description starts the kept set
-                // over and the last statement wins. The declared types came
-                // with the description, so the rows are shown by type from the
-                // first.
-                if let Some(feed) = fetch.feed {
-                    feed.begin(columns.clone());
-                }
-                let mut rows = Vec::new();
-                let mut bytes = 0;
-                // This set's rows, kept or not, and kept: a fed row is not in
-                // `rows` to be counted.
-                let (mut returned, mut kept) = (0, 0);
-                filled = None;
-                let mut stepped = statement
-                    .query([])
-                    .map_err(|error| query_error(&error, sql))?;
-                while let Some(row) = stepped.next().map_err(|error| query_error(&error, sql))? {
-                    returned += 1;
-                    if fetch.limit.is_some_and(|limit| kept >= limit) {
-                        // There is no server to tell: a read is stopped by
-                        // stepping it no further. Dropping `stepped` resets the
-                        // statement, which ends the read transaction it opened
-                        // and leaves one the user began as it was.
-                        if fetch.reads_only {
-                            result.stopped = Some(Stopped::AtLimit);
-                            break;
-                        }
-                        continue;
-                    }
-                    kept += 1;
-                    if fetch.limit == Some(kept) {
-                        filled = Some(started.elapsed());
-                        if let Some(feed) = fetch.feed {
-                            feed.fill();
-                        }
-                    }
-                    for index in 0..columns.len() {
-                        let value = row
-                            .get_ref(index)
-                            .map_err(|error| query_error(&error, sql))?;
-                        let cell = render(value, &columns, index)?;
-                        builder.push(cell.as_deref());
-                    }
-                    let cells = builder.finish()?;
-                    bytes += cells.text_len();
-                    match fetch.feed {
-                        Some(feed) => feed.push(cells),
-                        None => rows.push(cells),
-                    }
-                }
-
-                // A query's count is the rows it returned. `changes()` would
-                // report whatever the statement before it modified, since
-                // SQLite does not reset it for a select.
-                result.rows_affected = Some(returned as u64);
-                result.capped_from =
-                    (result.stopped.is_none() && returned > kept).then_some(returned);
-                past_limit = returned > kept;
-                result.columns = columns;
-                result.rows = rows;
-                result.bytes = bytes;
-                probed = described;
-                if result.stopped.is_some() {
-                    break;
-                }
-            }
-            // Timed to the last kept row when rows past the limit came after
-            // it: draining the statement is not the wait for these.
-            result.elapsed = match filled {
-                Some(filled) if past_limit => filled,
-                _ => started.elapsed(),
-            };
-            Ok(())
-        })();
-
-        if let Err(error) = outcome {
-            return Err(rolled_back(&connection, outside_a_transaction, error));
-        }
+        let (mut result, probed) = ran(&connection, sql, fetch)?;
 
         // The mutex is not reentrant and `edit_target` runs a pragma through it,
         // so the lock has to go before the question is asked.
         drop(held);
         drop(connection);
         if editable {
-            result.edit = self.edit_target(&probed);
+            (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
         }
 
         Ok(result)
     }
 
-    /// Which table these columns can be written back to, if any.
+    /// Which table these columns can be written back to, if any, and when the
+    /// answer is no for a reason the user can act on, that reason.
     ///
     /// Every step is allowed to answer "no": a join, a computed column, a table
-    /// without a primary key, a key the select omitted. A failure answers "no"
-    /// too — this runs after the user's statement already succeeded, and a
-    /// pragma that refused must not turn that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> Option<EditTarget> {
-        let (schema, table) = sole_table(probed)?;
+    /// without a primary key whose values cannot all be matched, a key the
+    /// select omitted. A failure answers "no" too — this runs after the user's
+    /// statement already succeeded, and a pragma that refused must not turn
+    /// that success into an error.
+    fn edit_target(
+        &self,
+        sql: &str,
+        probed: &[ProbedColumn],
+    ) -> (Option<EditTarget>, Option<String>) {
+        let Some((schema, table)) = sole_table(probed) else {
+            return (None, None);
+        };
         // ponytail: one pragma per result set, no cache. A map from table to key
         // held on the connection is the upgrade path if the trip shows up in
         // query timings.
-        let key = self.schema().primary_key(&schema, &table).ok()?;
-        resolve_edit_target(probed, &schema, &table, &key)
+        let Ok(key) = self.schema().primary_key(&schema, &table) else {
+            return (None, None);
+        };
+        if !key.is_empty() {
+            return (resolve_edit_target(probed, &schema, &table, &key), None);
+        }
+        // Provenance names a column's table, never which instance of it: the
+        // two sides of a self-join each read `t`, and every-column matching
+        // would then name a row that is neither. Only a plain read of one
+        // table is edited by its values.
+        if let Err(why) = crate::sql::table_read_or_why(Engine::Sqlite, sql) {
+            return (None, Some(why.reason().into()));
+        }
+        match self.schema().table_columns(&schema, &table) {
+            Ok(columns) => resolve_keyless_target(probed, &schema, &table, &columns),
+            Err(_) => (None, None),
+        }
     }
 
     fn schema(&self) -> Schema<impl Fn(&str) -> Result<QueryResult, DbError> + '_> {
@@ -445,6 +384,38 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
         ))?;
 
         column_of(&result, "column_name")
+    }
+
+    /// The columns of an ordinary table, in table order, as `table_xinfo` lists
+    /// them: the generated ones too, none of a virtual table's hidden ones.
+    /// Empty for a view, a virtual table or a table that is not there, none of
+    /// which has rows to name by their values.
+    fn table_columns(&self, schema: &str, table: &str) -> Result<Vec<TableColumn>, DbError> {
+        let result = (self.run)(&format!(
+            "SELECT info.name AS column_name, info.type AS column_type,
+                    info.hidden AS column_hidden
+             FROM pragma_table_xinfo({table}{schema_argument}) AS info
+             WHERE info.hidden IN (0, 2, 3)
+               AND EXISTS (SELECT 1 FROM pragma_table_list AS listed
+                           WHERE listed.name = {table} AND listed.schema = {schema}
+                             AND listed.type = 'table')
+             ORDER BY info.cid",
+            table = self.engine.quote_literal(table),
+            schema = self.engine.quote_literal(schema),
+            schema_argument = self.argument(schema),
+        ))?;
+
+        result
+            .rows
+            .iter()
+            .map(|row| {
+                Ok(TableColumn {
+                    name: required_cell(&result, row, "column_name")?.to_string(),
+                    declared: required_cell(&result, row, "column_type")?.to_string(),
+                    generated: required_cell(&result, row, "column_hidden")? != "0",
+                })
+            })
+            .collect()
     }
 
     pub(super) fn catalog(&self) -> Result<Catalog, DbError> {
@@ -1030,6 +1001,13 @@ struct ProbedColumn {
     schema: Option<String>,
     table: Option<String>,
     column: Option<String>,
+    /// A row read held a BLOB here. SQLite stores one in a column of any
+    /// declared type, and its rendering, `x'…'`, is also a text such a column
+    /// can hold, so no predicate spelled from it names that row alone.
+    blob: bool,
+    /// A row read held an infinite REAL here, which renders as `inf`, also a
+    /// text the column can hold.
+    infinite: bool,
 }
 
 /// The one table every column that came from a table came from.
@@ -1046,6 +1024,29 @@ fn sole_table(probed: &[ProbedColumn]) -> Option<(String, String)> {
     named.all(|table| table == first).then_some(first)
 }
 
+/// Whether no two result columns read the same table column.
+///
+/// Two result columns reading the same table column are the two sides of a
+/// self-join, and no driver reports the alias that tells them apart. The key
+/// is located by position, so it would resolve to whichever side came first
+/// and write the edit at the other row's key; the same shape also generates
+/// one SET clause per side for the same column. Refusing the whole result set
+/// is one answer to both.
+fn reads_each_column_once(probed: &[ProbedColumn]) -> bool {
+    let mut origins = HashSet::new();
+    probed
+        .iter()
+        .filter_map(origin_of)
+        .all(|column| origins.insert(column))
+}
+
+/// The real column name behind a result column. The caller has already
+/// established that the columns carrying a table all carry the same one, so
+/// carrying a table at all means carrying this one.
+fn origin_of(column: &ProbedColumn) -> Option<String> {
+    column.table.as_ref().and(column.column.clone())
+}
+
 /// The description decided against the table's key.
 ///
 /// Refuses unless *every* primary key column is present in the result set: a
@@ -1057,21 +1058,7 @@ fn resolve_edit_target(
     table: &str,
     key: &[String],
 ) -> Option<EditTarget> {
-    // The caller has already established that the columns carrying a table all
-    // carry the same one, so carrying a table at all means carrying this one.
-    let column_of = |column: &ProbedColumn| column.table.as_ref().and(column.column.clone());
-    // Two result columns reading the same table column are the two sides of a
-    // self-join, and no driver reports the alias that tells them apart. The key
-    // below is located by position, so it would resolve to whichever side came
-    // first and write the edit at the other row's key; the same shape also
-    // generates one SET clause per side for the same column. Refusing the whole
-    // result set is one answer to both.
-    let mut origins = HashSet::new();
-    if !probed
-        .iter()
-        .filter_map(column_of)
-        .all(|column| origins.insert(column))
-    {
+    if !reads_each_column_once(probed) {
         return None;
     }
     let keys = key
@@ -1079,7 +1066,7 @@ fn resolve_edit_target(
         .map(|name| {
             probed
                 .iter()
-                .position(|column| column_of(column).as_deref() == Some(name.as_str()))
+                .position(|column| origin_of(column).as_deref() == Some(name.as_str()))
         })
         .collect::<Option<Vec<usize>>>()?;
     if keys.is_empty() {
@@ -1089,10 +1076,127 @@ fn resolve_edit_target(
     Some(EditTarget {
         schema: schema.to_string(),
         table: table.to_string(),
-        columns: probed.iter().map(column_of).collect(),
+        columns: probed.iter().map(origin_of).collect(),
         keys,
         ..Default::default()
     })
+}
+
+/// One column of a table as `table_xinfo` describes it.
+struct TableColumn {
+    name: String,
+    /// The type as the table declares it, possibly empty.
+    declared: String,
+    /// A generated column: matched, never set.
+    generated: bool,
+}
+
+/// Whether `=` against a literal finds a column's values as the grid shows
+/// them. Fail closed: only the affinities the apply was probed on are listed.
+///
+/// ponytail: INTEGER, TEXT and REAL, by SQLite's own rules for a declared
+/// type; NUMERIC affinity (`numeric`, `decimal`, `date`, `boolean`) and a
+/// column with no declared type are not, so a keyless table holding one is
+/// read-only until its matching is probed. Nor is BLOB: a blob renders as
+/// `x'…'`, which the writer quotes as that text, and a text is never equal to
+/// a blob.
+fn is_matchable(declared: &str) -> bool {
+    let declared = declared.to_ascii_uppercase();
+    !declared.is_empty()
+        && ["INT", "CHAR", "CLOB", "TEXT", "REAL", "FLOA", "DOUB"]
+            .iter()
+            .any(|word| declared.contains(word))
+}
+
+/// The target of a result set over a table with no primary key: every column
+/// of the table names the row, a NULL as `IS NULL`, the generated columns
+/// matched but never set. Or the reason it cannot be, when the user can do
+/// something about it.
+///
+/// Never a unique key and never the rowid (neither is in the result set the
+/// grid reads its values from), and never some of the columns: a column left
+/// out of the `WHERE` matches rows the user is not looking at, so a column that
+/// cannot be matched by its value, or that the result omits, makes the whole
+/// result read-only.
+fn resolve_keyless_target(
+    probed: &[ProbedColumn],
+    schema: &str,
+    table: &str,
+    described: &[TableColumn],
+) -> (Option<EditTarget>, Option<String>) {
+    // A view, a virtual table or a table that is gone describes no columns.
+    if described.is_empty() || !reads_each_column_once(probed) {
+        return (None, None);
+    }
+    if probed.iter().any(|column| origin_of(column).is_none()) {
+        return (None, None);
+    }
+    let refusal = |what: String| {
+        Some(format!(
+            "A table without a primary key is edited by matching every column, and {what}."
+        ))
+    };
+    if let Some(column) = probed.iter().find(|column| column.blob) {
+        return (
+            None,
+            refusal(format!(
+                "{} holds a BLOB, which cannot be matched by its value",
+                origin_of(column).unwrap_or_default()
+            )),
+        );
+    }
+    if let Some(column) = probed.iter().find(|column| column.infinite) {
+        return (
+            None,
+            refusal(format!(
+                "{} holds an infinite REAL, which cannot be matched by its value",
+                origin_of(column).unwrap_or_default()
+            )),
+        );
+    }
+    if let Some(column) = described
+        .iter()
+        .find(|column| !is_matchable(&column.declared))
+    {
+        let declared = match column.declared.as_str() {
+            "" => "no declared type",
+            declared => declared,
+        };
+        return (
+            None,
+            refusal(format!(
+                "{} ({declared}) cannot be matched by its value",
+                column.name
+            )),
+        );
+    }
+    let mut keys = Vec::new();
+    let mut fixed = Vec::new();
+    for column in described {
+        let Some(at) = probed
+            .iter()
+            .position(|probed| origin_of(probed).as_deref() == Some(column.name.as_str()))
+        else {
+            return (
+                None,
+                refusal(format!("{} is not in the result", column.name)),
+            );
+        };
+        keys.push(at);
+        if column.generated {
+            fixed.push(at);
+        }
+    }
+
+    let target = EditTarget {
+        schema: schema.to_string(),
+        table: table.to_string(),
+        columns: probed.iter().map(origin_of).collect(),
+        keys,
+        row_match: RowMatch::EveryColumn { fixed },
+        ..Default::default()
+    };
+    (Some(target), None)
 }
 
 /// One `sqlite_master` scan per schema, aliased to the column names
@@ -1317,6 +1421,165 @@ fn open_file(path: &std::path::Path) -> Result<rusqlite::Connection, DbError> {
     })
 }
 
+/// One submission run on a session already held: the statements, stepped as
+/// SQLite splits them, and what `fetch` asks of the last one's rows, with the
+/// columns that statement was read from. Everything [`Connection::run`] does
+/// under its lock, which is not reentrant: a sequence that holds the lock for
+/// itself ([`Connection::apply_verified`]) sends each statement through this.
+fn ran(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    fetch: Fetch,
+) -> Result<(QueryResult, Vec<ProbedColumn>), DbError> {
+    let mut result = QueryResult::default();
+    let mut probed = Vec::new();
+    // How long the kept rows took, once there were as many as the limit.
+    let mut filled = None;
+    let mut past_limit = false;
+
+    // Whether this submission is the one that opened a transaction, asked
+    // before it runs: a transaction the user began in an earlier run is
+    // theirs to finish, not dbdelve's to discard on their next typo.
+    let outside_a_transaction = connection.is_autocommit();
+
+    let outcome = (|| -> Result<(), DbError> {
+        // SQLite splits the submission itself, using the tail its own
+        // parser reports. dbdelve's tree-sitter grammar could have done it,
+        // but then a statement SQLite accepts and the grammar does not
+        // would become a statement dbdelve refuses to send — and what the
+        // user types goes to the engine verbatim.
+        let mut batch = Batch::new(connection, sql);
+
+        // Timed from here, not from the call: one connection serialises a
+        // profile's queries, and time spent waiting behind the catalog load
+        // is not time spent on this statement.
+        let started = Instant::now();
+        let mut builder = RowBuilder::default();
+        while let Some(mut statement) = batch.next().map_err(|error| query_error(&error, sql))? {
+            // Both borrow the statement, and running it needs it mutably,
+            // so everything the description says is taken first.
+            let columns: Vec<Column> = statement
+                .columns()
+                .iter()
+                .map(|column| Column {
+                    name: column.name().to_string(),
+                    // Lowercased because Postgres names its types in lower
+                    // case and both engines' tags appear in the same grid;
+                    // SQLite's is whatever case the `CREATE TABLE` used.
+                    data_type: column.decl_type().map(str::to_lowercase),
+                })
+                .collect();
+            let mut described: Vec<ProbedColumn> = statement
+                .columns_with_metadata()
+                .iter()
+                .map(|column| ProbedColumn {
+                    schema: column.database_name().map(str::to_string),
+                    table: column.table_name().map(str::to_string),
+                    column: column.origin_name().map(str::to_string),
+                    blob: false,
+                    infinite: false,
+                })
+                .collect();
+
+            // No columns is a command rather than a query, and only a
+            // command has rows to have affected.
+            if columns.is_empty() {
+                statement
+                    .execute([])
+                    .map_err(|error| query_error(&error, sql))?;
+                result.rows_affected = Some(connection.changes());
+                continue;
+            }
+
+            // One selection can carry several statements, and the grid shows
+            // one result set, so each new description starts the kept set
+            // over and the last statement wins. The declared types came
+            // with the description, so the rows are shown by type from the
+            // first.
+            if let Some(feed) = fetch.feed {
+                feed.begin(columns.clone());
+            }
+            let mut rows = Vec::new();
+            let mut bytes = 0;
+            // This set's rows, kept or not, and kept: a fed row is not in
+            // `rows` to be counted.
+            let (mut returned, mut kept) = (0, 0);
+            filled = None;
+            let mut stepped = statement
+                .query([])
+                .map_err(|error| query_error(&error, sql))?;
+            while let Some(row) = stepped.next().map_err(|error| query_error(&error, sql))? {
+                returned += 1;
+                if fetch.limit.is_some_and(|limit| kept >= limit) {
+                    // There is no server to tell: a read is stopped by
+                    // stepping it no further. Dropping `stepped` resets the
+                    // statement, which ends the read transaction it opened
+                    // and leaves one the user began as it was.
+                    if fetch.reads_only {
+                        result.stopped = Some(Stopped::AtLimit);
+                        break;
+                    }
+                    continue;
+                }
+                kept += 1;
+                if fetch.limit == Some(kept) {
+                    filled = Some(started.elapsed());
+                    if let Some(feed) = fetch.feed {
+                        feed.fill();
+                    }
+                }
+                for index in 0..columns.len() {
+                    let value = row
+                        .get_ref(index)
+                        .map_err(|error| query_error(&error, sql))?;
+                    if let Some(column) = described.get_mut(index) {
+                        match value {
+                            ValueRef::Blob(_) => column.blob = true,
+                            ValueRef::Real(real) if !real.is_finite() => column.infinite = true,
+                            _ => {}
+                        }
+                    }
+                    let cell = render(value, &columns, index)?;
+                    builder.push(cell.as_deref());
+                }
+                let cells = builder.finish()?;
+                bytes += cells.text_len();
+                match fetch.feed {
+                    Some(feed) => feed.push(cells),
+                    None => rows.push(cells),
+                }
+            }
+
+            // A query's count is the rows it returned. `changes()` would
+            // report whatever the statement before it modified, since
+            // SQLite does not reset it for a select.
+            result.rows_affected = Some(returned as u64);
+            result.capped_from = (result.stopped.is_none() && returned > kept).then_some(returned);
+            past_limit = returned > kept;
+            result.columns = columns;
+            result.rows = rows;
+            result.bytes = bytes;
+            probed = described;
+            if result.stopped.is_some() {
+                break;
+            }
+        }
+        // Timed to the last kept row when rows past the limit came after
+        // it: draining the statement is not the wait for these.
+        result.elapsed = match filled {
+            Some(filled) if past_limit => filled,
+            _ => started.elapsed(),
+        };
+        Ok(())
+    })();
+
+    if let Err(error) = outcome {
+        return Err(rolled_back(connection, outside_a_transaction, error));
+    }
+
+    Ok((result, probed))
+}
+
 /// End the transaction a failed batch left open, and say so in the error.
 ///
 /// SQLite stops the batch at the failing statement, so the `COMMIT` dbdelve wrote
@@ -1465,10 +1728,35 @@ pub(super) mod graph_fixture {
     }
 }
 
+/// Whether a verified apply's `COMMIT` error means the session went before it
+/// answered. Never on a file, but for the one a test stages
+/// (`tests::COMMIT_ANSWER_LOST`), so an unknown outcome can be driven through
+/// the workspace's landing.
+fn answer_lost(error: &DbError) -> bool {
+    #[cfg(test)]
+    return error.message == tests::LOST_ANSWER;
+    #[cfg(not(test))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::db::{ColumnDefinition, RelationKind};
+
+    thread_local! {
+        /// Set, the next verified apply's `COMMIT` on this thread commits and
+        /// then answers as a connection lost before its answer would:
+        /// whether the draft landed is then not known to the workspace.
+        pub(crate) static COMMIT_ANSWER_LOST: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    /// What that `COMMIT` answers.
+    pub(super) const LOST_ANSWER: &str = "The connection was lost.";
 
     /// A connection over a database built in memory. Needs nothing external, so
     /// unlike the `live_` tests below these run everywhere.
@@ -1480,6 +1768,463 @@ mod tests {
         let connection = rusqlite::Connection::open_in_memory().expect("in-memory should open");
         connection.execute_batch(setup).expect("setup should apply");
         Connection::wrap(connection, statement_timeout)
+    }
+
+    /// A step of a verified apply as `sql::draft_batch` writes it, over `birds`.
+    fn step(
+        kind: crate::db::StepKind,
+        sql: &str,
+        id: &str,
+        before: &[(&str, Option<&str>)],
+    ) -> crate::db::VerifiedStep {
+        crate::db::VerifiedStep {
+            sql: sql.into(),
+            kind,
+            reread: Some(format!(
+                r#"SELECT * FROM "main"."birds" WHERE "id" = '{id}' LIMIT 2"#
+            )),
+            before: before
+                .iter()
+                .map(|(column, text)| crate::db::FetchedCell {
+                    column: (*column).into(),
+                    text: text.map(Into::into),
+                    cell_type: None,
+                    column_type: None,
+                })
+                .collect(),
+            read_back: None,
+            by_key: true,
+        }
+    }
+
+    fn insert(id: &str, name: &str) -> crate::db::VerifiedStep {
+        crate::db::VerifiedStep {
+            sql: format!(r#"INSERT INTO "main"."birds" ("id", "name") VALUES ('{id}', '{name}')"#),
+            kind: crate::db::StepKind::Insert,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        }
+    }
+
+    /// A keyless draft that deletes position 1 and then edits the row read at
+    /// position 2: the delete's trigger closes the gap, which moves the row
+    /// read at position 3 onto exactly the values the edit names, and the edit
+    /// would count that row as its one. Refused before anything is written,
+    /// while the same draft on a table no trigger rewrites applies.
+    #[test]
+    fn a_keyless_edit_after_a_write_a_trigger_follows_is_refused_unwritten() {
+        use crate::db::{ApplyOutcome, ApplyStage, FetchedCell, StepKind, VerifiedStep};
+
+        let keyless = |kind, sql: &str, pos: &str, name: &str| VerifiedStep {
+            reread: crate::sql::row_reread(Engine::Sqlite, sql),
+            sql: sql.into(),
+            kind,
+            before: [("pos", pos), ("name", name)]
+                .iter()
+                .map(|(column, text)| FetchedCell {
+                    column: (*column).into(),
+                    text: Some((*text).into()),
+                    cell_type: None,
+                    column_type: None,
+                })
+                .collect(),
+            read_back: None,
+            by_key: false,
+        };
+        let steps = [
+            keyless(
+                StepKind::Delete,
+                r#"DELETE FROM "main"."queue" WHERE "pos" = '1' AND "name" = 'a'"#,
+                "1",
+                "a",
+            ),
+            keyless(
+                StepKind::Update,
+                r#"UPDATE "main"."queue" SET "name" = 'c' WHERE "pos" = '2' AND "name" = 'b'"#,
+                "2",
+                "b",
+            ),
+        ];
+        assert!(steps.iter().all(|step| step.reread.is_some()));
+        let table = "create table queue (pos integer, name text); \
+                     insert into queue values (1, 'a'), (2, 'b'), (3, 'b');";
+        let rows = |connection: &Connection| {
+            let read = connection
+                .query("select pos, name from queue order by pos", Fetch::default())
+                .unwrap();
+            read.rows
+                .iter()
+                .map(|row| format!("{}:{}", row.get(0).unwrap(), row.get(1).unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        let compacted = memory(&format!(
+            "{table} create trigger compact after delete on queue \
+             begin update queue set pos = pos - 1 where pos > old.pos; end;"
+        ));
+        assert_eq!(
+            compacted.apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: plain_error(crate::db::KEYLESS_AFTER_A_WRITE.into()),
+            }
+        );
+        assert_eq!(
+            rows(&compacted),
+            ["1:a", "2:b", "3:b"],
+            "nothing was written"
+        );
+        assert!(compacted.connection.lock().unwrap().is_autocommit());
+
+        let plain = memory(table);
+        assert!(matches!(
+            plain.apply_verified(&steps, &|| true),
+            ApplyOutcome::Applied { affected: 2, .. }
+        ));
+        assert_eq!(rows(&plain), ["2:c", "3:b"]);
+    }
+
+    /// A foreign key that cascades from a table an earlier step wrote can
+    /// rewrite the keyless table too; one that does nothing cannot.
+    #[test]
+    fn a_keyless_edit_under_a_cascade_from_an_earlier_write_is_refused() {
+        use crate::db::{ApplyOutcome, StepKind, VerifiedStep};
+
+        let insert = VerifiedStep {
+            sql: r#"INSERT INTO "main"."nests" ("id") VALUES ('2')"#.into(),
+            kind: StepKind::Insert,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        };
+        let update = r#"UPDATE "main"."eggs" SET "n" = '5' WHERE "nest" = '1' AND "n" = '1'"#;
+        let edit = VerifiedStep {
+            reread: crate::sql::row_reread(Engine::Sqlite, update),
+            sql: update.into(),
+            kind: StepKind::Update,
+            before: vec![
+                crate::db::FetchedCell {
+                    column: "nest".into(),
+                    text: Some("1".into()),
+                    cell_type: None,
+                    column_type: None,
+                },
+                crate::db::FetchedCell {
+                    column: "n".into(),
+                    text: Some("1".into()),
+                    cell_type: None,
+                    column_type: None,
+                },
+            ],
+            read_back: None,
+            by_key: false,
+        };
+        let steps = [insert, edit];
+        let with = |action: &str| {
+            memory(&format!(
+                "create table nests (id integer primary key); insert into nests values (1); \
+                 create table eggs (nest integer references nests (id) {action}, n integer); \
+                 insert into eggs values (1, 1);"
+            ))
+        };
+        assert!(matches!(
+            with("on delete cascade").apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            with("").apply_verified(&steps, &|| true),
+            ApplyOutcome::Applied { affected: 2, .. }
+        ));
+    }
+
+    /// A transaction the user opened on the connection, whatever the workspace
+    /// read off their statements, is seen by the apply before it sends its
+    /// own `BEGIN`, and left open: nothing is written and nothing ended.
+    #[test]
+    fn an_apply_inside_the_users_transaction_is_refused_and_leaves_it_open() {
+        use crate::db::{ApplyOutcome, ApplyStage, StepKind};
+
+        let connection = memory(
+            "create table birds (id integer primary key, name text not null); \
+             insert into birds values (1, 'wren');",
+        );
+        connection
+            .query("BEGIN", Fetch::default())
+            .expect("the user's BEGIN");
+        let update = step(
+            StepKind::Update,
+            r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "id" = '1'"#,
+            "1",
+            &[("id", Some("1")), ("name", Some("wren"))],
+        );
+        assert_eq!(
+            connection.apply_verified(&[update], &|| true),
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: crate::db::in_a_transaction(),
+            }
+        );
+        let inner = connection.connection.lock().unwrap();
+        assert!(
+            !inner.is_autocommit(),
+            "the user's transaction is still open"
+        );
+        drop(inner);
+        assert_eq!(name_of(&connection, 1).as_deref(), Some("wren"));
+    }
+
+    fn name_of(connection: &Connection, id: i64) -> Option<String> {
+        connection
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("select name from birds where id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .ok()
+    }
+
+    #[test]
+    fn an_update_or_insert_must_count_one_and_a_zero_delete_must_find_its_row_gone() {
+        use crate::db::{ApplyOutcome, StepKind};
+
+        let birds = "create table birds (id integer primary key, name text not null, label text); \
+                     insert into birds values (1, 'wren', 'a'), (2, 'tit', 'a'), (3, 'jay', 'b');";
+        let delete = |id: &str, name: &str| {
+            step(
+                StepKind::Delete,
+                &format!(r#"DELETE FROM "main"."birds" WHERE "id" = '{id}'"#),
+                id,
+                &[("id", Some(id)), ("name", Some(name))],
+            )
+        };
+        let update = |id: &str, name: &str| {
+            step(
+                StepKind::Update,
+                &format!(r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "id" = '{id}'"#),
+                id,
+                &[("id", Some(id)), ("name", Some(name))],
+            )
+        };
+        let apply = |connection: &Connection, steps: &[crate::db::VerifiedStep]| {
+            connection.apply_verified(steps, &|| true)
+        };
+        let rows_of = |connection: &Connection| -> i64 {
+            connection
+                .connection
+                .lock()
+                .unwrap()
+                .query_row("select count(*) from birds", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        // An UPDATE a trigger skipped counts none: the whole sequence, the
+        // DELETE before it included, is rolled back.
+        let connection = memory(&format!(
+            "{birds} create trigger skips before update on birds when old.id = 2 \
+             begin select raise(ignore); end;"
+        ));
+        assert_eq!(
+            apply(&connection, &[delete("1", "wren"), update("2", "tit")]),
+            ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            }
+        );
+        assert_eq!(rows_of(&connection), 3);
+        assert_eq!(name_of(&connection, 2).as_deref(), Some("tit"));
+        assert!(connection.connection.lock().unwrap().is_autocommit());
+
+        // An UPDATE that reaches two rows is read again by its own predicate,
+        // which finds both: nothing is written, and both keep their values.
+        let connection = memory(birds);
+        let mut both = update("1", "wren");
+        both.sql = r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "label" = 'a'"#.into();
+        both.reread = crate::sql::row_reread(Engine::Sqlite, &both.sql);
+        assert_eq!(
+            apply(&connection, &[both]),
+            ApplyOutcome::Drifted(vec![(0, crate::db::Drift::Ambiguous(2))])
+        );
+        assert_eq!(name_of(&connection, 1).as_deref(), Some("wren"));
+        assert_eq!(name_of(&connection, 2).as_deref(), Some("tit"));
+
+        // One that counts one applies.
+        let connection = memory(birds);
+        assert_eq!(
+            apply(&connection, &[update("1", "wren")]),
+            ApplyOutcome::Applied {
+                affected: 1,
+                read_backs: Vec::new()
+            }
+        );
+        assert_eq!(name_of(&connection, 1).as_deref(), Some("robin"));
+
+        // A DELETE that counts none is a row an earlier DELETE took with it,
+        // which the second read of its row finds gone.
+        let connection = memory(&format!(
+            "{birds} create trigger cascades after delete on birds when old.id = 1 \
+             begin delete from birds where id = 2; end;"
+        ));
+        assert_eq!(
+            apply(&connection, &[delete("1", "wren"), delete("2", "tit")]),
+            ApplyOutcome::Applied {
+                affected: 1,
+                read_backs: Vec::new()
+            }
+        );
+        assert_eq!(rows_of(&connection), 1);
+
+        // One that counts none with its row still there was skipped, and is
+        // refused.
+        let connection = memory(&format!(
+            "{birds} create trigger keeps before delete on birds when old.id = 2 \
+             begin select raise(ignore); end;"
+        ));
+        assert_eq!(
+            apply(&connection, &[delete("2", "tit")]),
+            ApplyOutcome::Miscounted {
+                step: 0,
+                count: Some(0)
+            }
+        );
+        assert_eq!(rows_of(&connection), 3);
+
+        // An INSERT counts one, or is refused when a trigger skipped it.
+        let connection = memory(&format!(
+            "{birds} create trigger skips before insert on birds when new.id = 5 \
+             begin select raise(ignore); end;"
+        ));
+        assert_eq!(
+            apply(&connection, &[insert("4", "owl")]),
+            ApplyOutcome::Applied {
+                affected: 1,
+                read_backs: Vec::new()
+            }
+        );
+        assert_eq!(
+            apply(&connection, &[delete("1", "wren"), insert("5", "kite")]),
+            ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            }
+        );
+        assert_eq!(rows_of(&connection), 4, "the DELETE before it is undone");
+        assert_eq!(name_of(&connection, 5), None);
+    }
+
+    #[test]
+    fn a_verified_step_reads_its_row_back_inside_the_transaction() {
+        use crate::db::{ApplyOutcome, StepKind};
+
+        let setup = "create table birds (id integer primary key, name text not null); \
+                     insert into birds values (1, 'wren');";
+        let mut update = step(
+            StepKind::Update,
+            r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "id" = '1'"#,
+            "1",
+            &[("id", Some("1")), ("name", Some("wren"))],
+        );
+        update.read_back = crate::sql::row_read(Engine::Sqlite, &update.sql);
+        let named = |outcome: ApplyOutcome| {
+            let ApplyOutcome::Applied {
+                affected,
+                mut read_backs,
+            } = outcome
+            else {
+                panic!("applied with its row read back, not {outcome:?}");
+            };
+            let (_, read) = read_backs.pop().expect("its row is read back");
+            let name = read.columns.iter().position(|c| c.name == "name").unwrap();
+            assert_eq!(read.rows.len(), 1);
+            (affected, read.rows[0].get(name).map(str::to_owned))
+        };
+
+        let connection = memory(setup);
+        assert_eq!(
+            named(connection.apply_verified(std::slice::from_ref(&update), &|| true)),
+            (1, Some("robin".to_string()))
+        );
+        assert!(connection.connection.lock().unwrap().is_autocommit());
+    }
+
+    #[test]
+    fn a_verified_sequence_reads_every_row_before_it_writes_any() {
+        use crate::db::{ApplyOutcome, Drift, StepKind};
+
+        // The delete of row 1 rewrites row 2 behind it: a row read after that
+        // write would be called changed, which is the draft's own cascade and
+        // not a drift.
+        let setup = "create table birds (id integer primary key, name text not null); \
+                     insert into birds values (1, 'wren'), (2, 'tit'); \
+                     create trigger cascades after delete on birds \
+                     begin update birds set name = 'cascaded' where id = 2; end;";
+        let delete = r#"DELETE FROM "main"."birds" WHERE "id" = '1'"#;
+        let update = r#"UPDATE "main"."birds" SET "name" = 'robin' WHERE "id" = '2'"#;
+        // The manifest of row 2 lists its columns in another order than the table.
+        let steps = |second: &str| {
+            [
+                step(
+                    StepKind::Delete,
+                    delete,
+                    "1",
+                    &[("id", Some("1")), ("name", Some("wren"))],
+                ),
+                step(
+                    StepKind::Update,
+                    update,
+                    "2",
+                    &[("name", Some(second)), ("id", Some("2"))],
+                ),
+            ]
+        };
+
+        let connection = memory(setup);
+        assert_eq!(
+            connection.apply_verified(&steps("tit"), &|| true),
+            ApplyOutcome::Applied {
+                affected: 2,
+                read_backs: Vec::new()
+            }
+        );
+        assert_eq!(name_of(&connection, 1), None);
+        assert_eq!(name_of(&connection, 2).as_deref(), Some("robin"));
+
+        // The second row was changed after it was read: nothing is written, the
+        // first row stays, and the session is left outside a transaction.
+        let connection = memory(setup);
+        assert_eq!(
+            connection.apply_verified(&steps("tit, changed"), &|| true),
+            ApplyOutcome::Drifted(vec![(1, Drift::Changed)])
+        );
+        assert_eq!(name_of(&connection, 1).as_deref(), Some("wren"));
+        assert_eq!(name_of(&connection, 2).as_deref(), Some("tit"));
+        assert!(connection.connection.lock().unwrap().is_autocommit());
+
+        // Every drifted row is named, not the first alone.
+        let connection = memory(setup);
+        let mut both = steps("tit, changed");
+        both[0].before[1].text = Some("wren, changed".into());
+        assert_eq!(
+            connection.apply_verified(&both, &|| true),
+            ApplyOutcome::Drifted(vec![(0, Drift::Changed), (1, Drift::Changed)])
+        );
+
+        // A row another session deleted is gone, not changed.
+        let connection = memory(setup);
+        connection
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("delete from birds where id = 2")
+            .unwrap();
+        assert_eq!(
+            connection.apply_verified(&steps("tit"), &|| true),
+            ApplyOutcome::Drifted(vec![(1, Drift::Gone)])
+        );
+        assert_eq!(name_of(&connection, 1).as_deref(), Some("wren"));
     }
 
     /// Runs until something stops it. The recursion has no termination
@@ -1836,6 +2581,8 @@ RETURNING n
                 schema: table.map(|_| "main".to_string()),
                 table: table.map(str::to_string),
                 column: column.map(str::to_string),
+                blob: false,
+                infinite: false,
             })
             .collect()
     }
@@ -2120,14 +2867,184 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
     }
 
     #[test]
-    fn a_table_without_a_primary_key_is_not_editable() {
-        // There is a rowid that would identify the row, but it is not in the
-        // result set, so there is no predicate dbdelve can read off the grid.
-        let result = memory("CREATE TABLE unkeyed (value INTEGER, label TEXT); INSERT INTO unkeyed VALUES (1, 'a');")
-            .query("SELECT value, label FROM unkeyed", Fetch::default())
-            .expect("query should succeed");
+    fn a_table_without_a_primary_key_is_matched_by_every_column_or_read_only_with_a_reason() {
+        use crate::db::RowMatch;
 
-        assert!(result.edit.is_none());
+        let connection = memory(
+            "create table sightings (bird text, place text, seen integer, weight real);
+             create table pictured (bird text, photo blob);
+             create table tagged (bird text, place text,
+                 label text generated always as (bird || place) virtual);
+             create table measured (bird text, amount numeric);
+             create table untyped (bird text, anything);",
+        );
+        let edit = |sql: &str| connection.query(sql, Fetch::default()).expect("a read");
+
+        let sightings = edit("SELECT * FROM sightings");
+        let target = sightings.edit.expect("every column is of a matchable type");
+        assert_eq!(target.keys, vec![0, 1, 2, 3]);
+        assert_eq!(target.row_match, RowMatch::EveryColumn { fixed: vec![] });
+        assert_eq!(sightings.read_only_reason, None);
+
+        let tagged = edit("SELECT * FROM tagged")
+            .edit
+            .expect("a generated column is matched");
+        assert_eq!(tagged.keys, vec![0, 1, 2]);
+        assert_eq!(tagged.row_match, RowMatch::EveryColumn { fixed: vec![2] });
+
+        for (sql, column) in [
+            ("SELECT * FROM measured", "amount (numeric)"),
+            ("SELECT bird FROM measured", "amount (numeric)"),
+            ("SELECT * FROM untyped", "anything (no declared type)"),
+            ("SELECT * FROM pictured", "photo (BLOB)"),
+        ] {
+            let read = edit(sql);
+            assert!(read.edit.is_none(), "{sql}");
+            assert_eq!(
+                read.read_only_reason,
+                Some(format!(
+                    "A table without a primary key is edited by matching every column, \
+                     and {column} cannot be matched by its value."
+                )),
+                "{sql}"
+            );
+        }
+
+        // A column the result leaves out would be left out of the WHERE.
+        let partial = edit("SELECT bird FROM sightings");
+        assert!(partial.edit.is_none());
+        assert_eq!(
+            partial.read_only_reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and place is not in the result."
+            )
+        );
+        // A disjoint self-join reads each column once, from two rows: the
+        // origins cannot tell the instances apart, so the statement must.
+        let disjoint = edit(
+            "SELECT x.bird, y.place, x.seen, y.weight FROM sightings x JOIN sightings y \
+             ON x.bird = 'a' AND y.bird = 'b'",
+        );
+        assert!(disjoint.edit.is_none());
+        assert_eq!(
+            disjoint.read_only_reason.as_deref(),
+            Some(crate::sql::Unread::Join.reason())
+        );
+        let reordered = edit("SELECT weight, bird, seen, place FROM sightings");
+        assert!(reordered.edit.is_some(), "a reordered projection is edited");
+        // Computed beside real columns, and a self-join, are no table's rows.
+        assert!(edit("SELECT *, 1 AS one FROM sightings").edit.is_none());
+        assert!(
+            edit("SELECT a.bird, a.place, a.seen, a.weight, b.bird FROM sightings a, sightings b")
+                .edit
+                .is_none()
+        );
+
+        let keyed = memory(ACCOUNTS)
+            .query("SELECT * FROM accounts", Fetch::default())
+            .expect("a read");
+        assert_eq!(keyed.edit.expect("keyed").row_match, RowMatch::Key);
+        assert_eq!(keyed.read_only_reason, None);
+    }
+
+    /// A BLOB stored in a column declared as text renders as `x'…'`, which is
+    /// also a text the column can hold: the predicate spelled from it would
+    /// name that text row, so a result holding one is not edited by value.
+    #[test]
+    fn a_blob_in_a_text_column_leaves_a_keyless_result_read_only() {
+        let connection = memory(
+            "create table marks (c text, label text);
+             insert into marks values (x'68', 'old'), ('x''68''', 'old');",
+        );
+        let blob = connection
+            .query(
+                "SELECT c, label FROM marks WHERE typeof(c) = 'blob'",
+                Fetch::default(),
+            )
+            .expect("a read");
+        assert_eq!(blob.rows[0].get(0), Some("x'68'"));
+        assert!(blob.edit.is_none());
+        assert_eq!(
+            blob.read_only_reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and c holds a BLOB, which cannot be matched by its value."
+            )
+        );
+        let text = connection
+            .query(
+                "SELECT c, label FROM marks WHERE typeof(c) = 'text'",
+                Fetch::default(),
+            )
+            .expect("a read");
+        assert!(text.edit.is_some(), "the text row is still edited");
+    }
+
+    /// An infinite REAL renders as `inf`, which is also a text a REAL column
+    /// can hold: the predicate spelled from it would name the text row, so a
+    /// result holding one is not edited by value.
+    #[test]
+    fn an_infinite_real_leaves_a_keyless_result_read_only() {
+        let connection = memory(
+            "create table marks (n real, label text);
+             insert into marks values (1e999, 'old'), ('inf', 'old'), (1.5, 'old');",
+        );
+        let infinite = connection
+            .query(
+                "SELECT n, label FROM marks WHERE typeof(n) = 'real' AND n > 2",
+                Fetch::default(),
+            )
+            .expect("a read");
+        assert_eq!(infinite.rows[0].get(0), Some("inf"));
+        assert!(infinite.edit.is_none());
+        assert_eq!(
+            infinite.read_only_reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and n holds an infinite REAL, which cannot be matched by its value."
+            )
+        );
+        let finite = connection
+            .query("SELECT n, label FROM marks WHERE n = 1.5", Fetch::default())
+            .expect("a read");
+        assert!(finite.edit.is_some(), "a finite row is still edited");
+    }
+
+    /// Why a blob makes a keyless table read-only: the every-column predicate
+    /// the writer spells from the row as read finds no row by its blob.
+    #[test]
+    fn a_blob_is_not_found_by_the_predicate_written_from_its_rendering() {
+        let connection = memory(
+            "create table pictured (bird text, photo blob);
+             insert into pictured values ('wren', x'68');",
+        );
+        let read = connection
+            .query("SELECT bird, photo FROM pictured", Fetch::default())
+            .expect("a read");
+        let rendered: Vec<&str> = (0..2)
+            .map(|index| read.rows[0].get(index).expect("a value"))
+            .collect();
+        assert_eq!(rendered, ["wren", "x'68'"]);
+        let types = [
+            ("bird".to_string(), "text".to_string()),
+            ("photo".to_string(), "blob".to_string()),
+        ];
+        let delete = crate::sql::delete_row_matching(
+            Engine::Sqlite,
+            "main",
+            "pictured",
+            &[("bird", rendered[0]), ("photo", rendered[1])],
+            &[],
+            &types,
+        )
+        .expect("the predicate is written");
+        assert!(crate::sql::is_generated_write_on(Engine::Sqlite, &delete));
+
+        let deleted = connection
+            .query(&delete, Fetch::default())
+            .expect("the delete runs");
+        assert_eq!(deleted.rows_affected, Some(0), "{delete}");
     }
 
     #[test]
@@ -2777,6 +3694,9 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
+        generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
 
     #[test]

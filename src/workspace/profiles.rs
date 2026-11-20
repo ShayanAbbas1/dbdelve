@@ -11,7 +11,7 @@ use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, k
 use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
-use crate::session::{Bound, BoundSession, STALE_ROWS, restored_shortcuts};
+use crate::session::{Bound, BoundSession, EditMode, STALE_ROWS, restored_shortcuts};
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
 
@@ -33,6 +33,40 @@ fn mark_objects_stale(profile: &mut Profile) {
             *stale = true;
         }
     }
+}
+
+/// Drops what `profile`'s query tabs read from the target it is leaving, with
+/// the prompts, the review and the New row form written from it: rows of the
+/// old target, and an edit staged on them or a row added beside them, would
+/// be applied to the new one. The tabs keep their SQL, which is the user's to
+/// run wherever they like.
+fn forget_what_was_read(profile: &mut Profile, window: &mut Window, cx: &mut Context<Workspace>) {
+    for tab in &mut profile.session.queries {
+        let _ = store::remove_grid(&profile.id, &store::query_grid_key(tab.id));
+        for queued in 0..tab.stored(false).queued_results {
+            let _ = store::remove_grid(&profile.id, &store::queued_grid_key(tab.id, queued));
+        }
+        tab.results = crate::result_grid::new_grid(window, cx);
+        // A cancelled run stays `Running` until its result comes back and
+        // `drop_stale_run` idles it, which keeps a second run off the tab
+        // meanwhile.
+        if !matches!(tab.query, QueryState::Running { .. }) {
+            tab.query = QueryState::Idle;
+        }
+        tab.queue = None;
+        // The slot just replaced is the one a loan would give back.
+        tab.lent = None;
+        tab.queued_results = 0;
+        tab.last_query = None;
+        tab.sent_from = None;
+        tab.ran_from = None;
+        tab.plan = None;
+        tab.showing_plan = false;
+        tab.showing_messages = false;
+    }
+    profile.session.clear_prompts();
+    profile.session.apply_review = None;
+    profile.session.insert_form = None;
 }
 
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
@@ -152,6 +186,8 @@ impl Workspace {
             sidebar_density: Some(self.settings.density.slug().into()),
             sidebar_show_host: Some(self.settings.show_host),
             sidebar_show_sizes: Some(self.settings.show_sizes),
+            edit_mode: (self.settings.edit_mode != EditMode::default())
+                .then(|| self.settings.edit_mode.slug().into()),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -990,8 +1026,26 @@ impl Workspace {
         let profile = &mut self.profiles[index];
         // A profile left idle, disconnected or never opened, opens on the
         // edited config whenever it is next picked.
+        let retargeted = profile.config.retargets(&config);
         let reconnect =
             profile.config.needs_reconnect(&config) && !matches!(profile.state, ProfileState::Idle);
+        // Edits staged against the rows the old config reached say nothing
+        // about the new one's, where the same key can name another row; kept,
+        // a Row view's next leave would send one there unread. A config that
+        // reaches the same target another way (a password, a timeout, TLS)
+        // keeps them.
+        let grids: Vec<_> = match retargeted {
+            true => profile
+                .session
+                .objects
+                .iter()
+                .filter_map(|tab| match &tab.body {
+                    ObjectBody::Relation { results, .. } => Some(results.clone()),
+                    _ => None,
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         let syntax = config.engine().syntax();
         if profile.config.engine().syntax() != syntax {
             profile.session.set_syntax(syntax, window, cx);
@@ -999,6 +1053,14 @@ impl Workspace {
         profile.name = name;
         profile.color = color;
         profile.config = config;
+        // The tabs stay open on the new target, so a view in a mode it does
+        // not offer is put in the one it does, as a new tab's is.
+        let target = profile.config.target();
+        for tab in &mut profile.session.objects {
+            if let ObjectBody::Relation { edit_mode, .. } = &mut tab.body {
+                *edit_mode = edit_mode.on(target);
+            }
+        }
 
         // Only what was typed. A blank field is not an instruction to forget the
         // stored password.
@@ -1015,6 +1077,48 @@ impl Workspace {
         self.remember_profiles(cx);
         // The name is the row's label.
         self.rebuild_connections(cx);
+
+        let mut discarded = false;
+        for results in grids {
+            results.update(cx, |table, cx| {
+                let grid = table.delegate_mut();
+                if grid.has_pending() {
+                    grid.discard_pending();
+                    discarded = true;
+                    table.refresh(cx);
+                }
+            });
+        }
+        if retargeted {
+            // Before the reconnect: the cancel goes out over the old
+            // connection, as `leave_database`'s does.
+            if self.active == Some(index)
+                && let Some(profile) = self.profiles.get(index)
+            {
+                let queries: Vec<u64> = profile.session.queries.iter().map(|tab| tab.id).collect();
+                for id in queries {
+                    self.stop_queue_on(Tab::Query(id), cx);
+                    self.stop_run(Tab::Query(id), cx);
+                }
+            }
+            if let Some(profile) = self.profiles.get_mut(index) {
+                discarded |= profile.session.apply_review.is_some()
+                    || profile.session.insert_form.is_some()
+                    || profile
+                        .session
+                        .queries
+                        .iter()
+                        .any(|tab| tab.results.read(cx).delegate().has_pending());
+                forget_what_was_read(profile, window, cx);
+            }
+        }
+        if discarded {
+            self.note(
+                "The connection now reaches a different target, so the unapplied edits of its tables and queries were discarded."
+                    .into(),
+                cx,
+            );
+        }
 
         if reconnect {
             self.reconnect(index, cx);
@@ -1478,32 +1582,7 @@ impl Workspace {
             let key = store::object_grid_key(&object.schema, &object.name, &object.filter);
             let _ = store::remove_grid(&profile.id, &key);
         }
-        for tab in &mut profile.session.queries {
-            let _ = store::remove_grid(&profile.id, &store::query_grid_key(tab.id));
-            for queued in 0..tab.stored(false).queued_results {
-                let _ = store::remove_grid(&profile.id, &store::queued_grid_key(tab.id, queued));
-            }
-            tab.results = crate::result_grid::new_grid(window, cx);
-            // A cancelled run stays `Running` until its result comes back and
-            // `drop_stale_run` idles it, which keeps a second run off the tab
-            // meanwhile.
-            if !matches!(tab.query, QueryState::Running { .. }) {
-                tab.query = QueryState::Idle;
-            }
-            tab.queue = None;
-            // The slot just replaced is the one a loan would give back.
-            tab.lent = None;
-            tab.queued_results = 0;
-            tab.last_query = None;
-            tab.sent_from = None;
-            tab.ran_from = None;
-            tab.plan = None;
-            tab.showing_plan = false;
-            tab.showing_messages = false;
-        }
-        profile.session.clear_prompts();
-        profile.session.apply_review = None;
-        profile.session.insert_form = None;
+        forget_what_was_read(profile, window, cx);
         profile.databases = Databases::default();
     }
 

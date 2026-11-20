@@ -59,11 +59,11 @@ use gpui_component::{
 };
 
 use actions::{
-    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseTab, CollapseAllSchemas, CommandPalette,
-    CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows, CopySelection,
-    CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell, ExpandAllSchemas,
-    ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, HideColumn,
-    ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
+    AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseAllTabs, CloseTab, CollapseAllSchemas,
+    CommandPalette, CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows,
+    CopySelection, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell,
+    ExpandAllSchemas, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
+    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenLogsFolder,
     OpenReference, OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
@@ -93,10 +93,10 @@ use icons::{Icons, icon};
 use palette::{Command, Mode as PaletteMode, Palette, PaletteEvent, Scope, Stroke};
 use result_grid::{NewValue, ResultGrid};
 use session::{
-    ApplyReview, CatalogState, Explained, Focus, InsertField, InsertForm, ObjectBody, ObjectTab,
-    OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines, RowCount,
-    Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab, relation_kind,
-    restored_state, show_snapshot,
+    ApplyReview, CatalogState, EditMode, Explained, Focus, InsertField, InsertForm, ObjectBody,
+    ObjectTab, OpenedObject, Profile, ProfileState, QueryState, QueryTab, Refresh, Routines,
+    RowCount, Session, Sorting, StructureState, Tab, TabKey, insert_value, matching_tab,
+    relation_kind, restored_state, show_snapshot,
 };
 use sql::{Buffer, SortKey};
 use theme::{ConnectionColor, FontSlot, Fonts, Theme, fonts, layout, popup_theme, theme};
@@ -396,6 +396,7 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
                 MenuItem::action("Save Query", SaveQuery),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Close All Tabs", CloseAllTabs),
                 MenuItem::separator(),
                 MenuItem::action("Disconnect", Disconnect),
             ])

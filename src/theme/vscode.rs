@@ -7,7 +7,8 @@ use serde_json::{Map, Value};
 
 use super::color::{Rgba, contrast_ratio};
 use super::zed::{
-    apart_from, hex, keep_untaken, on_accent, read_text, see_through, skipped, sorted_entries,
+    apart_from, hex, keep_untaken, on_accent, read_text, row_washes, see_through, skipped,
+    sorted_entries,
 };
 use super::{PALETTE_EDITED_ALPHA, Theme};
 use crate::store;
@@ -263,6 +264,24 @@ fn convert(name: String, light: bool, source: &Source) -> Theme {
         .filter(|rule| rule.get("scope").is_none())
         .find_map(|rule| hex(rule.pointer("/settings/foreground")?.as_str()?))
         .map_or(text, |c| c.flatten(backdrop));
+    let selection =
+        first(&["editor.selectionBackground"]).map_or(base.selection, |c| see_through(c, surface));
+    let edited =
+        solid(&["editorWarning.foreground"]).map_or(base.edited, |c| c.alpha(PALETTE_EDITED_ALPHA));
+    // Gruvbox colours a file it added in its plain foreground, which as a wash
+    // is a grey that says nothing: a git colour that is the text's is not taken.
+    let git = |key: &str| solid(&[key]).filter(|color| *color != text);
+    let [added, updated, deleted] = row_washes(
+        &base,
+        backdrop,
+        selection,
+        edited,
+        [
+            git("gitDecoration.addedResourceForeground"),
+            git("gitDecoration.modifiedResourceForeground"),
+            git("gitDecoration.deletedResourceForeground"),
+        ],
+    );
     // ponytail: leaked, but themes load once per process so it is bounded.
     let name: &'static str = Box::leak(name.into_boxed_str());
     Theme {
@@ -315,11 +334,12 @@ fn convert(name: String, light: bool, source: &Source) -> Theme {
         text_faint: solid(&["editorLineNumber.foreground"]).unwrap_or(base.text_faint),
         accent,
         on_accent: on_accent(text, surface, accent),
-        selection: first(&["editor.selectionBackground"])
-            .map_or(base.selection, |c| see_through(c, surface)),
+        selection,
         cursor: solid(&["editorCursor.foreground"]).unwrap_or(text),
-        edited: solid(&["editorWarning.foreground"])
-            .map_or(base.edited, |c| c.alpha(PALETTE_EDITED_ALPHA)),
+        edited,
+        added,
+        updated,
+        deleted,
         danger: solid(&["errorForeground", "editorError.foreground"]).unwrap_or(base.danger),
         // Gruvbox's added-file colour is its plain foreground.
         success: solid(&[
@@ -377,7 +397,10 @@ fn foreground(rules: &[Value], scope: &str) -> Option<Rgba> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::color::Srgb;
+    use crate::theme::{
+        PALETTE_ADDED_ALPHA, PALETTE_DELETED_ALPHA, PALETTE_UPDATED_ALPHA, ROW_WASHES_APART,
+        color::Srgb,
+    };
 
     #[cfg(unix)]
     #[test]
@@ -437,6 +460,63 @@ mod tests {
             std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(!linux_directories(Some(&path), None).contains(&extensions));
         });
+    }
+
+    fn themed(colors: &str) -> Theme {
+        let Value::Object(colors) = serde_json::from_str(colors).unwrap() else {
+            panic!("an object of colours");
+        };
+        let source = Source {
+            colors,
+            token_colors: Vec::new(),
+        };
+        convert("Test".to_string(), false, &source)
+    }
+
+    #[test]
+    fn a_vscode_theme_maps_its_git_decoration_colours_and_keeps_them_apart() {
+        let dark = Theme::dark();
+        let far_apart = themed(
+            r##"{ "editor.background": "#1e1e1e", "editor.foreground": "#d4d4d4",
+                "gitDecoration.addedResourceForeground": "#2ecc71",
+                "gitDecoration.modifiedResourceForeground": "#e056fd",
+                "gitDecoration.deletedResourceForeground": "#ff4d4d" }"##,
+        );
+        assert_eq!(
+            far_apart.added,
+            Srgb::from_hex(0x2ecc71).alpha(PALETTE_ADDED_ALPHA)
+        );
+        assert_eq!(
+            far_apart.updated,
+            Srgb::from_hex(0xe056fd).alpha(PALETTE_UPDATED_ALPHA)
+        );
+        assert_eq!(
+            far_apart.deleted,
+            Srgb::from_hex(0xff4d4d).alpha(PALETTE_DELETED_ALPHA)
+        );
+
+        // VS Code 2026 Light's added and modified are an olive pair 2.4 levels
+        // apart, which two washes cannot be.
+        let olive = themed(
+            r##"{ "editor.background": "#ffffff", "editor.foreground": "#202020",
+                "gitDecoration.addedResourceForeground": "#587c0c",
+                "gitDecoration.modifiedResourceForeground": "#667309" }"##,
+        );
+        let [added, updated] = [olive.added, olive.updated].map(|wash| wash.flatten(olive.bg));
+        assert!(added.distance(updated) >= ROW_WASHES_APART);
+
+        // Gruvbox colours a file it added in its plain foreground, a grey.
+        let gruvbox = themed(
+            r##"{ "editor.background": "#282828", "editor.foreground": "#ebdbb2",
+                "gitDecoration.addedResourceForeground": "#ebdbb2" }"##,
+        );
+        assert_eq!(gruvbox.added, dark.added);
+
+        let none = themed(r##"{ "editor.background": "#1e1e1e" }"##);
+        assert_eq!(
+            (none.added, none.updated, none.deleted),
+            (dark.added, dark.updated, dark.deleted)
+        );
     }
 
     #[test]

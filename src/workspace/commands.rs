@@ -135,6 +135,10 @@ impl Workspace {
         let focused = results.update(cx, |table, cx| {
             crate::result_grid::reveal_column(table, col, window, cx)
         });
+        // The ring moved without a table event, which is what would have
+        // staged the input it closed; left recorded, a later move would stage
+        // that text over an edit of the same cell made in between.
+        self.flush_left_row(&results, cx);
         // The grid holds the keyboard now. Closing the palette asked for the
         // tab's own focus back, which in a query tab is the editor, and the
         // next render would hand it there, leaving the arrow keys typing.
@@ -733,6 +737,7 @@ impl Workspace {
                 self.import_rows_from_clipboard(&ImportRowsFromClipboard, window, cx)
             }
             Command::CloseObject(id) => self.ask_before_close(Tab::Object(id), window, cx),
+            Command::CloseAllTabs => self.close_all_tabs(&CloseAllTabs, window, cx),
             Command::SetNull => self.set_null(&SetNull, window, cx),
             Command::SetEmpty => self.set_empty(&SetEmpty, window, cx),
             Command::SetDefault => self.set_default(&SetDefault, window, cx),
@@ -868,6 +873,7 @@ impl Workspace {
             Command::NodeAction(node, action) => self.run_node_action(&node, action, window, cx),
             Command::SelectionAction(action) => self.run_selection_action(action, window, cx),
             Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
+            Command::SetEditMode(mode) => self.set_edit_mode(mode, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it
             // goes on to click into it; the keyboard has to be put there.

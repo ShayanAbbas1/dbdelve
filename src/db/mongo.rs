@@ -41,9 +41,10 @@ use tokio::sync::oneshot;
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Fetch, Index,
-    IndexKind, MISSING, NamedDefinition, QueryResult, Relation, RelationKind, Row, Schema,
-    ServerConfig, Sizes, SslMode, Statistics, Stopped, Structure, plain_error,
+    ApplyOutcome, ApplyStage, CancelToken, Catalog, Cell, Column, ColumnDefinition, DbError, Drift,
+    EditTarget, Fetch, FetchedCell, Index, IndexKind, MISSING, NamedDefinition, QueryResult,
+    Relation, RelationKind, Row, Schema, ServerConfig, Sizes, SslMode, Statistics, StepKind,
+    Stopped, Structure, VerifiedStep, plain_error,
 };
 use crate::mql::{self, Arg, Call, CursorMethod, DbMethod, Method, Show, Target, Value};
 
@@ -291,6 +292,34 @@ fn connection_string(config: &MongoConfig) -> Result<String, DbError> {
         "{scheme}://{credentials}{hosts}/{}?{options}",
         encoded(config.login_database.as_deref().unwrap_or(&server.database))
     ))
+}
+
+/// The keys in `options` that pick which servers and database are read,
+/// lowercased, sorted and joined, for `ConnectionConfig::retargets`: a
+/// timeout or an app name reaches the same data, and is left out so that
+/// changing one keeps what was staged against it.
+pub(super) fn target_options(options: &str) -> String {
+    const TARGET: [&str; 5] = [
+        "authsource",
+        "directconnection",
+        "loadbalanced",
+        "replicaset",
+        "srvservicename",
+    ];
+    let mut kept: Vec<String> = options
+        .trim()
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = key.trim().to_ascii_lowercase();
+            TARGET
+                .contains(&key.as_str())
+                .then(|| format!("{key}={}", value.trim()))
+        })
+        .collect();
+    kept.sort();
+    kept.join("&")
 }
 
 /// A key in `options` that the profile's own fields decide, named in the
@@ -600,6 +629,120 @@ impl Connection {
         Ok(result)
     }
 
+    /// Applies `steps` one statement at a time, with no transaction: every
+    /// step's document is read again by `_id` and compared with the document as
+    /// it was fetched ([`document_drift`]) before anything is written, then
+    /// each write is sent in order and its count, the server's own `n`, must be
+    /// one. The first failure or other count stops the rest unsent.
+    ///
+    /// What the outcome says about how far it got is on [`ApplyOutcome`]: here
+    /// the steps before the one named were applied, and none after it was sent.
+    /// A write that failed is told by what answered it: a refusal the server
+    /// sent ([`ApplyStage::Write`]) applied nothing, a write concern error
+    /// ([`ApplyStage::Concern`]) follows a write that applied, and a failure
+    /// nothing answered, the connection's or a Cancel's or the timeout's on its
+    /// way, is [`ApplyStage::Unanswered`]: it may have applied.
+    /// `proceed` is not asked: each statement registers its own run in
+    /// `cancel` ([`Run::start`]), so a Cancel between two of them stops the
+    /// sequence there.
+    ///
+    /// Every write is checked against [`mql::is_generated_write`] and every
+    /// read against [`mql::browse::is_generated_read`] first, whoever built
+    /// the steps, and a statement that fails either leaves the whole draft
+    /// unsent.
+    // ponytail: with no transaction, a document another client changes between
+    // its re-read and its write is overwritten: the compare sees a change made
+    // since the fetch, not one made in those milliseconds. The count still
+    // sees a document that vanished in that window. The upgrade is a session
+    // transaction, which needs a replica set; the compose server is
+    // standalone, so it is deferred.
+    pub fn apply_verified(&self, steps: &[VerifiedStep], cancel: &CancelToken) -> ApplyOutcome {
+        if steps.is_empty() {
+            return ApplyOutcome::Applied {
+                affected: 0,
+                read_backs: Vec::new(),
+            };
+        }
+        let Some(prepared) = steps.iter().map(prepared).collect::<Option<Vec<_>>>() else {
+            return ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                error: plain_error(
+                    "dbdelve refused to run a statement it wrote itself: the draft and its \
+                     statements do not match."
+                        .into(),
+                ),
+            };
+        };
+        let send = |target: &Target| {
+            Run::start(self, cancel).and_then(|run| self.statement(target, run, Fetch::default()))
+        };
+
+        let mut drifted = Vec::new();
+        for (index, (step, prepared)) in steps.iter().zip(&prepared).enumerate() {
+            let Some(read) = &prepared.reread else {
+                continue;
+            };
+            match send(read) {
+                Ok(result) => drifted
+                    .extend(document_drift(&step.before, &result).map(|drift| (index, drift))),
+                Err(error) => {
+                    return ApplyOutcome::Failed {
+                        stage: ApplyStage::Reread(index),
+                        error,
+                    };
+                }
+            }
+        }
+        if !drifted.is_empty() {
+            return ApplyOutcome::Drifted(drifted);
+        }
+
+        let (mut affected, mut read_backs) = (0, Vec::new());
+        for (index, prepared) in prepared.iter().enumerate() {
+            // A Cancel before the write went out sent nothing.
+            let run = match Run::start(self, cancel) {
+                Ok(run) => run,
+                Err(error) => {
+                    return ApplyOutcome::Failed {
+                        stage: ApplyStage::Write(index),
+                        error,
+                    };
+                }
+            };
+            ANSWERED.set(None);
+            let count = match self.statement(&prepared.write, run, Fetch::default()) {
+                Ok(result) => result.rows_affected,
+                Err(error) => {
+                    let stage = match ANSWERED.take() {
+                        Some(Answered::Refused) => ApplyStage::Write(index),
+                        Some(Answered::Applied) => ApplyStage::Concern(index),
+                        None => ApplyStage::Unanswered(index),
+                    };
+                    return ApplyOutcome::Failed { stage, error };
+                }
+            };
+            if count != Some(1) {
+                return ApplyOutcome::Miscounted { step: index, count };
+            }
+            affected += 1;
+            if let Some(read) = &prepared.read_back {
+                match send(read) {
+                    Ok(result) => read_backs.push((index, result)),
+                    Err(error) => {
+                        return ApplyOutcome::Failed {
+                            stage: ApplyStage::ReadBack(index),
+                            error,
+                        };
+                    }
+                }
+            }
+        }
+        ApplyOutcome::Applied {
+            affected,
+            read_backs,
+        }
+    }
+
     /// Ask the server to stop every statement running under `cancel`, then
     /// drop each one here whether or not the server found it: one still on its
     /// way there has nothing to kill yet. The client's pool is untouched, so
@@ -866,7 +1009,7 @@ impl Connection {
                     None => {
                         let whole = !elsewhere && returns_whole_documents(&sent);
                         let mut result = read_cursor(run, &database, sent, fetch)?.rows()?;
-                        if whole {
+                        if whole && result.read_only_reason.is_none() {
                             result.edit = self.edit_target(collection, &result);
                         }
                         Ok(result)
@@ -1884,7 +2027,10 @@ impl<'a> Run<'a> {
                 };
                 tokio::select! {
                     outcome = operation(session).into_future() => {
-                        Some(outcome.map_err(|error| plain_error(error.kind.to_string())))
+                        Some(outcome.map_err(|error| {
+                            ANSWERED.set(refusal(&error));
+                            plain_error(error.kind.to_string())
+                        }))
                     }
                     Ok(()) = stopped => Some(Err(plain_error("Cancelled.".into()))),
                     () = bound => None,
@@ -2019,6 +2165,15 @@ pub(super) const APPLIED: &str = " The statement's other writes applied: ";
 /// reply alone says nothing.
 fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbError> {
     let written = command(run, database, sent)?;
+    write_reply(written).map_err(|(answered, error)| {
+        ANSWERED.set(answered);
+        error
+    })
+}
+
+/// [`write`]'s reading of a write command's reply, with what the reply says
+/// of whether the failed write applied ([`ANSWERED`]).
+fn write_reply(written: Document) -> Result<Document, (Option<Answered>, DbError)> {
     if let Some(error) = written
         .get_array("writeErrors")
         .ok()
@@ -2026,18 +2181,66 @@ fn write(run: Run, database: &Database, sent: Document) -> Result<Document, DbEr
         .and_then(Bson::as_document)
     {
         let message = error.get_str("errmsg").unwrap_or("A write failed.");
-        return Err(plain_error(match number(written.get("n")) {
-            0 => message.to_string(),
-            n => format!("{message}{APPLIED}{n}."),
-        }));
+        let answered = match error.get_i32("code") {
+            Ok(code) if unsettled(code) => None,
+            _ => Some(Answered::Refused),
+        };
+        return Err((
+            answered,
+            plain_error(match number(written.get("n")) {
+                0 => message.to_string(),
+                n => format!("{message}{APPLIED}{n}."),
+            }),
+        ));
     }
     if let Ok(error) = written.get_document("writeConcernError") {
-        return Err(plain_error(format!(
-            "The writes applied, but their write concern failed: {}",
-            error.get_str("errmsg").unwrap_or_default()
-        )));
+        return Err((
+            Some(Answered::Applied),
+            plain_error(format!(
+                "The writes applied, but their write concern failed: {}",
+                error.get_str("errmsg").unwrap_or_default()
+            )),
+        ));
     }
     Ok(written)
+}
+
+/// What a failed statement's answer said of whether its write applied, for a
+/// verified apply to tell a refusal from a write nothing answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answered {
+    /// The server refused it: nothing of it applied.
+    Refused,
+    /// It applied, and something after it failed: its write concern.
+    Applied,
+}
+
+thread_local! {
+    /// What the last failed statement on this thread was answered with, set
+    /// where the reply is read ([`write`], [`Run::execute`]) and taken by
+    /// [`Connection::apply_verified`] after each write. Per thread because a
+    /// statement is driven on the thread that sends it (`block_on`), and one
+    /// apply's writes go out one after another on one thread.
+    static ANSWERED: std::cell::Cell<Option<Answered>> = const { std::cell::Cell::new(None) };
+}
+
+/// A command the server failed with an answer, which is a refusal unless its
+/// code says the operation was stopped part way ([`unsettled`]). Anything
+/// else (the socket, the pool, a server that could not be picked) is `None`:
+/// nothing answered for the write.
+fn refusal(error: &Error) -> Option<Answered> {
+    match &*error.kind {
+        ErrorKind::Command(failed) if !unsettled(failed.code) => Some(Answered::Refused),
+        _ => None,
+    }
+}
+
+/// Codes a server stops an operation already under way with, which say
+/// nothing of whether a write in it applied: interrupted (by a Cancel's
+/// `killOp` among others), out of time, or a server stepping down or
+/// shutting down under it.
+fn unsettled(code: i32) -> bool {
+    matches!(code, 50 | 91 | 189 | 262 | 11600 | 11601 | 11602)
 }
 
 /// `show collections` and `getCollectionNames()`: every name, sorted, the
@@ -2230,6 +2433,121 @@ fn number(value: Option<&Bson>) -> i64 {
 fn affected(mut result: QueryResult, written: &Document) -> QueryResult {
     result.rows_affected = u64::try_from(number(written.get("n"))).ok();
     result
+}
+
+/// One step of a verified apply, read into the statements the driver runs.
+struct Prepared {
+    write: Target,
+    reread: Option<Target>,
+    read_back: Option<Target>,
+}
+
+/// `step` as the statements to send, or `None` when anything in it is not what
+/// dbdelve would have written for it: the write must be exactly one `insertOne`,
+/// `updateOne` or `deleteOne` of its [`StepKind`] that [`mql::is_generated_write`]
+/// admits, its re-read exactly the `find` of the same `_id`
+/// ([`mql::browse::row_reread`]), and a read-back that same `find`. Read off
+/// the parse, not off what the caller says the step is.
+fn prepared(step: &VerifiedStep) -> Option<Prepared> {
+    let one = |text: &str| {
+        let mut statements = mql::parse(text).ok()?;
+        match statements.len() {
+            1 => statements.pop().map(|statement| statement.target),
+            _ => None,
+        }
+    };
+    let write = one(&step.sql).filter(|target| match target {
+        Target::Collection {
+            database: None,
+            call,
+            cursor,
+            ..
+        } => {
+            cursor.is_empty()
+                && matches!(
+                    (step.kind, call.method),
+                    (StepKind::Insert, Method::InsertOne)
+                        | (StepKind::Update, Method::UpdateOne)
+                        | (StepKind::Delete, Method::DeleteOne)
+                )
+        }
+        _ => false,
+    })?;
+    if !mql::is_generated_write(&step.sql) {
+        return None;
+    }
+    let reread = match (step.kind, &step.reread) {
+        (StepKind::Insert, None) => None,
+        (StepKind::Update | StepKind::Delete, Some(read))
+            if mql::browse::row_reread(&step.sql).as_deref() == Some(read)
+                && mql::browse::is_generated_read(read) =>
+        {
+            Some(one(read)?)
+        }
+        _ => return None,
+    };
+    // The read-back is the `find` of this step's own `_id`, as the re-read is,
+    // not just some read dbdelve could have written.
+    let read_back = match &step.read_back {
+        None => None,
+        Some(read)
+            if mql::browse::row_reread(&step.sql).as_deref() == Some(read)
+                && mql::browse::is_generated_read(read) =>
+        {
+            Some(one(read)?)
+        }
+        Some(_) => return None,
+    };
+    Some(Prepared {
+        write,
+        reread,
+        read_back,
+    })
+}
+
+/// How the document as it was fetched differs from its re-read, which is the
+/// `find` of its `_id` ([`mql::browse::row_reread`]).
+///
+/// No document is [`Drift::Gone`], and more than one is [`Drift::Ambiguous`].
+/// The whole document is compared, by field name and never by position, since
+/// the server may send fields in any order: each fetched field must be in the
+/// re-read with the same text and the same `$type` tag, a field fetched
+/// [`MISSING`] must still be absent from it (a null is not a missing field),
+/// and a field the fetch did not hold is a difference. Names and text are
+/// compared byte for byte, with no Unicode normalisation, so `1` the int and
+/// `1` the double, and `café` written two ways, are different values.
+fn document_drift(before: &[FetchedCell], reread: &QueryResult) -> Option<Drift> {
+    match reread.rows.as_slice() {
+        [] => return Some(Drift::Gone),
+        [_] => {}
+        rows => return Some(Drift::Ambiguous(rows.len())),
+    }
+    // Its text names another value as well as its own, so equal text proves
+    // nothing. A fetch that held one was never editable.
+    if reread.read_only_reason.as_deref() == Some(AMBIGUOUS) {
+        return Some(Drift::Changed);
+    }
+    let row = &reread.rows[0];
+    let tags = reread.cell_types.first();
+    let position = |name: &str| reread.columns.iter().position(|column| column.name == name);
+    let held =
+        before.iter().all(
+            |cell| match (position(&cell.column), cell.cell_type.as_deref()) {
+                (None, Some(MISSING)) => true,
+                (None, _) | (Some(_), Some(MISSING)) => false,
+                (Some(at), tag) => {
+                    row.get(at) == cell.text.as_deref()
+                        && tag
+                            .zip(tags.and_then(|tags| tags.get(at)))
+                            .is_none_or(|(fetched, now)| fetched == *now)
+                }
+            },
+        );
+    let whole = reread
+        .columns
+        .iter()
+        .all(|column| before.iter().any(|cell| cell.column == column.name));
+    (!(held && whole)).then_some(Drift::Changed)
 }
 
 /// A reply as one row of its fields.
@@ -2427,6 +2745,7 @@ fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
     let mut rows = Vec::with_capacity(documents.len());
     let mut cell_types = Vec::with_capacity(documents.len());
     let mut bytes = 0;
+    let mut ambiguous = false;
     for document in &documents {
         let mut row = vec![None; names.len()];
         let mut types = vec![MISSING; names.len()];
@@ -2434,6 +2753,7 @@ fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
             let at = positions[name.as_str()];
             row[at] = cell(value);
             types[at] = type_alias(value);
+            ambiguous = ambiguous || !reads_back(value);
         }
         let row = Row::try_from(row)?;
         bytes += row.text_len();
@@ -2454,8 +2774,45 @@ fn documents(documents: Vec<Document>) -> Result<QueryResult, DbError> {
         rows,
         cell_types,
         bytes,
+        read_only_reason: ambiguous.then(|| AMBIGUOUS.to_string()),
         ..QueryResult::default()
     })
+}
+
+/// Why a result holding a value [`reads_back`] refuses is not edited, and why
+/// a re-read holding one is never taken for the row that was read.
+const AMBIGUOUS: &str = "A field holds a document with a field named like an Extended JSON \
+                         type ($numberLong, $date, …), which its text cannot tell from that \
+                         type, so its documents cannot be checked before a write.";
+
+/// Whether a value's cell text reads back as exactly that value, byte for byte.
+/// A document or an array is shown as Extended JSON, where a literal
+/// `{"$numberLong": "7"}` and the long 7 are one text: comparing that text
+/// would take one for the other. A scalar's text is told apart by its type.
+fn reads_back(value: &Bson) -> bool {
+    let shown_as_json = matches!(
+        value,
+        Bson::Document(_)
+            | Bson::Array(_)
+            | Bson::JavaScriptCodeWithScope(_)
+            | Bson::Symbol(_)
+            | Bson::Undefined
+            | Bson::DbPointer(_)
+    );
+    if !shown_as_json {
+        return true;
+    }
+    let bytes = |value: Bson| {
+        let mut bytes = Vec::new();
+        doc! { "v": value }
+            .to_writer(&mut bytes)
+            .ok()
+            .map(|()| bytes)
+    };
+    Bson::try_from(typed_json(value))
+        .ok()
+        .and_then(bytes)
+        .is_some_and(|read| Some(read) == bytes(value.clone()))
 }
 
 /// A column's one type when its values agree, else `mixed`. A null or a
@@ -3347,6 +3704,342 @@ mod tests {
         assert_eq!(with_id(doc! { "a": 1, "_id": 7 }).0, Bson::Int32(7));
     }
 
+    /// A verified apply keeps a draft whose write the server refused, to be
+    /// applied again once corrected, and takes one nothing answered as
+    /// unknown: only the reply tells the two apart.
+    #[test]
+    fn a_failed_write_is_told_by_what_answered_it() {
+        let refused = write_reply(doc! {
+            "n": 0,
+            "writeErrors": [{ "index": 0, "code": 11000, "errmsg": "E11000 duplicate key" }],
+        })
+        .expect_err("a write error fails the write");
+        assert_eq!(refused.0, Some(Answered::Refused));
+        assert_eq!(refused.1.message, "E11000 duplicate key");
+        let validator = write_reply(doc! {
+            "n": 0,
+            "writeErrors": [{ "index": 0, "code": 121, "errmsg": "Document failed validation" }],
+        })
+        .expect_err("a validator's refusal fails the write");
+        assert_eq!(validator.0, Some(Answered::Refused));
+        // Stopped part way by a Cancel's killOp: the reply cannot say.
+        let interrupted = write_reply(doc! {
+            "n": 0,
+            "writeErrors": [{ "index": 0, "code": 11601, "errmsg": "operation was interrupted" }],
+        })
+        .expect_err("an interrupted write fails");
+        assert_eq!(interrupted.0, None);
+        let concern = write_reply(doc! {
+            "n": 1,
+            "writeConcernError": { "code": 64, "errmsg": "waiting for replication timed out" },
+        })
+        .expect_err("a write concern error fails the statement");
+        assert_eq!(concern.0, Some(Answered::Applied));
+        assert!(write_reply(doc! { "n": 1 }).is_ok());
+
+        let command = |code: i32| {
+            let failed: mongodb::error::CommandError = mongodb::bson::from_document(
+                doc! { "code": code, "codeName": "X", "errmsg": "no" },
+            )
+            .expect("a command error deserializes");
+            Error::from(ErrorKind::Command(failed))
+        };
+        assert_eq!(
+            refusal(&command(13)),
+            Some(Answered::Refused),
+            "unauthorized"
+        );
+        assert_eq!(refusal(&command(50)), None, "out of time part way");
+        assert_eq!(refusal(&command(11601)), None, "interrupted");
+        assert_eq!(
+            refusal(&Error::from(std::io::Error::from(
+                std::io::ErrorKind::ConnectionReset
+            ))),
+            None,
+            "the socket answered nothing"
+        );
+    }
+
+    /// `fields` as the one document a re-read of `_id` returns: each field's
+    /// text and `$type` tag, in the order the server sent them.
+    fn one_document(fields: &[(&str, Option<&str>, &'static str)]) -> QueryResult {
+        QueryResult {
+            columns: fields
+                .iter()
+                .map(|(name, _, _)| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            rows: vec![Row::new(fields.iter().map(|(_, text, _)| *text)).unwrap()],
+            cell_types: vec![fields.iter().map(|(_, _, tag)| *tag).collect()],
+            ..QueryResult::default()
+        }
+    }
+
+    /// The document as it was fetched: one cell per field, each typed.
+    fn fetched_document(fields: &[(&str, Option<&str>, &str)]) -> Vec<FetchedCell> {
+        fields
+            .iter()
+            .map(|(name, text, tag)| FetchedCell {
+                column: (*name).into(),
+                text: text.map(str::to_owned),
+                cell_type: Some((*tag).into()),
+                column_type: None,
+            })
+            .collect()
+    }
+
+    /// A nested long and a literal document of one `$numberLong` field show
+    /// one text: a re-read holding either is not taken for a fetch of the
+    /// other, and a fetch holding the literal one is not editable.
+    #[test]
+    fn a_nested_long_and_a_literal_dollar_document_of_one_text_are_told_apart() {
+        let long = documents(vec![doc! { "_id": 1, "n": { "a": Bson::Int64(7) } }]).unwrap();
+        let literal = documents(vec![
+            doc! { "_id": 1, "n": { "a": { "$numberLong": "7" } } },
+        ])
+        .unwrap();
+        assert_eq!(
+            long.rows, literal.rows,
+            "the text alone cannot tell them apart"
+        );
+        assert_eq!(long.cell_types, literal.cell_types);
+        assert_eq!(long.read_only_reason, None);
+        assert_eq!(literal.read_only_reason.as_deref(), Some(AMBIGUOUS));
+
+        let fetched: Vec<FetchedCell> = long
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(at, column)| FetchedCell {
+                column: column.name.clone(),
+                text: long.rows[0].get(at).map(str::to_owned),
+                cell_type: Some(long.cell_types[0][at].into()),
+                column_type: None,
+            })
+            .collect();
+        assert_eq!(document_drift(&fetched, &long), None);
+        assert_eq!(document_drift(&fetched, &literal), Some(Drift::Changed));
+    }
+
+    #[test]
+    fn every_typed_value_a_document_holds_reads_back_from_its_text() {
+        let typed = doc! {
+            "long": Bson::Int64(7),
+            "int": 7,
+            "whole": 2.0,
+            "half": 2.5,
+            "date": DateTime::from_millis(0),
+            "id": ObjectId::from_bytes([1; 12]),
+            "list": [1, Bson::Int64(2), { "x": "y" }],
+        };
+        assert!(reads_back(&Bson::Document(typed)));
+        assert!(!reads_back(&Bson::Document(doc! { "$date": "1970" })));
+    }
+
+    #[test]
+    fn a_mongo_document_matches_by_field_name_and_a_missing_field_differs_from_a_null() {
+        let drift = |before: &[(&str, Option<&str>, &str)],
+                     now: &[(&str, Option<&str>, &'static str)]| {
+            document_drift(&fetched_document(before), &one_document(now))
+        };
+        let id = ("_id", Some("1"), "int");
+
+        // Name decides, not position: the server may send fields in any order.
+        assert_eq!(
+            drift(
+                &[id, ("name", Some("Ada"), "string"), ("n", Some("5"), "int")],
+                &[("n", Some("5"), "int"), ("name", Some("Ada"), "string"), id]
+            ),
+            None
+        );
+        // A document of its `_id` alone matches its own re-read.
+        assert_eq!(drift(&[id], &[id]), None);
+        // A field the document lacks is not a null, either way round.
+        let missing = ("email", None, MISSING);
+        let null = ("email", None, "null");
+        assert_eq!(drift(&[id, missing], &[id]), None);
+        assert_eq!(drift(&[id, missing], &[id, null]), Some(Drift::Changed));
+        assert_eq!(
+            drift(&[id, missing], &[id, ("email", Some("a@b.c"), "string")]),
+            Some(Drift::Changed)
+        );
+        assert_eq!(drift(&[id, null], &[id]), Some(Drift::Changed));
+        assert_eq!(drift(&[id, null], &[id, null]), None);
+        // `1` and `1.0` both render `1`; the tag tells them apart.
+        assert_eq!(
+            drift(
+                &[id, ("n", Some("1"), "int")],
+                &[id, ("n", Some("1"), "double")]
+            ),
+            Some(Drift::Changed)
+        );
+        assert_eq!(
+            drift(
+                &[id, ("n", Some("1"), "int")],
+                &[id, ("n", Some("1"), "int")]
+            ),
+            None
+        );
+        // A value that changed, and a field that arrived, are both drift: the
+        // whole document is compared.
+        assert_eq!(
+            drift(
+                &[id, ("n", Some("1"), "int")],
+                &[id, ("n", Some("2"), "int")]
+            ),
+            Some(Drift::Changed)
+        );
+        assert_eq!(
+            drift(&[id], &[id, ("added", Some("x"), "string")]),
+            Some(Drift::Changed)
+        );
+        // A field that went is drift too.
+        assert_eq!(
+            drift(&[id, ("n", Some("1"), "int")], &[id]),
+            Some(Drift::Changed)
+        );
+        // Names and text are compared byte for byte, with no normalisation.
+        let (precomposed, decomposed) = ("caf\u{e9}", "cafe\u{301}");
+        assert_eq!(
+            drift(
+                &[id, ("name", Some(precomposed), "string")],
+                &[id, ("name", Some(decomposed), "string")]
+            ),
+            Some(Drift::Changed)
+        );
+        assert_eq!(
+            drift(
+                &[id, (precomposed, Some("x"), "string")],
+                &[id, (decomposed, Some("x"), "string")]
+            ),
+            Some(Drift::Changed)
+        );
+        assert_eq!(
+            drift(
+                &[id, (precomposed, Some(precomposed), "string")],
+                &[id, (precomposed, Some(precomposed), "string")]
+            ),
+            None
+        );
+
+        // No document is gone, and more than one is not the one that was read.
+        let nothing = QueryResult {
+            columns: vec![],
+            ..QueryResult::default()
+        };
+        assert_eq!(
+            document_drift(&fetched_document(&[id]), &nothing),
+            Some(Drift::Gone)
+        );
+        let mut two = one_document(&[id]);
+        two.rows.push(two.rows[0].clone());
+        assert_eq!(
+            document_drift(&fetched_document(&[id]), &two),
+            Some(Drift::Ambiguous(2))
+        );
+    }
+
+    /// The workspace builds a collection's draft with `sql::draft_batch`, cuts
+    /// it with `sql::generated_writes` and pairs each write with
+    /// `sql::row_reread`: the apply must accept the steps those make, which the
+    /// hand-cut steps of the live test above never exercise.
+    #[test]
+    fn a_draft_cut_by_the_sql_entry_points_is_accepted_step_by_step() {
+        use crate::result_grid::{NewValue, PendingRow};
+        use crate::sql::{self, DraftDelete, DraftInsert};
+
+        let types = vec![
+            ("_id".to_owned(), "objectId".to_owned()),
+            ("name".to_owned(), "string".to_owned()),
+        ];
+        let id = |n: u8| format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')");
+        let deletes = [DraftDelete {
+            schema: String::new(),
+            table: "accounts".into(),
+            keys: vec![("_id".into(), id(1))],
+            null_keys: Vec::new(),
+            types: types.clone(),
+        }];
+        let updates = [PendingRow {
+            table: "accounts".into(),
+            keys: vec![("_id".into(), id(2))],
+            sets: vec![("name".into(), NewValue::Value("bee".into()))],
+            types: types.clone(),
+            ..PendingRow::default()
+        }];
+        let inserts = [DraftInsert {
+            schema: String::new(),
+            table: "accounts".into(),
+            columns: vec![("name".into(), Some("c".into()))],
+            types,
+        }];
+        let draft = sql::draft_batch(Engine::MongoDb, &deletes, &updates, &inserts)
+            .expect("the draft is written");
+        let statements =
+            sql::generated_writes(Engine::MongoDb, &draft).expect("the draft is cut into steps");
+        let kinds = [StepKind::Delete, StepKind::Update, StepKind::Insert];
+        assert_eq!(statements.len(), kinds.len(), "{statements:?}");
+        for (sql, kind) in statements.into_iter().zip(kinds) {
+            let step = VerifiedStep {
+                reread: sql::row_reread(Engine::MongoDb, &sql),
+                sql,
+                kind,
+                before: Vec::new(),
+                read_back: None,
+                by_key: true,
+            };
+            let prepared = prepared(&step);
+            assert!(prepared.is_some(), "{kind:?}: {}", step.sql);
+            assert_eq!(
+                prepared.is_some_and(|prepared| prepared.reread.is_some()),
+                kind != StepKind::Insert
+            );
+        }
+    }
+
+    /// A Row send's read-back is the `find` of its own `_id`: one of another
+    /// document, though a read dbdelve could have written, is refused.
+    #[test]
+    fn a_read_back_of_another_document_is_refused() {
+        use crate::{NewValue, result_grid::PendingRow, sql};
+
+        let write = |n: u8| {
+            let update = PendingRow {
+                table: "accounts".into(),
+                keys: vec![(
+                    "_id".into(),
+                    format!("ObjectId('65a4f1c0ffffffffffffff{n:02x}')"),
+                )],
+                sets: vec![("name".into(), NewValue::Value("bee".into()))],
+                types: vec![
+                    ("_id".to_owned(), "objectId".to_owned()),
+                    ("name".to_owned(), "string".to_owned()),
+                ],
+                ..PendingRow::default()
+            };
+            let draft = sql::draft_batch(Engine::MongoDb, &[], &[update], &[])
+                .expect("the update is written");
+            sql::generated_writes(Engine::MongoDb, &draft)
+                .and_then(|mut statements| statements.pop())
+                .expect("one statement")
+        };
+        let step = |read_back: Option<String>| VerifiedStep {
+            reread: sql::row_reread(Engine::MongoDb, &write(1)),
+            sql: write(1),
+            kind: StepKind::Update,
+            before: Vec::new(),
+            read_back,
+            by_key: true,
+        };
+        let own = sql::row_reread(Engine::MongoDb, &write(1));
+        let other = sql::row_reread(Engine::MongoDb, &write(2));
+        assert!(own.is_some() && other.is_some() && own != other);
+        assert!(prepared(&step(own)).is_some_and(|prepared| prepared.read_back.is_some()));
+        assert!(prepared(&step(other)).is_none());
+    }
+
     /// The server the `live_` tests talk to, from `dbdelve_MONGO_URL`.
     fn live_config() -> MongoConfig {
         let url = std::env::var("dbdelve_MONGO_URL").expect("dbdelve_MONGO_URL is required");
@@ -4061,6 +4754,303 @@ mod tests {
             "a refused statement reached the server"
         );
         assert_eq!(count(&connection, "accounts"), 5);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_verified_mongo_draft_applies_in_order_and_stops_at_the_first_failure() {
+        use crate::result_grid::{NewValue, PendingRow};
+        use crate::sql::{DraftDelete, DraftInsert};
+
+        let connection = live();
+        let name = format!("dbdelve_test_{}", ObjectId::new());
+        let collection = format!("db.getCollection('{name}')");
+        let drop = format!("{collection}.drop()");
+        let _ = connection.query(&drop, &CancelToken::default(), Fetch::default());
+        let _scratch = Scratch(&connection, name.clone());
+        let cancel = CancelToken::default();
+        let types = vec![
+            ("_id".to_owned(), "int".to_owned()),
+            ("name".to_owned(), "string".to_owned()),
+        ];
+        let delete = |id: i32| DraftDelete {
+            schema: String::new(),
+            table: name.clone(),
+            keys: vec![("_id".into(), id.to_string())],
+            null_keys: Vec::new(),
+            types: types.clone(),
+        };
+        let update = |id: i32, to: &str| PendingRow {
+            table: name.clone(),
+            keys: vec![("_id".into(), id.to_string())],
+            sets: vec![("name".into(), NewValue::Value(to.into()))],
+            types: types.clone(),
+            ..PendingRow::default()
+        };
+        let insert = |id: i32, who: &str| DraftInsert {
+            schema: String::new(),
+            table: name.clone(),
+            columns: vec![
+                ("_id".into(), Some(id.to_string())),
+                ("name".into(), Some(who.into())),
+            ],
+            types: types.clone(),
+        };
+        let manifest = |id: i32| -> Vec<FetchedCell> {
+            let read = ran(&connection, &format!("{collection}.find({{_id: {id}}})"));
+            read.columns
+                .iter()
+                .enumerate()
+                .map(|(at, column)| FetchedCell {
+                    column: column.name.clone(),
+                    text: read.rows[0].get(at).map(str::to_owned),
+                    cell_type: Some(read.cell_types[0][at].to_owned()),
+                    column_type: column.data_type.clone(),
+                })
+                .collect()
+        };
+        // The statements of a draft, each with the document it read as it was
+        // fetched, handed over in the order the draft names them.
+        let steps = |text: &str, mut befores: Vec<Vec<FetchedCell>>| -> Vec<VerifiedStep> {
+            befores.reverse();
+            text.lines()
+                .map(|line| {
+                    let sql = line.strip_suffix(';').unwrap_or(line).to_owned();
+                    let kind = match (sql.contains(".insertOne("), sql.contains(".updateOne(")) {
+                        (true, _) => StepKind::Insert,
+                        (_, true) => StepKind::Update,
+                        _ => StepKind::Delete,
+                    };
+                    let reread = mql::browse::row_reread(&sql);
+                    let before = match kind {
+                        StepKind::Insert => Vec::new(),
+                        _ => befores.pop().expect("a manifest for each document"),
+                    };
+                    VerifiedStep {
+                        sql,
+                        kind,
+                        reread,
+                        before,
+                        read_back: None,
+                        by_key: true,
+                    }
+                })
+                .collect()
+        };
+        let name_of = |id: i32| {
+            let read = ran(&connection, &format!("{collection}.find({{_id: {id}}})"));
+            (
+                read.rows.len(),
+                read.rows.first().and_then(|row| {
+                    read.columns
+                        .iter()
+                        .position(|column| column.name == "name")
+                        .and_then(|at| row.get(at).map(str::to_owned))
+                }),
+            )
+        };
+
+        ran(
+            &connection,
+            &format!(
+                "{collection}.insertMany([{{_id: 1, name: 'a'}}, {{_id: 2, name: 'b'}}, \
+                 {{_id: 3, name: 'c'}}])"
+            ),
+        );
+
+        // No step sends nothing and answers none applied.
+        assert_eq!(
+            connection.apply_verified(&[], &cancel),
+            ApplyOutcome::Applied {
+                affected: 0,
+                read_backs: Vec::new()
+            }
+        );
+
+        // A statement the gates never saw is refused before anything is sent,
+        // the draft's other statements with it.
+        let mut refused = steps(
+            &mql::draft_batch(&[delete(1)], &[update(2, "bee")], &[]).unwrap(),
+            vec![manifest(1), manifest(2)],
+        );
+        refused.push(VerifiedStep {
+            sql: format!("{collection}.deleteMany({{}})"),
+            kind: StepKind::Delete,
+            reread: None,
+            before: Vec::new(),
+            read_back: None,
+            by_key: true,
+        });
+        match connection.apply_verified(&refused, &cancel) {
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Begin,
+                ..
+            } => {}
+            other => panic!("a statement no gate admits was not refused: {other:?}"),
+        }
+        assert_eq!(count(&connection, &name), 3);
+
+        // Delete 1, update 2, insert a second document with 3's `_id`: the
+        // insert is the third statement and the one the server refuses.
+        let draft =
+            mql::draft_batch(&[delete(1)], &[update(2, "bee")], &[insert(3, "dup")]).unwrap();
+        let outcome =
+            connection.apply_verified(&steps(&draft, vec![manifest(1), manifest(2)]), &cancel);
+        match outcome {
+            ApplyOutcome::Failed {
+                stage: ApplyStage::Write(2),
+                error,
+            } => assert!(error.message.contains("duplicate key"), "{}", error.message),
+            other => panic!("the third statement was expected to fail: {other:?}"),
+        }
+        assert_eq!(name_of(1), (0, None), "the delete before it was applied");
+        assert_eq!(name_of(2), (1, Some("bee".into())), "so was the update");
+        assert_eq!(
+            name_of(3),
+            (1, Some("c".into())),
+            "and C is the one document"
+        );
+        assert_eq!(count(&connection, &name), 2);
+
+        // Fresh documents: delete one, update the other, each counted once.
+        ran(
+            &connection,
+            &format!("{collection}.insertMany([{{_id: 4, name: 'd'}}, {{_id: 5, name: 'e'}}])"),
+        );
+        let draft = mql::draft_batch(&[delete(4)], &[update(5, "five")], &[]).unwrap();
+        let mut applying = steps(&draft, vec![manifest(4), manifest(5)]);
+        applying[1].read_back = applying[1].reread.clone();
+        match connection.apply_verified(&applying, &cancel) {
+            ApplyOutcome::Applied {
+                affected: 2,
+                read_backs,
+            } => match read_backs.as_slice() {
+                [(1, shown)] => assert_eq!(shown.rows.len(), 1),
+                other => panic!("the update's read-back was expected: {other:?}"),
+            },
+            other => panic!("the draft was expected to apply: {other:?}"),
+        }
+        assert_eq!(name_of(4), (0, None));
+        assert_eq!(name_of(5), (1, Some("five".into())));
+
+        // A document changed since its manifest was taken stops the draft
+        // before anything is written: the delete ahead of it is not sent.
+        ran(
+            &connection,
+            &format!("{collection}.insertMany([{{_id: 6, name: 'f'}}, {{_id: 7, name: 'g'}}])"),
+        );
+        let draft = mql::draft_batch(&[delete(6)], &[update(7, "seven")], &[]).unwrap();
+        let drifting = steps(&draft, vec![manifest(6), manifest(7)]);
+        ran(
+            &connection,
+            &format!("{collection}.updateOne({{_id: 7}}, {{$set: {{name: 'someone else'}}}})"),
+        );
+        assert_eq!(
+            connection.apply_verified(&drifting, &cancel),
+            ApplyOutcome::Drifted(vec![(1, Drift::Changed)])
+        );
+        assert_eq!(name_of(6), (1, Some("f".into())), "the delete was not sent");
+        assert_eq!(name_of(7), (1, Some("someone else".into())));
+        // One that is gone is told from one that changed.
+        ran(&connection, &format!("{collection}.deleteOne({{_id: 7}})"));
+        assert_eq!(
+            connection.apply_verified(&drifting, &cancel),
+            ApplyOutcome::Drifted(vec![(1, Drift::Gone)])
+        );
+        assert_eq!(name_of(6), (1, Some("f".into())));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MONGO_URL"]
+    fn live_a_mongo_row_send_is_reread_counted_and_read_back_by_its_id() {
+        use crate::result_grid::{NewValue, PendingRow};
+
+        let connection = live();
+        let name = format!("dbdelve_test_{}", ObjectId::new());
+        let collection = format!("db.getCollection('{name}')");
+        let _ = connection.query(
+            &format!("{collection}.drop()"),
+            &CancelToken::default(),
+            Fetch::default(),
+        );
+        let _scratch = Scratch(&connection, name.clone());
+        let cancel = CancelToken::default();
+        ran(
+            &connection,
+            &format!("{collection}.insertOne({{_id: 1, name: 'a'}})"),
+        );
+        let manifest = || -> Vec<FetchedCell> {
+            let read = ran(&connection, &format!("{collection}.find({{_id: 1}})"));
+            read.columns
+                .iter()
+                .enumerate()
+                .map(|(at, column)| FetchedCell {
+                    column: column.name.clone(),
+                    text: read.rows[0].get(at).map(str::to_owned),
+                    cell_type: Some(read.cell_types[0][at].to_owned()),
+                    column_type: column.data_type.clone(),
+                })
+                .collect()
+        };
+        // The one step a Row send makes, as `Workspace::save_row` builds it: the
+        // `updateOne` the grid writes, its re-read and its read-back both the
+        // read by `_id` that `sql::row_read` cuts from it.
+        let update = crate::sql::update_batch(
+            Engine::MongoDb,
+            &[PendingRow {
+                table: name.clone(),
+                keys: vec![("_id".into(), "1".into())],
+                sets: vec![("name".into(), NewValue::Value("b".into()))],
+                types: vec![
+                    ("_id".into(), "int".to_owned()),
+                    ("name".into(), "string".to_owned()),
+                ],
+                ..PendingRow::default()
+            }],
+        )
+        .unwrap();
+        let sql = update.trim_end().trim_end_matches(';').to_owned();
+        let read = crate::sql::row_read(Engine::MongoDb, &sql).expect("a read by _id");
+        let step = |before| VerifiedStep {
+            sql: sql.clone(),
+            kind: StepKind::Update,
+            reread: Some(read.clone()),
+            before,
+            read_back: Some(read.clone()),
+            by_key: true,
+        };
+        let name_of = || {
+            let read = ran(&connection, &format!("{collection}.find({{_id: 1}})"));
+            let at = read.columns.iter().position(|c| c.name == "name").unwrap();
+            read.rows[0].get(at).map(str::to_owned)
+        };
+
+        // A document changed since the grid fetched it is not written over.
+        let fetched = manifest();
+        ran(
+            &connection,
+            &format!("{collection}.updateOne({{_id: 1}}, {{$set: {{name: 'someone else'}}}})"),
+        );
+        assert_eq!(
+            connection.apply_verified(&[step(fetched)], &cancel),
+            ApplyOutcome::Drifted(vec![(0, Drift::Changed)])
+        );
+        assert_eq!(name_of().as_deref(), Some("someone else"));
+
+        // One that matches is written once, and what the server holds comes back.
+        match connection.apply_verified(&[step(manifest())], &cancel) {
+            ApplyOutcome::Applied {
+                affected: 1,
+                mut read_backs,
+            } => {
+                let (_, shown) = read_backs.pop().expect("the row is read back");
+                assert_eq!(shown.rows.len(), 1);
+                let at = shown.columns.iter().position(|c| c.name == "name").unwrap();
+                assert_eq!(shown.rows[0].get(at), Some("b"));
+            }
+            other => panic!("the row was expected to apply: {other:?}"),
+        }
+        assert_eq!(name_of().as_deref(), Some("b"));
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# Rust 1.100 stabilized `Vec::new_in`, which shadows the extension method
+# turso_core 0.8.x calls on stable, so turso_core stops compiling (E0308 in
+# index_method/fts/directory.rs). Drop this pin once a turso_core release
+# builds on 1.100.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

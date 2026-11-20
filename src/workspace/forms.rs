@@ -1713,7 +1713,19 @@ impl Workspace {
 
     pub(crate) fn render_discard_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
-        self.profile()?.session.pending_discard.as_ref()?;
+        let pending = self.profile()?.session.pending_discard.as_ref()?;
+        let held = 1 + pending.also.len();
+        let (title, sentence) = match pending.row {
+            _ if held > 1 => (
+                "Close tabs",
+                format!(
+                    "{held} tabs have cell edits that have not been applied. \
+                     Closing them discards them."
+                ),
+            ),
+            Some(_) => pending.then.discards_refused_row(),
+            None => pending.then.discards(),
+        };
         let cancel_workspace = cx.entity().downgrade();
         let discard_workspace = cancel_workspace.clone();
 
@@ -1727,18 +1739,16 @@ impl Workspace {
                 .justify_center()
                 .child(
                     dialog(t)
-                        .child(section_label(t, "Close tab"))
+                        .child(section_label(t, title))
                         .child(
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 // The edits are held against the fetched rows
-                                // and never written to them, so closing the
-                                // tab is the moment they stop existing.
-                                .child(
-                                    "This tab has cell edits that have not been applied. \
-                                     Closing it discards them.",
-                                ),
+                                // and never written to them, so whatever
+                                // replaces or closes them is the moment they
+                                // stop existing.
+                                .child(sentence),
                         )
                         .child(
                             div()
@@ -2591,9 +2601,11 @@ impl Workspace {
     /// this is where rule 1's "the statement that runs is the statement on
     /// screen" is satisfied, and Run is the ask.
     ///
-    /// It stays up until the batch succeeds. `execute_sql` clears the grid as it
-    /// starts and the pending edits go with it, so after a failure this is the
-    /// only remaining copy of what was attempted.
+    /// It stays up until the batch succeeds. On a target whose batch has no
+    /// transaction `execute_sql` clears the grid as it starts and the pending
+    /// edits go with it, so after a failure this is the only remaining copy of
+    /// what was attempted; elsewhere the edits stay too, and the panel carries
+    /// the server's message.
     pub(crate) fn render_apply_review(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
         let code = fonts(cx).editor.clone();
@@ -2603,12 +2615,17 @@ impl Workspace {
             return None;
         }
         let scope = review.tab.scroll_scope(&profile.id);
-        // The batch is the only thing this tab can have run while the panel is
-        // open, so a failure on it is this batch's failure.
-        let error = match profile.session.active_query() {
-            Some(QueryState::Failed(error)) => Some(error.message.clone()),
-            _ => None,
-        };
+        // A send that keeps the draft says why it failed in the review itself
+        // (`ApplyReview::error`); a target that clears the grid ends the tab in
+        // `Failed`, and the batch is the only thing this tab can have run while
+        // the panel is open, so that failure is this batch's.
+        let error = review
+            .error
+            .clone()
+            .or_else(|| match profile.session.active_query() {
+                Some(QueryState::Failed(error)) => Some(error.message.clone()),
+                _ => None,
+            });
         let running = matches!(
             profile.session.active_query(),
             Some(QueryState::Running { .. })
@@ -2657,6 +2674,7 @@ impl Workspace {
                         .children(error.map(|message| {
                             div()
                                 .id("apply-review-error")
+                                .debug_selector(|| "apply-review-error".into())
                                 .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
                                 .overflow_y_scroll()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))

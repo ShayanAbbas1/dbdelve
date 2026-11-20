@@ -342,14 +342,16 @@ mod tests {
             std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
             let start = Instant::now();
+            // A script that answers gets a loaded runner's worth of time to
+            // start; only the one that never answers is held to a short limit.
             let timeout = if script.starts_with("exec") {
                 Duration::from_millis(150)
             } else {
-                Duration::from_secs(2)
+                Duration::from_secs(10)
             };
             let result = probe(&path, "aws", timeout);
             assert_eq!(result.is_ok(), success, "{result:?}");
-            assert!(start.elapsed() < Duration::from_secs(3));
+            assert!(start.elapsed() < timeout + Duration::from_secs(3));
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(matches!(

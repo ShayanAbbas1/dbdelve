@@ -10,7 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::color::{Oklch, Rgba, Srgb, contrast_ratio};
-use super::{Appearance, PALETTE_EDITED_ALPHA, PALETTE_SELECTION_ALPHA, Theme};
+use super::{
+    Appearance, PALETTE_ADDED_ALPHA, PALETTE_DELETED_ALPHA, PALETTE_EDITED_ALPHA,
+    PALETTE_SELECTION_ALPHA, PALETTE_UPDATED_ALPHA, ROW_WASH_FROM_SELECTION, ROW_WASHES_APART,
+    Theme,
+};
 use crate::store;
 
 /// Zed's defaults, from `assets/themes` in its repository.
@@ -153,6 +157,16 @@ pub(super) fn finished(theme: Theme) -> Theme {
     }
 }
 
+/// The Zed defaults as [`convert`] reads them, for the tests that hold every
+/// theme to one floor.
+#[cfg(test)]
+pub(super) fn bundled() -> Vec<Theme> {
+    BUNDLED
+        .iter()
+        .flat_map(|text| parse_zed(text).unwrap())
+        .collect()
+}
+
 fn parse_zed(text: &str) -> Result<Vec<Theme>, String> {
     zed_family(serde_json::from_str(text).map_err(|error| error.to_string())?)
 }
@@ -179,7 +193,7 @@ macro_rules! native_colors {
             surface, bg, panel, overlay, control, text, text_muted, text_faint, accent, on_accent,
             cursor, danger, success, syntax_comment, syntax_keyword, syntax_string, syntax_number,
             syntax_function, syntax_type, syntax_variable, syntax_operator;
-            element_hover, element_active, border, border_strong, selection, edited
+            element_hover, element_active, border, border_strong, selection, edited, added, updated, deleted
         )
     };
 }
@@ -276,6 +290,16 @@ fn convert(entry: Entry) -> Theme {
     let cursor = solid("/players/0/cursor");
     let accent = solid("/text.accent").or(cursor).unwrap_or(base.accent);
     let syntax = |name: &str| solid(&format!("/syntax/{name}/color"));
+    let selection =
+        rgba("/players/0/selection").map_or(base.selection, |c| see_through(c, surface));
+    let edited = solid("/warning").map_or(base.edited, |c| c.alpha(PALETTE_EDITED_ALPHA));
+    let [added, updated, deleted] = row_washes(
+        &base,
+        editor.unwrap_or(base.bg),
+        selection,
+        edited,
+        [solid("/created"), solid("/modified"), solid("/deleted")],
+    );
     Theme {
         name: Box::leak(entry.name.into_boxed_str()),
         is_glass: glass,
@@ -293,9 +317,12 @@ fn convert(entry: Entry) -> Theme {
         text_faint: solid("/text.placeholder").unwrap_or(base.text_faint),
         accent,
         on_accent: on_accent(text, surface, accent),
-        selection: rgba("/players/0/selection").map_or(base.selection, |c| see_through(c, surface)),
+        selection,
         cursor: cursor.unwrap_or(base.cursor),
-        edited: solid("/warning").map_or(base.edited, |c| c.alpha(PALETTE_EDITED_ALPHA)),
+        edited,
+        added,
+        updated,
+        deleted,
         danger: solid("/error").unwrap_or(base.danger),
         success: solid("/success")
             .or(solid("/created"))
@@ -310,6 +337,105 @@ fn convert(entry: Entry) -> Theme {
         syntax_operator: syntax("operator").unwrap_or(base.syntax_operator),
         ..base
     }
+}
+
+/// The added, updated and deleted washes of an import, from the colours it
+/// names for them (`None` where it names none, which takes `base`'s). Each is
+/// the colour at its palette alpha, kept legible as a state: an updated wash
+/// that lands within [`ROW_WASH_FROM_SELECTION`] of the selection, of the
+/// selection over it, or of the edited cell wash over it is moved off in
+/// lightness the way [`apart_from`] moves chrome (Zed's `modified` is its
+/// `warning`, the edited amber, and is sometimes the selection's own hue); and
+/// a wash within [`ROW_WASHES_APART`] of an earlier one, of the `base` wash a
+/// later unnamed slot keeps, or that no move rescues, is `base`'s instead,
+/// since two states drawn alike are worse than a borrowed colour. That default
+/// is held to the same: an updated one on the selection is moved off it, and
+/// a wash named before it that it would be drawn like goes back to its own
+/// default. `bg` is what the washes are flattened over.
+pub(super) fn row_washes(
+    base: &Theme,
+    bg: Srgb,
+    selection: Rgba,
+    edited: Rgba,
+    named: [Option<Srgb>; 3],
+) -> [Rgba; 3] {
+    let own = [base.added, base.updated, base.deleted];
+    let alphas = [
+        PALETTE_ADDED_ALPHA,
+        PALETTE_UPDATED_ALPHA,
+        PALETTE_DELETED_ALPHA,
+    ];
+    let clear_of_selection = |color: Srgb| {
+        let under = color.alpha(PALETTE_UPDATED_ALPHA).flatten(bg);
+        [
+            under.distance(selection.flatten(bg)),
+            selection.flatten(under).distance(under),
+            edited.flatten(under).distance(under),
+        ]
+        .into_iter()
+        .all(|step| step >= ROW_WASH_FROM_SELECTION)
+    };
+    // The updated wash's colour, or the nearest lightness off it clear of
+    // the selection.
+    let rescued = |color: Srgb| {
+        let own = Oklch::from_srgb(color);
+        // Away from the selection first: toward the side with room.
+        let away = if Oklch::from_srgb(selection.flatten(bg)).l > own.l {
+            -0.02
+        } else {
+            0.02
+        };
+        // The colour as named first: a round trip through Oklch would
+        // nudge one that needs no move.
+        std::iter::once(color)
+            .chain(
+                (1..=20)
+                    .flat_map(|n| [away * n as f32, -away * n as f32])
+                    .map(|step| Oklch::new((own.l + step).clamp(0.0, 1.0), own.c, own.h).to_srgb()),
+            )
+            .find(|candidate| clear_of_selection(*candidate))
+    };
+    let apart = |a: Rgba, b: Rgba| a.flatten(bg).distance(b.flatten(bg)) >= ROW_WASHES_APART;
+    let mut washes = own;
+    let unnamed = named.map(|color| color.is_none());
+    for (i, named) in named.into_iter().enumerate() {
+        let Some(color) = named else { continue };
+        let color = if i == 1 { rescued(color) } else { Some(color) };
+        let stands_apart = |wash: &Rgba, washes: &[Rgba]| {
+            let later_defaults = (i + 1..own.len()).filter(|&j| unnamed[j]).map(|j| own[j]);
+            washes[..i]
+                .iter()
+                .copied()
+                .chain(later_defaults)
+                .all(|other| apart(*wash, other))
+        };
+        let picked = color
+            .map(|color| color.alpha(alphas[i]))
+            .filter(|wash| stands_apart(wash, &washes));
+        washes[i] = match picked {
+            Some(wash) => wash,
+            None => {
+                // The default stands in, moved off the selection where it
+                // too sits on it, and a wash named before it that it would
+                // be drawn like goes back to its own default.
+                let fallback = (i == 1)
+                    .then(|| {
+                        rescued(Srgb::new(own[i].r, own[i].g, own[i].b))
+                            .map(|color| color.alpha(alphas[i]))
+                            .filter(|wash| stands_apart(wash, &washes))
+                    })
+                    .flatten()
+                    .unwrap_or(own[i]);
+                for j in 0..i {
+                    if !apart(washes[j], fallback) {
+                        washes[j] = own[j];
+                    }
+                }
+                fallback
+            }
+        };
+    }
+    washes
 }
 
 /// `chrome`, unless it sits too close to `editor` to tell the two apart, as
@@ -380,7 +506,7 @@ pub(super) fn hex(text: &str) -> Option<Rgba> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Appearance;
+    use crate::theme::{Appearance, ROW_WASH_FROM_SELECTION};
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -554,6 +680,131 @@ mod tests {
             assert_eq!(native_text(&loaded), native_text(&finished(read)));
             assert_eq!(loaded.bg != read.bg, flat.is_glass, "{}", flat.name);
         }
+
+        // The three row washes are a native file's too.
+        let own = Theme {
+            added: Srgb::from_hex(0x11aa44).alpha(0.2),
+            updated: Srgb::from_hex(0x2255dd).alpha(0.3),
+            deleted: Srgb::from_hex(0xcc2233).alpha(0.4),
+            ..Theme::dark()
+        };
+        let text = native_text(&own);
+        let read = native(&serde_json::from_str(&text).unwrap()).unwrap();
+        for (put, got) in [
+            (own.added, read.added),
+            (own.updated, read.updated),
+            (own.deleted, read.deleted),
+        ] {
+            assert_eq!(rgba_hex(got), rgba_hex(put));
+        }
+    }
+
+    #[test]
+    fn a_zed_theme_maps_created_modified_and_deleted_to_the_three_row_washes() {
+        let [mapped, bare, crowded] = parse_zed(
+            r##"{ "themes": [
+                { "name": "Mapped", "style": {
+                    "created": "#2ecc71", "modified": "#e056fd", "deleted": "#ff4d4d"
+                } },
+                { "name": "Bare", "style": {} },
+                { "name": "Crowded", "style": {
+                    "created": "#2ecc71", "modified": "#0055aa", "deleted": "#ff4d4d",
+                    "players": [{ "selection": "#0055aa2e" }]
+                } }
+            ] }"##,
+        )
+        .unwrap()[..] else {
+            panic!("three themes");
+        };
+        let dark = Theme::dark();
+        assert_eq!(
+            mapped.added,
+            Srgb::from_hex(0x2ecc71).alpha(PALETTE_ADDED_ALPHA)
+        );
+        assert_eq!(
+            mapped.updated,
+            Srgb::from_hex(0xe056fd).alpha(PALETTE_UPDATED_ALPHA)
+        );
+        assert_eq!(
+            mapped.deleted,
+            Srgb::from_hex(0xff4d4d).alpha(PALETTE_DELETED_ALPHA)
+        );
+        assert_eq!(
+            (bare.added, bare.updated, bare.deleted),
+            (dark.added, dark.updated, dark.deleted)
+        );
+        // A modified colour that is the selection's own would be a changed row
+        // read as a selected one.
+        assert_ne!(
+            crowded.updated,
+            Srgb::from_hex(0x0055aa).alpha(PALETTE_UPDATED_ALPHA)
+        );
+        let updated = crowded.updated.flatten(crowded.bg);
+        assert!(updated.distance(crowded.selection.flatten(crowded.bg)) >= ROW_WASH_FROM_SELECTION);
+        assert!(crowded.selection.flatten(updated).distance(updated) >= ROW_WASH_FROM_SELECTION);
+    }
+
+    /// A named wash is kept apart from the default a later, unnamed slot
+    /// keeps, not only from the washes named before it.
+    #[test]
+    fn a_partial_import_keeps_its_named_wash_apart_from_the_defaults() {
+        let dark = Theme::dark();
+        let updated = Srgb {
+            r: dark.updated.r,
+            g: dark.updated.g,
+            b: dark.updated.b,
+        };
+        let [added, updated, _] = row_washes(
+            &dark,
+            dark.bg,
+            dark.selection,
+            dark.edited,
+            [Some(updated), None, None],
+        );
+        assert!(
+            added.flatten(dark.bg).distance(updated.flatten(dark.bg)) >= ROW_WASHES_APART,
+            "added and updated rows drawn alike"
+        );
+        assert_eq!(added, dark.added);
+    }
+
+    /// A named wash refused for standing too close to another falls back to
+    /// its default, which is held to the same rules: a wash named before it
+    /// that it would be drawn like goes back to its own default, and an
+    /// updated default that sits on the selection is moved off it.
+    #[test]
+    fn a_refused_wash_falls_back_to_a_default_that_stands_apart() {
+        let dark = Theme::dark();
+        let rgb = |wash: Rgba| Srgb::new(wash.r, wash.g, wash.b);
+        let added_like_updated = rgb(dark.updated);
+        let washes = row_washes(
+            &dark,
+            dark.bg,
+            dark.selection,
+            dark.edited,
+            [Some(added_like_updated), Some(added_like_updated), None],
+        );
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            assert!(
+                washes[a]
+                    .flatten(dark.bg)
+                    .distance(washes[b].flatten(dark.bg))
+                    >= ROW_WASHES_APART,
+                "washes {a} and {b} drawn alike"
+            );
+        }
+
+        // The selection is the default updated wash's own colour.
+        let selection = rgb(dark.updated).alpha(PALETTE_SELECTION_ALPHA);
+        let [_, updated, _] = row_washes(
+            &dark,
+            dark.bg,
+            selection,
+            dark.edited,
+            [None, Some(rgb(dark.added)), None],
+        );
+        let updated = updated.flatten(dark.bg);
+        assert!(updated.distance(selection.flatten(dark.bg)) >= ROW_WASH_FROM_SELECTION);
     }
 
     #[test]

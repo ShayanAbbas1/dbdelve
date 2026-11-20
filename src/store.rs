@@ -11,7 +11,9 @@ use crate::db::{
     DbError, EditTarget, Engine, ExplainMode, Plugin, QueryResult, RelationKind, Row, SshTunnel,
     Stopped, odbc_string,
 };
+use secrets::{Secret, SystemKeychain};
 
+pub(crate) mod secrets;
 pub(crate) mod stable_import;
 
 const PROFILES_FILE: &str = "profiles.toml";
@@ -715,6 +717,12 @@ pub struct StoredSettings {
     /// at all. Absent reads as on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_show_sizes: Option<bool>,
+    /// The edit mode a new table tab starts in: `classic`, `draft` or `row`.
+    /// Absent reads as classic, which is how every file written before it
+    /// edited, and a slug this build cannot read reads as classic too. Not
+    /// written while the default is classic. A scalar, above the tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_mode: Option<String>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -1351,7 +1359,7 @@ pub fn profile_id(name: &str, existing: &[String]) -> String {
     candidate
 }
 
-/// `Ok(None)` only for a keychain that holds no item for this profile. A denied
+/// `Ok(None)` only for a keychain that holds none for this profile. A denied
 /// prompt, a locked keychain and a secret that is not text are failures: a
 /// blank password is valid, so none of them can be inferred from the connect
 /// attempt that would follow.
@@ -1373,37 +1381,19 @@ pub fn set_ssh_passphrase(profile_id: &str, passphrase: &str) -> Result<(), Stri
     set_secret(Secret::SshPassphrase, profile_id, passphrase)
 }
 
-/// Both of a profile's keychain items, the password and the key passphrase.
+/// Both of a profile's secrets, the password and the key passphrase.
 pub fn delete_secrets(profile_id: &str) {
-    for kind in [Secret::Password, Secret::SshPassphrase] {
-        if let Ok(entry) = keychain_entry(kind, profile_id) {
+    let Ok(variant) = variant_name() else {
+        return;
+    };
+    if secrets::ONE_ITEM {
+        secrets::VAULTS.forget(&SystemKeychain, &variant, profile_id);
+        return;
+    }
+    for kind in Secret::BOTH {
+        if let Ok(entry) = keychain_entry(kind, &variant, profile_id) {
             let _ = entry.delete_credential();
         }
-    }
-}
-
-/// What a profile keeps in the keychain, each under the profile id as its
-/// account and a service of its own.
-#[derive(Clone, Copy)]
-enum Secret {
-    Password,
-    SshPassphrase,
-}
-
-impl Secret {
-    fn what(self) -> &'static str {
-        match self {
-            Self::Password => "password",
-            Self::SshPassphrase => "SSH key passphrase",
-        }
-    }
-
-    fn service(self) -> Result<String, String> {
-        let variant = variant_name()?;
-        Ok(match self {
-            Self::Password => variant,
-            Self::SshPassphrase => passphrase_service(&variant),
-        })
     }
 }
 
@@ -1417,7 +1407,13 @@ fn passphrase_service(variant: &str) -> String {
 
 fn secret(kind: Secret, profile_id: &str) -> Result<Option<String>, String> {
     let what = kind.what();
-    match keychain_entry(kind, profile_id)?.get_password() {
+    let variant = variant_name()?;
+    if secrets::ONE_ITEM {
+        return secrets::VAULTS
+            .read(&SystemKeychain, &variant, kind, profile_id)
+            .map_err(|error| format!("Could not read the {what} from the keychain: {error}"));
+    }
+    match keychain_entry(kind, &variant, profile_id)?.get_password() {
         Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::BadEncoding(_)) => {
@@ -1430,22 +1426,28 @@ fn secret(kind: Secret, profile_id: &str) -> Result<Option<String>, String> {
 }
 
 fn set_secret(kind: Secret, profile_id: &str, secret: &str) -> Result<(), String> {
-    keychain_entry(kind, profile_id)?
-        .set_password(secret)
-        .map_err(|error| {
-            format!(
-                "Could not save the {} to the keychain: {error}",
-                kind.what()
-            )
-        })
+    let variant = variant_name()?;
+    let saved = if secrets::ONE_ITEM {
+        secrets::VAULTS.write(&SystemKeychain, &variant, kind, profile_id, secret)
+    } else {
+        keychain_entry(kind, &variant, profile_id)?
+            .set_password(secret)
+            .map_err(|error| error.to_string())
+    };
+    saved.map_err(|error| {
+        format!(
+            "Could not save the {} to the keychain: {error}",
+            kind.what()
+        )
+    })
 }
 
-/// Keychain Services on macOS, Secret Service on Linux, Credential Manager on
-/// Windows. The account is the profile id and the service comes from the
+/// Secret Service on Linux, Credential Manager on Windows: an item per
+/// secret. The account is the profile id and the service comes from the
 /// variant name, which is what keeps a dev build's passwords apart from a
-/// release build's.
-fn keychain_entry(kind: Secret, profile_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(&kind.service()?, profile_id)
+/// release build's. macOS keeps them in [`secrets::Vaults`].
+fn keychain_entry(kind: Secret, variant: &str, profile_id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(&kind.item_service(variant), profile_id)
         .map_err(|error| format!("Could not reach the keychain: {error}"))
 }
 
@@ -4691,6 +4693,7 @@ open_objects = []
                 sidebar_density: Some("compact".into()),
                 sidebar_show_host: Some(false),
                 sidebar_show_sizes: Some(false),
+                edit_mode: Some("row".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
