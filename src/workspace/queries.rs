@@ -2799,7 +2799,16 @@ impl Workspace {
                 // Whether it is a lone end, whose failure the engine may say
                 // left the transaction open (SQLite's `SQLITE_BUSY`).
                 let lone = sql::after_last_end(engine, text).is_empty();
-                ending = Some((sql.clone(), lone, reopens, profile.transaction_sends()));
+                // Where the record stands as it goes: what other tabs send
+                // before it lands may run in the transaction it opens.
+                let since = profile.transaction_statements.len();
+                ending = Some((
+                    sql.clone(),
+                    lone,
+                    reopens,
+                    profile.transaction_sends(),
+                    since,
+                ));
             } else {
                 profile.record_sent(&sql, leaves.transaction);
                 if let Some(open) = leaves.transaction {
@@ -3334,12 +3343,12 @@ impl Workspace {
                         if profile.transaction_in_flight == Some(tab) {
                             profile.transaction_in_flight = None;
                         }
-                        if let Some((sent, lone, reopens, sent_at)) = &ending
+                        if let Some((sent, lone, reopens, sent_at, since)) = &ending
                             && (lost || !profile.superseded(*sent_at))
                         {
                             let error = result.as_ref().err();
                             match reopens {
-                                true => profile.reopen_landed(sent, lost, error),
+                                true => profile.reopen_landed(sent, *since, lost, error),
                                 false => profile.end_landed(sent, *lone, lost, error),
                             }
                         }

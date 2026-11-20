@@ -341,10 +341,24 @@ impl Profile {
     /// rolled it back and the `BEGIN` behind it never ran, as Postgres skips
     /// the rest of a submission: nothing is open, and Manual, which promises a
     /// transaction, gives way to Auto. One sent nothing changed nothing, and a
-    /// `lost` session has no transaction left.
-    pub(crate) fn reopen_landed(&mut self, sql: &str, lost: bool, error: Option<&DbError>) {
+    /// `lost` session has no transaction left. What another tab sent while
+    /// the pair was out, recorded from `since` on, may have run after it, in
+    /// the transaction it opened, so a pair that ran whole keeps it.
+    pub(crate) fn reopen_landed(
+        &mut self,
+        sql: &str,
+        since: usize,
+        lost: bool,
+        error: Option<&DbError>,
+    ) {
         match error {
-            None => self.record_sent(sql, Some(true)),
+            None => {
+                let later = self
+                    .transaction_statements
+                    .split_off(since.min(self.transaction_statements.len()));
+                self.record_sent(sql, Some(true));
+                self.transaction_statements.extend(later);
+            }
             Some(error) if crate::db::sent_nothing(error) && !lost => {}
             Some(error)
                 if !lost
