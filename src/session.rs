@@ -51,6 +51,7 @@ use crate::{
     structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
+    vim,
 };
 
 /// A connection and everything it owns.
@@ -1449,6 +1450,13 @@ impl Session {
         }
     }
 
+    pub(crate) fn active_query_tab_mut(&mut self) -> Option<&mut QueryTab> {
+        match self.active {
+            Tab::Query(id) => self.query_tab_mut(id),
+            Tab::Object(_) => None,
+        }
+    }
+
     /// Every chip the strip draws, left to right: the dragged order first,
     /// then anything newer than it in the default one.
     pub(crate) fn strip_order(&self) -> Vec<TabKey> {
@@ -2615,6 +2623,10 @@ pub(crate) struct QueryTab {
     /// tab must not resize another's. Not persisted -- a fresh tab always
     /// starts at the built-in default.
     pub(crate) row_panel_split: Entity<ResizableState>,
+    /// Not persisted: a restored buffer starts in Insert, as a new one does.
+    pub(crate) vim: vim::Mode,
+    /// A Normal-mode command still being typed, if one is.
+    pub(crate) vim_pending: Option<vim::Pending>,
     /// The database, and where the engine picks one the schema, this tab was
     /// opened for with New Query Here, or `None` for a tab that runs on the
     /// profile's own session. Kept for good: running the tab puts its
@@ -3241,6 +3253,8 @@ impl QueryTab {
             row_panel_editing: false,
             row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
+            vim: vim::Mode::default(),
+            vim_pending: None,
             // Kept as written, and handed to the driver as data on the first
             // run: a database the server no longer has fails that run with the
             // open's own words, and the tab stays bound to it.

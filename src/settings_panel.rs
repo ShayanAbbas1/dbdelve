@@ -112,6 +112,7 @@ enum SettingId {
     RowLimit,
     DefaultSorting,
     DefaultEditMode,
+    VimMode,
     QualifyCompletions,
     AliasCompletions,
     RunUnreadable,
@@ -185,8 +186,16 @@ fn setting_rows() -> Vec<SettingRow> {
             &["sort", "order", "server", "client"],
         ),
         row(
-            SettingId::DefaultEditMode,
+            SettingId::VimMode,
             SettingsTab::General,
+            "Editor",
+            "Vim mode",
+            "Enable Vim mode and key bindings.",
+            &["vim", "mode", "editor"],
+        ),
+        row(
+             SettingId::DefaultEditMode,
+             SettingsTab::General,
             "Results",
             "Default edit mode",
             "When a new table tab sends its edits. Classic holds cell edits \
@@ -924,6 +933,12 @@ fn render_control(
                 )
                 .into_any_element()
         }
+        SettingId::VimMode => switch("vim-mode", settings.vim_mode, t)
+            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                let on = !workspace.settings.vim_mode;
+                workspace.set_vim_mode(on, cx);
+            }))
+            .into_any_element(),
         SettingId::DefaultEditMode => {
             let edit_mode = settings.edit_mode;
             segmented(t)
