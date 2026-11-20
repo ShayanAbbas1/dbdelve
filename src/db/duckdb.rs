@@ -85,6 +85,12 @@ pub fn path_from_url(url: &str) -> Result<String, String> {
     })
 }
 
+/// Whether `path` opens a database in memory, as [`Connection::open`] reads
+/// it: blank, or [`IN_MEMORY`], either with spaces around it.
+pub fn is_in_memory(path: &str) -> bool {
+    matches!(path.trim(), "" | IN_MEMORY)
+}
+
 #[derive(Clone)]
 pub struct Connection {
     connection: Arc<Mutex<duckdb::Connection>>,
@@ -125,7 +131,7 @@ struct Pick {
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
         let connection = match path.trim() {
-            "" | IN_MEMORY => duckdb::Connection::open_in_memory_with_flags(config()?)
+            path if is_in_memory(path) => duckdb::Connection::open_in_memory_with_flags(config()?)
                 .map_err(|error| plain_error(error.to_string()))?,
             path => {
                 let path = crate::store::home_expanded(path);
@@ -3716,6 +3722,18 @@ mod tests {
             .expect("the timeout stops it");
         assert_eq!(error.message, INTERRUPTED);
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_blank_or_spaced_path_is_a_database_in_memory() {
+        for path in ["", "  ", IN_MEMORY, " :memory: "] {
+            assert!(is_in_memory(path), "{path:?}");
+            let config = crate::db::ConnectionConfig::duckdb(path.to_string(), 0);
+            assert!(config.lives_with_its_connection(), "{path:?}");
+        }
+        assert!(!is_in_memory("data.duckdb"));
+        let file = crate::db::ConnectionConfig::duckdb("data.duckdb".into(), 0);
+        assert!(!file.lives_with_its_connection());
     }
 
     #[test]
