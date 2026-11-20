@@ -91,6 +91,23 @@ pub fn is_in_memory(path: &str) -> bool {
     matches!(path.trim(), "" | IN_MEMORY)
 }
 
+/// A statement timeout armed on a connection's interrupt. Dropped, it is
+/// disarmed and waited out: a timer that ran out just as its statement ended
+/// has fired by then, so its interrupt cannot reach the next statement.
+struct Deadline {
+    disarm: Option<Sender<()>>,
+    timer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        drop(self.disarm.take());
+        if let Some(timer) = self.timer.take() {
+            let _ = timer.join();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Connection {
     connection: Arc<Mutex<duckdb::Connection>>,
@@ -418,32 +435,31 @@ impl Connection {
 
     /// The statement timeout, the way `sqlite.rs` arms its own: a thread that
     /// interrupts unless this is dropped first.
-    fn deadline(&self) -> Option<Sender<()>> {
+    fn deadline(&self) -> Option<Deadline> {
         self.deadline_from(Instant::now())
     }
 
     /// [`Self::deadline`] for a limit counted from `started`, firing when what
     /// is left of it runs out.
-    fn deadline_from(&self, started: Instant) -> Option<Sender<()>> {
+    fn deadline_from(&self, started: Instant) -> Option<Deadline> {
         self.deadline_on(&self.interrupt, started)
     }
 
     /// [`Self::deadline_from`] firing `interrupt`, for a session other than
     /// this one's.
-    fn deadline_on(
-        &self,
-        interrupt: &Arc<InterruptHandle>,
-        started: Instant,
-    ) -> Option<Sender<()>> {
+    fn deadline_on(&self, interrupt: &Arc<InterruptHandle>, started: Instant) -> Option<Deadline> {
         let left = self.statement_timeout?.saturating_sub(started.elapsed());
         let interrupt = Arc::clone(interrupt);
         let (sender, receiver) = channel::<()>();
-        std::thread::spawn(move || {
+        let timer = std::thread::spawn(move || {
             if receiver.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
                 interrupt.interrupt();
             }
         });
-        Some(sender)
+        Some(Deadline {
+            disarm: Some(sender),
+            timer: Some(timer),
+        })
     }
 
     /// Run the submission verbatim, keeping what `fetch` asks for of the last
@@ -3701,27 +3717,37 @@ mod tests {
     /// timeout, on the connection it opens and on every session replaying it.
     #[test]
     fn a_statement_timeout_stops_a_runaway_startup_statement() {
-        let started = Instant::now();
-        let error = Connection::open(IN_MEMORY, 1)
-            .unwrap()
-            .with_startup(vec![RUNAWAY.into()])
-            .err()
-            .expect("the timeout stops it");
+        // Each probe on a thread of its own, watched from here: one the
+        // deadline never stopped fails the test rather than hanging it.
+        fn within<T: Send + 'static>(probe: impl FnOnce() -> T + Send + 'static) -> T {
+            let (sender, receiver) = channel();
+            std::thread::spawn(move || sender.send(probe()));
+            receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the statement timeout stopped the startup statement")
+        }
+        let error = within(|| {
+            Connection::open(IN_MEMORY, 1)
+                .unwrap()
+                .with_startup(vec![RUNAWAY.into()])
+                .err()
+                .expect("the timeout stops it")
+        });
         assert_eq!(error.message, INTERRUPTED);
-        assert!(started.elapsed() < Duration::from_secs(10));
 
         let mut connection = Connection::open(IN_MEMORY, 1).unwrap();
         connection.startup = vec![RUNAWAY.to_string()].into();
-        let started = Instant::now();
-        let error = connection.alongside().err().expect("the timeout stops it");
+        let beside = connection.clone();
+        let error = within(move || beside.alongside().err().expect("the timeout stops it"));
         assert_eq!(error.message, INTERRUPTED);
         let home = connection.current_database().to_string();
-        let error = connection
-            .on_database(&home)
-            .err()
-            .expect("the timeout stops it");
+        let error = within(move || {
+            connection
+                .on_database(&home)
+                .err()
+                .expect("the timeout stops it")
+        });
         assert_eq!(error.message, INTERRUPTED);
-        assert!(started.elapsed() < Duration::from_secs(20));
     }
 
     #[test]
@@ -3734,6 +3760,23 @@ mod tests {
         assert!(!is_in_memory("data.duckdb"));
         let file = crate::db::ConnectionConfig::duckdb("data.duckdb".into(), 0);
         assert!(!file.lives_with_its_connection());
+    }
+
+    /// A deadline dropped as it runs out is waited out, so its interrupt has
+    /// landed before the next statement starts and stops nothing of it.
+    #[test]
+    fn a_dropped_deadline_has_fired_or_never_will() {
+        let connection = Connection::open(IN_MEMORY, 1).unwrap();
+        for _ in 0..20 {
+            let deadline = connection.deadline_from(Instant::now() - Duration::from_secs(1));
+            drop(deadline);
+            let answer = connection.query("SELECT 1", Fetch::default());
+            assert!(
+                answer.is_ok(),
+                "{:?}",
+                answer.err().map(|error| error.message)
+            );
+        }
     }
 
     #[test]
