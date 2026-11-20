@@ -26742,6 +26742,35 @@ fn a_queue_whose_begin_waits_for_another_tab_is_stopped_there(cx: &mut TestAppCo
     });
 }
 
+/// What another tab sends while Manual's `COMMIT; BEGIN;` is out may run in
+/// the transaction the pair opens, so it stays in the record once the pair
+/// lands.
+#[gpui::test]
+fn a_statement_sent_while_a_pair_is_out_stays_recorded(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let first = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.queries[0].id
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.execute_sql("COMMIT;\n\nBEGIN;".into(), Tab::Query(first), cx);
+                workspace.new_query(&crate::actions::NewQuery, window, cx);
+                let second = workspace.profile().unwrap().session.active;
+                workspace.execute_sql("INSERT INTO t VALUES (2)".into(), second, cx);
+                assert!(workspace.profile().unwrap().session.running(second));
+            });
+        });
+        settle(cx);
+        let recorded = recorded_statements(&workspace, cx);
+        assert_eq!(recorded, ["BEGIN;", "INSERT INTO t VALUES (2)"]);
+        run_in_front(&workspace, cx, "ROLLBACK");
+        quit(workspace, cx);
+    });
+}
+
 /// A pair whose `COMMIT` failed where the engine does not keep the
 /// transaction ended it, and the `BEGIN` behind it never ran: nothing is
 /// open, and Manual gives way to Auto.
@@ -26756,7 +26785,8 @@ fn a_failed_pair_that_ended_the_transaction_leaves_manual(cx: &mut TestAppContex
         };
         workspace.update(cx, |workspace, _| {
             let profile = workspace.profile_mut().expect("a profile is in front");
-            profile.reopen_landed("COMMIT;\n\nBEGIN;", false, Some(&ended));
+            let since = profile.transaction_statements.len();
+            profile.reopen_landed("COMMIT;\n\nBEGIN;", since, false, Some(&ended));
         });
         let (auto_commit, open, _) = transaction_state(&workspace, cx);
         assert!(auto_commit && !open, "no transaction, and Auto says so");
