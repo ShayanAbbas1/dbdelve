@@ -53,6 +53,10 @@ use crate::{
     ui::row_readout,
 };
 
+/// Asked by a keep-alive ping once it holds its session: whether the session
+/// is still free of the user's transaction.
+pub(crate) type IdleCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A connection and everything it owns.
 ///
 /// The editor, results, explorer and query state live here rather than on
@@ -114,7 +118,9 @@ pub(crate) struct Profile {
     /// sent. An end of the transaction is settled only when it lands, so one
     /// sent before this moved was overtaken on the session by the later
     /// submission and must not undo what it said ([`Self::superseded`]).
-    pub(crate) transaction_sends: u64,
+    /// Shared, so a keep-alive ping can tell under the session's lock that a
+    /// `BEGIN` went out after its round was set ([`Self::sessions_to_ping`]).
+    pub(crate) transaction_sends: Arc<AtomicU64>,
     /// The startup script the live connection ran at its connect, whose
     /// statements its driver replays on every later session: a script saved
     /// since applies only from the next connect.
@@ -302,11 +308,22 @@ impl Profile {
         }
     }
 
+    /// [`Self::transaction_sends`] as it stands.
+    pub(crate) fn transaction_sends(&self) -> u64 {
+        self.transaction_sends.load(Ordering::SeqCst)
+    }
+
+    /// One more submission set the transaction state as it was sent; what
+    /// [`Self::transaction_sends`] now reads.
+    pub(crate) fn transaction_sent(&self) -> u64 {
+        self.transaction_sends.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// Whether a submission sent after `sent_at` set the transaction state,
     /// which an end sent at `sent_at` landing now must leave alone: the
     /// session ran that submission after the end.
     pub(crate) fn superseded(&self, sent_at: u64) -> bool {
-        self.transaction_sends != sent_at
+        self.transaction_sends() != sent_at
     }
 
     /// A `COMMIT` or `ROLLBACK` sent with the next transaction's `BEGIN`
@@ -527,14 +544,22 @@ impl Profile {
 
     /// Every session the keep-alive pings: the profile's own connection and
     /// each one open for another database.
-    pub(crate) fn sessions_to_ping(&self) -> Vec<Connection> {
-        self.connection()
-            .into_iter()
-            .chain(
-                self.sessions_to_hold()
-                    .into_iter()
-                    .map(|bound| bound.connection.clone()),
-            )
+    /// Each session a keep-alive round pings, with what it asks once it holds
+    /// that session ([`Connection::ping`]): that no transaction was opened on
+    /// it since the round was set, which the round checked only before.
+    pub(crate) fn sessions_to_ping(&self) -> Vec<(Connection, IdleCheck)> {
+        let sends = self.transaction_sends.clone();
+        let set_at = self.transaction_sends();
+        let own = self.connection().map(|connection| {
+            let idle: IdleCheck = Arc::new(move || sends.load(Ordering::SeqCst) == set_at);
+            (connection, idle)
+        });
+        own.into_iter()
+            .chain(self.sessions_to_hold().into_iter().map(|bound| {
+                let connection = bound.connection.clone();
+                let idle: IdleCheck = Arc::new(move || !bound.in_transaction());
+                (connection, idle)
+            }))
             .collect()
     }
 

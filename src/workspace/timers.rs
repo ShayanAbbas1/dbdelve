@@ -16,7 +16,7 @@ use std::time::Duration;
 use gpui::{App, Context};
 
 use super::{Workspace, profiles::unapplied_edits_of, spawn_blocking};
-use crate::db::{Connection, DbError};
+use crate::db::DbError;
 use crate::session::{Profile, ProfileState, Tab};
 
 impl Workspace {
@@ -50,7 +50,7 @@ impl Workspace {
     ///
     /// A round is skipped, and the next one set, while the user has a
     /// transaction open on any session, so a ping never lands inside it. A
-    /// session a statement is running on skips itself ([`Connection::ping`]).
+    /// session a statement is running on skips itself ([`crate::db::Connection::ping`]).
     /// This writes no profile field but the timer: a ping is not the user's
     /// activity and changes nothing they see.
     fn keep_alive_due(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
@@ -73,7 +73,9 @@ impl Workspace {
             self.pings += 1;
         }
         let round = spawn_blocking(cx.background_executor(), move || {
-            sessions.iter().try_for_each(Connection::ping)
+            sessions
+                .iter()
+                .try_for_each(|(connection, idle)| connection.ping(&**idle))
         });
         let task_id = id.to_string();
         let Some(profile) = self.issued_to(id, generation) else {

@@ -2770,13 +2770,12 @@ impl Workspace {
                 // Whether it is a lone end, whose failure the engine may say
                 // left the transaction open (SQLite's `SQLITE_BUSY`).
                 let lone = sql::after_last_end(engine, text).is_empty();
-                ending = Some((sql.clone(), lone, reopens, profile.transaction_sends));
+                ending = Some((sql.clone(), lone, reopens, profile.transaction_sends()));
             } else {
                 profile.record_sent(&sql, leaves.transaction);
                 if let Some(open) = leaves.transaction {
                     profile.in_transaction = open;
-                    profile.transaction_sends += 1;
-                    published = Some(profile.transaction_sends);
+                    published = Some(profile.transaction_sent());
                 }
             }
             profile.session_changed |= leaves.settings;

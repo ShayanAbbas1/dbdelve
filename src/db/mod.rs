@@ -2795,11 +2795,15 @@ impl Connection {
     /// statement holds the session, and is a no-op on an engine with no
     /// long-lived session to keep (`Target::keeps_alive`). The error is a
     /// session that did not answer.
-    pub fn ping(&self) -> Result<(), DbError> {
+    ///
+    /// `idle` is asked once a session that runs a statement to answer is
+    /// held: one a transaction was opened on since the round was set is left
+    /// alone. MySQL's ping and Redis's are no statement and take no snapshot.
+    pub fn ping(&self, idle: &dyn Fn() -> bool) -> Result<(), DbError> {
         match self {
-            Self::Postgres(connection) => connection.ping(),
+            Self::Postgres(connection) => connection.ping(idle),
             Self::MySql(connection) => connection.ping(),
-            Self::SqlServer(connection) => connection.ping(),
+            Self::SqlServer(connection) => connection.ping(idle),
             Self::Redis(connection) => connection.ping(),
             Self::Sqlite(_)
             | Self::Turso(_)
