@@ -754,6 +754,7 @@ impl Workspace {
             Command::CopyResults(format) => self.copy_results_as(format, cx),
             Command::SwitchProfile(index) => self.activate(index, cx),
             Command::SwitchConnection => self.open_connections(window, cx),
+            Command::ShowSsmCleanup => self.show_pending_cleanup(window, cx),
             Command::Disconnect => self.disconnect(&Disconnect, window, cx),
             Command::ConnectionActions(index) => {
                 self.open_palette(PaletteMode::ConnectionActions(index), window, cx)

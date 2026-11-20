@@ -4,6 +4,7 @@
 //! grouped by concern in the sibling modules, which are parts of this same
 //! inherent impl rather than types of their own.
 
+mod cleanup;
 mod commands;
 mod diagrams;
 #[cfg(test)]
@@ -365,7 +366,8 @@ pub(crate) struct Workspace {
     /// What `note` says while there is no connection and no form to say it
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
-    pub(crate) cleanup_notices: Vec<crate::db::ssm::CleanupResult>,
+    pub(crate) cleanup: crate::db::ssm::cleanup::Manager,
+    _cleanup_updates: gpui::Task<()>,
     /// Statements written for data files opened before their profile had
     /// connected: profile id, query tab, statement. Run once it has.
     pub(crate) runs_on_connect: Vec<(String, u64, String)>,
@@ -519,6 +521,15 @@ impl Workspace {
             .observe_button_layout_changed(|window, _| window.refresh())
             .detach();
 
+        let cleanup = cx.default_global::<cleanup::SharedCleanup>().0.clone();
+        let mut updates = cleanup.subscribe();
+        let cleanup_updates = cx.spawn(async move |workspace, cx| {
+            while updates.changed().await.is_ok() {
+                if workspace.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
         let mut workspace = Self {
             profiles: Vec::new(),
             unavailable: Vec::new(),
@@ -576,7 +587,8 @@ impl Workspace {
             stable_connections: stable_import::stable_connections(),
             stable_import: None,
             welcome_notice: None,
-            cleanup_notices: Vec::new(),
+            cleanup,
+            _cleanup_updates: cleanup_updates,
             runs_on_connect: Vec::new(),
             project_name_error: None,
             welcome_needs_focus: true,
@@ -1533,115 +1545,6 @@ impl Workspace {
             )
             .children(self.settings_open.then(|| render_settings_panel(self, cx)))
             .into_any_element()
-    }
-}
-
-impl Workspace {
-    fn dismiss_cleanup_notice(
-        &mut self,
-        _: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.cleanup_notices.is_empty() {
-            return;
-        }
-        self.cleanup_notices.remove(0);
-        // A mouse click too: a button never takes focus on mouse-down, so one
-        // tabbed to earlier still holds it as the notice unmounts.
-        if self.cleanup_notices.is_empty() {
-            self.focus.focus(window, cx);
-            self.refocus_front();
-        }
-        cx.notify();
-    }
-
-    fn render_cleanup_notice(&self, t: Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        let result = self.cleanup_notices.first()?;
-        let profile = result.profile.as_deref().map_or_else(
-            || "Profile: AWS CLI configuration".to_string(),
-            |profile| format!("Configured profile: {profile}"),
-        );
-        let profile_selector = format!("cleanup-profile: {profile}");
-        let region = result.region.as_deref().unwrap_or("AWS CLI configuration");
-        let session = result.session.clone();
-        let remaining = self.cleanup_notices.len().saturating_sub(1);
-        Some(
-            div()
-                .flex_shrink_0()
-                .w_full()
-                .px(px(layout::SPACE_MD))
-                .py(px(layout::SPACE_SM))
-                .border_b_1()
-                .border_color(t.border)
-                .flex()
-                .flex_col()
-                .gap(px(layout::SPACE_XS))
-                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                .text_color(t.text_muted)
-                .child("AWS session termination could not be confirmed. Check the session in AWS.")
-                .child(
-                    div()
-                        .debug_selector(move || profile_selector.clone())
-                        .child(format!(
-                            "{profile} · Region: {region} (account and effective region unverified)"
-                        )),
-                )
-                .child(session.as_ref().map_or_else(
-                    || "Session ID unavailable".to_string(),
-                    |id| format!("Session ID: {id}"),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(layout::SPACE_SM))
-                        .children(session.map(|id| {
-                            div()
-                                .rounded(px(layout::RADIUS_CONTROL))
-                                .border_1()
-                                .border_color(t.border)
-                                .bg(t.element_active)
-                                .child(
-                                    ui::button(
-                                        ("cleanup-copy", 0usize),
-                                        "Copy session ID",
-                                        Tone::Primary,
-                                        Control::Compact,
-                                        t,
-                                    )
-                                    .debug_selector(|| "cleanup-copy-0".to_string())
-                                    .on_click(cx.listener(
-                                        move |_, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                id.clone(),
-                                            ))
-                                        },
-                                    )),
-                                )
-                        }))
-                        .child(
-                            div()
-                                .rounded(px(layout::RADIUS_CONTROL))
-                                .border_1()
-                                .border_color(t.border)
-                                .bg(t.element_active)
-                                .child(
-                                    ui::button(
-                                        ("cleanup-dismiss", 0usize),
-                                        "Dismiss",
-                                        Tone::Primary,
-                                        Control::Compact,
-                                        t,
-                                    )
-                                    .debug_selector(|| "cleanup-dismiss-0".to_string())
-                                    .on_click(cx.listener(Self::dismiss_cleanup_notice)),
-                                ),
-                        )
-                        .when(remaining > 0, |row| row.child(format!("{remaining} more"))),
-                ),
-        )
     }
 }
 
@@ -2820,24 +2723,33 @@ impl Render for Workspace {
                 ],
             ))
             .children(self.render_cleanup_notice(t, cx))
-            .child(self.beside_settings(main_pane, cx))
-            .children(self.dialog_layer(
-                [
-                    ("show-ddl", self.render_show_ddl(cx)),
-                    ("apply-review", self.render_apply_review(cx)),
-                    ("import-rows", self.render_import_rows(window, cx)),
-                    ("delete", self.render_delete_confirmation(cx)),
-                    ("discard", self.render_discard_confirmation(cx)),
-                    ("pending-export", self.render_pending_export(cx)),
-                    ("pending-run", self.render_pending_run(cx)),
-                    ("queue-failure", self.render_queue_failure(cx)),
-                    ("stale-edit", self.render_stale_edit(cx)),
-                    ("import-choice", self.render_import_choice(cx)),
-                    ("stable-import", self.render_stable_import(cx)),
-                ],
-                window,
-                cx,
-            ))
+            // Dialogs cover the database surface, leaving app-wide cleanup actions usable.
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.beside_settings(main_pane, cx))
+                    .children(self.dialog_layer(
+                        [
+                            ("show-ddl", self.render_show_ddl(cx)),
+                            ("apply-review", self.render_apply_review(cx)),
+                            ("import-rows", self.render_import_rows(window, cx)),
+                            ("delete", self.render_delete_confirmation(cx)),
+                            ("discard", self.render_discard_confirmation(cx)),
+                            ("pending-export", self.render_pending_export(cx)),
+                            ("pending-run", self.render_pending_run(cx)),
+                            ("queue-failure", self.render_queue_failure(cx)),
+                            ("stale-edit", self.render_stale_edit(cx)),
+                            ("import-choice", self.render_import_choice(cx)),
+                            ("stable-import", self.render_stable_import(cx)),
+                        ],
+                        window,
+                        cx,
+                    )),
+            )
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
@@ -2937,6 +2849,10 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
     // thread and fails a test woken from any other, so the end-to-end tests
     // get the work inline, as one blocking task at a time.
     if executor.is_test() {
+        #[cfg(test)]
+        if e2e::THREADED_BLOCKING.get() {
+            return e2e::threaded_work(executor, work);
+        }
         return executor.spawn(async move { work() });
     }
     executor.spawn(blocking::unblock(work))

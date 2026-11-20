@@ -72,7 +72,6 @@ pub(crate) struct Profile {
     pub(crate) confirmed_stale: bool,
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
-    pub(crate) cleanup_attempt: Option<crate::db::ConnectAttempt>,
     /// Whether the server is known to hold this connection as `mode` says
     /// (`Connection::set_read_only`): set when a connect lands, which fails
     /// rather than open unheld, and by the latest hold `set_mode` sent, once

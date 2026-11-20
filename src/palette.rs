@@ -376,6 +376,7 @@ pub enum Command {
     SwitchConnection,
     /// Close the connection in front and go to the welcome surface.
     Disconnect,
+    ShowSsmCleanup,
     /// Put the palette back up over what can be done to this connection.
     ConnectionActions(usize),
     /// Fold or unfold a project's connections in the Connections scope. The
@@ -1520,6 +1521,17 @@ impl Palette {
     #[cfg(test)]
     pub fn labels(&self) -> Vec<&str> {
         self.items.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    #[cfg(test)]
+    pub fn matched_labels(&self) -> Vec<&str> {
+        self.rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(index) => Some(self.items[*index].label.as_str()),
+                Row::Header(_) => None,
+            })
+            .collect()
     }
 
     /// Each row's label with the detail drawn beside it.
@@ -3514,6 +3526,14 @@ fn starting_items(workspace: &Workspace) -> Vec<Item> {
             CONNECTION,
         ));
     }
+    if workspace.pending_cleanup_count() > 0 {
+        items.push(command(
+            "Show pending AWS session cleanup",
+            icon::REFRESH,
+            Command::ShowSsmCleanup,
+            CONNECTION,
+        ));
+    }
     items.extend(import_connection_items(overrides));
     items
 }
@@ -4693,6 +4713,7 @@ fn beside_import(command: &Command) -> bool {
             | Command::SelectTheme
             | Command::PickFont(_)
             | Command::OpenSettings
+            | Command::ShowSsmCleanup
             | Command::ToggleSidebar
             | Command::CollapseAllSchemas
             | Command::ExpandAllSchemas

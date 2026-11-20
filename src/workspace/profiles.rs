@@ -320,7 +320,6 @@ impl Workspace {
             confirmed_stale: stored.confirmed.iter().any(|slug| slug == STALE_ROWS),
             generation: 0,
             state: ProfileState::Idle,
-            cleanup_attempt: None,
             held: false,
             holds: Arc::default(),
             in_transaction: false,
@@ -392,7 +391,6 @@ impl Workspace {
             confirmed_stale: false,
             generation: 0,
             state: ProfileState::Idle,
-            cleanup_attempt: None,
             held: false,
             holds: Arc::default(),
             in_transaction: false,
@@ -887,6 +885,27 @@ impl Workspace {
         }
     }
 
+    pub(super) fn observe_ssm_cleanup(
+        &mut self,
+        attempt: &crate::db::ConnectAttempt,
+        mut config: Option<crate::db::ssm::SsmTunnel>,
+        cx: &mut Context<Self>,
+    ) {
+        let result = attempt.observe_cleanup();
+        // Setup may fail before a Tunnel exists. Do not retain the sender we await.
+        if let Some(config) = &mut config {
+            config.attempt = None;
+        }
+        let cleanup = self.cleanup.clone();
+        // Delivery and retry ownership survive the originating window and form.
+        cx.spawn(async move |_, _| {
+            if let Ok(result) = result.await {
+                cleanup.add(result, config);
+            }
+        })
+        .detach();
+    }
+
     /// Opens the form's connection and throws it away, so a profile can be
     /// checked before it is saved. The same open, keychain lookup and
     /// Read-only hold `begin_connect` does, or a pass here would not mean the
@@ -919,6 +938,7 @@ impl Workspace {
         let attempt = crate::db::ConnectAttempt::default();
         config.set_connect_attempt(attempt.clone());
         let guard = attempt.guard();
+        let cleanup = config.ssm().map(|config| (attempt.clone(), config.clone()));
         let engine = config.target().label();
         let probe = spawn_blocking(cx.background_executor(), move || {
             let started = std::time::Instant::now();
@@ -979,6 +999,9 @@ impl Workspace {
             });
         });
         form.test = Some(ConnectionTest::Running(task, guard));
+        if let Some((attempt, config)) = cleanup {
+            self.observe_ssm_cleanup(&attempt, Some(config), cx);
+        }
         cx.notify();
     }
 
@@ -1474,18 +1497,6 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
-        let cleanup = if matches!(
-            profile.state,
-            ProfileState::Connecting { .. } | ProfileState::Connected(_)
-        ) {
-            profile
-                .cleanup_attempt
-                .take()
-                .map(|attempt| attempt.observe_cleanup())
-        } else {
-            profile.cleanup_attempt = None;
-            None
-        };
         let rolled_back = profile.in_transaction && profile.connection().is_some();
         tracing::info!(
             connection = crate::logging::connection_number(&profile.id),
@@ -1503,21 +1514,6 @@ impl Workspace {
         mark_objects_stale(profile);
         let name = profile.name.clone();
         self.active = None;
-        if let Some(cleanup) = cleanup {
-            cx.spawn(async move |workspace, cx| {
-                if let Ok(result) = cleanup.await
-                    && !result.accepted
-                {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.cleanup_notices.push(result);
-                            cx.notify();
-                        })
-                        .ok();
-                }
-            })
-            .detach();
-        }
         self.remember_profiles(cx);
         self.rebuild_connections(cx);
         self.refocus_front();
@@ -1985,7 +1981,6 @@ impl Workspace {
         profile.generation = generation;
         profile.drop_sessions();
         let attempt = crate::db::ConnectAttempt::default();
-        profile.cleanup_attempt = profile.config.ssm().map(|_| attempt.clone());
         profile.state = ProfileState::Connecting {
             _attempt: attempt.guard(),
         };
@@ -2007,6 +2002,9 @@ impl Workspace {
         let mut config = profile.config.clone();
         config.set_connect_attempt(attempt.clone());
         let mode = profile.mode;
+        if config.ssm().is_some() {
+            self.observe_ssm_cleanup(&attempt, config.ssm().cloned(), cx);
+        }
         // The sidebar draws the tree whenever there are saved queries, so the
         // old catalog's rows have to leave it with the catalog.
         self.refresh_explorer(&id, cx);
