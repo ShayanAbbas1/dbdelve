@@ -27738,6 +27738,41 @@ fn a_profile_without_keep_alive_arms_no_timer(cx: &mut TestAppContext) {
     });
 }
 
+/// A round set while no transaction was open asks again once it holds each
+/// session: a `BEGIN` sent meanwhile, on the profile's own session or on one
+/// of another database, leaves that session unpinged.
+#[gpui::test]
+fn a_keep_alive_round_asks_again_under_the_session_whether_a_begin_went_out(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let set = workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let session =
+                crate::session::Bound::new(profile.connection().expect("the profile is connected"));
+            profile.bound.insert(
+                "other".to_string(),
+                crate::session::BoundSession::Open(session.clone()),
+            );
+            (profile.sessions_to_ping(), session)
+        });
+        let (sessions, bound) = set;
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|(_, idle)| idle()), "nothing open yet");
+
+        run_in_front(&workspace, cx, "BEGIN");
+        assert!(!sessions[0].1(), "the profile's own session took a BEGIN");
+        assert!(sessions[1].1(), "the other session did not");
+        bound
+            .leave(Some(true), false, || Ok::<_, crate::db::DbError>(()))
+            .expect("nothing is sent");
+        assert!(!sessions[1].1(), "until it did");
+        run_in_front(&workspace, cx, "ROLLBACK");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_keep_alive_round_is_skipped_inside_a_transaction(cx: &mut TestAppContext) {
     use std::time::Duration;

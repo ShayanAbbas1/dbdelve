@@ -1022,8 +1022,9 @@ impl Connection {
     /// use, so the ping is skipped, never queued behind it; a session that has
     /// not logged in yet is left alone, since a ping that logged in would open
     /// a login nobody asked for. A poisoned lock is a session every later
-    /// statement would fail on.
-    pub fn ping(&self) -> Result<(), DbError> {
+    /// statement would fail on. `idle` is asked once the session is held, and
+    /// a `false` skips it too, as on Postgres.
+    pub fn ping(&self, idle: &dyn Fn() -> bool) -> Result<(), DbError> {
         let mut session = match self.session.try_lock() {
             Ok(session) => session,
             Err(TryLockError::WouldBlock) => return Ok(()),
@@ -1033,6 +1034,7 @@ impl Connection {
         };
         match session.as_mut() {
             None => Ok(()),
+            Some(_) if !idle() => Ok(()),
             Some(session) => ask(session, "SELECT 1").map(|_| ()),
         }
     }
@@ -3235,13 +3237,16 @@ mod tests {
     #[ignore = "requires the compose databases"]
     fn live_a_keep_alive_ping_answers_and_never_waits_on_a_busy_session() {
         let connection = live();
-        assert!(connection.ping().is_ok(), "an idle session answers");
+        assert!(connection.ping(&|| true).is_ok(), "an idle session answers");
 
         // A statement holds the session for as long as it runs; the round
         // skips it rather than queue behind it.
         let busy = connection.session.lock().expect("nothing else holds it");
         let started = Instant::now();
-        assert!(connection.ping().is_ok(), "a busy session is skipped");
+        assert!(
+            connection.ping(&|| true).is_ok(),
+            "a busy session is skipped"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "and the skip does not wait"
@@ -3250,7 +3255,7 @@ mod tests {
 
         let unopened = connection.alongside();
         assert!(
-            unopened.ping().is_ok(),
+            unopened.ping(&|| true).is_ok(),
             "a session never logged in is left alone"
         );
         assert!(
