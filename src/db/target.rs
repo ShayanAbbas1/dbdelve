@@ -4,10 +4,10 @@
 //! dialect DBDelve knows has few of them, whatever that dialect could do.
 
 use super::plugin::Plugin;
-use super::spec::Abilities;
+use super::spec::{Abilities, SessionTimeZone};
 use super::{
-    DbError, Engine, Fields, RelationKind, ServerConfig, Syntax, clickhouse, duckdb, external,
-    mssql, postgres, redis, turso,
+    DbError, Engine, Fields, Property, RelationKind, ServerConfig, Syntax, clickhouse, duckdb,
+    external, mssql, postgres, redis, turso,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +138,35 @@ impl Target {
             self.fields(),
             super::Fields::Server | super::Fields::ConnectionString
         ) && self.engine != Engine::MongoDb
+    }
+
+    /// Whether a profile can carry a startup script: DBDelve's own driver
+    /// replays it on every session it opens for the user, and a plugin's
+    /// process is its own.
+    pub fn takes_startup_script(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine.spec().takes_startup_script
+    }
+
+    /// Whether a profile can keep its sessions alive with a ping: DBDelve's
+    /// own driver sends it, and a plugin's process keeps its own session.
+    pub fn keeps_alive(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine.spec().keeps_alive
+    }
+
+    /// The driver properties a profile can set: DBDelve's own driver maps each
+    /// to the one field it names, and a plugin's process takes none.
+    pub fn driver_properties(self) -> &'static [Property] {
+        match self.driver {
+            Driver::BuiltIn => self.engine.spec().driver_properties,
+            Driver::Plugin(_) => &[],
+        }
+    }
+
+    /// Whether a profile can carry a session time zone: DBDelve's own driver
+    /// sets it as a default of each session, and a plugin's process is its own.
+    pub fn takes_time_zone(self) -> bool {
+        self.driver == Driver::BuiltIn
+            && self.engine.spec().sql.session_time_zone != SessionTimeZone::None
     }
 
     /// Whether a profile's SSH tunnel may end at a Unix socket on the SSH host,
@@ -392,6 +421,13 @@ impl Target {
     pub fn draws_diagrams(self) -> bool {
         self.abilities().draws_diagrams
     }
+
+    /// Whether the connection lists its server's users and roles, shows who
+    /// holds which grant on an object, and writes role changes for review.
+    /// Never for a plugin, whose dialect's catalog it may not carry.
+    pub fn manages_roles(self) -> bool {
+        self.abilities().manages_roles
+    }
 }
 
 /// Whether `error` is the user's Cancel landing, in the words each engine's
@@ -639,6 +675,32 @@ mod tests {
             assert!(!plugin.ordered_edits(), "{engine:?}");
             assert!(!plugin.keeps_edits(), "{engine:?}");
         }
+    }
+
+    #[test]
+    fn keep_alive_is_offered_where_a_session_stays_open() {
+        for engine in Engine::ALL {
+            assert_eq!(
+                Target::built_in(engine).keeps_alive(),
+                matches!(
+                    engine,
+                    Engine::Postgres
+                        | Engine::MySql
+                        | Engine::MariaDb
+                        | Engine::SqlServer
+                        | Engine::Redis
+                ),
+                "{engine:?}"
+            );
+        }
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: Driver::Plugin(odbc()),
+        };
+        assert!(
+            !plugin.keeps_alive(),
+            "a plugin's process keeps its own session"
+        );
     }
 
     #[test]

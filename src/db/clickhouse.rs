@@ -10,7 +10,7 @@
 mod edit;
 mod http;
 #[cfg(test)]
-mod mock;
+pub(crate) mod mock;
 mod tsv;
 
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ use self::tsv::{Framed, Next, Reader, Untagged, is_cut};
 use super::tunnel::tunnelled;
 use super::{
     CancelToken, Cancelling, Catalog, Column, Databases, DbError, EditTarget, Engine, Fetch,
-    QueryResult, RelationKind, RowBuilder, ServerConfig, Stopped, Structure, UpdateSpelling,
+    QueryResult, RelationKind, RowBuilder, ServerConfig, Shown, Stopped, Structure, UpdateSpelling,
     assemble_catalog, assemble_databases, assemble_structure, plain_error, required_cell,
     terminated,
 };
@@ -85,6 +85,25 @@ SELECT name, name = currentDatabase() AS is_current
 FROM system.databases
 ORDER BY name";
 
+/// The databases [`RELATIONS_SQL`] draws when nothing is filtered, by its own
+/// predicates, so a filtered catalog's `left_out` and the filter picker's list
+/// count what the unfiltered tree counts. `system.databases` also lists an
+/// empty database (`default` on a fresh server) the tree never draws. The inner
+/// select keeps the column name `database` and names it `name` only outside:
+/// ClickHouse resolves a select alias before a column of the same name, so
+/// aliasing it inside would make the `.inner` predicate read the database's
+/// name.
+const CATALOG_DATABASES_SQL: &str = "
+SELECT database AS name, database = currentDatabase() AS is_current
+FROM (
+    SELECT DISTINCT database
+    FROM system.tables
+    WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+        AND NOT is_temporary
+        AND NOT startsWith(name, '.inner')
+)
+ORDER BY name";
+
 /// `total_bytes` and `total_rows` are what the server keeps for the table, so
 /// they ride along here instead of in `sizes`. Both are NULL for a view and a
 /// dictionary, and count rows still waiting for a merge. The `.inner` tables
@@ -105,10 +124,24 @@ SELECT
     total_bytes AS size_bytes,
     total_rows AS row_estimate
 FROM system.tables
-WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema'){only}
     AND NOT is_temporary
     AND NOT startsWith(name, '.inner')
 ORDER BY database, name";
+
+/// [`RELATIONS_SQL`] over the server-listed databases a filter matched, or all
+/// of them for `None`. Each name is quoted by the engine and the pattern a
+/// person typed never gets here.
+fn relations_sql(names: Option<&[String]>) -> String {
+    let only = names.map_or_else(String::new, |names| {
+        let quoted = names
+            .iter()
+            .map(|name| Engine::ClickHouse.quote_literal(name))
+            .collect::<Vec<_>>();
+        format!("\n    AND database IN ({})", quoted.join(", "))
+    });
+    RELATIONS_SQL.replace("{only}", &only)
+}
 
 // The structure queries name one relation, so they carry `{schema}` and
 // `{relation}` placeholders substituted by `structure_sql`.
@@ -165,7 +198,7 @@ WHERE database = {schema} AND name = {relation} AND primary_key != ''";
 /// The server's version, and the settings a request may carry, with whether
 /// this user may change each.
 const FACTS_SQL: &str = "SELECT version() AS version, name, value, readonly FROM system.settings \
-                         WHERE name IN ('readonly', 'max_execution_time', \
+                         WHERE name IN ('readonly', 'max_execution_time', 'session_timezone', \
                          'format_tsv_null_representation', 'enable_http_compression')";
 
 /// Carries exactly what every later request will, so a setting this user may
@@ -370,7 +403,11 @@ impl Connection {
                 read => read.map_err(|failed| connection.explain(failed))?,
             };
             let connection = Self {
-                server: Arc::new(facts(&read, server.statement_timeout)?),
+                server: Arc::new(facts(
+                    &read,
+                    server.statement_timeout,
+                    server.time_zone.as_deref(),
+                )?),
                 ..connection
             };
             if !connection.server.settings.is_empty() {
@@ -753,12 +790,41 @@ impl Connection {
         })
     }
 
-    pub fn catalog(&self) -> Result<Catalog, DbError> {
-        assemble_catalog(self.internal_query(RELATIONS_SQL)?, QueryResult::default())
+    /// Only the matched databases are asked about; the listing is read here,
+    /// in the read's own closure, so the statement carries names the server
+    /// just gave. The listing is [`Self::catalog_databases`], the databases the
+    /// catalog draws, so the `left_out` returned is on the tree's basis. A match
+    /// of nothing sends no statement on any engine, though ClickHouse would
+    /// accept an empty `IN`.
+    pub fn catalog(&self, shown: &Shown) -> Result<Catalog, DbError> {
+        let matched = if shown.narrows_catalog() {
+            shown.matched_databases(&self.catalog_databases()?, Engine::ClickHouse)
+        } else {
+            None
+        };
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        let left_out = matched.as_ref().map_or(0, |(_, left_out)| *left_out);
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Catalog {
+                left_out,
+                ..Catalog::default()
+            });
+        }
+        let relations = self.internal_query(&relations_sql(names))?;
+        Ok(Catalog {
+            left_out,
+            ..assemble_catalog(relations, QueryResult::default())?
+        })
     }
 
     pub fn databases(&self) -> Result<Databases, DbError> {
         assemble_databases(&self.internal_query(DATABASES_SQL)?)
+    }
+
+    /// The databases holding something the catalog reads, the server's own
+    /// left out: what the unfiltered tree draws.
+    pub fn catalog_databases(&self) -> Result<Databases, DbError> {
+        assemble_databases(&self.internal_query(CATALOG_DATABASES_SQL)?)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -1538,11 +1604,18 @@ fn cap(sets: &mut [QueryResult], returned: usize, kept: usize) {
 /// - `max_execution_time` is sent unless it already is the profile's timeout.
 ///   A user who may not change it and has another value fails the validation
 ///   request, in the server's words.
+/// - `session_timezone` is sent unless it already is the profile's time zone,
+///   with the same outcome for a user who may not change it. The text is
+///   compared as the server shows it, which is how a request will name it.
 /// - `format_tsv_null_representation=\N` is sent wherever it may be, so a
 ///   user's `SET` of it cannot make NULL and the text `NULL` the same bytes.
 ///   Where it may not be, it has to be `\N` already.
 /// - `enable_http_compression=1` where it is off and may be turned on.
-fn facts(read: &QueryResult, statement_timeout: u32) -> Result<ServerFacts, DbError> {
+fn facts(
+    read: &QueryResult,
+    statement_timeout: u32,
+    time_zone: Option<&str>,
+) -> Result<ServerFacts, DbError> {
     let mut version = String::new();
     let mut found = HashMap::new();
     for row in &read.rows {
@@ -1565,6 +1638,11 @@ fn facts(read: &QueryResult, statement_timeout: u32) -> Result<ServerFacts, DbEr
         if current != Some(f64::from(statement_timeout)) {
             settings.push(("max_execution_time", statement_timeout.to_string()));
         }
+    }
+    if let Some(zone) = time_zone
+        && found.get("session_timezone").map(|(value, _)| *value) != Some(zone)
+    {
+        settings.push(("session_timezone", zone.to_string()));
     }
     match found.get("format_tsv_null_representation") {
         Some((value, false)) if *value == NULL => {}
@@ -1660,6 +1738,166 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
+    const BEFORE_RELATIONS: &str = r#"
+SELECT
+    database AS schema_name,
+    name AS relation_name,
+    multiIf(
+        engine IN ('View', 'LiveView', 'WindowView'), 'view',
+        engine = 'MaterializedView', 'materialized_view',
+        engine = 'Dictionary', 'dictionary',
+        engine IN ('MySQL', 'PostgreSQL', 'MongoDB', 'S3', 'S3Queue', 'URL', 'HDFS', 'Kafka',
+                   'RabbitMQ', 'NATS', 'JDBC', 'ODBC', 'Hudi', 'Redis', 'AzureBlobStorage')
+            OR startsWith(engine, 'Iceberg') OR startsWith(engine, 'DeltaLake'), 'foreign_table',
+        'table'
+    ) AS relation_kind,
+    total_bytes AS size_bytes,
+    total_rows AS row_estimate
+FROM system.tables
+WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+    AND NOT is_temporary
+    AND NOT startsWith(name, '.inner')
+ORDER BY database, name"#;
+
+    #[test]
+    fn an_unfiltered_relations_statement_is_byte_identical_and_a_filtered_one_names_only_matched_databases()
+     {
+        assert_eq!(relations_sql(None), BEFORE_RELATIONS);
+        assert!(!relations_sql(None).contains("{only}"));
+
+        let names = ["analytics".to_string(), "o'k".to_string()];
+        let filtered = relations_sql(Some(&names));
+        assert!(
+            filtered.contains("AND database IN ('analytics', 'o''k')"),
+            "{filtered}"
+        );
+        assert!(!filtered.contains("{only}"));
+    }
+
+    /// The filter is matched in Rust against the server's own listing, so only
+    /// a listed name reaches the statement.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_include_list_reads_only_the_listed_databases() {
+        use crate::db::{Include, Levels, Shown};
+
+        let connection = Connection::open(&live::live_config()).expect("connection should open");
+        let user_databases = connection
+            .catalog_databases()
+            .expect("databases should list")
+            .names
+            .len();
+        let shown = |entries: &[&str]| {
+            Include {
+                databases: entries.iter().map(|entry| (*entry).to_string()).collect(),
+                ..Include::default()
+            }
+            .resolve(Levels::DatabaseIsSchema, None, None)
+        };
+        let schema_names = |catalog: &Catalog| {
+            catalog
+                .schemas
+                .iter()
+                .map(|schema| schema.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let catalog = connection.catalog(&shown(&["analyt*"])).unwrap();
+        assert_eq!(schema_names(&catalog), ["analytics"]);
+        assert_eq!(catalog.left_out, user_databases - 1);
+
+        let catalog = connection.catalog(&shown(&["no_such*"])).unwrap();
+        assert!(catalog.schemas.is_empty());
+        assert_eq!(catalog.left_out, user_databases);
+
+        let all = connection.catalog(&Shown::everything()).unwrap();
+        let all = schema_names(&all);
+        assert!(all.contains(&"analytics".to_string()), "{all:?}");
+        assert!(all.contains(&"dbdelve_dev".to_string()), "{all:?}");
+    }
+
+    #[test]
+    fn a_filtered_catalog_counts_the_hidden_databases_the_tree_draws_and_the_picker_lists_the_same()
+    {
+        use crate::db::{Include, Levels};
+
+        let mock = Mock::start();
+        let connection = open(&mock);
+        let listing = [("name", "String"), ("is_current", "UInt8")];
+        mock.on_statement(
+            "SELECT DISTINCT database",
+            [Response::rows(
+                &listing,
+                &[&["analytics", "0"], &["dbdelve_dev", "1"]],
+            )],
+        );
+        mock.on_statement(
+            "relation_kind",
+            [Response::rows(
+                &[
+                    ("schema_name", "String"),
+                    ("relation_name", "String"),
+                    ("relation_kind", "String"),
+                    ("size_bytes", "Nullable(UInt64)"),
+                    ("row_estimate", "Nullable(UInt64)"),
+                ],
+                &[&["analytics", "events", "table", "\\N", "\\N"]],
+            )],
+        );
+        mock.on_statement(
+            "FROM system.databases",
+            [Response::rows(
+                &listing,
+                &[
+                    &["INFORMATION_SCHEMA", "0"],
+                    &["analytics", "0"],
+                    &["dbdelve_dev", "1"],
+                    &["default", "0"],
+                    &["information_schema", "0"],
+                    &["system", "0"],
+                ],
+            )],
+        );
+        let shown = Include {
+            databases: vec!["analyt*".into()],
+            ..Include::default()
+        }
+        .resolve(Levels::DatabaseIsSchema, None, None);
+
+        let catalog = connection.catalog(&shown).unwrap();
+        let drawn = connection.catalog_databases().unwrap();
+
+        let schemas: Vec<_> = catalog.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(schemas, ["analytics"]);
+        assert_eq!(catalog.left_out, 1);
+        assert_eq!(drawn.names, ["analytics", "dbdelve_dev"]);
+        assert_eq!(drawn.current.as_deref(), Some("dbdelve_dev"));
+        assert_eq!(catalog.schemas.len() + catalog.left_out, drawn.names.len());
+        let relations = sent(&mock, "relation_kind");
+        assert_eq!(relations.len(), 1);
+        assert!(
+            relations[0]
+                .statement
+                .contains("AND database IN ('analytics')"),
+            "{}",
+            relations[0].statement
+        );
+        assert!(sent(&mock, "FROM system.databases").is_empty());
+    }
+
+    #[test]
+    fn the_listing_a_filtered_catalog_counts_over_reads_with_the_relations_predicates() {
+        for predicate in [
+            "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')",
+            "NOT is_temporary",
+            "NOT startsWith(name, '.inner')",
+        ] {
+            assert!(RELATIONS_SQL.contains(predicate), "{predicate}");
+            assert!(CATALOG_DATABASES_SQL.contains(predicate), "{predicate}");
+        }
+        assert!(CATALOG_DATABASES_SQL.contains("SELECT DISTINCT database"));
+        assert!(!CATALOG_DATABASES_SQL.contains("DISTINCT database AS"));
+    }
     const FACTS_COLUMNS: [(&str, &str); 4] = [
         ("version", "String"),
         ("name", "String"),
@@ -1720,7 +1958,7 @@ mod tests {
         Connection::open(server)
     }
 
-    fn open(mock: &Mock) -> Connection {
+    pub(super) fn open(mock: &Mock) -> Connection {
         open_with(mock, writer(), &profile(mock)).unwrap()
     }
 
@@ -2012,6 +2250,23 @@ mod tests {
     }
 
     #[test]
+    fn a_readonly_user_whose_zone_differs_fails_the_connect_in_the_servers_words() {
+        let mock = Mock::start();
+        mock.readonly(&["session_timezone"]);
+        let server = ServerConfig {
+            time_zone: Some("Europe/Paris".into()),
+            ..profile(&mock)
+        };
+        let error = open_with(&mock, reader("0"), &server).err().unwrap();
+        assert_eq!(
+            error.message,
+            "Cannot modify 'session_timezone' setting in readonly mode. (READONLY)"
+        );
+        let [validation] = sent(&mock, VALIDATION_SQL).try_into().unwrap();
+        assert_eq!(validation.param("session_timezone"), Some("Europe/Paris"));
+    }
+
+    #[test]
     fn a_null_spelling_that_cannot_be_changed_back_fails_the_connect() {
         let mock = Mock::start();
         let facts = settings(&[
@@ -2026,9 +2281,9 @@ mod tests {
         );
     }
 
-    fn decided(statement_timeout: u32, rows: &[[&str; 3]]) -> Vec<&'static str> {
+    fn read_of(rows: &[[&str; 3]]) -> QueryResult {
         let mut builder = RowBuilder::default();
-        let read = QueryResult {
+        QueryResult {
             columns: FACTS_COLUMNS
                 .iter()
                 .map(|(name, _)| Column {
@@ -2047,13 +2302,35 @@ mod tests {
                 })
                 .collect(),
             ..QueryResult::default()
-        };
-        facts(&read, statement_timeout)
+        }
+    }
+
+    fn decided(statement_timeout: u32, rows: &[[&str; 3]]) -> Vec<&'static str> {
+        let read = read_of(rows);
+        facts(&read, statement_timeout, None)
             .unwrap()
             .settings
             .into_iter()
             .map(|(name, _)| name)
             .collect()
+    }
+
+    #[test]
+    fn a_time_zone_already_in_force_is_not_sent() {
+        let zone = |asked: Option<&str>, in_force: &str| {
+            let read = read_of(&[["session_timezone", in_force, "0"]]);
+            facts(&read, 0, asked)
+                .unwrap()
+                .settings
+                .into_iter()
+                .find(|(name, _)| *name == "session_timezone")
+        };
+        assert_eq!(zone(Some("Europe/Paris"), "Europe/Paris"), None);
+        assert_eq!(
+            zone(Some("UTC"), "Europe/Paris"),
+            Some(("session_timezone", "UTC".to_string()))
+        );
+        assert_eq!(zone(None, "Europe/Paris"), None);
     }
 
     #[test]
@@ -3876,13 +4153,13 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
-    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, IndexKind, is_cancel};
+    use crate::db::{Column, ConnectionConfig, Engine, ExplainMode, IndexKind, Shown, is_cancel};
     use crate::explorer::{drop_sql, select_top_sql, truncate_sql};
     use crate::export::{RowsAs, render_rows_as};
     use crate::filter::{Operator, filter_predicate};
     use crate::sql::{Mode, Stop, classify, gate};
 
-    fn live_config() -> ServerConfig {
+    pub(super) fn live_config() -> ServerConfig {
         let url =
             std::env::var("dbdelve_CLICKHOUSE_URL").expect("dbdelve_CLICKHOUSE_URL is required");
         crate::db::server_from_url(&url, "ClickHouse").expect("dbdelve_CLICKHOUSE_URL should parse")
@@ -3895,6 +4172,47 @@ mod live {
     fn live_any(config: ServerConfig) -> crate::db::Connection {
         crate::db::Connection::open(ConnectionConfig::ClickHouse(config))
             .expect("connection should open")
+    }
+
+    /// The picker's list, the unfiltered tree and a filtered one count the
+    /// same databases, so a filtered total never exceeds the unfiltered one.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_pickers_total_and_a_filtered_total_are_the_unfiltered_count() {
+        use crate::db::{Include, Levels};
+
+        let connection = live_any(live_config());
+        let mut picker = connection
+            .catalog_databases(Engine::ClickHouse)
+            .expect("databases should list")
+            .names;
+        let drawn = |shown: &Shown| {
+            let mut catalog = connection.catalog(shown).expect("catalog should read");
+            catalog.merge(connection.routines(shown).expect("routines should read"));
+            catalog
+        };
+        let unfiltered = drawn(&Shown::everything());
+        let filtered = drawn(
+            &Include {
+                databases: vec!["analyt*".into()],
+                ..Include::default()
+            }
+            .resolve(Levels::DatabaseIsSchema, None, None),
+        );
+
+        assert_eq!(
+            filtered.schemas.len() + filtered.left_out,
+            unfiltered.schemas.len()
+        );
+        let mut tree: Vec<_> = unfiltered.schemas.iter().map(|s| s.name.clone()).collect();
+        picker.sort();
+        tree.sort();
+        assert_eq!(picker, tree);
+        assert!(
+            !picker
+                .iter()
+                .any(|name| name == "default" || name == "system")
+        );
     }
 
     fn run(connection: &Connection, sql: &str) -> Result<QueryResult, DbError> {
@@ -3971,6 +4289,26 @@ mod live {
             .iter()
             .map(|c: &Column| c.data_type.as_deref())
             .collect()
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
+    fn live_the_time_zone_rides_every_request() {
+        let zone = |connection: &Connection| {
+            ran(connection, "SELECT timezone()").rows[0]
+                .iter()
+                .next()
+                .flatten()
+                .map(str::to_string)
+        };
+        let config = ServerConfig {
+            time_zone: Some("Asia/Tokyo".into()),
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("connection should open");
+        assert_eq!(zone(&main).as_deref(), Some("Asia/Tokyo"));
+        let other = main.on_database("system").expect("a session should open");
+        assert_eq!(zone(&other).as_deref(), Some("Asia/Tokyo"));
     }
 
     #[test]
@@ -4846,7 +5184,9 @@ mod live {
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_every_seeded_kind_lands_right_and_the_system_databases_stay_out() {
-        let catalog = live_any(live_config()).catalog().unwrap();
+        let catalog = live_any(live_config())
+            .catalog(&crate::db::Shown::everything())
+            .unwrap();
         let seeded = kinds_of(&catalog, "dbdelve_dev");
         let kind = |name: &str| {
             seeded
@@ -4880,7 +5220,7 @@ mod live {
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_the_servers_own_row_and_byte_counts_ride_on_the_catalog() {
         let connection = live_any(live_config());
-        let catalog = connection.catalog().unwrap();
+        let catalog = connection.catalog(&crate::db::Shown::everything()).unwrap();
         let relation = |name: &str| {
             catalog
                 .schemas
@@ -4894,8 +5234,19 @@ mod live {
         assert_eq!(relation("accounts").rows, Some(50));
         assert_eq!(relation("active_accounts").rows, None);
         assert_eq!(relation("active_accounts").size, None);
-        assert!(connection.sizes().unwrap().is_empty());
-        assert!(connection.routines().unwrap().schemas.is_empty());
+        assert!(
+            connection
+                .sizes(&crate::db::Shown::everything())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            connection
+                .routines(&crate::db::Shown::everything())
+                .unwrap()
+                .schemas
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4914,7 +5265,7 @@ mod live {
             &connection,
             "SELECT count() FROM system.tables WHERE startsWith(name, '.inner')",
         ));
-        let catalog = live_any(live_config()).catalog();
+        let catalog = live_any(live_config()).catalog(&crate::db::Shown::everything());
         ran(&connection, &format!("DROP VIEW `{view}`"));
         let listed = kinds_of(&catalog.unwrap(), "dbdelve_dev");
         assert!(inner.parse::<u32>().unwrap() > 0, "no .inner table to hide");
@@ -4934,7 +5285,7 @@ mod live {
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_the_databases_list_flags_the_one_connected_to() {
         let databases = live_any(live_config())
-            .databases(Engine::ClickHouse)
+            .databases(Engine::ClickHouse, &Shown::everything())
             .unwrap();
         assert_eq!(databases.current.as_deref(), Some("dbdelve_dev"));
         assert!(databases.names.iter().any(|name| name == "analytics"));

@@ -84,6 +84,39 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`Profile::sessions_to_hold`, `Bound::holds`, `set_mode`); all of them end
   with the connection they were opened from (`Profile::drop_sessions`). The
   agent keeps its own lanes and reaches none of them.
+- **A profile keeps one include list per filtered level** (`Profile::include`,
+  `db::Include`; `include_databases` and `include_schemas` in `profiles.toml`,
+  each left out when empty). An entry is an exact name or a `*`/`?` glob,
+  matched in Rust ignoring case (`db::include::matches`) and never sent as
+  `LIKE`; empty means everything. `Target::levels` says which list a target
+  uses, and a list its level does not use is kept and ignored. The
+  connection's own database and active schema always show. The lists sit
+  outside `ConnectionConfig`, so changing them never reconnects. A list is
+  narrowed where each answer is read (`Connection::databases(.., &Shown)`),
+  so nothing stores an unnarrowed answer, and a database it hides is neither
+  drawn nor opened. `Databases::left_out` carries how many it hid, which
+  `SidebarTree::totals` turns into the connection row's `1 of 2` while no
+  search text is typed.
+  Save and load both pass the lists through `Include::from_stored` (entries
+  trimmed, blanks dropped, at most `ENTRIES_CAP`, 500, per list), so what a
+  profile holds is what its file holds and the picker's preview counts only
+  what Save keeps.
+  Where the catalog lists databases as schemas (MySQL, MariaDB, ClickHouse),
+  the hidden count comes from the listing the picker reads
+  (`Connection::catalog_databases`: on MySQL and MariaDB every database but
+  the system ones, as the catalog draws them; on ClickHouse the databases
+  holding a relation), so shown plus hidden is the unfiltered count.
+- **A profile's `introspection_depth` chooses which connect-time loads run**
+  (`Profile::behaviour.depth`, `session::Depth`; `relations`, `routines` or
+  `sizes`, left out at the default `sizes`, which is every load): relations
+  always, then routines and sequences, then sizes, which also need Show sizes.
+  It lives on `Profile::behaviour`, outside `ConnectionConfig`, so changing it
+  re-reads over the open session (`Workspace::set_behaviour`) and never
+  reconnects. The one rule governs the connection's own catalog, every other
+  database's and Refresh. A skipped routines read lands `Routines::Skipped`,
+  which is not an error: no notice is written, and a restored routine tab
+  stays pending as it does for `Failed`. A slug this build cannot read reads
+  as `sizes`, costing that one field.
 - **New Query Here opens a tab bound to a database** (`QueryTab::binding`,
   `session::Binding`), from the connections tree's menu. A database row binds
   that database; a schema row binds by its connection's levels
@@ -294,6 +327,55 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   a connection of its own, on threads the scheduler does not own, so a test
   that runs more than one statement calls `cx.executor().allow_parking()`
   first. Focus moves that wait for the next frame need `settle`.
+- **Per-profile timers are one-shot tasks on the profile**
+  (`src/workspace/timers.rs`). Keep-alive is the first: `Profile.keep_alive_task`
+  holds a `background_executor().timer`, replaced to re-arm and dropped to
+  cancel, and it is re-armed after each round lands rather than repeating. It
+  is off unless the profile sets `keep_alive_seconds` (10 to 3600; the form refuses
+  outside it and a stored value outside it restores as off), so a
+  profile that never asked arms nothing. A round pings every session in
+  `Profile::sessions_to_ping` (its own and each one open for another database)
+  through `spawn_blocking`, each by `try_lock`, so a session a statement holds
+  is skipped and never waited on; it is skipped whole while
+  `Profile::any_transaction_open` holds; and a failed
+  ping stops the keep-alive until the next connect without a word, the lost
+  session being found on its next use. Only engines with `EngineSpec.keeps_alive`
+  are pinged (Postgres, MySQL, MariaDB, SQL Server, Redis); each ping is
+  `try_lock`, leaves a session never logged in or dialled alone, and a Redis
+  session with a `MULTI` open too, where a `PING` would be queued. A ping writes no profile field: it is not
+  the user's activity. In the e2e harness `run_until_parked` does not jump to
+  timers but `advance_clock` fires them, and a test that then blocks on a
+  future must drop an armed timer first (`set_behaviour` with `keep_alive:
+  None`), because the scheduler jumps to the next timer when it would park.
+  `advance_clock` also runs every task that is ready, so a test that needs a
+  call still in flight when a timer fires holds it open on something that
+  only the clock or the test releases, never on the scheduler's order.
+  The idle close (`idle_timeout_minutes`, 1 to 1440 by the same rule,
+  `Profile.idle_task`) is the second:
+  it shares `disconnect`'s state change (`close_sessions`) but keeps the tabs,
+  the buffers and the profile's place in front. Idle time counts from `Profile.last_activity`, read from
+  `background_executor().now()` so `advance_clock` moves it, and only the user's
+  own work moves it (`mark_activity`: a statement's start and landing in
+  `execute_unchecked`, `run_routed`, the catalog reads, a connect landing);
+  keep-alive pings never do. The timer sleeps to the deadline
+  and checks it then, so use moves it with no re-arm per event, and the deadline
+  closes only a connected profile: one whose session was lost keeps its failure
+  and drops the timer, as `keep_alive_due` does. The deadline
+  passing does not close a profile that has work unfinished, front or not
+  (`idle_blocked`): a transaction, a bound session's transaction, a running
+  statement, a queue awaiting or holding statements, an import into it, an
+  export from it, a grid with unapplied edits (`unapplied_edits_of`, of that
+  profile, not the front-only helper). A
+  blocked profile waits a whole timeout more, counted from then: re-arming
+  from `last_activity` would be a wait already over and fire at once, for ever.
+  An idle-closed profile comes back by use: a plain Run in its query tab is
+  parked on `runs_on_connect` and `begin_connect` starts, the landing's
+  `run_waiting_files` then hands the statement to `execute_sql`, so the mode
+  gate judges it when it runs; a connect that fails drops it and the text stays
+  in its tab. A relation tab visited on it (`load_relation`) and a tree expand
+  connect it too, and the status bar offers Reconnect as it does for a failed
+  connection. An explain, a refresh or an edit's read-back is not parked: on an
+  idle profile it fails with `The connection is not open.`.
 - **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
   holds focus, and `left`/`right`/`tab` step a ring across its buttons and
   then its one other control, the "Don't ask again" box (`enter` or `space`
@@ -430,7 +512,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   no `$out` or `$merge`. And only while `Profile::in_turn` is `None`: what the
   user's statements left on the session (`sql::leaves`) -- a transaction
   still open (`in_transaction`, opened by `BEGIN`, ended by `COMMIT` or
-  `ROLLBACK`, read off what was sent rather than asked of the server), or a
+  `ROLLBACK`, read off what was sent rather than asked of the server; an end
+  is marked only once it lands, and not at all when a Cancel dropped it
+  unsent, `Profile::end_landed`), or a
   `SET`, `USE`, temporary table or one of those session calls
   (`session_changed`, until the next connect)
   -- which a fresh connection would not see. A read, a `SHOW`, an `EXPLAIN`,

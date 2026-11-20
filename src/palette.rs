@@ -57,8 +57,8 @@ use crate::{
         routine_name,
     },
     sidebar::{
-        ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, node_actions,
-        selection_header,
+        ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, connection_row,
+        count_label, node_actions, selection_header,
     },
     sql,
     store::{HistoryEntry, StoredProject},
@@ -299,8 +299,10 @@ impl Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     /// A schema's ER diagram, by name, showing the neighbourhood of `centre`
-    /// where one is named.
+    /// where one is named. The schema is `database`'s, the connection's own
+    /// where none is named.
     ShowDiagram {
+        database: Option<String>,
         schema: String,
         centre: Option<String>,
     },
@@ -428,6 +430,8 @@ pub enum Command {
     ImportTheme(user::Source, usize, Option<Appearance>),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
+    /// Open the filter picker over the front connection's databases.
+    FilterDatabases,
     SetDatabase(String),
     /// Put the palette back up over the catalog's schemas.
     SelectSchema,
@@ -1528,6 +1532,15 @@ impl Palette {
         self.items
             .iter()
             .map(|item| (item.label.as_str(), item.detail.as_deref()))
+            .collect()
+    }
+
+    /// Each row's label with the hint drawn at its end, empty where it has none.
+    #[cfg(test)]
+    pub fn labels_with_hints(&self) -> Vec<(&str, &str)> {
+        self.items
+            .iter()
+            .map(|item| (item.label.as_str(), item.hint.as_ref()))
             .collect()
     }
 
@@ -3965,6 +3978,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 &format!("Show {} in diagram", tab.name),
                 icon::DIAGRAM,
                 Command::ShowDiagram {
+                    database: tab.database.clone(),
                     schema: tab.schema.clone(),
                     centre: Some(tab.name.clone()),
                 },
@@ -4027,21 +4041,24 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 }),
         );
     } else if let Some(node) = workspace.selected_node(cx)
-        && let Some(target) = workspace
+        && let Some((target, filterable)) = workspace
             .profiles
             .iter()
             .find(|found| found.id == node.profile)
-            .map(|found| found.config.target())
+            .map(|found| (found.config.target(), found.offers_filter()))
     {
         items.extend(
             node_actions(node.kind, &node.name, target)
                 .into_iter()
+                .filter(|action| filterable || *action != NodeAction::FilterDatabases)
                 .map(|action| {
                     let icon = match action {
                         NodeAction::NewQueryHere => icon::PLUS,
                         NodeAction::CopyName(_) => icon::COPY,
                         NodeAction::ShowDdl => icon::STRUCTURE,
+                        NodeAction::ShowGrants => icon::SHIELD,
                         NodeAction::Refresh => icon::REFRESH,
+                        NodeAction::FilterDatabases => icon::DATABASE,
                     };
                     command(
                         action.label(),
@@ -4548,6 +4565,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                         &format!("Show diagram of {schema}"),
                         icon::DIAGRAM,
                         Command::ShowDiagram {
+                            database: None,
                             schema,
                             centre: None,
                         },
@@ -4555,6 +4573,30 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     )
                 }),
         );
+    }
+    // Offered where there are databases to choose between, and omitted rather
+    // than disabled where there are none.
+    if profile.offers_filter() {
+        // The count the tree draws, from what it already holds: simple mode
+        // has no count slot and shows none.
+        let row = connection_row(&profile.id);
+        let counted = (workspace.view_mode() == ViewMode::Complex)
+            .then(|| {
+                let shown = workspace.connections.counts.get(&row)?;
+                let total = workspace.connections.totals.get(&row)?;
+                Some(count_label(*shown, Some(*total)))
+            })
+            .flatten();
+        let item = command(
+            "Filter databases…",
+            icon::DATABASE,
+            Command::FilterDatabases,
+            CONNECTION,
+        );
+        items.push(match counted {
+            Some(count) => item.hint(count),
+            None => item,
+        });
     }
     if profile.config.target().picks_schema() {
         items.push(command(

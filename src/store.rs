@@ -166,6 +166,52 @@ pub struct StoredProfile {
     /// order they were picked. Same rules as `open_rows`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_rows: Vec<String>,
+    /// The databases of the server this profile shows: exact names or `*`/`?`
+    /// globs, case ignored. Empty shows every database. A scalar array, so it
+    /// comes before `ssh`. Left out when empty, which is every profile written
+    /// before the filter existed; a build without the key drops it on its next
+    /// save, and the profile then shows everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_databases: Vec<String>,
+    /// The schemas this profile shows, by the same rules as `include_databases`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_schemas: Vec<String>,
+    /// The slug of the connect-time loads this profile runs; absent is every
+    /// load, which is every profile written before the setting existed. A slug
+    /// this build cannot read reads as every load, so a newer build's value
+    /// costs this one field and nothing else. A scalar, so it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_depth: Option<String>,
+    /// User SQL run on connect and on every session beside it, gated first.
+    /// Plain text like the query history, not a secret store; a hand-edited
+    /// one is judged at every connect, never trusted from disk. A scalar, so
+    /// it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_script: Option<String>,
+    /// Seconds between pings of the sessions this profile holds open, so an
+    /// idle cut-off between here and the server does not close them. Absent is
+    /// off, which is every profile written before the setting existed; a value
+    /// under 10, or on an engine that keeps no session, reads as off. A scalar,
+    /// so it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive_seconds: Option<u32>,
+    /// Whole minutes without use after which this profile closes its
+    /// sessions. Absent is off, which is every profile written
+    /// before the setting existed; 0 reads as off. The unit is in the name so a
+    /// later change of unit is a rename. A scalar, so it comes before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_minutes: Option<u32>,
+    /// The session time zone this profile connects with: a name or an offset,
+    /// checked when read. Absent leaves the server's own. A scalar, so it comes
+    /// before `ssh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    /// The driver settings this profile sets, allow-listed per engine when
+    /// read. An inline array of pairs, never a table, so it stays before
+    /// `ssh`. Left out when empty, which is every profile written before the
+    /// setting existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub driver_properties: Vec<(String, String)>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -3485,6 +3531,14 @@ user = "shayan"
                 ssm: None,
                 open_rows: Vec::new(),
                 selected_rows: Vec::new(),
+                include_databases: Vec::new(),
+                include_schemas: Vec::new(),
+                introspection_depth: None,
+                startup_script: None,
+                keep_alive_seconds: None,
+                idle_timeout_minutes: None,
+                time_zone: None,
+                driver_properties: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
                 open_objects: Vec::new(),
@@ -3546,6 +3600,14 @@ user = "shayan"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -3695,6 +3757,14 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -3762,6 +3832,262 @@ open_objects = []
             !golden.contains("open_rows"),
             "the fixtures hold neither key"
         );
+    }
+
+    #[test]
+    fn the_include_lists_round_trip_before_ssh_and_an_old_file_reads_unfiltered() {
+        let mut profile = a_stored_profile();
+        profile.include_databases = vec!["app*".into(), "Billing".into()];
+        profile.include_schemas = vec!["public".into(), "tenant_?".into()];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let databases = text
+            .find("include_databases")
+            .expect("the database list is written");
+        let schemas = text.find("include_schemas").expect("so is the schema list");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            databases < tunnel && schemas < tunnel,
+            "TOML cannot emit a scalar after a table, so both come before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(
+            decoded.profiles[0].include_databases,
+            profile.include_databases
+        );
+        assert_eq!(decoded.profiles[0].include_schemas, profile.include_schemas);
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("include_databases") && !bare.contains("include_schemas"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].include_databases.is_empty());
+        assert!(old.profiles[0].include_schemas.is_empty());
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(
+            !golden.contains("include_databases") && !golden.contains("include_schemas"),
+            "the fixtures hold neither key"
+        );
+    }
+
+    #[test]
+    fn the_introspection_depth_round_trips_before_ssh_and_an_unknown_slug_reads_as_sizes() {
+        use crate::session::Depth;
+        let mut profile = a_stored_profile();
+        profile.introspection_depth = Some("relations".into());
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let depth = text
+            .find("introspection_depth = \"relations\"")
+            .expect("the depth is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            depth < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(
+            decoded.profiles[0].introspection_depth,
+            profile.introspection_depth
+        );
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("introspection_depth"),
+            "a profile at the default is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert_eq!(old.profiles[0].introspection_depth, None);
+
+        // A slug a newer build wrote costs this one field and nothing else.
+        let newer = text.replace("\"relations\"", "\"everything\"");
+        let decoded = decode_profiles(&newer, &[]).expect("the profile still loads");
+        assert_eq!(decoded.profiles[0].name, "Dev");
+        let read = decoded.profiles[0]
+            .introspection_depth
+            .as_deref()
+            .and_then(Depth::from_slug);
+        assert_eq!(read.unwrap_or_default(), Depth::Sizes);
+
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(
+            !golden.contains("introspection_depth"),
+            "the fixtures hold no such key"
+        );
+    }
+
+    #[test]
+    fn the_startup_script_round_trips_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.startup_script =
+            Some("SET search_path TO app, public;\nSET TIME ZONE 'UTC';".into());
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let script = text.find("startup_script").expect("the script is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            script < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(
+            decoded.profiles[0].startup_script, profile.startup_script,
+            "a script comes back byte for byte"
+        );
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("startup_script"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("startup_script"));
+    }
+
+    #[test]
+    fn the_keep_alive_round_trips_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.keep_alive_seconds = Some(120);
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let at = text
+            .find("keep_alive_seconds = 120")
+            .expect("it is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            at < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].keep_alive_seconds, Some(120));
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("keep_alive"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("keep_alive"));
+    }
+
+    #[test]
+    fn the_idle_timeout_round_trips_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.idle_timeout_minutes = Some(30);
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let at = text
+            .find("idle_timeout_minutes = 30")
+            .expect("it is written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            at < tunnel,
+            "TOML cannot emit a scalar after a table, so it comes before `ssh`:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].idle_timeout_minutes, Some(30));
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("idle_timeout"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("idle_timeout"));
+    }
+
+    #[test]
+    fn the_time_zone_and_driver_properties_round_trip_before_ssh() {
+        let mut profile = a_stored_profile();
+        profile.time_zone = Some("Europe/Paris".into());
+        profile.driver_properties = vec![
+            ("application_name".into(), "billing".into()),
+            ("connect_timeout".into(), "5".into()),
+        ];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let tunnel = text.find("[profiles.ssh]").expect("the tunnel is written");
+        for key in ["time_zone = ", "driver_properties = "] {
+            let at = text.find(key).expect("the key is written");
+            assert!(
+                at < tunnel,
+                "TOML cannot emit a scalar after a table, so {key} comes before `ssh`:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("driver_properties = [") && !text.contains("[profiles.driver_properties"),
+            "an inline array of pairs, never a table:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].time_zone, profile.time_zone);
+        assert_eq!(
+            decoded.profiles[0].driver_properties,
+            profile.driver_properties
+        );
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("time_zone") && !bare.contains("driver_properties"),
+            "a profile with neither is written as it always was:\n{bare}"
+        );
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert_eq!(resaved(include_str!("testdata/every-engine.toml")), golden);
+        assert!(!golden.contains("time_zone") && !golden.contains("driver_properties"));
     }
 
     #[test]
@@ -4319,6 +4645,14 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4407,6 +4741,14 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4481,6 +4823,14 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: Vec::new(),
@@ -4601,6 +4951,14 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![StoredObject {
@@ -4749,6 +5107,14 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     selected_rows: Vec::new(),
+                    include_databases: Vec::new(),
+                    include_schemas: Vec::new(),
+                    introspection_depth: None,
+                    startup_script: None,
+                    keep_alive_seconds: None,
+                    idle_timeout_minutes: None,
+                    time_zone: None,
+                    driver_properties: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -4790,6 +5156,14 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     selected_rows: Vec::new(),
+                    include_databases: Vec::new(),
+                    include_schemas: Vec::new(),
+                    introspection_depth: None,
+                    startup_script: None,
+                    keep_alive_seconds: None,
+                    idle_timeout_minutes: None,
+                    time_zone: None,
+                    driver_properties: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
                     open_objects: Vec::new(),
@@ -5613,6 +5987,14 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
@@ -6234,6 +6616,14 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![
@@ -6364,6 +6754,14 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            include_databases: Vec::new(),
+            include_schemas: Vec::new(),
+            introspection_depth: None,
+            startup_script: None,
+            keep_alive_seconds: None,
+            idle_timeout_minutes: None,
+            time_zone: None,
+            driver_properties: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
             open_objects: vec![object],

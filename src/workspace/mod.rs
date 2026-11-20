@@ -12,9 +12,11 @@ mod editing;
 mod exports;
 use exports::ExportMenu;
 mod files;
+mod filter_picker;
 mod filters;
 mod folders;
 mod forms;
+mod grants_dialog;
 mod import_dialog;
 mod import_rows;
 mod modes;
@@ -25,6 +27,9 @@ mod queries;
 mod sidebar;
 mod stable_import;
 mod tabs;
+mod timers;
+mod transactions;
+mod users;
 mod welcome;
 
 use std::collections::{HashMap, HashSet};
@@ -37,6 +42,7 @@ pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
+pub(crate) use users::{GrantsOf, GrantsView, RoleForm, RoleFormKind};
 
 use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
@@ -263,6 +269,13 @@ pub(crate) struct Workspace {
     /// nothing can be counted.
     #[cfg(test)]
     pub(crate) size_reads: usize,
+    /// How many routine reads were started, counted as `size_reads` is.
+    #[cfg(test)]
+    pub(crate) routine_reads: usize,
+    /// How many keep-alive rounds pinged, which run on the blocking pool where
+    /// nothing can be counted.
+    #[cfg(test)]
+    pub(crate) pings: usize,
     /// Profiles on an engine this build cannot open, held as they were read
     /// and written back by `remember_profiles`; never restored.
     pub(crate) unavailable: Vec<store::UnavailableProfile>,
@@ -413,6 +426,18 @@ pub(crate) struct Workspace {
     /// Numbers each Show DDL read, so an answer that comes back after the
     /// dialog was closed, or put up for another object, is not drawn.
     pub(crate) last_ddl_request: u64,
+    /// The filter picker: one connection's include list being edited. Only a
+    /// connection node's Filter Databases and the palette's command open it,
+    /// and only its own Save Filter, Discard Changes and `escape` end it.
+    pub(crate) filter_picker: Option<filter_picker::FilterPicker>,
+    /// Numbers each picker open, so a listing that lands after the dialog
+    /// closed, or after another went up, is not applied.
+    pub(crate) last_filter_request: u64,
+    /// The New User, New Role, Edit or Reset Password dialog.
+    pub(crate) role_form: Option<RoleForm>,
+    /// The Show Grants dialog.
+    pub(crate) grants_view: Option<GrantsView>,
+    pub(crate) last_grants_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -591,6 +616,11 @@ impl Workspace {
             theme_before_preview: None,
             ddl_view: None,
             last_ddl_request: 0,
+            filter_picker: None,
+            last_filter_request: 0,
+            role_form: None,
+            grants_view: None,
+            last_grants_request: 0,
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -598,6 +628,10 @@ impl Workspace {
             opened: Vec::new(),
             #[cfg(test)]
             size_reads: 0,
+            #[cfg(test)]
+            routine_reads: 0,
+            #[cfg(test)]
+            pings: 0,
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
             connections: sidebar::ConnectionsSidebar::new(window, cx),
@@ -1770,7 +1804,7 @@ impl Render for Workspace {
                     // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
+                    Some(ObjectBody::Routine(_) | ObjectBody::Users { .. }) | None => Focus::Window,
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -1937,6 +1971,7 @@ impl Render for Workspace {
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
+        let idle = matches!(profile.state, ProfileState::Idle);
         let status = match &profile.state {
             ProfileState::Idle => "Connection is idle.".to_string(),
             ProfileState::Connecting { .. } => {
@@ -2007,6 +2042,7 @@ impl Render for Workspace {
         let view_sorting = views::render_view_sorting(profile, cx);
         let edit_mode = views::render_edit_mode(profile, cx);
         let apply_label = views::apply_label(views::view_edit_mode(profile));
+        let transaction = views::render_transaction(profile, cx);
         let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
@@ -2207,10 +2243,11 @@ impl Render for Workspace {
                     .text_color(if failed { t.danger } else { t.text_muted })
                     .child(status),
             )
-            .when(failed, |group| {
+            .when(failed || idle, |group| {
                 group.child(
                     div()
                         .flex_shrink_0()
+                        .debug_selector(|| "reconnect-button".into())
                         .child(ui::reconnect_button("reconnect", t)),
                 )
             });
@@ -2277,6 +2314,7 @@ impl Render for Workspace {
             || paging.is_some()
             || view_sorting.is_some()
             || edit_mode.is_some()
+            || transaction.is_some()
             || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
@@ -2331,6 +2369,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
+                        .children(transaction)
                         .children(view_sorting)
                         .children(hidden_columns)
                         .children(left_stats.map(|stats| {
@@ -2683,6 +2722,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_mode))
+            .on_action(cx.listener(Self::toggle_auto_commit))
+            .on_action(cx.listener(Self::commit_transaction))
+            .on_action(cx.listener(Self::rollback_transaction))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
@@ -2824,10 +2866,14 @@ impl Render for Workspace {
             .children(self.dialog_layer(
                 [
                     ("show-ddl", self.render_show_ddl(cx)),
+                    ("filter-picker", self.render_filter_picker(window, cx)),
+                    ("show-grants", self.render_show_grants(cx)),
+                    ("role-form", self.render_role_form(cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
+                    ("end-transaction", self.render_end_transaction(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),

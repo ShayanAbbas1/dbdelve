@@ -240,6 +240,17 @@ impl Workspace {
         ) {
             return;
         }
+        // An idle-closed profile stays in front with its tabs, so visiting one
+        // is its reconnect; the landing's `reload_front_object` loads this tab.
+        if let Some(index) = self.active
+            && matches!(
+                self.profiles.get(index).map(|profile| &profile.state),
+                Some(ProfileState::Idle)
+            )
+        {
+            self.begin_connect(index, cx);
+            return;
+        }
         let (schema, relation) = (tab.schema.clone(), tab.name.clone());
         let (query, stale, sent) = match &tab.body {
             ObjectBody::Relation {
@@ -260,6 +271,10 @@ impl Workspace {
             }
             ObjectBody::Diagram { .. } => {
                 self.load_diagram(id, cx);
+                return;
+            }
+            ObjectBody::Users { .. } => {
+                self.show_users(cx);
                 return;
             }
             ObjectBody::Routine(_) => return,
@@ -318,7 +333,8 @@ impl Workspace {
                     } => Some((filter.clone(), sort.clone(), *limit, *offset)),
                     ObjectBody::Routine(_)
                     | ObjectBody::Structure { .. }
-                    | ObjectBody::Diagram { .. } => None,
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => None,
                 }
             })
         else {
@@ -742,6 +758,14 @@ impl Workspace {
                     _ => {}
                 }
             }
+            NodeAction::ShowGrants => {
+                let kind = match node.kind {
+                    NodeKind::Relation(kind) => relation_kind_label(kind),
+                    NodeKind::Sequence => "sequence",
+                    _ => return,
+                };
+                self.show_object_grants(node, kind, window, cx);
+            }
             NodeAction::NewQueryHere => {
                 if !self.make_front(&node.profile, cx) {
                     return;
@@ -778,6 +802,11 @@ impl Workspace {
                 match self.elsewhere(node.database.clone()) {
                     Some(database) => self.reload_database(&node.profile, database, cx),
                     None => self.refresh_schema(cx),
+                }
+            }
+            NodeAction::FilterDatabases => {
+                if self.make_front(&node.profile, cx) {
+                    self.open_filter_picker(&node.profile, window, cx);
                 }
             }
         }
@@ -937,7 +966,11 @@ impl Workspace {
     /// `id`, in front or not, by id and generation, with how to reach it.
     /// Another database's is its session, which a read with none open opens
     /// first.
-    fn route_in(&self, id: &str, database: Option<String>) -> Option<(String, u64, Routed)> {
+    pub(super) fn route_in(
+        &self,
+        id: &str,
+        database: Option<String>,
+    ) -> Option<(String, u64, Routed)> {
         let profile = self.profiles.iter().find(|found| found.id == id)?;
         let own = profile.active_database();
         let database = database.filter(|database| own.as_ref() != Some(database));
@@ -1423,7 +1456,9 @@ impl Workspace {
                             }
                             *structure = loaded(result);
                         }
-                        ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {}
+                        ObjectBody::Routine(_)
+                        | ObjectBody::Diagram { .. }
+                        | ObjectBody::Users { .. } => {}
                     }
                     let pages_by_key = profile.config.engine().pages_by_key();
                     cx.notify();
@@ -1475,6 +1510,8 @@ impl Workspace {
         };
         // The session already open, to take out if the read finds it lost.
         let bound = routed.bound();
+        // A tab's read of its own: the user is looking at it.
+        self.mark_activity(id, cx);
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
             let resolved = match opens {
@@ -2565,7 +2602,9 @@ impl Workspace {
         for (opened, active, database) in opened {
             let id = match opened {
                 Reopened::Object(opened) => self.open_object(opened, database, window, cx),
-                Reopened::Diagram(schema, view) => self.diagram_tab(schema, Some(view), window, cx),
+                Reopened::Diagram(schema, view) => {
+                    self.diagram_tab(database, schema, Some(view), window, cx)
+                }
             };
             if active {
                 restored_active = id;
@@ -2805,6 +2844,17 @@ fn loaded(result: Result<Structure, DbError>) -> StructureState {
     }
 }
 
+/// What Show Grants calls a relation of `kind` under its title.
+fn relation_kind_label(kind: RelationKind) -> &'static str {
+    match kind {
+        RelationKind::Table | RelationKind::PartitionedTable => "table",
+        RelationKind::View => "view",
+        RelationKind::MaterializedView => "materialized view",
+        RelationKind::ForeignTable => "foreign table",
+        RelationKind::Dictionary => "dictionary",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2924,6 +2974,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             routines,
         )
@@ -2951,6 +3002,22 @@ mod tests {
         );
         assert_eq!(opened.len(), 2);
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_routine_waits_while_the_depth_skips_the_routines() {
+        let pending = [stored("accounts", false), stored("digest()", true)];
+
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            &catalog_with(Routines::Skipped),
+            &pending,
+        );
+
+        assert_eq!(opened.len(), 1);
+        assert_eq!(name(&opened[0].0), "accounts");
+        assert_eq!(waiting, [stored("digest()", true)]);
     }
 
     #[test]

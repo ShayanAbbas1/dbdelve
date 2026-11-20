@@ -1218,6 +1218,111 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     }
 }
 
+/// The gate every role change DBDelve writes passes before it is shown for
+/// review: `CREATE ROLE` and `ALTER ROLE`, one or more, in the shapes
+/// `db::roles` writes and no other. A
+/// password is admitted only as a SCRAM verifier, so a statement that would
+/// carry one in the clear is refused here whoever wrote it. Never a
+/// superuser, a privilege on an object, or a change of anything else.
+pub fn is_generated_role_change(engine: Engine, sql: &str) -> bool {
+    let spec = &engine.spec().sql;
+    if engine.syntax() != Syntax::Sql || spec.parser_dialect != ParserDialect::PostgreSql {
+        return false;
+    }
+    let dialect = parser(spec.parser_dialect);
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    !statements.is_empty() && statements.iter().all(role_change)
+}
+
+/// Whether `text` is a SCRAM-SHA-256 verifier in full,
+/// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`. The server
+/// takes a string of any other shape, a prefix-alike included, as the password
+/// itself.
+fn is_scram_verifier(text: &str) -> bool {
+    let base64 = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    };
+    let Some(rest) = text.strip_prefix("SCRAM-SHA-256$") else {
+        return false;
+    };
+    let Some((head, keys)) = rest.split_once('$') else {
+        return false;
+    };
+    let (Some((iterations, salt)), Some((stored, server))) =
+        (head.split_once(':'), keys.split_once(':'))
+    else {
+        return false;
+    };
+    !iterations.is_empty()
+        && iterations.bytes().all(|b| b.is_ascii_digit())
+        && base64(salt)
+        && base64(stored)
+        && base64(server)
+}
+
+fn role_change(statement: &Statement) -> bool {
+    use sqlparser::ast::{AlterRoleOperation, CreateRole, Password, RoleOption};
+    let number = |expr: &Expr| matches!(expr, Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::Number(..)));
+    let string = |expr: &Expr| matches!(expr, Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::SingleQuotedString(_)));
+    let verifier = |password: &Password| match password {
+        Password::Password(Expr::Value(value)) => matches!(
+            &value.value,
+            sqlparser::ast::Value::SingleQuotedString(text) if is_scram_verifier(text)
+        ),
+        _ => false,
+    };
+    match statement {
+        Statement::CreateRole(CreateRole {
+            names,
+            if_not_exists: false,
+            login: Some(_),
+            inherit: None,
+            bypassrls: None,
+            password,
+            superuser: None,
+            create_db: None,
+            create_role: None,
+            replication: None,
+            connection_limit,
+            valid_until,
+            in_role: _,
+            in_group,
+            role,
+            user,
+            admin,
+            authorization_owner: None,
+        }) => {
+            names.len() == 1
+                && password.as_ref().is_none_or(verifier)
+                && connection_limit.as_ref().is_none_or(number)
+                && valid_until.as_ref().is_none_or(string)
+                && in_group.is_empty()
+                && role.is_empty()
+                && user.is_empty()
+                && admin.is_empty()
+        }
+        Statement::AlterRole {
+            operation: AlterRoleOperation::WithOptions { options },
+            ..
+        } => {
+            !options.is_empty()
+                && options.iter().all(|option| match option {
+                    RoleOption::ConnectionLimit(limit) => number(limit),
+                    RoleOption::ValidUntil(date) => string(date),
+                    RoleOption::Login(_) => true,
+                    RoleOption::Password(password) => verifier(password),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
 /// The statements of a write [`is_generated_write_on`] admits, each as its own
 /// text, the transaction bracket the gate sees through dropped: for a driver
 /// that brackets them in a transaction of its own rather than in text. Each
@@ -2816,12 +2921,32 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     }
 }
 
+/// [`update_batch`] for a session that already has a transaction of the
+/// user's open: no brackets of its own, so the batch runs inside that
+/// transaction and is committed or rolled back with it. Bracketed, its
+/// `COMMIT` would end the user's transaction, and on MySQL and MariaDB its
+/// `START TRANSACTION` would commit it first.
+pub(crate) fn update_batch_joining(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_statements(engine.spec(), rows, false),
+        _ => update_batch(engine, rows),
+    }
+}
+
 pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result<String, String> {
+    sql_statements(spec, rows, true)
+}
+
+fn sql_statements(spec: &EngineSpec, rows: &[PendingRow], bracket: bool) -> Result<String, String> {
     if rows.is_empty() {
         return Err(NO_EDITS.into());
     }
     let statements = update_statements(spec, rows).ok_or(NO_KEY)?;
-    Ok(bracketed(spec, statements.join("\n"), statements.len()))
+    let batch = statements.join("\n");
+    Ok(match bracket {
+        true => bracketed(spec, batch, statements.len()),
+        false => batch,
+    })
 }
 
 const NO_EDITS: &str = "There are no edits to apply.";
@@ -5065,6 +5190,48 @@ pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
         })
 }
 
+/// Whether `sql` ends a transaction somewhere in it. A submission can end the
+/// open transaction and open the next in one go (`COMMIT;` then `BEGIN;`), and
+/// [`Leaves`] only says where it lands.
+pub(crate) fn ends_transaction(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::Commit { .. }
+                    | Statement::Rollback {
+                        savepoint: None,
+                        ..
+                    }
+            )
+        })
+    })
+}
+
+/// What `sql` runs after the last statement that ends a transaction: all of
+/// it when none does or the text cannot be read, nothing when it ends on the
+/// end. What a submission leaves inside the transaction it opens, for a
+/// `COMMIT;` and `BEGIN;` sent as one is not part of the transaction after it.
+///
+/// Cut by [`Buffer::for_engine`], the same boundaries a run is cut at, with
+/// each piece read as [`ends_transaction`] reads a submission.
+pub(crate) fn after_last_end(engine: Engine, sql: &str) -> &str {
+    let buffer = Buffer::for_engine(engine, sql);
+    let statements = buffer.statements();
+    match statements
+        .iter()
+        .rposition(|range| ends_transaction(engine, &sql[range.clone()]))
+    {
+        Some(last) => statements
+            .get(last + 1)
+            .map_or("", |next| sql[next.start..].trim()),
+        None => sql,
+    }
+}
+
 impl Leaves {
     fn add(&mut self, statement: &Statement) {
         match statement {
@@ -5516,6 +5683,68 @@ pub(crate) fn gate_own_run(
     gate(verdict, mode, confirmed).filter(|stop| !(run_unreadable && *stop == Stop::RunOnce))
 }
 
+/// The statements of a profile's startup script, judged as the statements of
+/// any other submission are, or why the script may not run. Called at the
+/// form's save and again at every connect, under the profile's mode as it
+/// stands, so a script written under one mode and a profile since lowered
+/// does not run on trust.
+///
+/// All of it or none of it: every unit passes [`gate`] under `mode`, and the
+/// whole leaves no transaction open, which a session that replays the script
+/// on every connection it opens could not close. No dialog is raised -- a
+/// script has no one to ask -- so a statement the gate would stop at a
+/// confirmation fails the script the same way one it refuses does. A blank
+/// script is no script and returns no statements; one holding only comments
+/// is refused, as it was written to do something.
+///
+/// The messages say what the gate found and never repeat the script.
+pub(crate) fn startup_statements(
+    engine: Engine,
+    mode: Mode,
+    confirmed: &[Destructive],
+    script: &str,
+) -> Result<Vec<String>, String> {
+    if script.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let refused = |reason: String| format!("The startup script was not run: {reason}");
+    batch_counts(engine, script).map_err(refused)?;
+    let units: Vec<String> = queued_statements(engine, script, None)
+        .into_iter()
+        .map(|range| script[range].to_string())
+        .collect();
+    if units.is_empty() {
+        return Err("The startup script holds no statement.".into());
+    }
+    for unit in &units {
+        match gate(&classify(engine, unit), mode, confirmed) {
+            None => {}
+            Some(Stop::Upgrade(needed)) => {
+                return Err(refused(format!(
+                    "it holds a statement that needs {}, and this connection is {}.",
+                    needed.label(),
+                    mode.label()
+                )));
+            }
+            Some(Stop::Confirm(kind)) => {
+                return Err(refused(format!(
+                    "it holds a {} statement, which this connection asks about first.",
+                    kind.label()
+                )));
+            }
+            Some(Stop::RunOnce) => {
+                return Err(refused(
+                    "DBDelve could not read one of its statements.".into(),
+                ));
+            }
+        }
+    }
+    if leaves(engine, script).transaction == Some(true) || transaction_uncertain(engine, script) {
+        return Err(refused("it would leave a transaction open.".into()));
+    }
+    Ok(units)
+}
+
 /// `sql` laid out over several lines: the same tokens, indented. Refused when
 /// the buffer holds a dollar-quoted body, which this cannot reflow safely.
 ///
@@ -5785,6 +6014,124 @@ fn has_dollar_quote(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_role_gate_admits_what_db_roles_writes() {
+        use crate::db::roles::{NewRole, create_role, reset_password, set_login};
+        let pg = Engine::Postgres;
+        let create = create_role(&NewRole {
+            name: "ana".into(),
+            login: true,
+            password: Some("pw".into()),
+            connection_limit: Some(5),
+            password_expires: Some("2027-01-31".into()),
+            member_of: vec!["reporting".into()],
+        });
+        for sql in [
+            create.as_str(),
+            "CREATE ROLE app_rw NOLOGIN;",
+            &reset_password("ana", "pw"),
+            &set_login("ana", false),
+            "ALTER ROLE ana WITH CONNECTION LIMIT 3 VALID UNTIL 'infinity';",
+        ] {
+            assert!(is_generated_role_change(pg, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn the_role_gate_refuses_anything_else() {
+        let pg = Engine::Postgres;
+        for sql in [
+            "CREATE ROLE ana LOGIN PASSWORD 'in the clear';",
+            // Shaped like a verifier only at its start: the server would
+            // store it as the password.
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$hunter2';",
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5 :c2VydmVy';",
+            "CREATE ROLE ana LOGIN SUPERUSER;",
+            "CREATE ROLE ana;",
+            "ALTER ROLE ana SUPERUSER;",
+            "ALTER ROLE ana RENAME TO bo;",
+            // sqlparser cannot read a negative limit, so neither could the
+            // mode check: no limit is never written back.
+            "ALTER ROLE ana WITH CONNECTION LIMIT -1;",
+            "ALTER ROLE ana SET search_path = x;",
+            "GRANT SELECT ON t TO ana;",
+            "GRANT ALL ON t TO ana;",
+            // sqlparser cannot read a membership grant, so the mode check
+            // could not either: refused rather than run unread.
+            "GRANT reporting TO ana;",
+            "DROP ROLE ana;",
+            "CREATE ROLE ana NOLOGIN; DROP TABLE t;",
+            "",
+        ] {
+            assert!(!is_generated_role_change(pg, sql), "{sql}");
+        }
+        assert!(!is_generated_role_change(
+            Engine::MySql,
+            "CREATE ROLE app_rw NOLOGIN;"
+        ));
+    }
+
+    #[test]
+    fn every_engine_that_opens_a_transaction_spells_one_the_gate_reads() {
+        use crate::db::Engine;
+
+        for engine in Engine::ALL {
+            let Some(begin) = engine.begins_transaction() else {
+                continue;
+            };
+            // The buffer gets this text and the user may run it again, so it
+            // has to read back as a bracket rather than as a statement the
+            // gate cannot place.
+            assert!(is_transaction_bracket(begin), "{engine:?}: {begin}");
+            assert!(
+                is_transaction_bracket(&format!("{begin};")),
+                "{engine:?}: {begin};"
+            );
+            // Transaction control runs in every mode: asking for Read-write
+            // to end a transaction would teach people to live in Full.
+            assert_eq!(classify(engine, begin).mode, Mode::ReadOnly, "{engine:?}");
+            for verb in ["COMMIT", "ROLLBACK"] {
+                assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn opening_a_transaction_is_not_the_same_question_as_bracketing_a_batch() {
+        use crate::db::Engine;
+
+        // The one engine the two answer differently, and the reason
+        // `begins_transaction` exists at all: collapsing them into one method
+        // would stop Postgres ever opening a transaction.
+        assert_eq!(Engine::Postgres.transaction_start(), None);
+        assert_eq!(Engine::Postgres.begins_transaction(), Some("BEGIN"));
+
+        // Where neither has a transaction to offer, both say so.
+        for engine in [Engine::MongoDb, Engine::Redis] {
+            assert_eq!(engine.transaction_start(), None, "{engine:?}");
+            assert_eq!(engine.begins_transaction(), None, "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn ending_a_transaction_and_opening_the_next_leaves_one_open() {
+        use crate::db::Engine;
+
+        // What Commit sends while auto-commit is off. `leaves` reading the
+        // pair as closed would leave the switch saying "off" over a session
+        // that is autocommitting again.
+        for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
+            let begin = engine.begins_transaction().expect("opens one");
+            let sent = format!("COMMIT;\n\n{begin};");
+            assert_eq!(leaves(engine, &sent).transaction, Some(true), "{engine:?}");
+            assert_eq!(
+                leaves(engine, "COMMIT;").transaction,
+                Some(false),
+                "{engine:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_mode_cycle_runs_read_only_to_full_and_back() {
@@ -8782,6 +9129,26 @@ mod tests {
     }
 
     #[test]
+    fn only_a_batch_that_brackets_itself_ends_the_transaction_it_runs_in() {
+        let rows = vec![
+            pending_row(&[("name", set("a"))], &[("id", "1")]),
+            pending_row(&[("name", set("b"))], &[("id", "2")]),
+        ];
+        for (engine, brackets) in [
+            (Engine::MySql, true),
+            (Engine::MariaDb, true),
+            (Engine::Sqlite, true),
+            (Engine::SqlServer, true),
+            (Engine::Postgres, false),
+        ] {
+            let batch = update_batch(engine, &rows).unwrap();
+            assert_eq!(ends_transaction(engine, &batch), brackets, "{engine:?}");
+            let lone = update_batch(engine, &rows[..1]).unwrap();
+            assert!(!ends_transaction(engine, &lone), "{engine:?}: one row");
+        }
+    }
+
+    #[test]
     fn several_pending_rows_become_one_semicolon_joined_batch() {
         let rows = vec![
             pending_row(&[("name", set("Ada"))], &[("id", "1")]),
@@ -8825,6 +9192,30 @@ mod tests {
 
         let postgres = update_batch(Engine::Postgres, &rows).unwrap();
         assert!(!postgres.contains("BEGIN"), "{postgres}");
+    }
+
+    #[test]
+    fn a_batch_joining_an_open_transaction_carries_no_brackets_and_passes_the_gate() {
+        // Its own COMMIT would end the user's transaction, and MySQL's
+        // START TRANSACTION would commit it first.
+        let rows = vec![
+            pending_row(&[("name", set("Ada"))], &[("id", "1")]),
+            pending_row(&[("name", set("Bo"))], &[("id", "2")]),
+        ];
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::SqlServer,
+            Engine::Postgres,
+        ] {
+            let batch = update_batch_joining(engine, &rows).unwrap();
+            assert_eq!(batch.matches("UPDATE").count(), 2, "{engine:?} {batch}");
+            assert!(!ends_transaction(engine, &batch), "{engine:?} {batch}");
+            assert!(!batch.contains("BEGIN"), "{engine:?} {batch}");
+            assert!(!batch.contains("START TRANSACTION"), "{engine:?} {batch}");
+            assert!(is_generated_write_on(engine, &batch), "{engine:?} {batch}");
+        }
     }
 
     #[test]
@@ -11394,6 +11785,62 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_or_rollback_anywhere_in_a_submission_ends_its_transaction() {
+        for (engine, statement) in [
+            (Engine::Postgres, "COMMIT"),
+            (Engine::Postgres, "ROLLBACK"),
+            (Engine::Postgres, "COMMIT;\n\nBEGIN;"),
+            (Engine::Postgres, "ROLLBACK;\n\nBEGIN;"),
+            (Engine::MySql, "COMMIT;\n\nBEGIN;"),
+            (Engine::SqlServer, "COMMIT TRANSACTION"),
+        ] {
+            assert!(ends_transaction(engine, statement), "{statement}");
+        }
+        for (engine, statement) in [
+            (Engine::Postgres, "BEGIN"),
+            (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
+            (Engine::Postgres, "SELECT 1"),
+            (Engine::Postgres, "COMMIT\nselec 1"),
+            (Engine::Redis, "EXEC"),
+            (Engine::Snowflake, "COMMIT"),
+        ] {
+            let ended = ends_transaction(engine, statement);
+            // Snowflake's requests are stateless: no session holds a
+            // transaction there for a submission to end.
+            assert!(!ended, "{statement}");
+        }
+    }
+
+    #[test]
+    fn only_what_follows_the_last_end_belongs_to_the_next_transaction() {
+        for (engine, sql, rest) in [
+            (Engine::Postgres, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::Postgres, "ROLLBACK;\n\nBEGIN;", "BEGIN;"),
+            (Engine::MySql, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::MariaDb, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::Sqlite, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::DuckDb, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (
+                Engine::SqlServer,
+                "COMMIT;\n\nBEGIN TRANSACTION;",
+                "BEGIN TRANSACTION;",
+            ),
+            (
+                Engine::Postgres,
+                "INSERT INTO t VALUES (1); COMMIT; BEGIN; INSERT INTO t VALUES (2);",
+                "BEGIN; INSERT INTO t VALUES (2);",
+            ),
+            (Engine::Postgres, "COMMIT", ""),
+            (Engine::Postgres, "INSERT INTO t VALUES (1); COMMIT;", ""),
+            (Engine::Postgres, "BEGIN", "BEGIN"),
+            (Engine::Postgres, "SELECT 1; SELECT 2", "SELECT 1; SELECT 2"),
+            (Engine::Postgres, "selec 1", "selec 1"),
+        ] {
+            assert_eq!(after_last_end(engine, sql), rest, "{engine:?}: {sql}");
+        }
+    }
+
+    #[test]
     fn only_an_open_transaction_or_a_changed_session_is_left_behind() {
         let open = Leaves {
             transaction: Some(true),
@@ -11783,5 +12230,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A startup script is judged by the gate every statement is, one unit at
+    /// a time under the profile's mode, and refused whole: a refusal runs none
+    /// of it, and what it says never repeats the script.
+    #[test]
+    fn a_startup_script_is_gated_like_any_statement() {
+        let read_only =
+            |engine, script: &str| startup_statements(engine, Mode::ReadOnly, &[], script);
+        let full = |script: &str| startup_statements(Engine::Postgres, Mode::Full, &[], script);
+
+        assert_eq!(
+            read_only(Engine::Postgres, "SET search_path TO app, public"),
+            Ok(vec!["SET search_path TO app, public".to_string()])
+        );
+        let two = read_only(
+            Engine::Postgres,
+            "SET search_path TO a;\nSET search_path TO b",
+        )
+        .expect("two settings are two units");
+        assert_eq!(two.len(), 2);
+        assert!(
+            two[0].starts_with("SET search_path TO a") && two[1] == "SET search_path TO b",
+            "{two:?}"
+        );
+
+        assert_eq!(read_only(Engine::Postgres, "   \n"), Ok(vec![]));
+        for script in [
+            "-- nothing\n/* here */",
+            "SELEC nonsense ??",
+            "SET GLOBAL x = 1;;;;( ",
+        ] {
+            let refused = read_only(Engine::Postgres, script).expect_err(script);
+            assert!(refused.starts_with("The startup script"), "{refused}");
+        }
+        let write = read_only(Engine::MySql, "INSERT INTO secret_table VALUES (1)")
+            .expect_err("a write needs more");
+        assert!(write.starts_with("The startup script"), "{write}");
+        assert!(!write.contains("secret_table"), "{write}");
+
+        for script in ["BEGIN", "BEGIN; SET search_path TO app; COMMIT"] {
+            let refused = full(script).expect_err(script);
+            assert!(refused.starts_with("The startup script"), "{refused}");
+            assert!(refused.contains("transaction"), "{refused}");
+        }
+
+        let dropped = full("DROP TABLE secret_table").expect_err("a drop asks first");
+        assert!(dropped.starts_with("The startup script"), "{dropped}");
+        assert!(!dropped.contains("secret_table"), "{dropped}");
+        assert!(
+            startup_statements(
+                Engine::Postgres,
+                Mode::Full,
+                &[Destructive::Drop],
+                "DROP TABLE secret_table"
+            )
+            .is_ok()
+        );
+
+        // A mix is refused whole, the permitted statement included.
+        let mixed = read_only(
+            Engine::Postgres,
+            "SELECT 1;\nDELETE FROM secret_table WHERE id = 1",
+        )
+        .expect_err("a write is not a read");
+        assert!(mixed.starts_with("The startup script"), "{mixed}");
+        assert!(!mixed.contains("secret_table"), "{mixed}");
+
+        let counted = startup_statements(Engine::SqlServer, Mode::Full, &[], "SELECT 1;\nGO 2")
+            .expect_err("a counted GO repeats its batch");
+        assert!(counted.starts_with("The startup script"), "{counted}");
     }
 }

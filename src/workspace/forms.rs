@@ -8,6 +8,7 @@ use std::time::Duration;
 use gpui::{Animation, AnimationExt, Div, PathPromptOptions, StyledText, ease_out_quint};
 use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::input::Textarea;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
 use gpui_component::tooltip::Tooltip;
@@ -24,7 +25,7 @@ use crate::explorer::{
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
-use crate::session::PendingDelete;
+use crate::session::{Depth, PendingDelete};
 use crate::sidebar::{NodeAction, NodeKind, SelectedNode, SelectionAction, node_actions};
 use crate::sql::{Destructive, Stop};
 use crate::ui::{Status, code_lines, dot, raised_card, row_icon_tinted};
@@ -732,6 +733,86 @@ impl Workspace {
             }
         }
 
+        let mut session = Vec::new();
+        // The target decides, as it does for the rows above: a plugin's
+        // process and an engine with no session to set draw none.
+        if form.target().takes_time_zone() {
+            session.push(
+                ui::option_row(
+                    "Time zone",
+                    Some(
+                        "Applied as the session default on every session of this \
+                         connection. A name such as Europe/Paris or an offset such as \
+                         +02:00; blank leaves the server's own."
+                            .into(),
+                    ),
+                    div()
+                        .flex()
+                        .items_center()
+                        .w(px(layout::chrome(layout::FORM_TIMEOUT_WIDTH * 2.0)))
+                        .h(px(Control::Compact.height()))
+                        .px(px(layout::SPACE_SM))
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(t.border)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(gpui_component::Sizable::small(bare(&form.time_zone))),
+                        ),
+                    t,
+                )
+                .debug_selector(|| "form-time-zone".into())
+                .into_any_element(),
+            );
+        }
+        if form.target().takes_startup_script() {
+            session.push(
+                ui::stacked_option_row(
+                    "Startup script",
+                    Some(
+                        "Runs on every session DBDelve opens for this connection, checked \
+                         against its access mode first. Stored in profiles.toml as plain \
+                         text."
+                            .into(),
+                    ),
+                    div()
+                        .w_full()
+                        .child(Textarea::new(&form.startup_script).font_family(mono.clone())),
+                    t,
+                )
+                .into_any_element(),
+            );
+        }
+
+        let listed = form.target().driver_properties();
+        if !listed.is_empty() {
+            let keys = listed
+                .iter()
+                .map(|property| property.key())
+                .collect::<Vec<_>>()
+                .join(", ");
+            session.push(
+                ui::stacked_option_row(
+                    "Driver properties",
+                    Some(
+                        format!(
+                            "One key = value per line; only {keys} are taken. Applied to \
+                             every session of this connection."
+                        )
+                        .into(),
+                    ),
+                    div()
+                        .w_full()
+                        .child(Textarea::new(&form.properties).font_family(mono.clone())),
+                    t,
+                )
+                .debug_selector(|| "form-driver-properties".into())
+                .into_any_element(),
+            );
+        }
+
         let mut behaviour = Vec::new();
         // Only while creating: past that, `Workspace::set_mode` is the one
         // door a mode changes through, from the titlebar, and it pushes the
@@ -794,6 +875,66 @@ impl Workspace {
             )
             .into_any_element(),
         );
+        // Asked of the target, so the engines that keep a session open gain the
+        // row by turning the fact on, with no change here.
+        if form.target().keeps_alive() {
+            behaviour.push(
+                ui::option_row(
+                    "Keep-alive",
+                    Some(
+                        "Pings the connection's open sessions this often so an idle cut-off \
+                         between here and the server does not close them. Off when blank."
+                            .into(),
+                    ),
+                    seconds_field(&form.keep_alive, t),
+                    t,
+                )
+                .into_any_element(),
+            );
+        }
+        // Every engine's connection can be left unused, so every target draws it.
+        behaviour.push(
+            ui::option_row(
+                "Idle timeout",
+                Some(
+                    "Closes this connection's sessions after this long without use, never \
+                     while work is unfinished. Off when blank."
+                        .into(),
+                ),
+                number_field(&form.idle_timeout, "min", t),
+                t,
+            )
+            .into_any_element(),
+        );
+        // Every target's connect runs the loads this chooses among.
+        let depths = Depth::ALL.into_iter().enumerate().map(|(index, depth)| {
+            ui::segmented_choice(
+                ("introspection", index),
+                depth.label(),
+                depth == form.depth,
+                true,
+                t,
+            )
+            .on_click(cx.listener(move |workspace, _, _, cx| {
+                if let Some(form) = &mut workspace.form {
+                    form.depth = depth;
+                    cx.notify();
+                }
+            }))
+        });
+        behaviour.push(
+            ui::option_row(
+                "Introspection",
+                Some(
+                    "What a connect reads before the tree is drawn: relations always, then \
+                     routines and sequences, then table sizes while Show sizes is on."
+                        .into(),
+                ),
+                ui::segmented(t).children(depths),
+                t,
+            )
+            .into_any_element(),
+        );
 
         let section = |label: &'static str, rows: Vec<AnyElement>| {
             div()
@@ -816,6 +957,9 @@ impl Workspace {
             .child(section("Connection", connection))
             .when(!security.is_empty(), |body| {
                 body.child(section("Security", security))
+            })
+            .when(!session.is_empty(), |body| {
+                body.child(section("Session", session))
             })
             .child(section("Behaviour", behaviour))
     }
@@ -1227,9 +1371,12 @@ impl Workspace {
             self.focus_before_dialog.replace(window.focused(cx));
         }
         if raised {
-            // Every dialog opens on its primary button, as a native one does.
-            // The ring is drawn by the dialogs above, before this ran.
-            self.dialog_choice.set(0);
+            // Every dialog opens on its primary button, as a native one does,
+            // except the one that ends the user's transaction: it opens on
+            // Cancel, so an `enter` held or repeated from the click that
+            // raised it cancels rather than commits or discards. The ring is
+            // drawn by the dialogs above, before this ran.
+            self.dialog_choice.set(first_choice(front));
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
         // The palette is stacked over the dialogs and holds the keyboard
@@ -1315,7 +1462,11 @@ impl Workspace {
                 if all { 3 } else { 2 }
             }
             Some("stable-import") => self.stable_import_buttons(),
-            Some("import-rows") | None => 0,
+            // Forms with fields and a list of their own, which Tab moves the
+            // keyboard through and whose buttons act through their own handlers.
+            Some("import-rows" | "filter-picker" | "role-form") | None => 0,
+            Some("show-grants") => 1,
+            Some("end-transaction") => 3,
             Some(_) => 2 + checkbox,
         }
     }
@@ -1450,6 +1601,9 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
+            ("end-transaction", 0) => self.end_transaction_for_auto("COMMIT", window, cx),
+            ("end-transaction", 1) => self.end_transaction_for_auto("ROLLBACK", window, cx),
+            ("end-transaction", _) => _ = self.cancel_auto_commit_prompt(cx),
             ("delete", 0) => match deleting {
                 Some(PendingDelete::Query(name)) => self.delete_saved_query(name, window, cx),
                 Some(PendingDelete::Folder(name, _)) => self.delete_folder(name, cx),
@@ -1460,6 +1614,9 @@ impl Workspace {
             ("apply-review", 0) if !running => self.run_apply_review(cx),
             ("apply-review", 1) => _ = self.close_apply_review(cx),
             ("show-ddl", 0) => _ = self.close_ddl_view(cx),
+            ("show-grants", _) => _ = self.close_grants_view(cx),
+            ("role-form", 0) => self.submit_role_form(window, cx),
+            ("role-form", _) => _ = self.close_role_form(cx),
             ("show-ddl", _) => self.copy_shown_ddl(cx),
             _ => {}
         }
@@ -1983,6 +2140,180 @@ impl Workspace {
                                             move |_, _, cx| {
                                                 _ = close_workspace.update(cx, |workspace, cx| {
                                                     workspace.close_ddl_view(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// What turning auto-commit back on asks while a transaction is open:
+    /// commit it, roll it back, or leave it, with the statements it has run
+    /// behind a toggle. Drawn only while the transaction is still open under
+    /// a switch still reading Manual, so one that ended under the prompt
+    /// draws nothing.
+    pub(crate) fn render_end_transaction(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = popup_theme(cx);
+        let profile = self.profile()?;
+        let prompt = profile.session.auto_commit_prompt.as_ref()?;
+        if !profile.in_transaction || profile.auto_commit {
+            return None;
+        }
+        let syntax = profile.config.engine().syntax();
+        let statements = &profile.transaction_statements;
+        let shown = prompt.statements_shown;
+        let highlight = cx.theme().highlight_theme.clone();
+        let code = fonts(cx).editor.clone();
+        let cancel = cx.entity().downgrade();
+        let rollback = cancel.clone();
+        let commit = cancel.clone();
+        let toggle = cancel.clone();
+
+        let list = shown.then(|| {
+            div()
+                .id("end-transaction-statement-list")
+                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                .overflow_y_scroll()
+                .p(px(layout::SPACE_SM))
+                .flex()
+                .flex_col()
+                .gap(px(layout::SPACE_SM))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .bg(t.surface)
+                .font_family(code)
+                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                .text_color(t.text)
+                .children(statements.iter().enumerate().map(|(i, statement)| {
+                    div()
+                        .debug_selector(move || format!("end-transaction-statement-{i}"))
+                        .children(
+                            code_lines(statement, syntax, &highlight)
+                                .into_iter()
+                                .map(|line| div().child(line)),
+                        )
+                }))
+        });
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, "Auto-commit"))
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(
+                                    "A transaction is open on this connection's own session. \
+                                     Turning auto-commit on ends it: commit what it ran, or \
+                                     roll it back.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("end-transaction-statements")
+                                .debug_selector(|| "end-transaction-statements".into())
+                                .flex()
+                                .items_center()
+                                .gap(px(layout::SPACE_XS))
+                                .cursor_pointer()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(row_icon(
+                                    t,
+                                    match shown {
+                                        true => icon::CHEVRON_DOWN,
+                                        false => icon::CHEVRON_RIGHT,
+                                    },
+                                ))
+                                .child(format!(
+                                    "Statements in this transaction ({})",
+                                    statements.len()
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    _ = toggle.update(cx, |workspace, cx| {
+                                        workspace.toggle_auto_commit_statements(cx);
+                                    });
+                                }),
+                        )
+                        .children(list)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    self.choice(
+                                        "end-transaction",
+                                        2,
+                                        button(
+                                            "cancel-end-transaction",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel.update(cx, |workspace, cx| {
+                                                    workspace.cancel_auto_commit_prompt(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                .child(
+                                    self.choice(
+                                        "end-transaction",
+                                        1,
+                                        button(
+                                            "rollback-end-transaction",
+                                            "Roll back",
+                                            Tone::Danger,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = rollback.update(cx, |workspace, cx| {
+                                                    workspace.end_transaction_for_auto(
+                                                        "ROLLBACK", window, cx,
+                                                    );
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                .child(
+                                    self.choice(
+                                        "end-transaction",
+                                        0,
+                                        button(
+                                            "commit-end-transaction",
+                                            "Commit",
+                                            Tone::Primary,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                _ = commit.update(cx, |workspace, cx| {
+                                                    workspace.end_transaction_for_auto(
+                                                        "COMMIT", window, cx,
+                                                    );
                                                 });
                                             },
                                         ),
@@ -2998,9 +3329,13 @@ impl Workspace {
         let message = match &profile.catalog {
             CatalogState::Loading => Some(("Loading database objects…".to_string(), t.text_muted)),
             CatalogState::Failed(message) => Some((message.clone(), t.danger)),
-            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => {
-                Some(("No database objects found.".to_string(), t.text_muted))
-            }
+            CatalogState::Loaded(catalog, _) if catalog.schemas.is_empty() => Some((
+                crate::sidebar::empty_catalog_line(
+                    profile.config.target().levels(),
+                    catalog.left_out,
+                ),
+                t.text_muted,
+            )),
             CatalogState::Loaded(..) => None,
         };
         let lists_schemas = matches!(
@@ -3472,8 +3807,8 @@ pub(super) fn explorer_menu(
         .database
         .clone()
         .filter(|database| profile.active_database().as_deref() != Some(database.as_str()));
-    // A diagram reads the connection's own database, so another one draws none.
-    let draws_diagrams = elsewhere.is_none() && profile.draws_diagrams();
+    // A diagram is of the row's database, read on a session of its own there.
+    let draws_diagrams = profile.draws_diagrams();
     let node = state.row_node(&row.profile, row.database.as_deref(), &row.id, row.leaf);
     let Some(leaf) = row.leaf else {
         let Some(node) = node else {
@@ -3483,12 +3818,12 @@ pub(super) fn explorer_menu(
         // First, where it was before the node actions came.
         if draws_diagrams && is_schema_row(&row.id) {
             let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
-            let schema = row.label.to_string();
+            let (schema, database) = (row.label.to_string(), row.database.clone());
             menu = menu.item(
                 PopupMenuItem::new("Show Diagram").on_click(move |_, window, cx| {
-                    let schema = schema.clone();
+                    let (schema, database) = (schema.clone(), database.clone());
                     on_profile(&workspace, &profile_id, cx, |workspace, cx| {
-                        workspace.open_diagram(schema, None, window, cx);
+                        workspace.open_diagram(database, schema, None, window, cx);
                     });
                 }),
             );
@@ -3572,17 +3907,18 @@ pub(super) fn explorer_menu(
     // tree hands over its own.
     let (export_workspace, export_names, export_profile) = (
         workspace.clone(),
-        (schema.clone(), relation.clone()),
+        (row.database.clone(), schema.clone(), relation.clone()),
         row.profile.clone(),
     );
     let exports = PopupMenu::build(window, cx, move |submenu, _, _| {
         let export = |label: &'static str, format: FileAs| {
             let (workspace, profile) = (export_workspace.clone(), export_profile.clone());
-            let (schema, relation) = export_names.clone();
+            let (database, schema, relation) = export_names.clone();
             PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                let (schema, relation) = (schema.clone(), relation.clone());
+                let (database, schema, relation) =
+                    (database.clone(), schema.clone(), relation.clone());
                 on_profile(&workspace, &profile, cx, |workspace, cx| {
-                    workspace.export_relation(format, schema, relation, cx);
+                    workspace.export_relation(format, database, schema, relation, cx);
                 });
             })
         };
@@ -3599,12 +3935,13 @@ pub(super) fn explorer_menu(
         .item(open("Open Structure", true));
     if draws_diagrams && super::drawn_in_diagrams(kind) {
         let (workspace, profile) = (workspace.clone(), row.profile.clone());
-        let (schema, relation) = (schema.clone(), relation.clone());
+        let (schema, relation, database) = (schema.clone(), relation.clone(), row.database.clone());
         menu = menu.item(
             PopupMenuItem::new("Show in Diagram").on_click(move |_, window, cx| {
-                let (schema, relation) = (schema.clone(), relation.clone());
+                let (schema, relation, database) =
+                    (schema.clone(), relation.clone(), database.clone());
                 on_profile(&workspace, &profile, cx, |workspace, cx| {
-                    workspace.open_diagram(schema, Some(relation), window, cx);
+                    workspace.open_diagram(database, schema, Some(relation), window, cx);
                 });
             }),
         );
@@ -3641,6 +3978,7 @@ pub(super) fn explorer_menu(
                             ddl_names.clone(),
                         );
                         let (show_workspace, show_node) = (workspace.clone(), node.clone());
+                        let (grants_workspace, grants_node) = (workspace.clone(), node.clone());
                         menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                             let (schema, relation) = names.clone();
                             let database = database.clone();
@@ -3648,21 +3986,34 @@ pub(super) fn explorer_menu(
                                 workspace.copy_ddl(database, schema, relation, kind, cx);
                             });
                         }))
-                        .item(
-                            PopupMenuItem::new(NodeAction::ShowDdl.label()).on_click(
+                        .item(PopupMenuItem::new(NodeAction::ShowDdl.label()).on_click(
+                            move |_, window, cx| {
+                                let node = show_node.clone();
+                                _ = show_workspace.update(cx, |workspace, cx| {
+                                    workspace.run_node_action(
+                                        &node,
+                                        NodeAction::ShowDdl,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            },
+                        ))
+                        .when(target.manages_roles(), |menu| {
+                            menu.item(PopupMenuItem::new(NodeAction::ShowGrants.label()).on_click(
                                 move |_, window, cx| {
-                                    let node = show_node.clone();
-                                    _ = show_workspace.update(cx, |workspace, cx| {
+                                    let node = grants_node.clone();
+                                    _ = grants_workspace.update(cx, |workspace, cx| {
                                         workspace.run_node_action(
                                             &node,
-                                            NodeAction::ShowDdl,
+                                            NodeAction::ShowGrants,
                                             window,
                                             cx,
                                         )
                                     });
                                 },
-                            ),
-                        )
+                            ))
+                        })
                     }
                 })
         });
@@ -4273,6 +4624,11 @@ fn nested_field_row(
 
 /// A small boxed field for a number of seconds, its unit after it.
 fn seconds_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
+    number_field(input, "s", t)
+}
+
+/// A small boxed field for a whole number of `unit`, the unit after it.
+fn number_field(input: &Entity<InputState>, unit: &'static str, t: Theme) -> gpui::Div {
     div()
         .flex()
         .items_center()
@@ -4293,7 +4649,7 @@ fn seconds_field(input: &Entity<InputState>, t: Theme) -> gpui::Div {
             div()
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                 .text_color(t.text_faint)
-                .child("s"),
+                .child(unit),
         )
 }
 
@@ -4406,6 +4762,18 @@ fn footer_status(
         )),
         (None, Some(ConnectionTest::Failed(message))) => Some((Status::Failed, one_line(message))),
         (None, None) => None,
+    }
+}
+
+/// The button the ring starts on when `dialog` goes up, counted from the right:
+/// Cancel for the one that ends the user's transaction, the primary for every
+/// other.
+fn first_choice(dialog: Option<&str>) -> usize {
+    match dialog {
+        // Commit and Roll back cannot be undone, so an `enter` held or
+        // repeated from the click that raised it opens nothing it should not.
+        Some("end-transaction") => 2,
+        _ => 0,
     }
 }
 

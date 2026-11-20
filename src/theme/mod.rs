@@ -129,6 +129,9 @@ pub mod layout {
     /// chord, and its list capped so a catalog of thousands scrolls rather than
     /// filling the window.
     pub const PALETTE_WIDTH: f32 = 640.0;
+    /// The filter picker: two checklists side by side, each wide enough for a
+    /// database name and its hint.
+    pub const FILTER_DIALOG_WIDTH: f32 = 640.0;
     pub const PALETTE_MAX_HEIGHT: f32 = 400.0;
     pub const PALETTE_MIN_HEIGHT: f32 = 120.0;
     /// What the card holds besides its list -- the field, the scopes and the
@@ -629,6 +632,17 @@ impl ConnectionColor {
         Oklch::new(lightness, chroma, hue).to_srgb()
     }
 
+    /// The hue as text: a status word in a pill, a count. Light on a dark
+    /// theme and deep on a light one, far enough from the planes to read at
+    /// 4.5:1 on them and on its own `fill` -- see
+    /// `an_inked_word_reads_on_its_own_pill_in_every_theme`.
+    pub fn ink(self, theme: Theme) -> Srgb {
+        match theme.appearance {
+            Appearance::Dark => self.at(INK_LIGHTNESS_DARK),
+            Appearance::Light => self.at(INK_LIGHTNESS_LIGHT),
+        }
+    }
+
     /// The swatch as something to put text on: a tint of the hue, not a block
     /// of it. The label keeps the normal text token over this rather than the
     /// hue, so the fill has to stay weak enough to read as chrome the colour
@@ -682,6 +696,8 @@ pub fn engine_brand(engine: Engine, theme: Theme, planes: &[Srgb]) -> Srgb {
 }
 
 const SWATCH_LIGHTNESS: f32 = 0.65;
+const INK_LIGHTNESS_DARK: f32 = 0.84;
+const INK_LIGHTNESS_LIGHT: f32 = 0.38;
 const BAND_LIGHTNESS_DARK: f32 = 0.35;
 const BAND_LIGHTNESS_LIGHT: f32 = 0.88;
 const GLASS_BAND_ALPHA: f32 = 0.40;
@@ -828,7 +844,7 @@ impl Theme {
     /// appearance (`starting_theme`), and both are opaque: a blurred window
     /// reads as noise among a desktop full of others, so glass is something to
     /// pick, not a start.
-    fn built_in() -> [Self; 29] {
+    pub(crate) fn built_in() -> [Self; 29] {
         [
             Self::black(),
             Self::dark(),
@@ -2433,6 +2449,28 @@ mod tests {
                     color.label()
                 );
                 check(t, "the pill's label", t.text, fill, AAA_TEXT);
+            }
+        }
+    }
+
+    #[test]
+    fn an_inked_word_reads_on_its_own_pill_in_every_theme() {
+        // Users and roles' status pills and report counts: the hue as text,
+        // on its own tint over the content plane and over chrome. Glass is
+        // left out: its planes are tints whose ground is the desktop.
+        for t in Theme::all().into_iter().filter(|t| !t.is_glass) {
+            for color in [
+                ConnectionColor::Green,
+                ConnectionColor::Gray,
+                ConnectionColor::Orange,
+                ConnectionColor::Blue,
+                ConnectionColor::Red,
+                ConnectionColor::Purple,
+            ] {
+                for plane in [t.bg, t.surface, t.panel] {
+                    let pill = color.fill().flatten(plane);
+                    check(t, "an inked word", color.ink(t), pill, AA_TEXT);
+                }
             }
         }
     }

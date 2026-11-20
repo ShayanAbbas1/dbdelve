@@ -286,6 +286,20 @@ fn catalog_database(levels: Levels, database: Option<&str>) -> Option<&str> {
     database.filter(|_| levels == Levels::DatabaseThenSchema)
 }
 
+/// What a catalog with no rows to list says: that none was found, or how many
+/// the filter hid. Both trees say it, so it is built once.
+pub(crate) fn empty_catalog_line(levels: Levels, left_out: usize) -> String {
+    if left_out == 0 {
+        return "No database objects found.".to_string();
+    }
+    let noun = match levels {
+        Levels::DatabaseThenSchema => "schema",
+        Levels::Flat | Levels::DatabaseIsSchema | Levels::DatabaseHoldsObjects => "database",
+    };
+    let plural = if left_out == 1 { "" } else { "s" };
+    format!("No database objects shown: the filter hides {left_out} {noun}{plural}.")
+}
+
 /// The id the tree gives `row`, one of the rows simple mode lists for the tab
 /// in front of a connection: an object's sits under the database where the
 /// connection has one, a saved query's under the connection.
@@ -336,6 +350,45 @@ pub(crate) struct Listed<'a> {
     /// them, with how much of each is known. Empty unless the shape draws
     /// databases over its schemas or objects.
     pub(crate) databases: Vec<(String, Content)>,
+    /// How many databases of its server the profile's filter left out of
+    /// `databases`.
+    pub(crate) databases_left_out: usize,
+    /// What is known of its server's logins and roles, where its target
+    /// manages them; `None` draws no Users and roles row.
+    pub(crate) roles: Option<RolesListing>,
+}
+
+/// How much of a server's roles is known: each by name, and whether it is a
+/// login (one that can log in, or was turned off) rather than a role.
+pub(crate) enum RolesListing {
+    /// Never asked: read when the row is first opened.
+    Unloaded,
+    Loading,
+    Failed(String),
+    Loaded(Vec<(String, bool)>),
+}
+
+/// What the Users and roles row is called, and the tab it opens.
+pub(crate) const USERS_AND_ROLES: &str = "Users and roles";
+
+/// A connection's Users and roles row.
+pub(crate) fn users_row(profile: &str) -> String {
+    format!("{}/users", connection_row(profile))
+}
+
+/// The Logins or the Roles row under it.
+pub(crate) fn role_group_row(profile: &str, logins: bool) -> String {
+    let group = if logins { "logins" } else { "roles" };
+    format!("{}/{group}", users_row(profile))
+}
+
+/// One login's or role's row, its name after its length.
+pub(crate) fn role_row(profile: &str, logins: bool, name: &str) -> String {
+    format!(
+        "{}/role:{}:{name}",
+        role_group_row(profile, logins),
+        name.len()
+    )
 }
 
 /// The databases of a server that are not `current`, the one the connection
@@ -361,6 +414,20 @@ pub(crate) enum Node {
     Database {
         profile: String,
         database: String,
+    },
+    /// A connection's Users and roles row, which opens its tab.
+    Users {
+        profile: String,
+    },
+    /// The Logins or the Roles row under it.
+    RoleGroup {
+        logins: bool,
+    },
+    /// One login or role.
+    Role {
+        profile: String,
+        name: String,
+        login: bool,
     },
     /// Says what happened to its connection, and is never acted on.
     Notice,
@@ -405,7 +472,10 @@ pub(crate) enum NodeAction {
     /// The name as the catalog lists it, so what is copied is what is read.
     CopyName(String),
     ShowDdl,
+    ShowGrants,
     Refresh,
+    /// Choose which of the server's databases the connection lists.
+    FilterDatabases,
 }
 
 /// What a node of `kind` named `name` offers, in the order its menu lists
@@ -414,14 +484,26 @@ pub(crate) enum NodeAction {
 pub(crate) fn node_actions(kind: NodeKind, name: &str, target: Target) -> Vec<NodeAction> {
     let copy = NodeAction::CopyName(name.to_string());
     match kind {
+        NodeKind::Connection if target.levels() != Levels::Flat => vec![
+            NodeAction::NewQueryHere,
+            copy,
+            NodeAction::Refresh,
+            NodeAction::FilterDatabases,
+        ],
         NodeKind::Connection | NodeKind::Database | NodeKind::Schema => {
             vec![NodeAction::NewQueryHere, copy, NodeAction::Refresh]
         }
         // A target with no definition to write out has none to show.
-        NodeKind::Relation(_) | NodeKind::Sequence if target.copies_ddl() => {
-            vec![copy, NodeAction::ShowDdl]
+        NodeKind::Relation(_) | NodeKind::Sequence => {
+            let mut actions = vec![copy];
+            if target.copies_ddl() {
+                actions.push(NodeAction::ShowDdl);
+            }
+            if target.manages_roles() {
+                actions.push(NodeAction::ShowGrants);
+            }
+            actions
         }
-        NodeKind::Relation(_) | NodeKind::Sequence => vec![copy],
         NodeKind::Routine => vec![copy, NodeAction::ShowDdl],
     }
 }
@@ -433,7 +515,9 @@ impl NodeAction {
             NodeAction::NewQueryHere => "New Query Here",
             NodeAction::CopyName(_) => "Copy Name",
             NodeAction::ShowDdl => "Show DDL",
+            NodeAction::ShowGrants => "Show Grants",
             NodeAction::Refresh => "Refresh",
+            NodeAction::FilterDatabases => "Filter Databases",
         }
     }
 }
@@ -683,6 +767,10 @@ pub(crate) struct SidebarTree {
     /// filter, and a tree that dropped them without a word would read as
     /// having searched them.
     pub(crate) unsearched: usize,
+    /// What a row's count is of, shown plus left out by a filter, recorded
+    /// only when something was left out and no search text is typed. A row
+    /// without one draws its bare count.
+    pub(crate) totals: HashMap<String, usize>,
     /// The connection and database rows built folded because nothing had
     /// loaded under them. Their closed state is the build's, not a fold anyone
     /// chose, so a stored open row is not overruled by it.
@@ -693,6 +781,15 @@ pub(crate) struct SidebarTree {
     /// The row each row left out under a pruned one hangs from. A row's
     /// ancestors cannot be read from its id, and a reveal has to open them.
     pub(crate) hidden: HashMap<String, String>,
+}
+
+/// What a row's count slot says: `count`, or `count of total` where a filter
+/// left some out.
+pub(crate) fn count_label(count: usize, total: Option<usize>) -> String {
+    match total {
+        Some(total) => format!("{count} of {total}"),
+        None => count.to_string(),
+    }
 }
 
 /// What a loaded schema or database with nothing in it says in its one row.
@@ -829,7 +926,14 @@ fn connection_item(
                 .builder
                 .name_matches(&database_row(connection.id, database), database)
         });
-    if search.filtering && !named && !has_rows && !database_named {
+    // Its Users and roles row is its own too, listed once its objects have
+    // loaded, and a role's name keeps the connection even where none of its
+    // objects match.
+    let users = match (&connection.content, connection.roles) {
+        (Content::Loaded(_), Some(roles)) => users_item(tree, connection.id, roles, folds, search),
+        _ => None,
+    };
+    if search.filtering && !named && !has_rows && !database_named && users.is_none() {
         return None;
     }
     tree.nodes.insert(
@@ -843,6 +947,9 @@ fn connection_item(
     // connection has none of.
     let counts_databases = connection.levels != Levels::Flat;
     let mut count = None;
+    // What the filter dropped from the catalog rows that sit on the
+    // connection itself: where they are databases, the databases it hides.
+    let mut catalog_left_out = 0;
     let others = connection.databases;
     let (open, children) = match connection.content {
         // Nothing has asked it to load, and nothing will until this row is
@@ -871,16 +978,24 @@ fn connection_item(
             if content.items.is_empty() && others.is_empty() && own_database.is_none() =>
         {
             count = counts_databases.then_some(0);
-            (
-                followed,
-                vec![notice(
+            // Where the schemas are the database's own, they are not what
+            // the connection counts.
+            if connection.levels != Levels::DatabaseThenSchema {
+                catalog_left_out = content.left_out;
+            }
+            // Kept only by a role, it has objects, just none the filter matches.
+            let mut children = match search.filtering && users.is_some() {
+                true => Vec::new(),
+                false => vec![notice(
                     tree,
                     connection.id,
                     None,
                     "notice",
-                    "No database objects found.",
+                    &empty_catalog_line(connection.levels, content.left_out),
                 )],
-            )
+            };
+            children.extend(users);
+            (search.filtering || followed, children)
         }
         Content::Loaded(content) => {
             let ExplorerTree {
@@ -888,6 +1003,7 @@ fn connection_item(
                 leaves,
                 highlights,
                 shortcuts,
+                left_out,
             } = content;
             let mut rows = Rows {
                 profile: connection.id,
@@ -926,6 +1042,9 @@ fn connection_item(
                             },
                         );
                         tree.counts.insert(row.clone(), under.len());
+                        if left_out > 0 && !search.filtering {
+                            tree.totals.insert(row.clone(), under.len() + left_out);
+                        }
                         let open = search.filtering || folds.get(&row).copied().unwrap_or(false);
                         let mut item = TreeItem::new(row.clone(), database.to_string());
                         item = match (under.is_empty(), open) {
@@ -941,6 +1060,7 @@ fn connection_item(
                 }
                 None => {
                     count = counts_databases.then_some(catalog.len());
+                    catalog_left_out = left_out;
                     children.extend(
                         catalog
                             .into_iter()
@@ -959,11 +1079,20 @@ fn connection_item(
             // Each database row is one more of what the connection counts.
             count = count.map(|count| count + others.len());
             children.extend(others);
+            children.extend(users);
             (search.filtering || followed, children)
         }
     };
     if let Some(count) = count {
         tree.counts.insert(id.clone(), count);
+        let databases_left_out = match connection.levels.lists_other_databases() {
+            true => connection.databases_left_out,
+            false => 0,
+        };
+        let left_out = catalog_left_out + databases_left_out;
+        if left_out > 0 && !search.filtering {
+            tree.totals.insert(id.clone(), count + left_out);
+        }
     }
     let children = match open || search.filtering {
         true => children,
@@ -971,6 +1100,104 @@ fn connection_item(
     };
     Some(
         TreeItem::new(id, connection.name.to_string())
+            .expanded(open)
+            .children(children),
+    )
+}
+
+/// The Users and roles row, with Logins and Roles under it once read. Kept
+/// by a filter that matches its own name, either group's, or a role's.
+fn users_item(
+    tree: &mut SidebarTree,
+    profile: &str,
+    roles: RolesListing,
+    folds: &HashMap<String, bool>,
+    search: &mut Search,
+) -> Option<TreeItem> {
+    let id = users_row(profile);
+    let named = search.builder.name_matches(&id, USERS_AND_ROLES);
+    let followed = folds.get(&id).copied().unwrap_or(false);
+    let notice_row = |tree: &mut SidebarTree, text: &str| {
+        let row = format!("{id}/notice");
+        tree.nodes.insert(row.clone(), Node::Notice);
+        TreeItem::new(row, text.to_string()).disabled(true)
+    };
+    let (open, children) = match roles {
+        RolesListing::Unloaded => {
+            if search.filtering && !named {
+                return None;
+            }
+            tree.unloaded.insert(id.clone());
+            (false, vec![notice_row(tree, LOADING)])
+        }
+        RolesListing::Loading | RolesListing::Failed(_) if search.filtering && !named => {
+            return None;
+        }
+        RolesListing::Loading => (followed, vec![notice_row(tree, LOADING)]),
+        RolesListing::Failed(text) => (followed, vec![notice_row(tree, &text)]),
+        RolesListing::Loaded(roles) => {
+            let mut groups = Vec::new();
+            let mut total = 0;
+            for (logins, label) in [(true, "Logins"), (false, "Roles")] {
+                let group = role_group_row(profile, logins);
+                let group_named = named || search.builder.name_matches(&group, label);
+                let under: Vec<TreeItem> = (roles.iter())
+                    .filter(|(_, login)| *login == logins)
+                    .filter_map(|(name, _)| {
+                        let row = role_row(profile, logins, name);
+                        let kept = !search.filtering
+                            || group_named
+                            || search.builder.name_matches(&row, name);
+                        kept.then(|| {
+                            tree.nodes.insert(
+                                row.clone(),
+                                Node::Role {
+                                    profile: profile.to_string(),
+                                    name: name.clone(),
+                                    login: logins,
+                                },
+                            );
+                            TreeItem::new(row, name.clone())
+                        })
+                    })
+                    .collect();
+                if search.filtering && !group_named && under.is_empty() {
+                    continue;
+                }
+                total += under.len();
+                tree.nodes.insert(group.clone(), Node::RoleGroup { logins });
+                tree.counts.insert(group.clone(), under.len());
+                let open = search.filtering || folds.get(&group).copied().unwrap_or(false);
+                let children = match (under.is_empty(), open) {
+                    (true, _) => vec![empty_row(tree, &group)],
+                    (false, true) => under,
+                    (false, false) => prune(tree, &group, under),
+                };
+                groups.push(
+                    TreeItem::new(group, label.to_string())
+                        .expanded(open)
+                        .children(children),
+                );
+            }
+            if search.filtering && !named && groups.is_empty() {
+                return None;
+            }
+            tree.counts.insert(id.clone(), total);
+            (search.filtering || followed, groups)
+        }
+    };
+    tree.nodes.insert(
+        id.clone(),
+        Node::Users {
+            profile: profile.to_string(),
+        },
+    );
+    let children = match open || search.filtering {
+        true => children,
+        false => prune(tree, &id, children),
+    };
+    Some(
+        TreeItem::new(id, USERS_AND_ROLES.to_string())
             .expanded(open)
             .children(children),
     )
@@ -1021,6 +1248,7 @@ fn others_items(
                     leaves,
                     highlights,
                     shortcuts,
+                    left_out,
                 } = content;
                 let mut rows = Rows {
                     profile,
@@ -1051,6 +1279,9 @@ fn others_items(
                 };
                 if search.filtering && !named && under.is_empty() {
                     continue;
+                }
+                if left_out > 0 && !search.filtering {
+                    tree.totals.insert(row.clone(), count + left_out);
                 }
                 let children = match under.is_empty() {
                     true => vec![empty_row(tree, &row)],
@@ -1261,6 +1492,8 @@ mod tests {
             levels: Levels::Flat,
             database: None,
             databases: Vec::new(),
+            databases_left_out: 0,
+            roles: None,
         }
     }
 
@@ -1289,6 +1522,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             "",
         )
@@ -1472,6 +1706,8 @@ mod tests {
             levels,
             database: Some(database.to_string()),
             databases: Vec::new(),
+            databases_left_out: 0,
+            roles: None,
         }
     }
 
@@ -1494,6 +1730,7 @@ mod tests {
                 sequences: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         };
         let shortcuts = Shortcuts {
             folders: Vec::new(),
@@ -1692,6 +1929,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             "",
         );
@@ -1750,6 +1988,50 @@ mod tests {
                 database,
             )
         }
+    }
+
+    #[test]
+    fn a_database_the_filter_left_out_is_never_a_row_where_databases_hold_objects() {
+        use crate::db::{Databases, Include};
+        let others_of = |own: &str, all: &[&str], list: &[&str]| {
+            let include = Include::from_stored(
+                list.iter().map(|entry| entry.to_string()).collect(),
+                Vec::new(),
+            );
+            let narrowed = include
+                .resolve(Levels::DatabaseHoldsObjects, Some(own), None)
+                .narrow_databases(Databases {
+                    names: all.iter().map(|name| name.to_string()).collect(),
+                    current: Some(own.into()),
+                    left_out: 0,
+                });
+            let others = other_databases(&narrowed.names, narrowed.current.as_deref())
+                .into_iter()
+                .map(|name| (name.to_string(), Content::Unloaded))
+                .collect();
+            let tree = build(
+                &[],
+                vec![with_others(Levels::DatabaseHoldsObjects, own, others)],
+                &opened([connection_row("a")]),
+            );
+            row_ids(&find(&tree.items, &connection_row("a")).children)
+        };
+
+        assert_eq!(
+            others_of("db0", &["db0", "db1", "db2"], &["db1"]),
+            [
+                scoped_row("a", None, "schema-db0"),
+                database_row("a", "db1")
+            ]
+        );
+        assert_eq!(
+            others_of(
+                "dbdelve_dev",
+                &["dbdelve_archive", "dbdelve_dev"],
+                &["nothing*"]
+            ),
+            [scoped_row("a", None, "schema-dbdelve_dev")]
+        );
     }
 
     #[test]
@@ -1887,6 +2169,7 @@ mod tests {
             vec![Listed {
                 content: Content::Loaded(ExplorerTree::default()),
                 databases: vec![("shop".into(), Content::Loaded(shop))],
+                roles: None,
                 ..database_listed(
                     "a",
                     ExplorerTree::default(),
@@ -1944,6 +2227,7 @@ mod tests {
             &Catalog {
                 schemas,
                 database: None,
+                ..Default::default()
             },
             "",
         )
@@ -2164,6 +2448,7 @@ mod tests {
                 ],
             )],
             database: None,
+            ..Default::default()
         };
         let object = |name: &str| {
             Member::Object(ObjectRef {
@@ -2248,6 +2533,7 @@ mod tests {
                         .collect(),
                 )],
                 database: None,
+                ..Default::default()
             },
             filter,
         )
@@ -2471,6 +2757,258 @@ mod tests {
         assert!(row.children[0].is_disabled());
     }
 
+    /// `tree` as built from a catalog the filter dropped `left_out` of.
+    fn left_out(tree: ExplorerTree, left_out: usize) -> ExplorerTree {
+        ExplorerTree { left_out, ..tree }
+    }
+
+    fn schemas(names: &[&str]) -> Vec<Schema> {
+        names.iter().map(|name| schema(name, Vec::new())).collect()
+    }
+
+    #[test]
+    fn the_filtered_empty_line_names_how_many_the_filter_hides() {
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseIsSchema, 0),
+            "No database objects found."
+        );
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseIsSchema, 37),
+            "No database objects shown: the filter hides 37 databases."
+        );
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseHoldsObjects, 1),
+            "No database objects shown: the filter hides 1 database."
+        );
+        assert_eq!(
+            empty_catalog_line(Levels::DatabaseThenSchema, 2),
+            "No database objects shown: the filter hides 2 schemas."
+        );
+        assert!(empty_catalog_line(Levels::DatabaseThenSchema, 1).ends_with("1 schema."));
+    }
+
+    #[test]
+    fn a_connection_the_filter_emptied_says_so_in_its_notice_row() {
+        let emptied = |hidden: usize| {
+            let listed = Listed {
+                levels: Levels::DatabaseIsSchema,
+                ..listed(
+                    "a",
+                    "a",
+                    Content::Loaded(left_out(ExplorerTree::default(), hidden)),
+                )
+            };
+            let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+            let row = find(&tree.items, &connection_row("a"));
+            assert_eq!(row.children.len(), 1);
+            assert!(row.children[0].is_disabled());
+            (
+                row.children[0].label.to_string(),
+                count_of(&tree, &connection_row("a")),
+                tree.totals.get(&connection_row("a")).copied(),
+            )
+        };
+        assert_eq!(
+            emptied(37),
+            (
+                empty_catalog_line(Levels::DatabaseIsSchema, 37),
+                Some(0),
+                Some(37)
+            )
+        );
+        assert_eq!(
+            emptied(0),
+            ("No database objects found.".to_string(), Some(0), None)
+        );
+    }
+
+    #[test]
+    fn a_connection_count_carries_its_total_only_when_the_filter_left_a_database_out() {
+        let total = |levels: Levels, hidden: usize| {
+            let listed = Listed {
+                databases_left_out: hidden,
+                ..with_others(levels, "d", vec![("other".into(), Content::Unloaded)])
+            };
+            let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+            (
+                count_of(&tree, &connection_row("a")),
+                tree.totals.get(&connection_row("a")).copied(),
+            )
+        };
+        assert_eq!(total(Levels::DatabaseThenSchema, 3), (Some(2), Some(5)));
+        assert_eq!(total(Levels::DatabaseThenSchema, 0), (Some(2), None));
+        assert_eq!(total(Levels::Flat, 3), (None, None));
+    }
+
+    #[test]
+    fn a_connection_count_drops_its_total_while_the_search_box_has_text() {
+        let listed = Listed {
+            databases_left_out: 3,
+            ..with_others(
+                Levels::DatabaseThenSchema,
+                "d",
+                vec![("other".into(), Content::Unloaded)],
+            )
+        };
+        let tree = super::build(
+            &[],
+            vec![listed],
+            &opened([connection_row("a")]),
+            ListingScope::All,
+            None,
+            "a",
+        );
+        assert!(search(&tree.items, &connection_row("a")).is_some());
+        assert!(tree.totals.is_empty());
+    }
+
+    #[test]
+    fn a_count_reads_shown_of_total_from_counts_alone() {
+        assert_eq!(count_label(4, Some(38)), "4 of 38");
+        assert_eq!(count_label(0, Some(38)), "0 of 38");
+        assert_eq!(count_label(38, None), "38");
+
+        let counted = |names: [String; 2]| {
+            let listed = Listed {
+                databases_left_out: 3,
+                ..with_others(
+                    Levels::DatabaseThenSchema,
+                    "d",
+                    names
+                        .into_iter()
+                        .map(|name| (name, Content::Unloaded))
+                        .collect(),
+                )
+            };
+            let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+            (
+                count_of(&tree, &connection_row("a")),
+                tree.totals.get(&connection_row("a")).copied(),
+            )
+        };
+        assert_eq!(
+            counted(["x".repeat(200), "ü日本語".repeat(40)]),
+            counted(["p".into(), "q".into()])
+        );
+    }
+
+    #[test]
+    fn a_database_row_says_how_many_of_its_schemas_it_shows() {
+        let listed = || Listed {
+            databases: vec![(
+                "other".into(),
+                Content::Loaded(left_out(content_of(schemas(&["main"])), 1)),
+            )],
+            ..database_listed(
+                "a",
+                left_out(content_of(schemas(&["main", "extra"])), 3),
+                Levels::DatabaseThenSchema,
+                "d",
+            )
+        };
+        let (own, other) = (database_row("a", "d"), database_row("a", "other"));
+        let tree = build(&[], vec![listed()], &opened([connection_row("a")]));
+        assert_eq!(tree.totals.get(&own), Some(&5));
+        assert_eq!(tree.totals.get(&other), Some(&2));
+
+        let tree = super::build(
+            &[],
+            vec![listed()],
+            &opened([connection_row("a")]),
+            ListingScope::All,
+            None,
+            "a",
+        );
+        assert!(tree.totals.is_empty());
+    }
+
+    #[test]
+    fn where_schemas_are_databases_the_connection_says_how_many_it_shows() {
+        let listed = Listed {
+            levels: Levels::DatabaseIsSchema,
+            ..listed(
+                "a",
+                "a",
+                Content::Loaded(left_out(content_of(schemas(&["a1", "a2", "a3", "a4"])), 34)),
+            )
+        };
+        let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+        assert_eq!(count_of(&tree, &connection_row("a")), Some(4));
+        assert_eq!(tree.totals.get(&connection_row("a")), Some(&38));
+    }
+
+    #[test]
+    fn the_totals_add_up_to_the_rows_drawn_and_the_rows_left_out() {
+        let loaded = |names: &[&str], hidden: usize| {
+            Content::Loaded(left_out(content_of(schemas(names)), hidden))
+        };
+        // Each case: the connection as listed, and every row that may carry
+        // a total with what the filter left out of it.
+        let cases = [
+            (
+                Levels::DatabaseIsSchema,
+                Listed {
+                    levels: Levels::DatabaseIsSchema,
+                    ..listed("a", "a", loaded(&["main", "other"], 5))
+                },
+                vec![(connection_row("a"), 5)],
+            ),
+            (
+                Levels::DatabaseThenSchema,
+                Listed {
+                    databases: vec![("other".into(), loaded(&["main"], 1))],
+                    databases_left_out: 4,
+                    ..database_listed(
+                        "a",
+                        left_out(content_of(schemas(&["main", "extra"])), 3),
+                        Levels::DatabaseThenSchema,
+                        "d",
+                    )
+                },
+                vec![
+                    (connection_row("a"), 4),
+                    (database_row("a", "d"), 3),
+                    (database_row("a", "other"), 1),
+                ],
+            ),
+            (
+                Levels::DatabaseHoldsObjects,
+                Listed {
+                    levels: Levels::DatabaseHoldsObjects,
+                    databases: vec![("other".into(), loaded(&["other"], 0))],
+                    databases_left_out: 4,
+                    ..listed("a", "a", loaded(&["d"], 0))
+                },
+                vec![(connection_row("a"), 4)],
+            ),
+        ];
+        for (levels, listed, fed) in cases {
+            let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+            let mut totals: Vec<_> = tree.totals.keys().cloned().collect();
+            let mut expected: Vec<_> = fed.iter().map(|(row, _)| row.clone()).collect();
+            totals.sort();
+            expected.sort();
+            assert_eq!(totals, expected, "{levels:?}");
+            for (row, left_out) in fed {
+                let count = count_of(&tree, &row).expect("a counted row");
+                assert_eq!(tree.totals[&row], count + left_out, "{levels:?}: {row}");
+            }
+        }
+        // A kept row is one of the shown, never also one left out: the own
+        // database's two schemas are its count whatever the filter hid.
+        let tree = build(
+            &[],
+            vec![database_listed(
+                "a",
+                left_out(content_of(schemas(&["main", "extra"])), 3),
+                Levels::DatabaseThenSchema,
+                "d",
+            )],
+            &opened([connection_row("a")]),
+        );
+        assert_eq!(count_of(&tree, &database_row("a", "d")), Some(2));
+    }
+
     #[test]
     fn rows_under_a_connection_start_folded_and_keep_the_folds_they_are_given() {
         let schema = scoped_row("a", None, "schema-main");
@@ -2621,7 +3159,15 @@ mod tests {
         let on = |kind, engine| node_actions(kind, "birds", Target::built_in(engine));
         let table = NodeKind::Relation(RelationKind::Table);
         let copy = || NodeAction::CopyName("birds".into());
-        assert_eq!(on(table, Engine::Postgres), [copy(), NodeAction::ShowDdl]);
+        assert_eq!(
+            on(table, Engine::Postgres),
+            [copy(), NodeAction::ShowDdl, NodeAction::ShowGrants]
+        );
+        assert_eq!(
+            on(table, Engine::MySql),
+            [copy(), NodeAction::ShowDdl],
+            "a target that manages no roles shows no grants"
+        );
         assert_eq!(
             on(table, Engine::Redis),
             [copy()],
@@ -2629,19 +3175,106 @@ mod tests {
         );
         assert_eq!(
             on(NodeKind::Sequence, Engine::Postgres),
-            [copy(), NodeAction::ShowDdl]
+            [copy(), NodeAction::ShowDdl, NodeAction::ShowGrants]
         );
         assert_eq!(
             on(NodeKind::Routine, Engine::Postgres),
             [copy(), NodeAction::ShowDdl]
         );
-        for kind in [NodeKind::Connection, NodeKind::Database, NodeKind::Schema] {
+        for kind in [NodeKind::Database, NodeKind::Schema] {
             assert_eq!(
                 on(kind, Engine::Postgres),
                 [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
                 "{kind:?} has no definition of its own"
             );
         }
+        assert_eq!(
+            on(NodeKind::Connection, Engine::Postgres),
+            [
+                NodeAction::NewQueryHere,
+                copy(),
+                NodeAction::Refresh,
+                NodeAction::FilterDatabases
+            ],
+            "a connection is the one node whose databases a filter lists"
+        );
+        assert_eq!(
+            on(NodeKind::Connection, Engine::Sqlite),
+            [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
+            "a target with no databases to choose between has nothing to filter"
+        );
+    }
+
+    #[test]
+    fn users_and_roles_counts_logins_and_roles_once_read_and_is_kept_by_a_role_name() {
+        let with_roles = |roles| Listed {
+            roles: Some(roles),
+            ..listed("a", "a", Content::Loaded(birds()))
+        };
+        let unread = super::build(
+            &[],
+            vec![with_roles(RolesListing::Unloaded)],
+            &opened([connection_row("a")]),
+            ListingScope::All,
+            None,
+            "",
+        );
+        assert!(unread.unloaded.contains(&users_row("a")));
+        assert!(
+            !unread.counts.contains_key(&users_row("a")),
+            "nothing counted before it is read"
+        );
+
+        let read = || {
+            RolesListing::Loaded(vec![
+                ("ana".into(), true),
+                ("bo".into(), true),
+                ("reporting".into(), false),
+            ])
+        };
+        let tree = super::build(
+            &[],
+            vec![with_roles(read())],
+            &opened([
+                connection_row("a"),
+                users_row("a"),
+                role_group_row("a", true),
+            ]),
+            ListingScope::All,
+            None,
+            "",
+        );
+        assert_eq!(tree.counts[&users_row("a")], 3);
+        assert_eq!(tree.counts[&role_group_row("a", true)], 2);
+        assert_eq!(tree.counts[&role_group_row("a", false)], 1);
+        assert!(matches!(
+            tree.nodes.get(&role_row("a", true, "ana")),
+            Some(Node::Role { login: true, .. })
+        ));
+
+        let tree = filtered(&[], vec![with_roles(read())], "report");
+        let ids = all_ids(&tree.items);
+        assert!(ids.contains(&role_row("a", false, "reporting")));
+        assert!(!ids.contains(&role_row("a", true, "ana")));
+
+        // The caller narrows the objects too, so none matching leaves them empty.
+        let no_objects = |roles| Listed {
+            roles: Some(roles),
+            ..listed("a", "a", Content::Loaded(ExplorerTree::default()))
+        };
+        let tree = filtered(&[], vec![no_objects(read())], "report");
+        let ids = all_ids(&tree.items);
+        assert!(
+            ids.contains(&role_row("a", false, "reporting")),
+            "a role alone keeps its connection"
+        );
+        let tree = filtered(&[], vec![no_objects(read())], "users and");
+        assert!(
+            all_ids(&tree.items).contains(&users_row("a")),
+            "and so does the Users and roles row's own name"
+        );
+        let tree = filtered(&[], vec![no_objects(read())], "zzz");
+        assert!(tree.items.is_empty(), "nothing matching keeps nothing");
     }
 
     #[test]

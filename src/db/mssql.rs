@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::net::{Shutdown, SocketAddr};
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
@@ -545,6 +545,15 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
 
 type Tds = Client<Compat<TcpStream>>;
 
+/// The name the server shows for this login: the profile's, else `DBDelve`.
+fn application_name_of(server: &ServerConfig) -> &str {
+    server
+        .properties
+        .application_name
+        .as_deref()
+        .unwrap_or("DBDelve")
+}
+
 /// dbdelve's five rungs as tiberius's two settings.
 ///
 /// tiberius builds its own rustls configuration and offers three trusts:
@@ -566,7 +575,7 @@ fn config(server: &ServerConfig, encryption: EncryptionLevel) -> Config {
     if !server.database.is_empty() {
         config.database(&server.database);
     }
-    config.application_name("DBDelve");
+    config.application_name(application_name_of(server));
     // Sent as typed, blank included: cloud IAM issues a token or nothing.
     config.authentication(AuthMethod::sql_server(&server.user, &server.password));
     config.encryption(encryption);
@@ -854,6 +863,11 @@ pub struct Connection {
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]),
     /// asked and taken under [`Self::in_flight`]'s lock.
     graph: GraphCancel,
+    /// The statements the profile's gated startup script came to, run by
+    /// [`Self::connect`] on every login: the main session's, one opened for a
+    /// database, one beside it, and any reconnect after a stop. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
 }
 
 impl Connection {
@@ -866,6 +880,7 @@ impl Connection {
                 tunnel,
                 alongside: false,
                 graph: GraphCancel::default(),
+                startup: Arc::default(),
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -918,8 +933,7 @@ impl Connection {
         }
         .map_err(|error| connect_error(&error, &self.server))?;
 
-        self.in_flight().socket = Some(socket);
-        Ok(Session {
+        let mut session = Session {
             runtime,
             client,
             timeout: self.server.statement_timeout,
@@ -927,7 +941,52 @@ impl Connection {
             rowcount: false,
             in_transit: false,
             repeatable_read: false,
-        })
+        };
+        // Session options last on a login are the script's: a login holds them
+        // until the connection drops, so replaying here covers every one.
+        run_startup(&mut session, &self.startup, &self.server.database)?;
+        // Only once the script ran: a login it failed is dropped here, and
+        // its socket with it, rather than kept open for a Cancel to find.
+        self.in_flight().socket = Some(socket);
+        Ok(session)
+    }
+
+    /// Runs `statements` now on the session `open` logged in, and keeps them
+    /// for every login from here on. The first error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        {
+            let mut session = self.session.lock().map_err(|_| {
+                plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                )
+            })?;
+            if let Some(session) = session.as_mut() {
+                run_startup(session, &statements, &self.server.database)?;
+            }
+        }
+        self.startup = statements.into();
+        Ok(self)
+    }
+
+    /// One `SELECT 1` on the session. A statement holding it is the session in
+    /// use, so the ping is skipped, never queued behind it; a session that has
+    /// not logged in yet is left alone, since a ping that logged in would open
+    /// a login nobody asked for. A poisoned lock is a session every later
+    /// statement would fail on. `idle` is asked once the session is held, and
+    /// a `false` skips it too, as on Postgres.
+    pub fn ping(&self, idle: &dyn Fn() -> bool) -> Result<(), DbError> {
+        let mut session = match self.session.try_lock() {
+            Ok(session) => session,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(plain_error("The connection is closed.".into()));
+            }
+        };
+        match session.as_mut() {
+            None => Ok(()),
+            Some(_) if !idle() => Ok(()),
+            Some(session) => ask(session, "SELECT 1").map(|_| ()),
+        }
     }
 
     /// The profile's database, or the login's default when it names none,
@@ -1184,9 +1243,7 @@ impl Connection {
             position: None,
         })?;
         if cancelled {
-            return Err(plain_error(
-                "Cancelled before it started: nothing was sent to the server.".into(),
-            ));
+            return Err(plain_error(super::CANCELLED_QUEUED.into()));
         }
         connected?;
         Ok(guard)
@@ -2704,6 +2761,71 @@ fn sets_rowcount(sql: &str) -> Option<bool> {
         .map(|window| window[2].parse::<u64>() != Ok(0))
 }
 
+/// The startup `statements` on `session`, the first error stopping the rest,
+/// kept as a user's own run is: a `SET ROWCOUNT` they leave in force is
+/// theirs, so no read caps over it, and a script that leaves the session on
+/// another database than the one it started on, `database`, is moved back and
+/// refused, since the explorer and every statement dbdelve writes name
+/// `database`'s objects. Told apart by `DB_ID()`, not by name: on a
+/// case-sensitive server `Sales` and `sales` are two databases.
+fn run_startup(
+    session: &mut Session,
+    statements: &[String],
+    database: &str,
+) -> Result<(), DbError> {
+    let home = match statements.iter().any(|statement| mentions_use(statement)) {
+        true => Some(database_id(session)?),
+        false => None,
+    };
+    for statement in statements {
+        ask(session, statement).map_err(|error| startup_error(session, error))?;
+        if let Some(set) = sets_rowcount(statement) {
+            session.rowcount = set;
+        }
+    }
+    let Some(home) = home else {
+        return Ok(());
+    };
+    if database_id(session)? == home {
+        return Ok(());
+    }
+    // Refused either way; moved back so a session kept after the refusal is
+    // not left elsewhere.
+    let _ = ask(session, &format!("USE [{}]", database.replace(']', "]]")));
+    Err(plain_error(format!(
+        "The startup script was refused: it moved the session off database {database}, whose \
+         objects this connection's explorer and every statement dbdelve writes name."
+    )))
+}
+
+/// What a startup statement failed with, said where the session was lost and
+/// [`ask`] has no words for it: no `run_held` reports that here.
+fn startup_error(session: &Session, error: DbError) -> DbError {
+    if !error.message.is_empty() {
+        return error;
+    }
+    plain_error(match &session.lost {
+        Some(Lost::TimedOut) => format!(
+            "A startup statement ran past the {}-second statement timeout and was stopped by \
+             closing its connection.",
+            session.timeout
+        ),
+        Some(Lost::Panicked(message)) => message.clone(),
+        _ => "The connection was lost while the startup script ran.".into(),
+    })
+}
+
+/// The server's id of the database the session is on.
+fn database_id(session: &mut Session) -> Result<String, DbError> {
+    Ok(ask(session, "SELECT DB_ID()")?
+        .result
+        .rows
+        .first()
+        .and_then(|row| row.get(0))
+        .map(str::to_string)
+        .unwrap_or_default())
+}
+
 fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
     match session.trip(statement) {
         Some(result) => result.map_err(|error| plain_error(describe(&error))),
@@ -2906,8 +3028,110 @@ mod tests {
         config_from_url(&url).expect("dbdelve_MSSQL_URL should parse")
     }
 
+    #[test]
+    fn a_blank_application_name_keeps_dbdelve() {
+        let named = |application_name: Option<&str>| {
+            application_name_of(&ServerConfig {
+                properties: crate::db::Properties {
+                    application_name: application_name.map(str::to_string),
+                    connect_timeout: None,
+                },
+                ..ServerConfig::default()
+            })
+            .to_string()
+        };
+        assert_eq!(named(None), "DBDelve");
+        assert_eq!(named(Some("billing")), "billing");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_driver_properties_reach_the_server() {
+        let name = |connection: &Connection| {
+            let result = connection
+                .query("SELECT APP_NAME()", Fetch::default())
+                .expect("the name reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        assert_eq!(name(&live()).as_deref(), Some("DBDelve"));
+        let config = ServerConfig {
+            properties: crate::db::Properties {
+                application_name: Some("billing app".into()),
+                connect_timeout: None,
+            },
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("the connection opens");
+        assert_eq!(name(&main).as_deref(), Some("billing app"));
+        assert_eq!(name(&main.alongside()).as_deref(), Some("billing app"));
+    }
+
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_never_waits_on_a_busy_session() {
+        let connection = live();
+        assert!(connection.ping(&|| true).is_ok(), "an idle session answers");
+
+        // A statement holds the session for as long as it runs; the round
+        // skips it rather than queue behind it.
+        let busy = connection.session.lock().expect("nothing else holds it");
+        let started = Instant::now();
+        assert!(
+            connection.ping(&|| true).is_ok(),
+            "a busy session is skipped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "and the skip does not wait"
+        );
+        drop(busy);
+
+        let unopened = connection.alongside();
+        assert!(
+            unopened.ping(&|| true).is_ok(),
+            "a session never logged in is left alone"
+        );
+        assert!(
+            unopened
+                .session
+                .lock()
+                .expect("nothing else holds it")
+                .is_none(),
+            "and the ping did not log it in"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_startup_script_holds_on_every_login() {
+        let first_day = |connection: &Connection| {
+            let result = connection
+                .query("SELECT @@DATEFIRST", Fetch::default())
+                .expect("the option reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        let plain = live();
+        let default = first_day(&plain);
+        assert_ne!(default.as_deref(), Some("3"));
+        let scripted = live()
+            .with_startup(vec!["SET DATEFIRST 3".into()])
+            .expect("the script runs");
+        assert_eq!(first_day(&scripted).as_deref(), Some("3"));
+        // The lazy first login of a session beside it.
+        let beside = scripted.alongside();
+        assert_eq!(first_day(&beside).as_deref(), Some("3"));
+        let database = scripted.current_database().to_string();
+        let other = scripted.on_database(&database).expect("a session opens");
+        assert_eq!(first_day(&other).as_deref(), Some("3"));
+        assert_eq!(
+            first_day(&plain),
+            default,
+            "the script is the session's own"
+        );
     }
 
     #[test]
@@ -3070,13 +3294,7 @@ mod tests {
                 database: "dbdelve_test".into(),
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
-                password_command: None,
-                sslmode: SslMode::default(),
-                root_certificate: None,
-                statement_timeout: 0,
-                ssm: None,
-                ssh: None,
-                schema: None,
+                ..ServerConfig::default()
             }
         );
         let error = config_from_url("mssql://someone@db.example.test/db?encrypt=true").unwrap_err();
@@ -3741,7 +3959,7 @@ mod tests {
             .expect("the probe sequence should be created");
 
         let second = crate::db::Connection::SqlServer(live())
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas
@@ -5242,6 +5460,90 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_rowcount_is_the_users_own_and_kept() {
+        let connection = live()
+            .with_startup(vec!["SET ROWCOUNT 20".into()])
+            .expect("the script runs");
+        let read = "SELECT name FROM sys.all_columns";
+        let drained = connection.query(read, stoppable(10)).unwrap();
+        assert_eq!(drained.stopped, None);
+        assert_eq!(drained.capped_from, Some(20));
+        let kept = connection.query(read, Fetch::default()).unwrap();
+        assert_eq!(kept.rows.len(), 20, "no capped read reset it");
+        let database = connection.current_database().to_string();
+        let other = connection.on_database(&database).expect("a session opens");
+        let kept = other.query(read, stoppable(10)).unwrap();
+        assert_eq!(kept.capped_from, Some(20), "a replay keeps it too");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_script_that_leaves_the_database_is_refused() {
+        let connection = live();
+        let database = connection.current_database().to_string();
+        let error = live()
+            .with_startup(vec!["USE master".into()])
+            .err()
+            .expect("the script is refused");
+        assert!(
+            error.message.contains("startup script"),
+            "{}",
+            error.message
+        );
+        // Told by id, not by a name in another case.
+        let error = live()
+            .with_startup(vec![format!(
+                "USE [{}]",
+                database.to_uppercase().replace(']', "]]")
+            )])
+            .err()
+            .map(|error| error.message);
+        let case_sensitive = live()
+            .query(
+                "SELECT CASE WHEN 'a' = 'A' THEN 0 ELSE 1 END",
+                Fetch::default(),
+            )
+            .unwrap()
+            .rows[0]
+            .get(0)
+            == Some("1");
+        if !case_sensitive {
+            assert_eq!(error, None, "the same database, spelled in another case");
+        }
+        // One that comes back where it started is its own business.
+        let scripted = connection
+            .with_startup(vec![
+                "USE master".into(),
+                format!("USE [{}]", database.replace(']', "]]")),
+            ])
+            .expect("the script runs");
+        let here = scripted
+            .query("SELECT DB_NAME()", Fetch::default())
+            .unwrap();
+        assert_eq!(here.rows[0].get(0), Some(database.as_str()));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_statement_past_the_timeout_says_so() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        let error = connection
+            .with_startup(vec!["WAITFOR DELAY '00:00:03'".into()])
+            .err()
+            .expect("the timeout stops it");
+        assert!(
+            error.message.contains("1-second statement timeout"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_read_that_fails_still_takes_its_cap_back() {
         let connection = live();
         probe_table(&connection, "#dbdelve_rowcount_probe", 50);
@@ -5877,6 +6179,8 @@ mod tests {
             "{}",
             error.message
         );
+        // So a COMMIT dropped this way leaves the transaction recorded open.
+        assert!(crate::db::sent_nothing(&error));
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
@@ -5955,6 +6259,7 @@ mod tests {
             tunnel: None,
             alongside: true,
             graph: GraphCancel::default(),
+            startup: Arc::default(),
         };
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
@@ -5985,6 +6290,7 @@ mod tests {
             tunnel: None,
             alongside: false,
             graph: GraphCancel::default(),
+            startup: Arc::default(),
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));
