@@ -12508,6 +12508,22 @@ fn ssm_cleanup_reopens_from_the_keyboard_during_row_import(cx: &mut TestAppConte
         assert!(palette_mode(&workspace, cx).is_none());
         workspace.read_with(cx, |w, _| assert!(!w.cleanup.records()[0].dismissed));
         assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        for font in [13., 17.] {
+            workspace.update(cx, |w, cx| {
+                w.set_font_size(super::FontSlot::Chrome, font, cx)
+            });
+            settle(cx);
+            let dismiss = cx.debug_bounds("cleanup-dismiss-0").unwrap();
+            cx.simulate_click(dismiss.center(), gpui::Modifiers::default());
+            settle(cx);
+            workspace.read_with(cx, |w, _| assert!(w.cleanup.records()[0].dismissed));
+            assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+            let pending = cx.debug_bounds("cleanup-pending").unwrap();
+            cx.simulate_click(pending.center(), gpui::Modifiers::default());
+            settle(cx);
+            workspace.read_with(cx, |w, _| assert!(!w.cleanup.records()[0].dismissed));
+            assert_eq!(front_dialog(&workspace, cx), Some("import-rows"));
+        }
         quit(workspace, cx);
     });
 }

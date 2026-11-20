@@ -2657,24 +2657,33 @@ impl Render for Workspace {
                 ],
             ))
             .children(self.render_cleanup_notice(t, cx))
-            .child(self.beside_settings(main_pane, cx))
-            .children(self.dialog_layer(
-                [
-                    ("show-ddl", self.render_show_ddl(cx)),
-                    ("apply-review", self.render_apply_review(cx)),
-                    ("import-rows", self.render_import_rows(window, cx)),
-                    ("delete", self.render_delete_confirmation(cx)),
-                    ("discard", self.render_discard_confirmation(cx)),
-                    ("pending-export", self.render_pending_export(cx)),
-                    ("pending-run", self.render_pending_run(cx)),
-                    ("queue-failure", self.render_queue_failure(cx)),
-                    ("stale-edit", self.render_stale_edit(cx)),
-                    ("import-choice", self.render_import_choice(cx)),
-                    ("stable-import", self.render_stable_import(cx)),
-                ],
-                window,
-                cx,
-            ))
+            // Dialogs cover the database surface, leaving app-wide cleanup actions usable.
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.beside_settings(main_pane, cx))
+                    .children(self.dialog_layer(
+                        [
+                            ("show-ddl", self.render_show_ddl(cx)),
+                            ("apply-review", self.render_apply_review(cx)),
+                            ("import-rows", self.render_import_rows(window, cx)),
+                            ("delete", self.render_delete_confirmation(cx)),
+                            ("discard", self.render_discard_confirmation(cx)),
+                            ("pending-export", self.render_pending_export(cx)),
+                            ("pending-run", self.render_pending_run(cx)),
+                            ("queue-failure", self.render_queue_failure(cx)),
+                            ("stale-edit", self.render_stale_edit(cx)),
+                            ("import-choice", self.render_import_choice(cx)),
+                            ("stable-import", self.render_stable_import(cx)),
+                        ],
+                        window,
+                        cx,
+                    )),
+            )
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }
