@@ -12960,6 +12960,34 @@ fn new_query_in_complex_mode_opens_an_unbound_tab_on_the_profiles_own_session(
 
 /// Commit ends the profile's own transaction, so it is sent from a tab of
 /// the profile's own session even when a tab bound elsewhere is in front.
+/// The Auto dialog's COMMIT goes to a tab of its own when a bound tab is in
+/// front, and that tab's run is what says it was sent, however busy the
+/// bound one is: Auto is read once it lands.
+#[gpui::test]
+fn the_auto_dialogs_commit_from_a_running_bound_tab_still_turns_auto_on(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        toggle_auto_commit(cx);
+        assert!(!transaction_state(&workspace, cx).0, "Manual");
+        new_query_here(&workspace, cx, Some("other"), None);
+        workspace.update(cx, |workspace, cx| {
+            let tab = workspace.profile().unwrap().session.active;
+            workspace.execute_sql("SELECT 1".into(), tab, cx);
+            assert!(workspace.profile().unwrap().session.running(tab));
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_auto_commit(&crate::actions::ToggleAutoCommit, window, cx);
+                workspace.end_transaction_for_auto("COMMIT", window, cx);
+            })
+        });
+        settle(cx);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "the COMMIT landed and Auto is read");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn commit_from_a_bound_tab_ends_the_profiles_own_transaction(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -26622,11 +26650,11 @@ fn a_failed_commit_sent_with_the_next_begin_keeps_the_transactions_record(cx: &m
     });
 }
 
-/// A `COMMIT` sent from one tab and a `BEGIN` sent from another before the
-/// first was answered run on the session in that order, so the transaction
-/// the `BEGIN` opened is still open once both land.
+/// A `BEGIN` sent from one tab while another tab's `COMMIT` is still
+/// running waits: the two would race for the session, and the server could
+/// run them in either order. Once the `COMMIT` lands it goes ahead.
 #[gpui::test]
-fn an_earlier_commit_landing_late_leaves_a_later_begins_transaction_open(cx: &mut TestAppContext) {
+fn a_begin_waits_for_another_tabs_commit_to_land(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_a_writable_t(cx);
         run_in_front(&workspace, cx, "BEGIN");
@@ -26636,23 +26664,55 @@ fn an_earlier_commit_landing_late_leaves_a_later_begins_transaction_open(cx: &mu
             workspace.update(cx, |workspace, cx| {
                 let tab = workspace.profile().unwrap().session.active;
                 workspace.execute_sql(sql.into(), tab, cx);
-                assert!(workspace.profile().unwrap().session.running(tab));
-            });
+                workspace.profile().unwrap().session.running(tab)
+            })
         };
-        send(cx, "COMMIT");
+        assert!(send(cx, "COMMIT"));
         cx.update(|window, cx| {
             workspace.update(cx, |workspace, cx| {
                 workspace.new_query(&crate::actions::NewQuery, window, cx);
             });
         });
-        send(cx, "BEGIN");
+        assert!(!send(cx, "BEGIN"), "the BEGIN waits for the COMMIT");
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            let notice = session
+                .tab_notice
+                .as_ref()
+                .map(|(_, notice)| notice.as_str());
+            assert!(
+                notice.is_some_and(|notice| notice.contains("another tab")),
+                "{notice:?}"
+            );
+        });
         settle(cx);
-        assert!(
-            transaction_state(&workspace, cx).1,
-            "the BEGIN ran after the COMMIT, so a transaction is open"
-        );
+        assert!(!transaction_state(&workspace, cx).1, "the COMMIT ended it");
+        run_in_front(&workspace, cx, "BEGIN");
+        assert!(transaction_state(&workspace, cx).1);
         run_in_front(&workspace, cx, "ROLLBACK");
-        assert!(!transaction_state(&workspace, cx).1);
+        quit(workspace, cx);
+    });
+}
+
+/// A pair whose `COMMIT` failed where the engine does not keep the
+/// transaction ended it, and the `BEGIN` behind it never ran: nothing is
+/// open, and Manual gives way to Auto.
+#[gpui::test]
+fn a_failed_pair_that_ended_the_transaction_leaves_manual(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let ended = crate::db::DbError {
+            message: "cannot commit - no transaction is active".into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.reopen_landed("COMMIT;\n\nBEGIN;", false, Some(&ended));
+        });
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "no transaction, and Auto says so");
+        assert!(recorded_statements(&workspace, cx).is_empty());
         quit(workspace, cx);
     });
 }

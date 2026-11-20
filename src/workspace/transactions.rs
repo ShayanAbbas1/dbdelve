@@ -73,7 +73,7 @@ impl Workspace {
         // Manual only once its `BEGIN` is on its way: one refused before it
         // ran opened nothing, and a switch reading Manual over a session
         // still autocommitting would let the next write commit unasked.
-        let sent = open || self.run_sent(begin.to_string(), window, cx);
+        let sent = open || self.run_in_buffer(begin.to_string(), window, cx);
         if !sent {
             self.note(
                 format!("The {begin} was not sent, so auto-commit is still on."),
@@ -89,20 +89,6 @@ impl Workspace {
             profile.session.manual_after_begin = Some(profile.session.active);
         }
         cx.notify();
-    }
-
-    /// [`Self::run_in_buffer`], saying whether `statement` went to the run:
-    /// running now and not before means it did, where a refusal has already
-    /// said why it did not.
-    fn run_sent(&mut self, statement: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let running = |workspace: &Self| {
-            workspace
-                .profile()
-                .is_some_and(|profile| profile.session.running(profile.session.active))
-        };
-        let was_running = running(self);
-        self.run_in_buffer(statement, window, cx);
-        !was_running && running(self)
     }
 
     pub(crate) fn commit_transaction(
@@ -134,7 +120,7 @@ impl Workspace {
     /// is what `reopen` being false is for: it is the one end that leaves
     /// Manual.
     ///
-    /// Whether the statement went to the run ([`Self::run_sent`]), `None`
+    /// Whether the statement went to the run ([`Self::run_in_buffer`]), `None`
     /// where no transaction was open to end, which is said here.
     fn end_transaction(
         &mut self,
@@ -161,7 +147,7 @@ impl Workspace {
             Some(begin) => format!("{verb};\n\n{begin};"),
             None => verb.to_string(),
         };
-        Some(self.run_sent(statement, window, cx))
+        Some(self.run_in_buffer(statement, window, cx))
     }
 
     /// The Auto dialog's answer: end the open transaction with a plain
@@ -241,7 +227,16 @@ impl Workspace {
     /// and clearing the grid under it would look like the data went away.
     /// Never a tab bound to another database: it runs on that database's
     /// session, and the transaction these control is the profile's own.
-    fn run_in_buffer(&mut self, statement: String, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// Whether `statement` went to the run: the tab it was put in running now
+    /// and not before means it did, where a refusal has already said why it
+    /// did not.
+    fn run_in_buffer(
+        &mut self,
+        statement: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self
             .profile()
             .and_then(|profile| profile.session.active_query_tab())
@@ -253,9 +248,15 @@ impl Workspace {
             .profile()
             .and_then(|profile| profile.session.active_query_tab())
         else {
-            return;
+            return false;
         };
         let (id, editor) = (tab.id, tab.editor.clone());
+        let running = |workspace: &Self| {
+            workspace
+                .profile()
+                .is_some_and(|profile| profile.session.running(Tab::Query(id)))
+        };
+        let was_running = running(self);
         let text = editor.read(cx).value().to_string();
         let appended = appended_statement(self.engine(), &text, &statement);
         let line = appended
@@ -268,5 +269,6 @@ impl Workspace {
         });
         self.activate_tab(Tab::Query(id), window, cx);
         self.execute_and_then(statement, Tab::Query(id), None, true, None, cx);
+        !was_running && running(self)
     }
 }

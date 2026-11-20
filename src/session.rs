@@ -122,6 +122,10 @@ pub(crate) struct Profile {
     /// Shared, so a keep-alive ping can tell under the session's lock that a
     /// `BEGIN` went out after its round was set ([`Self::sessions_to_ping`]).
     pub(crate) transaction_sends: Arc<AtomicU64>,
+    /// The tab whose statement opening or ending the transaction on the
+    /// profile's own session is running, until it lands: another tab's waits
+    /// for it, so the server runs them in the order they were sent.
+    pub(crate) transaction_in_flight: Option<Tab>,
     /// The startup script the live connection ran at its connect, whose
     /// statements its driver replays on every later session: a script saved
     /// since applies only from the next connect.
@@ -342,20 +346,31 @@ impl Profile {
     /// `error` where it failed. [`Profile::in_transaction`] stayed set across
     /// it, and the record is kept until now: only a pair that ran whole ended
     /// the transaction it lists, and starts the record again with what
-    /// follows the end. One that failed may have left the transaction it
-    /// lists open (SQLite keeps it on a deferred constraint), so the pair is
-    /// added to the record rather than replacing it, as [`Self::record_sent`]
-    /// does wherever it cannot tell. One sent nothing changed nothing, and a
+    /// follows the end. One whose end failed where the engine keeps the
+    /// transaction (SQLite on a deferred constraint) still holds what the
+    /// record lists, so the pair is added to it. Anywhere else the failed end
+    /// rolled it back and the `BEGIN` behind it never ran, as Postgres skips
+    /// the rest of a submission: nothing is open, and Manual, which promises a
+    /// transaction, gives way to Auto. One sent nothing changed nothing, and a
     /// `lost` session has no transaction left.
     pub(crate) fn reopen_landed(&mut self, sql: &str, lost: bool, error: Option<&DbError>) {
         match error {
             None => self.record_sent(sql, Some(true)),
-            Some(_) if lost => {
+            Some(error) if crate::db::sent_nothing(error) && !lost => {}
+            Some(error)
+                if !lost
+                    && self
+                        .config
+                        .engine()
+                        .failed_end_keeps_transaction(&error.message) =>
+            {
+                self.transaction_statements.push(sql.to_string())
+            }
+            Some(_) => {
                 self.record_sent(sql, Some(false));
                 self.in_transaction = false;
+                self.auto_commit = true;
             }
-            Some(error) if crate::db::sent_nothing(error) => {}
-            Some(_) => self.transaction_statements.push(sql.to_string()),
         }
     }
 
