@@ -398,6 +398,7 @@ impl Workspace {
             in_transaction: false,
             transaction_statements: Vec::new(),
             transaction_sends: Arc::default(),
+            transaction_in_flight: None,
             connected_script: String::new(),
             listings: 0,
             auto_commit: true,
@@ -486,6 +487,7 @@ impl Workspace {
             in_transaction: false,
             transaction_statements: Vec::new(),
             transaction_sends: Arc::default(),
+            transaction_in_flight: None,
             connected_script: String::new(),
             listings: 0,
             auto_commit: true,
@@ -1687,6 +1689,7 @@ impl Workspace {
         profile.state = ProfileState::Idle;
         profile.in_transaction = false;
         profile.transaction_statements.clear();
+        profile.transaction_in_flight = None;
         profile.session.auto_after_end = None;
         profile.session.manual_after_begin = None;
         profile.session_changed = false;
@@ -2257,6 +2260,7 @@ impl Workspace {
         };
         profile.in_transaction = false;
         profile.transaction_statements.clear();
+        profile.transaction_in_flight = None;
         profile.session.auto_after_end = None;
         profile.session.manual_after_begin = None;
         // The transaction it was holding died with the session, and silently

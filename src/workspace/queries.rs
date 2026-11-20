@@ -2471,6 +2471,37 @@ impl Workspace {
             self.drop_parked(tab, refresh);
             return;
         }
+        // Everything an object tab runs is dbdelve's, and a query tab runs
+        // dbdelve's statement only when an edit is applied from its grid, the
+        // one run that carries a refresh -- bar a `Return`, which the user's
+        // own statement carries.
+        let generated = matches!(tab, Tab::Object(_))
+            || refresh
+                .as_ref()
+                .is_some_and(|refresh| !matches!(refresh, Refresh::Return));
+        // One tab's statement that opens or ends the transaction on the
+        // profile's own session waits for another's to land: each runs in a
+        // job of its own, racing for the session, so the server may run them
+        // in either order, and the open flag is read off the order they went.
+        if !generated
+            && binding.is_none()
+            && lane.is_none()
+            && explain.is_none()
+            && profile
+                .transaction_in_flight
+                .is_some_and(|other| other != tab)
+            && sql::leaves(engine, &sql).transaction.is_some()
+        {
+            profile.session.tab_notice = Some((
+                tab,
+                "The statement was not run: a statement opening or ending the transaction is \
+                 still running in another tab."
+                    .into(),
+            ));
+            self.drop_parked(tab, refresh);
+            cx.notify();
+            return;
+        }
 
         if !routed.is_available() {
             if kept {
@@ -2708,14 +2739,6 @@ impl Workspace {
             let ran = statement.as_ref().or(explained.as_ref());
             tab.ran_from = tab.sent_from.take().filter(|(_, sent)| Some(sent) == ran);
         }
-        // Everything an object tab runs is dbdelve's, and a query tab runs
-        // dbdelve's statement only when an edit is applied from its grid, the
-        // one run that carries a refresh -- bar a `Return`, which the user's
-        // own statement carries.
-        let generated = matches!(tab, Tab::Object(_))
-            || refresh
-                .as_ref()
-                .is_some_and(|refresh| !matches!(refresh, Refresh::Return));
         // Recorded on the way out rather than on the way back: the history is
         // what the user ran, and a statement that failed is exactly the one
         // worth getting back. Only the buffer's — a relation's preview is SQL
@@ -2766,6 +2789,9 @@ impl Workspace {
             // Commit sends it, keeps the record until it lands too: if its
             // end fails, the transaction the record lists can still be open.
             let reopens = leaves.transaction == Some(true) && sql::ends_transaction(engine, text);
+            if leaves.transaction.is_some() {
+                profile.transaction_in_flight = Some(tab);
+            }
             if (leaves.transaction == Some(false) || reopens) && profile.in_transaction {
                 // Whether it is a lone end, whose failure the engine may say
                 // left the transaction open (SQLite's `SQLITE_BUSY`).
@@ -3302,6 +3328,9 @@ impl Workspace {
                         // Not once a later submission set the transaction
                         // state as it went: the session ran it after this
                         // end, so what it said stands.
+                        if profile.transaction_in_flight == Some(tab) {
+                            profile.transaction_in_flight = None;
+                        }
                         if let Some((sent, lone, reopens, sent_at)) = &ending
                             && (lost || !profile.superseded(*sent_at))
                         {
