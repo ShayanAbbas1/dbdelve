@@ -56,7 +56,7 @@ mod xlsx;
 pub use builtins::{Builtin, BuiltinKind};
 #[cfg(test)]
 pub(crate) use clickhouse::mock as clickhouse_mock;
-pub use duckdb::IN_MEMORY as DUCKDB_IN_MEMORY;
+pub use duckdb::{IN_MEMORY as DUCKDB_IN_MEMORY, is_in_memory as duckdb_in_memory};
 pub use external::ExternalConfig;
 #[cfg(test)]
 pub(crate) use external::echo;
@@ -1754,7 +1754,7 @@ impl ConnectionConfig {
     /// a DuckDB in memory does: closing the connection for being idle would
     /// throw away every table in it.
     pub fn lives_with_its_connection(&self) -> bool {
-        matches!(self, Self::DuckDb { path, .. } if path == DUCKDB_IN_MEMORY)
+        matches!(self, Self::DuckDb { path, .. } if duckdb::is_in_memory(path))
     }
 
     /// What was being talked to, for an error or a title to name.
