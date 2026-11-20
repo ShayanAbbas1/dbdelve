@@ -11,6 +11,7 @@ use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, k
 use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
+use crate::palette::SchemaPick;
 use crate::session::{Bound, BoundSession, EditMode, STALE_ROWS, restored_shortcuts};
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
@@ -1332,6 +1333,18 @@ impl Workspace {
             );
             return false;
         }
+        // An export reads table after table on the connection a switch moves,
+        // so the rows after it would come from the other database.
+        if self
+            .profile()
+            .is_some_and(|profile| profile.session.exporting.is_some())
+        {
+            self.note(
+                "An export is running, so the database was not switched.".to_string(),
+                cx,
+            );
+            return false;
+        }
         let Some(profile) = self.profile() else {
             return false;
         };
@@ -1566,6 +1579,10 @@ impl Workspace {
         // Not running, which a switch refuses and a connect cannot have: the
         // dialog names a table of the database being left.
         self.abandon_import(&profile_id, cx);
+        // Its tables, and the keys read of them, are the database's being left.
+        if let Some(profile) = self.profile_mut() {
+            profile.session.schema_export = None;
+        }
         for id in closing {
             self.close_object(id, window, cx);
         }
@@ -1660,11 +1677,26 @@ impl Workspace {
 
     /// Offer the schemas the catalog already holds, to pick the active one.
     pub(crate) fn select_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.offer_schemas(SchemaPick::Activate, window, cx);
+    }
+
+    /// The same list, to export one. Opened whether or not the engine picks an
+    /// active schema, since MySQL has schemas to export and none to switch to.
+    pub(crate) fn pick_schema_to_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.offer_schemas(SchemaPick::Export, window, cx);
+    }
+
+    fn offer_schemas(&mut self, pick: SchemaPick, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_notice();
         let Some(profile) = self.profile() else {
             return;
         };
-        if !profile.config.target().picks_schema() {
+        let target = profile.config.target();
+        let offered = match pick {
+            SchemaPick::Activate => target.picks_schema(),
+            SchemaPick::Export => target.exports_schema().is_some(),
+        };
+        if !offered {
             return;
         }
         let unready = match (&profile.state, &profile.catalog) {
@@ -1679,7 +1711,7 @@ impl Workspace {
         };
         match unready {
             Some(message) => self.note(message.into(), cx),
-            None => self.open_palette(PaletteMode::Schema, window, cx),
+            None => self.open_palette(PaletteMode::Schema(pick), window, cx),
         }
     }
 

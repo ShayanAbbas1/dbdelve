@@ -1294,8 +1294,9 @@ impl Workspace {
 
     /// How many controls the dialog in front has to move the ring across:
     /// its buttons, then its "Don't ask again" box or its project, which sit
-    /// left of and above them. None for the import, a form with fields and
-    /// lists of its own, which Tab moves the keyboard itself through.
+    /// left of and above them. None for the import and the schema export,
+    /// forms with controls of their own, which Tab moves the keyboard itself
+    /// through.
     fn dialog_buttons(&self) -> usize {
         let checkbox = usize::from(self.dialog_checkbox());
         match self.dialog_in_front.get() {
@@ -1315,7 +1316,7 @@ impl Workspace {
                 if all { 3 } else { 2 }
             }
             Some("stable-import") => self.stable_import_buttons(),
-            Some("import-rows") | None => 0,
+            Some("import-rows" | "schema-export") | None => 0,
             Some(_) => 2 + checkbox,
         }
     }
@@ -3514,7 +3515,24 @@ pub(super) fn explorer_menu(
             );
         }
         let actions = node_actions(node.kind, &node.name, target);
-        return node_items(menu, &node, actions, workspace);
+        let menu = node_items(menu, &node, actions, workspace);
+        // Last, below the node's own actions. The export reads the
+        // connection's own database, so another one's schemas offer none.
+        if !is_schema_row(&row.id) || elsewhere.is_some() || target.exports_schema().is_none() {
+            return menu;
+        }
+        let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
+        let schema = row.label.to_string();
+        return menu
+            .separator()
+            .item(
+                PopupMenuItem::new("Export Schema as SQL…").on_click(move |_, _, cx| {
+                    let schema = schema.clone();
+                    on_profile(&workspace, &profile_id, cx, |workspace, cx| {
+                        workspace.open_schema_export(schema, cx);
+                    });
+                }),
+            );
     };
     let member = match elsewhere {
         None => state.member_in(&row.profile, leaf.target),

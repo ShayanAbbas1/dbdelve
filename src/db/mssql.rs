@@ -34,11 +34,11 @@ use tracing::span;
 
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    ApplyOutcome, ApplyStage, Catalog, Cell, Column, DbError, EditTarget, Engine, Fetch,
+    ApplyOutcome, ApplyStage, Catalog, Cell, Column, DbError, EditTarget, Engine, ExportDdl, Fetch,
     GraphCancel, QueryResult, Reference, RelationKind, Row, RowMatch, SchemaGraph, Sending,
     ServerConfig, SslMode, Stopped, Structure, VerifiedStep, assemble_catalog, assemble_databases,
     assemble_foreign_keys, assemble_references, assemble_schema_graph, assemble_sequences,
-    assemble_structure, create_table, plain_error, required_cell, terminated,
+    assemble_structure, create_table, plain_error, required_cell, split_foreign_keys, terminated,
 };
 
 const DATABASES_SQL: &str = "
@@ -151,8 +151,15 @@ ORDER BY s.name, o.name
 /// `TYPE_NAME(p.user_type_id)` is null for an alias type the login has no
 /// permission on, so it falls back to the base system type: an approximation,
 /// but never the null that used to fail the whole tab.
-const TYPE_SQL: &str = "(COALESCE(TYPE_NAME(p.user_type_id), TYPE_NAME(p.system_type_id)) COLLATE DATABASE_DEFAULT + CASE
-    WHEN p.user_type_id <> p.system_type_id THEN N''
+///
+/// `{named}` is where DDL puts [`DDL_TYPE_NAME_SQL`], and `{resolved}` where
+/// it asks that an alias's name be known before it leaves the length out
+/// (see [`type_sql`]).
+const TYPE_SQL: &str = "(COALESCE({named}
+    TYPE_NAME(p.user_type_id),
+    TYPE_NAME(p.system_type_id)
+) COLLATE DATABASE_DEFAULT + CASE
+    WHEN p.user_type_id <> p.system_type_id{resolved} THEN N''
     WHEN TYPE_NAME(p.system_type_id) IN ('varchar', 'char', 'varbinary', 'binary')
         THEN N'(' + CASE WHEN p.max_length = -1 THEN N'max'
             ELSE CAST(p.max_length AS nvarchar(10)) END + N')'
@@ -165,6 +172,33 @@ const TYPE_SQL: &str = "(COALESCE(TYPE_NAME(p.user_type_id), TYPE_NAME(p.system_
         THEN N'(' + CAST(p.scale AS nvarchar(10)) + N')'
     ELSE N''
 END)";
+
+/// A user-defined type as DDL spells it: quoted and schema-qualified. Its
+/// name is the user's, and DDL is text meant to be run back, where a name
+/// such as `int); DROP TABLE t; --` would otherwise be statements of its own.
+/// Null for a built-in type, which keeps its catalog spelling.
+const DDL_TYPE_NAME_SQL: &str = "(
+        SELECT QUOTENAME(SCHEMA_NAME(t.schema_id), '\"') + N'.' + QUOTENAME(t.name, '\"')
+        FROM sys.types AS t
+        WHERE t.user_type_id = p.user_type_id AND t.is_user_defined = 1
+    ),";
+
+/// [`TYPE_SQL`] for DDL, which quotes a user-defined type, or for display,
+/// which shows its bare name. Display text holds no subquery: a routine's
+/// signature aggregates it, and SQL Server refuses a subquery inside an
+/// aggregate.
+///
+/// An alias the login may not see falls back to its base type. Shown, the
+/// bare base name is enough; in DDL it is written with its length, since a
+/// bare `nvarchar` declares `nvarchar(1)` and the rows would not fit.
+fn type_sql(ddl: bool) -> String {
+    match ddl {
+        true => TYPE_SQL
+            .replace("{named}", DDL_TYPE_NAME_SQL)
+            .replace("{resolved}", " AND TYPE_NAME(p.user_type_id) IS NOT NULL"),
+        false => TYPE_SQL.replace("{named}", "").replace("{resolved}", ""),
+    }
+}
 
 // The structure queries name one relation by `{object}`, an `OBJECT_ID` over
 // the quoted name, substituted by `structure_sql`. `{column}` spells a column
@@ -327,6 +361,7 @@ SELECT
         CASE WHEN f.update_referential_action_desc <> 'NO_ACTION'
             THEN CONCAT(N' ON UPDATE ', REPLACE(f.update_referential_action_desc, '_', ' ') COLLATE DATABASE_DEFAULT)
             ELSE N'' END,
+        CASE WHEN f.is_not_for_replication = 1 THEN N' NOT FOR REPLICATION' ELSE N'' END,
         CASE WHEN {ddl} = 0 AND f.is_disabled = 1 THEN N' DISABLED' ELSE N'' END,
         CASE WHEN {ddl} = 0 AND f.is_not_trusted = 1 THEN N' NOT TRUSTED' ELSE N'' END
     )
@@ -854,6 +889,8 @@ pub struct Connection {
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]),
     /// asked and taken under [`Self::in_flight`]'s lock.
     graph: GraphCancel,
+    /// The login's default schema in the database it opened on.
+    default_schema: Option<String>,
 }
 
 impl Connection {
@@ -866,6 +903,7 @@ impl Connection {
                 tunnel,
                 alongside: false,
                 graph: GraphCancel::default(),
+                default_schema: None,
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -881,9 +919,23 @@ impl Connection {
                     ),
                     false => error,
                 })?;
+            let session = connection.read_default_schema(session)?;
             *connection.session.lock().expect("unshared until returned") = Some(session);
             Ok(connection)
         })
+    }
+
+    /// Read the login's default schema over `session`, which is only where a
+    /// list of schemas opens and so not worth failing a login over. A read
+    /// that times out marks the session lost, though, and a lost session
+    /// stored as open fails its first statement without sending it, so that
+    /// one is replaced by a new login.
+    fn read_default_schema(&mut self, mut session: Session) -> Result<Session, DbError> {
+        self.default_schema = first_value(&mut session, "SELECT SCHEMA_NAME()").unwrap_or_default();
+        match session.lost {
+            Some(_) => self.connect(),
+            None => Ok(session),
+        }
     }
 
     fn connect(&self) -> Result<Session, DbError> {
@@ -975,8 +1027,13 @@ impl Connection {
         // The server's spelling, as `open` asks for it: a restore after a
         // `USE` and a reconnect then name it as the server does.
         connection.server.database = current_database(&mut session)?;
+        let session = connection.read_default_schema(session)?;
         *connection.session.lock().expect("unshared until returned") = Some(session);
         Ok(connection)
+    }
+
+    pub fn current_schema(&self) -> Option<&str> {
+        self.default_schema.as_deref()
     }
 
     fn in_flight(&self) -> std::sync::MutexGuard<'_, InFlight> {
@@ -1539,7 +1596,7 @@ impl Connection {
     pub fn routines(&self) -> Result<Catalog, DbError> {
         assemble_catalog(
             QueryResult::default(),
-            self.internal_query(&ROUTINES_SQL.replace("{type}", TYPE_SQL))?,
+            self.internal_query(&ROUTINES_SQL.replace("{type}", &type_sql(false)))?,
         )
     }
 
@@ -1591,7 +1648,7 @@ impl Connection {
             let query = |template: &str| {
                 self.run(
                     &template
-                        .replace("{type}", TYPE_SQL)
+                        .replace("{type}", &type_sql(false))
                         .replace("{schema}", &Engine::SqlServer.quote_literal(schema)),
                     Origin::Internal,
                     Fetch {
@@ -1609,6 +1666,7 @@ impl Connection {
     }
 
     fn structure_for(&self, schema: &str, relation: &str, ddl: bool) -> Result<Structure, DbError> {
+        let types = type_sql(ddl);
         let (column, ddl) = match ddl {
             true => ("QUOTENAME(c.name, '\"')", "1"),
             false => ("c.name", "0"),
@@ -1616,7 +1674,7 @@ impl Connection {
         let query = |template: &str| {
             self.internal_query(&structure_sql(
                 &template
-                    .replace("{type}", TYPE_SQL)
+                    .replace("{type}", &types)
                     .replace("{column}", column)
                     .replace("{ddl}", ddl),
                 schema,
@@ -1638,10 +1696,78 @@ impl Connection {
     /// table put in after `INDEX`.
     ///
     /// ponytail: a disabled or untrusted foreign key is written as an ordinary
-    /// one, and an XML or spatial index's options are not written; a `NOCHECK`
-    /// statement per such key and reading `sys.xml_indexes` /
-    /// `sys.spatial_index_tessellations` are the upgrade paths.
+    /// one, as a schema export's are not ([`Self::export_ddl`]), and an XML or
+    /// spatial index's options are not written; a `NOCHECK` statement per such
+    /// key and reading `sys.xml_indexes` / `sys.spatial_index_tessellations`
+    /// are the upgrade paths.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        Ok(self.render_ddl(schema, relation, kind, false)?.create)
+    }
+
+    /// A table's DDL with its foreign keys left to statements of their own,
+    /// each as enforced as it is.
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    /// `added`, the `ALTER TABLE … ADD CONSTRAINT` of each of the table's
+    /// foreign keys, as enforced as each is: one not trusted is added without
+    /// checking the rows already in, which it may not hold, and one disabled
+    /// is then disabled again.
+    fn as_enforced(
+        &self,
+        schema: &str,
+        relation: &str,
+        added: Vec<String>,
+    ) -> Result<Vec<String>, DbError> {
+        let unchecked = self.internal_query(&structure_sql(
+            "SELECT f.name AS name, CAST(f.is_disabled AS int) AS disabled
+             FROM sys.foreign_keys AS f
+             WHERE f.parent_object_id = {object} AND f.is_not_trusted = 1",
+            schema,
+            relation,
+        ))?;
+        let table = Engine::SqlServer.qualified(schema, relation);
+        let plain = format!("ALTER TABLE {table} ADD CONSTRAINT ");
+        let mut statements = Vec::with_capacity(added.len());
+        for statement in added {
+            let state = unchecked.rows.iter().find_map(|row| {
+                let name = Engine::SqlServer
+                    .quote_identifier(required_cell(&unchecked, row, "name").ok()?);
+                statement
+                    .strip_prefix(&plain)?
+                    .starts_with(&format!("{name} "))
+                    .then(|| {
+                        (
+                            name,
+                            required_cell(&unchecked, row, "disabled").ok() == Some("1"),
+                        )
+                    })
+            });
+            match state {
+                Some((name, disabled)) => {
+                    statements.push(statement.replacen(
+                        &plain,
+                        &format!("ALTER TABLE {table} WITH NOCHECK ADD CONSTRAINT "),
+                        1,
+                    ));
+                    if disabled {
+                        statements.push(format!("ALTER TABLE {table} NOCHECK CONSTRAINT {name};"));
+                    }
+                }
+                None => statements.push(statement),
+            }
+        }
+        Ok(statements)
+    }
+
+    fn render_ddl(
+        &self,
+        schema: &str,
+        relation: &str,
+        kind: RelationKind,
+        keys_apart: bool,
+    ) -> Result<ExportDdl, DbError> {
         let name = Engine::SqlServer.qualified(schema, relation);
         if let RelationKind::View | RelationKind::MaterializedView = kind {
             let result = self.internal_query(&structure_sql(
@@ -1653,7 +1779,10 @@ impl Connection {
                 .rows
                 .first()
                 .and_then(|row| row.get(0))
-                .map(terminated)
+                .map(|definition| ExportDdl {
+                    create: terminated(definition),
+                    foreign_keys: Vec::new(),
+                })
                 .ok_or_else(|| plain_error(format!("{name} has no definition to show.")));
         }
 
@@ -1662,7 +1791,15 @@ impl Connection {
         if structure.columns.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
         }
-        Ok(create_table(
+        let (structure, mut foreign_keys) = match keys_apart {
+            true => {
+                let (rest, added) =
+                    split_foreign_keys(Engine::SqlServer, schema, relation, &structure);
+                (rest, self.as_enforced(schema, relation, added)?)
+            }
+            false => (structure, Vec::new()),
+        };
+        let mut create = create_table(
             Engine::SqlServer,
             &format!("CREATE TABLE {name}"),
             &structure,
@@ -1674,7 +1811,52 @@ impl Connection {
                 ),
                 None => index.definition.clone(),
             },
-        ))
+        );
+        if keys_apart {
+            let (before_rows, after_rows) = self.unchecked_checks(schema, relation)?;
+            for statement in before_rows {
+                create.push('\n');
+                create.push_str(&statement);
+            }
+            foreign_keys.extend(after_rows);
+        }
+        Ok(ExportDdl {
+            create,
+            foreign_keys,
+        })
+    }
+
+    /// The statements that bring back a table's CHECK constraints that do not
+    /// check its rows: a disabled one, or one enabled without checking the
+    /// rows it already had, which the catalog calls untrusted. Either may
+    /// hold rows it would refuse, so it is disabled right after the table is
+    /// created, and an untrusted one is enabled again after the rows, still
+    /// without checking them. An ordinary CHECK stays in the `CREATE TABLE`.
+    fn unchecked_checks(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<(Vec<String>, Vec<String>), DbError> {
+        let unchecked = self.internal_query(&structure_sql(
+            "SELECT c.name AS name, CAST(c.is_disabled AS int) AS disabled
+             FROM sys.check_constraints AS c
+             WHERE c.parent_object_id = {object} AND c.is_not_trusted = 1
+             ORDER BY c.name",
+            schema,
+            relation,
+        ))?;
+        let table = Engine::SqlServer.qualified(schema, relation);
+        let (mut before_rows, mut after_rows) = (Vec::new(), Vec::new());
+        for row in &unchecked.rows {
+            let name = Engine::SqlServer.quote_identifier(required_cell(&unchecked, row, "name")?);
+            before_rows.push(format!("ALTER TABLE {table} NOCHECK CONSTRAINT {name};"));
+            if required_cell(&unchecked, row, "disabled")? != "1" {
+                after_rows.push(format!(
+                    "ALTER TABLE {table} WITH NOCHECK CHECK CONSTRAINT {name};"
+                ));
+            }
+        }
+        Ok((before_rows, after_rows))
     }
 }
 
@@ -2713,13 +2895,16 @@ fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
 }
 
 fn current_database(session: &mut Session) -> Result<String, DbError> {
-    Ok(ask(session, "SELECT DB_NAME()")?
+    Ok(first_value(session, "SELECT DB_NAME()")?.unwrap_or_default())
+}
+
+fn first_value(session: &mut Session, sql: &str) -> Result<Option<String>, DbError> {
+    Ok(ask(session, sql)?
         .result
         .rows
         .first()
         .and_then(|row| row.get(0))
-        .map(str::to_string)
-        .unwrap_or_default())
+        .map(str::to_string))
 }
 
 fn held_to_database(session: &mut Session, database: &str) -> Result<(), DbError> {
@@ -2908,6 +3093,25 @@ mod tests {
 
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
+    }
+
+    /// A default-schema lookup that loses its session, as one that times out
+    /// does, hands back a new login rather than the lost session, which
+    /// would fail its first statement without sending it.
+    #[test]
+    #[ignore = "needs a live SQL Server: set dbdelve_MSSQL_URL"]
+    fn live_a_session_the_schema_lookup_lost_is_replaced() {
+        let mut connection = live();
+        let mut session = connection.connect().expect("a second login");
+        session.lost = Some(Lost::TimedOut);
+        let mut session = connection
+            .read_default_schema(session)
+            .expect("the lost session is replaced");
+        assert!(session.lost.is_none());
+        assert_eq!(
+            first_value(&mut session, "SELECT 1").expect("it reaches the server"),
+            Some("1".to_string())
+        );
     }
 
     #[test]
@@ -3708,6 +3912,12 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_connection_knows_the_logins_default_schema() {
+        assert_eq!(live().current_schema(), Some("dbo"));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_the_databases_list_flags_the_one_connected_to() {
         let databases = live().databases().expect("databases should list");
 
@@ -4106,6 +4316,54 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_export_ddl_adds_foreign_keys_after_the_rows() {
+        let connection = live();
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; \
+             DROP TABLE IF EXISTS dbdelve_test_export_parent; \
+             CREATE TABLE dbdelve_test_export_parent (id bigint NOT NULL PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_export_child (id bigint NOT NULL PRIMARY KEY, \
+                 parent_id bigint NULL, \
+                 CONSTRAINT dbdelve_test_export_fk FOREIGN KEY (parent_id) \
+                     REFERENCES dbdelve_test_export_parent (id))",
+        );
+        let exported = connection.export_ddl("dbo", "dbdelve_test_export_child");
+        setup("DROP TABLE dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent");
+        let exported = exported.expect("the table's DDL should load");
+
+        assert!(
+            !exported.create.contains("FOREIGN KEY"),
+            "{}",
+            exported.create
+        );
+        assert_eq!(
+            exported.foreign_keys.len(),
+            1,
+            "{:?}",
+            exported.foreign_keys
+        );
+        assert!(exported.foreign_keys[0].starts_with(
+            "ALTER TABLE \"dbo\".\"dbdelve_test_export_child\" \
+             ADD CONSTRAINT \"dbdelve_test_export_fk\" FOREIGN KEY"
+        ));
+        setup("CREATE TABLE dbdelve_test_export_parent (id bigint NOT NULL PRIMARY KEY)");
+        let replayed = connection.query(
+            &format!("{}\n{}", exported.create, exported.foreign_keys.join("\n")),
+            Fetch::default(),
+        );
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent",
+        );
+        replayed.expect("the table and its key should run on the server");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_the_ddl_of_a_table_and_a_view_reads_back_as_their_create_statements() {
         let connection = live();
         connection
@@ -4357,9 +4615,14 @@ mod tests {
             .query("EXECUTE AS USER = 'fix_cat_lowpriv'", Fetch::default())
             .expect("impersonation should start");
         let structure = connection.structure("dbo", "fix_cat_people");
+        let ddl = connection.ddl("dbo", "fix_cat_people", RelationKind::Table);
         connection
             .query("REVERT", Fetch::default())
             .expect("impersonation should end");
+        // Written to be run, the base type keeps its length: a bare `nvarchar`
+        // would declare one character.
+        let ddl = ddl.expect("the DDL should load despite the withheld permissions");
+        assert!(ddl.contains("\"email\" nvarchar(50)"), "{ddl}");
         let structure = structure.expect("structure should load despite the withheld permissions");
 
         let email = structure
@@ -5955,6 +6218,7 @@ mod tests {
             tunnel: None,
             alongside: true,
             graph: GraphCancel::default(),
+            default_schema: None,
         };
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
@@ -5985,6 +6249,7 @@ mod tests {
             tunnel: None,
             alongside: false,
             graph: GraphCancel::default(),
+            default_schema: None,
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

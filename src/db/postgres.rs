@@ -19,12 +19,12 @@ use crate::tls;
 use super::ssh::{self, Bridged, SocketBridge};
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch,
+    ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, ExportDdl, Feed, Fetch,
     GraphCancel, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch, SchemaGraph,
-    Sending, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
+    Sending, Sequences, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
     assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
     assemble_sequences, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, terminated,
+    optional_cell, plain_error, required_cell, split_foreign_keys, terminated,
 };
 
 mod pgpass;
@@ -1250,6 +1250,18 @@ impl Connection {
         })
     }
 
+    /// [`Self::alongside`] with an empty `search_path`, for reading text meant
+    /// to run on another session. The catalog's functions (`format_type`,
+    /// `pg_get_expr`, `pg_get_constraintdef`, `pg_get_indexdef`) name a schema
+    /// only where the path does not reach it, and the path here would start
+    /// with the profile's schema; empty, every name they write is qualified,
+    /// as pg_dump reads them.
+    pub fn alongside_unpathed(&self) -> Result<Self, DbError> {
+        let own = self.alongside()?;
+        own.internal_query("SELECT pg_catalog.set_config('search_path', '', false)")?;
+        Ok(own)
+    }
+
     /// A session on `database`, for the (connection, database) pair: a new
     /// connection from this one's live server config -- its resolved password
     /// and its route -- with the database replaced and no schema picked, which
@@ -1834,6 +1846,327 @@ impl Connection {
     /// populated. `relpartbound`, `attfdwoptions`, `pg_get_serial_sequence`
     /// and `relispopulated` are where each is.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        Ok(self.render_ddl(schema, relation, kind, false)?.create)
+    }
+
+    /// A table's DDL with its foreign keys left to statements of their own.
+    ///
+    /// A table in an inheritance is refused: its DDL writes no `INHERITS` or
+    /// `PARTITION OF`, so a child would come back on its own, and a parent's
+    /// rows are read without `ONLY`, so they hold every child's too, which a
+    /// file holding the children as well writes twice. The partitions of a
+    /// partitioned table in the schema never reach here; a partition whose
+    /// parent is in another schema, and old-style inheritance, do.
+    ///
+    /// ponytail: refused rather than written. The upgrade is `INHERITS` (or
+    /// `PARTITION OF … FOR VALUES` from `relpartbound`) in the DDL and `ONLY`
+    /// on a parent's rows.
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        let name = Engine::Postgres.qualified(schema, relation);
+        let family = self.internal_query(&format!(
+            "SELECT
+                 (SELECT pg_catalog.string_agg(
+                      parent_namespace.nspname || '.' || parent.relname, ', '
+                      ORDER BY parent_namespace.nspname, parent.relname)
+                  FROM pg_catalog.pg_inherits AS inheritance
+                  JOIN pg_catalog.pg_class AS parent ON parent.oid = inheritance.inhparent
+                  JOIN pg_catalog.pg_namespace AS parent_namespace
+                      ON parent_namespace.oid = parent.relnamespace
+                  WHERE inheritance.inhrelid = {0}::regclass) AS parents,
+                 (SELECT pg_catalog.string_agg(
+                      child_namespace.nspname || '.' || child.relname, ', '
+                      ORDER BY child_namespace.nspname, child.relname)
+                  FROM pg_catalog.pg_inherits AS inheritance
+                  JOIN pg_catalog.pg_class AS child ON child.oid = inheritance.inhrelid
+                  JOIN pg_catalog.pg_namespace AS child_namespace
+                      ON child_namespace.oid = child.relnamespace
+                  WHERE inheritance.inhparent = {0}::regclass) AS children",
+            Engine::Postgres.quote_literal(&name)
+        ))?;
+        let row = family.rows.first().cloned().unwrap_or_default();
+        if let Some(parents) = optional_cell(&family, &row, "parents") {
+            return Err(plain_error(format!(
+                "it inherits from {parents}, which an export does not write yet."
+            )));
+        }
+        if let Some(children) = optional_cell(&family, &row, "children") {
+            return Err(plain_error(format!(
+                "{children} inherit from it, which an export does not write yet."
+            )));
+        }
+        self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    /// The sequences columns of `tables` own, as the statements that bring
+    /// them back: created before the tables whose defaults name them, set
+    /// where they stood after the rows are in.
+    ///
+    /// A sequence of the schema their defaults name that none of them owns
+    /// (one shared, or one an unexported table owns) is created and set too,
+    /// owned by nothing: its owner is not in the file. One in another schema
+    /// is that schema's to bring back.
+    ///
+    /// ponytail: a default naming an exported identity column's sequence is
+    /// refused. The upgrade is pg_dump's: the column's identity added after
+    /// the tables with `ADD GENERATED … (SEQUENCE NAME …)`, ahead of the
+    /// tables whose defaults name it.
+    pub fn export_sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
+        let mut sequences = Sequences::default();
+        if tables.is_empty() {
+            return Ok(sequences);
+        }
+        let names: Vec<String> = tables
+            .iter()
+            .map(|table| Engine::Postgres.quote_literal(table))
+            .collect();
+        // Not `pg_sequences`, which reads where every sequence in the database
+        // stands, so one dropped by another session meanwhile fails the read.
+        // `owned` is each sequence a column of `tables` owns, as `serial` or
+        // as an identity; `named` is each other sequence of the schema their
+        // defaults name.
+        let tables_sql = format!(
+            "table_namespace.nspname = {} AND table_class.relname IN ({})",
+            Engine::Postgres.quote_literal(schema),
+            names.join(", ")
+        );
+        // An identity column's sequence is created by its table's `CREATE`,
+        // under a name of the server's choosing and only once that table is,
+        // so a default naming it would replay against no such sequence.
+        let borrowed = self.internal_query(&format!(
+            "SELECT table_class.relname || '.' || attribute.attname AS borrower,
+                 sequence_class.relname AS sequence_name,
+                 owner_class.relname || '.' || owner_attribute.attname AS owner
+             FROM pg_catalog.pg_depend AS dependency
+             JOIN pg_catalog.pg_attrdef AS attribute_default
+                 ON attribute_default.oid = dependency.objid
+             JOIN pg_catalog.pg_class AS table_class
+                 ON table_class.oid = attribute_default.adrelid
+             JOIN pg_catalog.pg_namespace AS table_namespace
+                 ON table_namespace.oid = table_class.relnamespace
+             JOIN pg_catalog.pg_attribute AS attribute
+                 ON attribute.attrelid = table_class.oid
+                 AND attribute.attnum = attribute_default.adnum
+             JOIN pg_catalog.pg_class AS sequence_class
+                 ON sequence_class.oid = dependency.refobjid AND sequence_class.relkind = 'S'
+             JOIN pg_catalog.pg_depend AS identity
+                 ON identity.objid = sequence_class.oid AND identity.deptype = 'i'
+                 AND identity.classid = 'pg_catalog.pg_class'::regclass
+                 AND identity.refclassid = 'pg_catalog.pg_class'::regclass
+             JOIN pg_catalog.pg_class AS owner_class ON owner_class.oid = identity.refobjid
+             JOIN pg_catalog.pg_attribute AS owner_attribute
+                 ON owner_attribute.attrelid = owner_class.oid
+                 AND owner_attribute.attnum = identity.refobjsubid
+             WHERE dependency.classid = 'pg_catalog.pg_attrdef'::regclass
+                 AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                 AND {tables_sql}
+                 AND owner_class.relnamespace = table_namespace.oid
+                 AND owner_class.relname IN ({})
+             ORDER BY 1",
+            names.join(", ")
+        ))?;
+        if let Some(row) = borrowed.rows.first() {
+            let cell = |name: &str| required_cell(&borrowed, row, name);
+            return Err(plain_error(format!(
+                "the default of {} takes its values from {}, the sequence of the identity \
+                 column {}, which the file cannot name: its table's CREATE makes it under a \
+                 name of its own. Export one of the two tables without the other.",
+                cell("borrower")?,
+                cell("sequence_name")?,
+                cell("owner")?
+            )));
+        }
+        let result = self.internal_query(&format!(
+            "WITH owned AS (
+                 SELECT dependency.objid AS sequence_oid,
+                     table_class.relname AS table_name,
+                     attribute.attname AS column_name,
+                     attribute.attnum AS position,
+                     dependency.deptype::text AS owner_kind
+                 FROM pg_catalog.pg_depend AS dependency
+                 JOIN pg_catalog.pg_class AS table_class
+                     ON table_class.oid = dependency.refobjid
+                 JOIN pg_catalog.pg_namespace AS table_namespace
+                     ON table_namespace.oid = table_class.relnamespace
+                 JOIN pg_catalog.pg_attribute AS attribute
+                     ON attribute.attrelid = table_class.oid
+                     AND attribute.attnum = dependency.refobjsubid
+                 WHERE dependency.classid = 'pg_catalog.pg_class'::regclass
+                     AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND dependency.deptype IN ('a', 'i')
+                     AND {tables_sql}
+             ), named AS (
+                 SELECT DISTINCT dependency.refobjid AS sequence_oid,
+                     NULL::name AS table_name,
+                     NULL::name AS column_name,
+                     NULL::int2 AS position,
+                     'n' AS owner_kind
+                 FROM pg_catalog.pg_depend AS dependency
+                 JOIN pg_catalog.pg_attrdef AS attribute_default
+                     ON attribute_default.oid = dependency.objid
+                 JOIN pg_catalog.pg_class AS table_class
+                     ON table_class.oid = attribute_default.adrelid
+                 JOIN pg_catalog.pg_namespace AS table_namespace
+                     ON table_namespace.oid = table_class.relnamespace
+                 WHERE dependency.classid = 'pg_catalog.pg_attrdef'::regclass
+                     AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND {tables_sql}
+                     AND dependency.refobjid NOT IN (SELECT sequence_oid FROM owned)
+                     AND dependency.refobjid IN (
+                         SELECT oid FROM pg_catalog.pg_class
+                         WHERE relnamespace = table_namespace.oid
+                     )
+             )
+             SELECT sequence_namespace.nspname AS sequence_schema,
+                 sequence_class.relname AS sequence_name,
+                 wanted.table_name,
+                 wanted.column_name,
+                 wanted.owner_kind,
+                 pg_catalog.format_type(sequence.seqtypid, NULL) AS data_type,
+                 sequence.seqstart::text AS start_value,
+                 sequence.seqmin::text AS min_value,
+                 sequence.seqmax::text AS max_value,
+                 sequence.seqincrement::text AS increment_by,
+                 sequence.seqcycle::text AS cycle,
+                 sequence.seqcache::text AS cache_size,
+                 CASE WHEN access.readable
+                     THEN pg_catalog.pg_sequence_last_value(sequence_class.oid)::text
+                 END AS last_value,
+                 access.readable::text AS readable,
+                 pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT')::text
+                     AS selectable
+             FROM (SELECT * FROM owned UNION ALL SELECT * FROM named) AS wanted
+             JOIN pg_catalog.pg_class AS sequence_class
+                 ON sequence_class.oid = wanted.sequence_oid AND sequence_class.relkind = 'S'
+             JOIN pg_catalog.pg_namespace AS sequence_namespace
+                 ON sequence_namespace.oid = sequence_class.relnamespace
+             JOIN pg_catalog.pg_sequence AS sequence ON sequence.seqrelid = sequence_class.oid
+             CROSS JOIN LATERAL (
+                 SELECT pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT, USAGE')
+                     AS readable
+             ) AS access
+             ORDER BY wanted.table_name NULLS LAST, wanted.position,
+                 sequence_namespace.nspname, sequence_class.relname"
+        ))?;
+        for row in &result.rows {
+            let cell = |name: &str| required_cell(&result, row, name);
+            let sequence =
+                Engine::Postgres.qualified(cell("sequence_schema")?, cell("sequence_name")?);
+            let kind = cell("owner_kind")?;
+            // `last_value` is NULL for a role that may not read the sequence,
+            // and for one whose next value is not yet taken: never used, or
+            // set by `setval(…, false)`. Only the sequence itself says where
+            // the second stands.
+            let set = match optional_cell(&result, row, "last_value") {
+                Some(last) => Some((last.to_string(), "true".to_string())),
+                None if cell("selectable")? == "true" => {
+                    let state = self.internal_query(&format!(
+                        "SELECT last_value::text AS last_value, is_called::text AS is_called \
+                         FROM {sequence}"
+                    ))?;
+                    let row = state
+                        .rows
+                        .first()
+                        .ok_or_else(|| plain_error(format!("{sequence} has no state to read.")))?;
+                    Some((
+                        required_cell(&state, row, "last_value")?.to_string(),
+                        required_cell(&state, row, "is_called")?.to_string(),
+                    ))
+                }
+                None => {
+                    sequences.unreadable.push(sequence.clone());
+                    None
+                }
+            };
+            // The definition and the value are read apart, the value from the
+            // sequence as it stands now: an `ALTER SEQUENCE` and a `setval`
+            // committed in between pair the old bounds with a value only the
+            // new ones allow, which a replay refuses.
+            if let Some((last, _)) = &set
+                && outside_bounds(last, cell("min_value")?, cell("max_value")?)
+            {
+                return Err(plain_error(format!(
+                    "{sequence} was changed while it was read: it stands at {last}, \
+                     outside the bounds read with it. Export it again."
+                )));
+            }
+            let set = set.map(|(last, called)| format!("{last}, {called}"));
+            // A sequence an identity column owns is created by its table, and
+            // a `named` one by no table at all.
+            let column_of = || -> Result<(String, String), DbError> {
+                Ok((
+                    Engine::Postgres.qualified(schema, cell("table_name")?),
+                    Engine::Postgres.quote_identifier(cell("column_name")?),
+                ))
+            };
+            if kind != "i" {
+                sequences.before_tables.push(format!(
+                    "CREATE SEQUENCE {sequence} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} \
+                     START WITH {} CACHE {} {};",
+                    cell("data_type")?,
+                    cell("increment_by")?,
+                    cell("min_value")?,
+                    cell("max_value")?,
+                    cell("start_value")?,
+                    cell("cache_size")?,
+                    if cell("cycle")? == "true" {
+                        "CYCLE"
+                    } else {
+                        "NO CYCLE"
+                    },
+                ));
+                if kind == "a" {
+                    let (table, column) = column_of()?;
+                    sequences.owned_by.push(format!(
+                        "ALTER SEQUENCE {sequence} OWNED BY {table}.{column};"
+                    ));
+                }
+                if let Some(set) = set {
+                    sequences.values.push(format!(
+                        "SELECT pg_catalog.setval({}, {set});",
+                        Engine::Postgres.quote_literal(&sequence)
+                    ));
+                }
+            } else {
+                let (table, column) = column_of()?;
+                let start = cell("start_value")?;
+                // The table's `GENERATED … AS IDENTITY` names none of its
+                // sequence's options, so the column is given them as they were.
+                // The new sequence stands at the default start, which a
+                // descending one's bounds refuse, so it restarts in the same
+                // statement.
+                sequences.identity.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} SET INCREMENT BY {} \
+                     SET MINVALUE {} SET MAXVALUE {} SET START WITH {start} RESTART WITH {start} \
+                     SET CACHE {} SET {};",
+                    cell("increment_by")?,
+                    cell("min_value")?,
+                    cell("max_value")?,
+                    cell("cache_size")?,
+                    if cell("cycle")? == "true" {
+                        "CYCLE"
+                    } else {
+                        "NO CYCLE"
+                    },
+                ));
+                if let Some(set) = set {
+                    sequences.values.push(format!(
+                        "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence({}, {}), {set});",
+                        Engine::Postgres.quote_literal(&table),
+                        Engine::Postgres.quote_literal(cell("column_name")?),
+                    ));
+                }
+            }
+        }
+        Ok(sequences)
+    }
+
+    fn render_ddl(
+        &self,
+        schema: &str,
+        relation: &str,
+        kind: RelationKind,
+        keys_apart: bool,
+    ) -> Result<ExportDdl, DbError> {
         let name = Engine::Postgres.qualified(schema, relation);
         let view = match kind {
             RelationKind::View => Some("VIEW"),
@@ -1867,10 +2200,17 @@ impl Connection {
                     statements.push(terminated(required_cell(&indexes, row, "definition")?));
                 }
             }
-            return Ok(statements.join("\n"));
+            return Ok(ExportDdl {
+                create: statements.join("\n"),
+                foreign_keys: Vec::new(),
+            });
         }
 
         let structure = self.structure(schema, relation)?;
+        let (structure, foreign_keys) = match keys_apart {
+            true => split_foreign_keys(Engine::Postgres, schema, relation, &structure),
+            false => (structure, Vec::new()),
+        };
         let storage = self.internal_query(&structure_sql(TABLE_STORAGE_SQL, schema, relation))?;
         if storage.rows.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
@@ -1910,13 +2250,17 @@ impl Connection {
             (Some(key), None) => ("TABLE", format!(" PARTITION BY {key}")),
             (None, None) => ("TABLE", String::new()),
         };
-        Ok(create_table(
+        let create = create_table(
             Engine::Postgres,
             &format!("CREATE {head} {name}"),
             &structure,
             &tail,
             |index| index.definition.clone(),
-        ))
+        );
+        Ok(ExportDdl {
+            create,
+            foreign_keys,
+        })
     }
 }
 
@@ -2256,6 +2600,20 @@ fn schema_sql(template: &str, schema: &str) -> String {
 }
 
 /// A relation name is user data and can contain a quote.
+/// Whether a sequence's `value` lies outside its `minimum` and `maximum`, all
+/// as the server prints them. Text that does not read as a bigint is taken as
+/// inside: the server's, not this check's, to refuse.
+fn outside_bounds(value: &str, minimum: &str, maximum: &str) -> bool {
+    match (
+        value.parse::<i64>(),
+        minimum.parse::<i64>(),
+        maximum.parse::<i64>(),
+    ) {
+        (Ok(value), Ok(minimum), Ok(maximum)) => value < minimum || value > maximum,
+        _ => false,
+    }
+}
+
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     super::structure_sql(super::Engine::Postgres, template, schema, relation)
 }
@@ -2730,6 +3088,15 @@ mod tests {
             ..parts
         };
         assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE;"));
+    }
+
+    #[test]
+    fn a_sequence_value_is_checked_against_the_bounds_read_with_it() {
+        assert!(!outside_bounds("5", "1", "10"));
+        assert!(!outside_bounds("-5", "-9223372036854775808", "-1"));
+        assert!(outside_bounds("50", "1", "10"));
+        assert!(outside_bounds("0", "1", "10"));
+        assert!(!outside_bounds("not a number", "1", "10"));
     }
 
     #[test]
@@ -5959,6 +6326,220 @@ mod tests {
                 .all(|reference| reference.referenced_column != "number"),
             "a composite key names no single column: {references:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_export_ddl_adds_foreign_keys_after_the_rows() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; \
+             DROP TABLE IF EXISTS dbdelve_test_export_parent; \
+             CREATE TABLE dbdelve_test_export_parent (id bigint PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_export_child (id bigint PRIMARY KEY, parent_id bigint, \
+                 CONSTRAINT dbdelve_test_export_fk FOREIGN KEY (parent_id) \
+                     REFERENCES dbdelve_test_export_parent (id))",
+        );
+        let exported = connection.export_ddl("public", "dbdelve_test_export_child");
+        setup("DROP TABLE dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent");
+        let exported = exported.expect("the table's DDL should load");
+
+        assert!(
+            !exported.create.contains("FOREIGN KEY"),
+            "{}",
+            exported.create
+        );
+        assert_eq!(
+            exported.foreign_keys.len(),
+            1,
+            "{:?}",
+            exported.foreign_keys
+        );
+        assert!(exported.foreign_keys[0].starts_with(
+            "ALTER TABLE \"public\".\"dbdelve_test_export_child\" \
+             ADD CONSTRAINT \"dbdelve_test_export_fk\" FOREIGN KEY"
+        ));
+        setup("CREATE TABLE dbdelve_test_export_parent (id bigint PRIMARY KEY)");
+        let replayed = connection.query(
+            &format!("{}\n{}", exported.create, exported.foreign_keys.join("\n")),
+            Fetch::default(),
+        );
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent",
+        );
+        replayed.expect("the table and its key should run on the server");
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_sequences_bring_serial_and_identity_back_to_where_they_were() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        let drop = "DROP TABLE IF EXISTS dbdelve_test_seq_serial; \
+                    DROP TABLE IF EXISTS dbdelve_test_seq_identity";
+        setup(drop);
+        setup(
+            "CREATE TABLE dbdelve_test_seq_serial (id serial PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_seq_identity (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY); \
+             INSERT INTO dbdelve_test_seq_serial DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_serial DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_serial DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_identity DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_identity DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_identity DEFAULT VALUES",
+        );
+        let tables = [
+            "dbdelve_test_seq_serial".to_string(),
+            "dbdelve_test_seq_identity".to_string(),
+        ];
+        let sequences = connection.export_sequences("public", &tables);
+        setup(drop);
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(
+            sequences.before_tables.len(),
+            1,
+            "{:?}",
+            sequences.before_tables
+        );
+        assert!(sequences.before_tables[0].starts_with(
+            "CREATE SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" AS integer INCREMENT BY 1"
+        ));
+        assert_eq!(sequences.identity.len(), 1, "{:?}", sequences.identity);
+        assert!(sequences.identity[0].starts_with(
+            "ALTER TABLE \"public\".\"dbdelve_test_seq_identity\" ALTER COLUMN \"id\" SET INCREMENT BY 1"
+        ));
+        // Each `setval` carries the 3 the rows reached.
+        assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);
+        assert!(
+            sequences
+                .values
+                .iter()
+                .all(|sql| sql.contains(", 3, true);"))
+        );
+        assert_eq!(
+            sequences.owned_by,
+            vec![
+                "ALTER SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" \
+                 OWNED BY \"public\".\"dbdelve_test_seq_serial\".\"id\";"
+                    .to_string()
+            ]
+        );
+
+        // The proof is the server: replay it into emptied tables and the next
+        // value carries on after the rows that were there.
+        setup(&sequences.before_tables.join("\n"));
+        setup(
+            "CREATE TABLE dbdelve_test_seq_serial (id integer PRIMARY KEY DEFAULT \
+                 nextval('public.dbdelve_test_seq_serial_id_seq')); \
+             CREATE TABLE dbdelve_test_seq_identity (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY)",
+        );
+        setup(&sequences.values.join("\n"));
+        setup(&sequences.owned_by.join("\n"));
+        let next = |table: &str| {
+            connection
+                .query(
+                    &format!("INSERT INTO {table} DEFAULT VALUES RETURNING id"),
+                    Fetch::default(),
+                )
+                .map(|result| {
+                    result
+                        .rows
+                        .first()
+                        .and_then(|row| row.get(0).map(str::to_string))
+                })
+        };
+        let serial = next("dbdelve_test_seq_serial");
+        let identity = next("dbdelve_test_seq_identity");
+        setup(drop);
+        assert_eq!(serial.expect("serial inserts"), Some("4".to_string()));
+        assert_eq!(identity.expect("identity inserts"), Some("4".to_string()));
+    }
+
+    #[test]
+    #[ignore = "needs the dev Postgres"]
+    fn live_a_sequence_whose_next_value_is_not_taken_is_set_where_it_stands() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        // The catalog shows both a NULL `last_value`: one never used, and one
+        // `setval(…, false)` put at 50 for its next value.
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_seq_unused; \
+             DROP TABLE IF EXISTS dbdelve_test_seq_reset; \
+             CREATE TABLE dbdelve_test_seq_unused (id serial PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_seq_reset (id serial PRIMARY KEY); \
+             SELECT setval('dbdelve_test_seq_reset_id_seq', 50, false)",
+        );
+        let sequences = connection.export_sequences(
+            "public",
+            &[
+                "dbdelve_test_seq_reset".to_string(),
+                "dbdelve_test_seq_unused".to_string(),
+            ],
+        );
+        setup("DROP TABLE dbdelve_test_seq_unused; DROP TABLE dbdelve_test_seq_reset");
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);
+        assert!(
+            sequences.values[0].ends_with(", 50, false);"),
+            "{:?}",
+            sequences.values
+        );
+        assert!(
+            sequences.values[1].ends_with(", 1, false);"),
+            "{:?}",
+            sequences.values
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the dev Postgres"]
+    fn live_an_unreadable_sequence_is_named_not_set_to_start() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        // `GRANT SELECT ON ALL TABLES` leaves the sequences out, so a role
+        // granted that reads every row and no sequence: the catalog shows it a
+        // NULL `last_value`, as it does a sequence never used.
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_seq_hidden; \
+             DROP ROLE IF EXISTS dbdelve_test_no_sequences; \
+             CREATE ROLE dbdelve_test_no_sequences; \
+             CREATE TABLE dbdelve_test_seq_hidden (id serial PRIMARY KEY); \
+             INSERT INTO dbdelve_test_seq_hidden DEFAULT VALUES; \
+             GRANT SELECT ON dbdelve_test_seq_hidden TO dbdelve_test_no_sequences; \
+             SET ROLE dbdelve_test_no_sequences",
+        );
+        let sequences =
+            connection.export_sequences("public", &["dbdelve_test_seq_hidden".to_string()]);
+        setup(
+            "RESET ROLE; DROP TABLE dbdelve_test_seq_hidden; \
+             DROP ROLE dbdelve_test_no_sequences",
+        );
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(
+            sequences.unreadable,
+            vec!["\"public\".\"dbdelve_test_seq_hidden_id_seq\"".to_string()]
+        );
+        assert!(sequences.values.is_empty(), "{:?}", sequences.values);
     }
 
     #[test]
