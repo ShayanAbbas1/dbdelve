@@ -2060,8 +2060,9 @@ pub(crate) fn unsafe_component(value: &str) -> Option<&'static str> {
 
 /// `name` as one folder name on every platform: what a path separator, a
 /// character Windows refuses or a control character would break becomes `-`,
-/// and a leading dot (hidden) or a trailing dot or space (dropped by Windows)
-/// goes.
+/// a leading dot (hidden) or a trailing dot or space (dropped by Windows)
+/// goes, and a name Windows keeps for a device is prefixed, since a suffix
+/// after its extension leaves it one.
 pub(crate) fn path_component(name: &str) -> String {
     let replaced: String = name
         .chars()
@@ -2076,17 +2077,28 @@ pub(crate) fn path_component(name: &str) -> String {
         .trim_start_matches('.')
         .trim_end_matches(['.', ' '])
         .trim();
-    let upper = trimmed.to_ascii_uppercase();
-    let numbered = upper.len() == 4
-        && (upper.starts_with("COM") || upper.starts_with("LPT"))
-        && matches!(upper.as_bytes()[3], b'1'..=b'9');
     match trimmed {
         "" => "Connection".to_string(),
-        _ if numbered || matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") => {
-            format!("{trimmed}-")
-        }
+        _ if windows_reserved(trimmed) => format!("_{trimmed}"),
         _ => trimmed.to_string(),
     }
+}
+
+/// Whether Windows takes `name` for a device: by what comes before its first
+/// dot, whatever follows, so `CON.reports` is one too.
+fn windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_uppercase();
+    let numbered = ["COM", "LPT"].iter().any(|device| {
+        upper.strip_prefix(device).is_some_and(|number| {
+            let mut digits = number.chars();
+            matches!(
+                (digits.next(), digits.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    });
+    numbered || matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
 }
 
 /// A folder name per connection, in `names`' order, from [`path_component`],
@@ -3870,9 +3882,13 @@ open_objects = []
         assert_eq!(path_component("Prod / EU: West"), "Prod - EU- West");
         assert_eq!(path_component(".hidden."), "hidden");
         assert_eq!(path_component("  "), "Connection");
-        assert_eq!(path_component("con"), "con-");
-        assert_eq!(path_component("COM1"), "COM1-");
+        assert_eq!(path_component("con"), "_con");
+        assert_eq!(path_component("COM1"), "_COM1");
+        assert_eq!(path_component("CON.reports"), "_CON.reports");
+        assert_eq!(path_component("com1.backup"), "_com1.backup");
+        assert_eq!(path_component("LPT\u{b2}"), "_LPT\u{b2}");
         assert_eq!(path_component("Company"), "Company");
+        assert_eq!(path_component("console.logs"), "console.logs");
         assert_eq!(
             connection_folders(&["Prod", "prod", "Prod/", "Dev", "Prod 2"]),
             ["Prod", "prod 2", "Prod-", "Dev", "Prod 2 2"]
