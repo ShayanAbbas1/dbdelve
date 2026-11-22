@@ -12577,3 +12577,306 @@ fn opening_a_file_already_open_brings_its_tab_up(cx: &mut TestAppContext) {
         quit(workspace, cx);
     });
 }
+
+/// The front tab's id and its scratch file's path.
+fn front_scratch(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (u64, std::path::PathBuf) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace.profile().expect("a connection in front");
+        let Tab::Query(id) = profile.session.active else {
+            panic!("a query tab is in front");
+        };
+        let scratch = store::query_directory(&profile.id)
+            .unwrap()
+            .join(format!(".scratch-{id}.sql"));
+        (id, scratch)
+    })
+}
+
+fn is_open(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    path: &std::path::Path,
+) -> bool {
+    workspace.read_with(cx, |workspace, _| workspace.tab_on_file(path).is_some())
+}
+
+/// A file opened and typed into, so its tab holds text the file does not.
+fn open_dirty_file(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    name: &str,
+) -> std::path::PathBuf {
+    let path = user_sql_file(name, "SELECT 1;");
+    open_sql_file(workspace, cx, &path);
+    cx.simulate_input("-- ");
+    assert!(front_dirty(workspace, cx));
+    path
+}
+
+#[gpui::test]
+fn closing_a_dirty_file_tab_asks_and_cancel_keeps_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "kept.sql");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "left");
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(front_file(&workspace, cx), Some(path.clone()));
+        assert!(front_dirty(&workspace, cx));
+        assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn dont_save_closes_a_dirty_file_tab_and_removes_its_scratch(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "dropped.sql");
+        let (_, scratch) = front_scratch(&workspace, cx);
+        workspace.read_with(cx, |workspace, cx| workspace.persist_buffers(cx));
+        assert!(scratch.exists(), "the unsaved text is in its scratch file");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "left");
+        press(cx, "left");
+        press(cx, "enter");
+        settle(cx);
+
+        assert!(!is_open(&workspace, cx, &path));
+        assert!(!scratch.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_in_the_close_question_writes_the_file_and_closes_its_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "written.sql");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        assert!(!is_open(&workspace, cx, &path));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn close_all_tabs_asks_once_about_every_dirty_file_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("SELECT 'untitled';");
+        let first = open_dirty_file(&workspace, cx, "first.sql");
+        let second = open_dirty_file(&workspace, cx, "second.sql");
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let asked = session.pending_discard.as_ref().expect("one question");
+            assert_eq!(asked.tabs.len(), 2);
+            assert_eq!(session.strip_tabs(), asked.tabs, "the rest closed unasked");
+        });
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "-- SELECT 1;");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "-- SELECT 1;");
+        assert_eq!(query_tab_count(&workspace, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
+/// The tab on `path` brought back to the front.
+fn bring_back(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, path: &std::path::Path) {
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.bring_up_file(path, window, cx));
+        });
+    });
+    settle(cx);
+}
+
+fn front_conflict(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<crate::session::Conflict> {
+    query_tab(workspace, cx, |tab, _, _| tab.file.as_ref()?.conflict)
+}
+
+#[gpui::test]
+fn an_outside_write_reloads_a_clean_tab_when_it_comes_forward(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("outside.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "SELECT 22;");
+        assert!(!front_dirty(&workspace, cx));
+
+        // And when the window comes back with the tab already in front.
+        cx.deactivate_window();
+        std::fs::write(&path, "SELECT 333;").unwrap();
+        cx.update(|window, _| window.activate_window());
+        settle(cx);
+        assert_eq!(buffer(&workspace, cx), "SELECT 333;");
+        assert!(!front_dirty(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_outside_write_under_unsaved_text_raises_the_bar(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "contested.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;", "nothing is lost");
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::Asking)
+        );
+        assert!(cx.debug_bounds("file-banner").is_some());
+
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.take_disk(id, false, window, cx)
+            });
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("file-banner").is_none(), "kept");
+        assert!(front_dirty(&workspace, cx));
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 22;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_after_an_outside_write_asks_before_overwriting_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "raced.sql");
+        std::fs::write(&path, "SELECT 22;").unwrap();
+
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 22;");
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        assert!(!front_dirty(&workspace, cx));
+        assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_file_deleted_on_disk_says_so_and_save_writes_it_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("deleted.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+
+        std::fs::remove_file(&path).unwrap();
+        bring_back(&workspace, cx, &path);
+        assert_eq!(
+            front_file(&workspace, cx),
+            Some(path.clone()),
+            "still bound"
+        );
+        assert!(front_dirty(&workspace, cx));
+        assert!(cx.debug_bounds("file-banner").is_some());
+
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        assert!(!front_dirty(&workspace, cx));
+        assert!(cx.debug_bounds("file-banner").is_none());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_file_gone_at_relaunch_comes_back_saying_it_was_deleted(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "vanished.sql");
+        let (id, _) = front_scratch(&workspace, cx);
+
+        close_window(workspace, cx);
+        std::fs::remove_file(&path).unwrap();
+        let (workspace, cx) = launch_again(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(Tab::Query(id), window, cx)
+            });
+        });
+        settle(cx);
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;");
+        assert!(front_dirty(&workspace, cx));
+        assert!(cx.debug_bounds("file-banner").is_some());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_as_into_the_saved_queries_folder_lists_the_query(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("SELECT 2;");
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        let queries = workspace.read_with(cx, |workspace, _| {
+            let id = &workspace.profile().expect("a connection in front").id;
+            store::query_directory(id).unwrap()
+        });
+        std::fs::create_dir_all(&queries).unwrap();
+        cx.simulate_new_path_selection(|_| Some(queries.join("nightly")));
+        settle(cx);
+
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            assert!(session.saved_queries.iter().any(|name| name == "nightly"));
+        });
+        quit(workspace, cx);
+    });
+}
