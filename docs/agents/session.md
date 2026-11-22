@@ -616,8 +616,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   writes the file again. A file missing at relaunch comes back the same
   way, so the label needs nothing of its own there.
 - **Saved queries are files where they already are.** A profile's saved
-  queries stay under `queries/<profile id>/` and are listed in the sidebar's
-  Queries group and the palette (`Session::saved_queries`), which a Save As
+  queries stay under `queries/<profile id>/` until moved, and are listed in the
+  sidebar's Files group and the palette (`Session::saved_queries`), which a Save As
   into that directory refreshes; opening one opens
   a file tab on that path, and a tab stored by a build before file tabs, with
   a `name` and no `path`, is bound to it at load (`session::adopted`).
@@ -637,6 +637,57 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   no-overwrite move, never a write under the new name and a delete of the old
   one: on a case-insensitive filesystem `daily` and `Daily` are one file. A
   name taken in any case is refused. Staging files are private to each writer.
+- **The Files group lists a connection's files, then its saved queries.**
+  Its row id is still `queries` (`explorer::FILES_GROUP`), so the fold
+  stored for the old Queries group applies. Its files are the profile's
+  recent files (`StoredProfile::recent_files`, left out when empty), then
+  any file open in a tab they no longer hold (`Profile::listed_files`); a
+  saved query's file is listed as the query instead. Opening a file in a
+  tab, Save and Save As put its resolved path first in the connection's list
+  (`session::remember_recent`: newest first, once, at most 20); so does the
+  move, for the connection each query was on. A row is named by its file,
+  with its folder beside it where two listed share a name, and shows the
+  full path on hover; its id is `file:` and the path, matched against the
+  listed paths rather than parsed back, since a path need not be UTF-8.
+  Open goes through the open-file path, so a file already open comes
+  forward. Reveal is named as each platform names it: Reveal in Finder,
+  Reveal in File Explorer, and Open Containing Folder elsewhere. Remove from List takes the path off the list and never touches
+  the file; deleting stays the file manager's. Which listed files are gone
+  is looked at off the window's thread at launch and whenever the window
+  comes forward (`Workspace::look_at_recent_files`), never per frame or
+  per rebuild; a gone row is greyed, and opening it asks whether to remove
+  it from the list (the "forget-file" dialog). The palette's Queries scope
+  lists the same files beside the saved queries.
+- **The saved queries move to a folder only when asked.** A launch where a
+  connection has saved queries left shows one line under the titlebar ("Your
+  N saved queries are now files.") with Move to Folder…, Reveal and Not Now,
+  until it is turned down or the move is made (`queries_move_dismissed` in
+  `[settings]`); "Move saved queries to a folder…" stays in the palette
+  while any are left. The move asks for the folder with the system picker,
+  directories only, so macOS asks for access to that folder and never to
+  Documents at launch, and `Workspace::move_saved_queries` is the seam the
+  tests call with the folder. Each connection gets `<folder>/<name>/`, its
+  name made one safe folder name on every platform and suffixed ` 2`, ` 3`
+  where two meet without case (`store::connection_folders`), over every
+  loaded connection in list order so the suffixes do not move with which
+  ones have queries left. Each query is copied, never renamed, since a
+  rename fails across volumes (`sql_file::move_file`): the copy is made with
+  create-new semantics, so a name taken there is skipped and reported and
+  its query stays; the bytes are copied as they are, synced with their
+  directory entry, and only then is the original removed. A copy that fails
+  is removed and the original kept, as is one whose original will not go. A
+  copy takes the folder's default permissions rather than the support
+  directory's 0600: it is the user's file now. A query that is a link moves
+  as the text it reads, and the file it led to stays. A tab bound to a moved
+  file, on any connection, is rebound where its chip stands, its unsaved
+  text and scratch file untouched; it takes the copy's stamp only if it had
+  seen the original as it was, so a change it had missed still settles on
+  the next look. The moved queries leave their folders and pins. The move
+  runs on the window's thread (`ponytail:` on `move_saved_queries`), which
+  is also what keeps a Save to an old file from landing between its copy
+  and its removal. It ends on the same line: moved, skipped and failed
+  counts and a Reveal of the folder. A profile this build cannot read is not
+  touched.
 - **Folders and pins are shortcuts** (`explorer::Shortcuts` on `Profile`,
   stored as the profile's `folders` and `pins`, left out when empty). Adding
   an object or a saved query to a folder, or pinning it, leaves its row where
@@ -644,7 +695,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   several folders and deleting a folder loses only the grouping. Folders are
   flat and their names unique per connection in any case. The sidebar lists
   Pinned (in the user's order; a pinned folder moves there with what it
-  holds), then the other folders by name, then Queries, then the schemas. A
+  holds), then the other folders by name, then Files, then the schemas. A
   shortcut's row id is everything it is named by (database, kind and the row
   it repeats) behind `pinned/` or its folder's `folder:{len}:{name}/`, the
   length keeping a name with a `/` from running into its members' ids, so no
@@ -678,7 +729,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Any object, saved query or folder row drags (`DragShortcut`, a static
   label for its preview); the state change is `Shortcuts::drop_on`. Dropped
   on a folder's row, a member taken out of another folder moves, and one from
-  anywhere else (the schemas, Queries, Pinned) is added and stays where it
+  anywhere else (the schemas, Files, Pinned) is added and stays where it
   was: a folder is shortcuts, so taking a row out of the schema tree is never
   what a drop does, while a folder-to-folder drag is the one place a copy
   would leave behind something nobody asked to keep. On the Pinned group's
@@ -699,9 +750,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   neither names a listed row, the only schema there is opens. So a database
   of many schemas is not a wall of open trees, and one of a single schema is
   not a lone closed row. Every other schema starts closed, and every row
-  that is not a schema (Pinned, folders, Queries) open
+  that is not a schema (Pinned, folders, Files) open
   (`explorer::root_folds`). Opening or closing a top-level row (a schema, a
-  folder, Pinned, Queries) is recorded from the tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
+  folder, Pinned, Files) is recorded from the tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
   `reveal_item` alike, in the profile's `folds`, row id to open, saved as
   `[profiles.folds]` and left out when empty. A row it does not name gets the
   default, so a schema created since stays closed and a new folder opens.
