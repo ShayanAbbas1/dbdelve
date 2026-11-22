@@ -535,8 +535,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `None`, and focus falls back to the window so the bindings that open a tab
   still work.
 - **A query tab is untitled or bound to a `.sql` file** (`QueryTab::file`,
-  a `FileBinding`: the path, the text as last read or written, and whether
-  the file began with a byte order mark). The path is resolved through every
+  a `FileBinding`: the path, the text as last read or written, whether
+  the file began with a byte order mark, and its `sql_file::Stamp`, the
+  modification time and length that read or write left). The path is resolved through every
   link (`sql_file::canonical`), and one file has one tab across the whole
   app: opening a path already open brings that tab and its connection
   forward (`Workspace::bring_up_file`), and Save As refuses a path another
@@ -562,9 +563,44 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`sql_file::canonical`): at open, at adoption, in the sidebar and at
   restore, so a link and its file are one tab; two restored tabs that meet
   leave the later one untitled with its text (`Session::unbind_duplicates`).
+- **Closing a file tab with unsaved changes asks Save / Don't Save /
+  Cancel** (`PendingDiscard::unsaved`, the "unsaved" dialog), after the
+  unapplied-edits question and only once it is answered Discard. Close All
+  Tabs closes everything else first and asks once about every dirty file
+  tab, its Save saving each; with cell edits too, the edits question holds
+  the dirty file tabs as well and the Save question follows it. Don't Save
+  closes, which deletes the scratch file. Save writes each file and closes
+  only the ones written: a refused write keeps its tab and says why, and a
+  file changed on disk goes to the Overwrite question first, whose
+  Overwrite then closes it. An untitled tab never asks, being kept anyway,
+  and nor does a tab whose scratch file would not read back
+  (`scratch_unread`), which holds nothing the user has seen. Quit never
+  asks: that is hot exit, below. Deleting a saved query closes its tab
+  without this question, the Delete having been asked.
+- **A file changed on disk is noticed on focus, not watched.** The front
+  tab's file is stat'ed when the window becomes active
+  (`observe_window_activation`) and when a tab reaches the front, which
+  render notices (`Workspace::file_looked_at`) since a tab gets there by
+  more paths than `activate_tab`: one stat per look, none per frame, on the
+  window's thread. A stamp that differs from the binding's
+  (`FileBinding::settle`) reloads a clean tab silently, keeping the cursor
+  offset, and refreshes its dirty mark by hand, since `set_value` emits no
+  change; under unsaved text it raises a bar on the tab, "Changed on disk",
+  with Reload and Keep Mine. Keep Mine takes the file as the saved text
+  and its stamp but leaves `Conflict::KeptMine`, so the next Save asks.
+  Save asks Overwrite / Cancel whenever the file's stamp is not the one
+  the tab last read or wrote, or Keep Mine was chosen
+  (`FileBinding::overwrites`); a file that has gone has nothing to
+  overwrite. An edit made outside while DBDelve keeps focus is missed until
+  the next look (a `ponytail:` on `check_front_file`).
+- **A file deleted on disk keeps its tab bound and dirty**, its saved
+  text `None`, and the tab says "Deleted on disk" in the same bar. Save
+  writes the file again. A file missing at relaunch comes back the same
+  way, so the label needs nothing of its own there.
 - **Saved queries are files where they already are.** A profile's saved
   queries stay under `queries/<profile id>/` and are listed in the sidebar's
-  Queries group and the palette (`Session::saved_queries`); opening one opens
+  Queries group and the palette (`Session::saved_queries`), which a Save As
+  into that directory refreshes; opening one opens
   a file tab on that path, and a tab stored by a build before file tabs, with
   a `name` and no `path`, is bound to it at load (`session::adopted`).
   `Session::query_directory` is that directory resolved as a tab's path is, so
@@ -673,16 +709,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   one, as its buffer, so it comes back dirty (`stored_text`, which reads a
   file tab's scratch without the legacy fallback below). A file gone at
   relaunch leaves its tab bound, holding its last scratch text or nothing,
-  and dirty; one that cannot be read unbinds the tab, since Save would write
+  dirty and saying "Deleted on disk"; one that cannot be read unbinds the tab, since Save would write
   over text nobody has seen. A scratch file that cannot be read back is
   left alone (`QueryTab::scratch_unread`), never rewritten or removed, until
   Save or a close settles the tab. A tab's path is `StoredQueryTab::path`, left out
   for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
   writes, timers or retries. A crash or forced termination can lose edits
-  since the last write. Closing a tab deletes its scratch; a file tab's
-  unsaved text goes with it unasked until the close prompt exists. A
-  successful Save or Save As removes the tab's scratch.
+  since the last write. Closing a tab deletes its scratch, once a file
+  tab's unsaved text has been asked about. A successful Save or Save As
+  removes the tab's scratch. Save runs on the window's thread, as quit's
+  writes do, so a quit cannot land part way through one.
   `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
