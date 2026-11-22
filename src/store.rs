@@ -166,6 +166,11 @@ pub struct StoredProfile {
     /// order they were picked. Same rules as `open_rows`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_rows: Vec<String>,
+    /// The `.sql` files last opened or saved on this connection, newest
+    /// first, each resolved through its links: the sidebar's Files group.
+    /// Left out when empty, so a profile without any is written as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_files: Vec<PathBuf>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -730,6 +735,10 @@ pub struct StoredSettings {
     /// at all. Absent reads as on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_show_sizes: Option<bool>,
+    /// Whether the offer to move the saved queries out of the support
+    /// directory was turned down or taken. Absent until either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queries_move_dismissed: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -2047,6 +2056,56 @@ pub(crate) fn unsafe_component(value: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// `name` as one folder name on every platform: what a path separator, a
+/// character Windows refuses or a control character would break becomes `-`,
+/// and a leading dot (hidden) or a trailing dot or space (dropped by Windows)
+/// goes.
+pub(crate) fn path_component(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            character if character.is_control() => '-',
+            character => character,
+        })
+        .collect();
+    let trimmed = replaced
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let numbered = upper.len() == 4
+        && (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && matches!(upper.as_bytes()[3], b'1'..=b'9');
+    match trimmed {
+        "" => "Connection".to_string(),
+        _ if numbered || matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") => {
+            format!("{trimmed}-")
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+/// A folder name per connection, in `names`' order, from [`path_component`],
+/// with ` 2`, ` 3`… after a name an earlier one took. Compared without case,
+/// since macOS and Windows would make `Prod` and `prod` one folder.
+pub(crate) fn connection_folders(names: &[&str]) -> Vec<String> {
+    let mut taken = HashSet::new();
+    names
+        .iter()
+        .map(|name| {
+            let base = path_component(name);
+            let folder = std::iter::once(base.clone())
+                .chain((2..).map(|n| format!("{base} {n}")))
+                .find(|folder| !taken.contains(&folder.to_lowercase()))
+                .expect("some suffix is free");
+            taken.insert(folder.to_lowercase());
+            folder
+        })
+        .collect()
 }
 
 /// The channel's slug with `DBDELVE_VARIANT` unset or empty,
@@ -3497,6 +3556,7 @@ user = "shayan"
                 open_query: None,
                 ssm: None,
                 open_rows: Vec::new(),
+                recent_files: Vec::new(),
                 selected_rows: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
@@ -3558,6 +3618,7 @@ user = "shayan"
             open_query: Some("daily".into()),
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -3707,6 +3768,7 @@ open_objects = []
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -3774,6 +3836,46 @@ open_objects = []
         assert!(
             !golden.contains("open_rows"),
             "the fixtures hold neither key"
+        );
+    }
+
+    #[test]
+    fn recent_files_round_trip_before_the_tables_and_an_old_file_reads_none() {
+        let mut profile = a_stored_profile();
+        profile.recent_files = vec!["/work/orders.sql".into(), "/work/daily.sql".into()];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let recent = text
+            .find("recent_files")
+            .expect("the recent files are written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            recent < tunnel,
+            "an array of strings before any table:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].recent_files, profile.recent_files);
+
+        let bare = written_alone(a_stored_profile());
+        assert!(!bare.contains("recent_files"), "{bare}");
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].recent_files.is_empty());
+    }
+
+    #[test]
+    fn a_connection_name_becomes_one_folder_and_colliding_names_get_their_own() {
+        assert_eq!(path_component("Prod / EU: West"), "Prod - EU- West");
+        assert_eq!(path_component(".hidden."), "hidden");
+        assert_eq!(path_component("  "), "Connection");
+        assert_eq!(path_component("con"), "con-");
+        assert_eq!(path_component("COM1"), "COM1-");
+        assert_eq!(path_component("Company"), "Company");
+        assert_eq!(
+            connection_folders(&["Prod", "prod", "Prod/", "Dev", "Prod 2"]),
+            ["Prod", "prod 2", "Prod-", "Dev", "Prod 2 2"]
         );
     }
 
@@ -4107,6 +4209,7 @@ folder = "Hot"
         let profile = StoredProfile {
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4137,6 +4240,7 @@ folder = "Hot"
         let profile = StoredProfile {
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4204,6 +4308,7 @@ folder = "Hot"
             schema: Some(r#"Sales "EU""#.into()),
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4331,6 +4436,7 @@ folder = "Hot"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4419,6 +4525,7 @@ folder = "Hot"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4493,6 +4600,7 @@ folder = "Hot"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4613,6 +4721,7 @@ open_objects = []
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4706,6 +4815,7 @@ open_objects = []
                 sidebar_density: Some("compact".into()),
                 sidebar_show_host: Some(false),
                 sidebar_show_sizes: Some(false),
+                queries_move_dismissed: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -4760,6 +4870,7 @@ open_objects = []
                     open_query: None,
                     ssm: None,
                     open_rows: Vec::new(),
+                    recent_files: Vec::new(),
                     selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
@@ -4801,6 +4912,7 @@ open_objects = []
                     open_query: None,
                     ssm: None,
                     open_rows: Vec::new(),
+                    recent_files: Vec::new(),
                     selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
@@ -5659,6 +5771,7 @@ active = true
             open_query: Some("daily".into()),
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: vec![
@@ -6286,6 +6399,7 @@ name = \"accounts\"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -6416,6 +6530,7 @@ name = \"accounts\"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),

@@ -152,6 +152,7 @@ impl Workspace {
         }
         for (path, _) in open {
             self.bring_up_file(&path, window, cx);
+            self.remember_held_file(&path, cx);
         }
         refused
     }
@@ -231,6 +232,7 @@ impl Workspace {
         let path = sql_file::canonical(&path);
         if let Some((_, id)) = self.tab_on_file(&path) {
             self.bring_up_file(&path, window, cx);
+            self.remember_held_file(&path, cx);
             return Some(id);
         }
         if let Err(message) = self.persist_buffer(cx) {
@@ -265,11 +267,142 @@ impl Workspace {
         );
         let profile = self.profile_mut()?;
         profile.session.queries.push(tab);
-        profile.session.place_last(TabKey::File(path));
+        profile.session.place_last(TabKey::File(path.clone()));
         self.install_completions(&profile_id, cx);
         self.activate_tab(Tab::Query(id), window, cx);
+        self.remember_file(&profile_id, &path, cx);
         self.remember_profiles(cx);
         Some(id)
+    }
+
+    /// `path`, resolved through its links, first among `profile_id`'s recent
+    /// files. A saved query's file is not one: the Files group lists it as
+    /// the query until it is moved.
+    pub(crate) fn remember_file(&mut self, profile_id: &str, path: &Path, cx: &mut Context<Self>) {
+        let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return;
+        };
+        if path.parent() == Some(profile.session.query_directory.as_path())
+            || profile.recent_files.first().map(PathBuf::as_path) == Some(path)
+        {
+            return;
+        }
+        crate::session::remember_recent(&mut profile.recent_files, path.to_path_buf());
+        profile.missing_files.remove(path);
+        self.profiles_unsaved = true;
+        self.refresh_query_library(profile_id, cx);
+    }
+
+    /// [`Self::remember_file`] on the connection whose tab holds `path`.
+    fn remember_held_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some((index, _)) = self.tab_on_file(path) {
+            let profile_id = self.profiles[index].id.clone();
+            self.remember_file(&profile_id, path, cx);
+        }
+    }
+
+    /// A row of the Files group, opened as any SQL file is, so one open
+    /// already comes forward. One gone since asks to leave the list.
+    pub(crate) fn open_listed_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.import_covers() {
+            return;
+        }
+        if self.tab_on_file(&path).is_none() && matches!(path.try_exists(), Ok(false)) {
+            let Some(profile) = self.profile_mut() else {
+                return;
+            };
+            profile.missing_files.insert(path.clone());
+            profile.session.pending_forget = Some(path);
+            cx.notify();
+            return;
+        }
+        self.open_files(vec![path], window, cx);
+    }
+
+    /// Remove from List: `path` leaves the front connection's recent files.
+    /// The file itself is never touched.
+    pub(crate) fn forget_recent_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        profile.recent_files.retain(|held| held != path);
+        profile.missing_files.remove(path);
+        let profile_id = profile.id.clone();
+        self.refresh_query_library(&profile_id, cx);
+        self.remember_profiles(cx);
+    }
+
+    /// Remove, from the question a gone file's row raised.
+    pub(crate) fn confirm_forget_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_forget.take())
+        else {
+            return;
+        };
+        self.forget_recent_file(&path, cx);
+        self.refocus_front();
+    }
+
+    pub(crate) fn cancel_forget_file(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_forget.take())
+            .is_some();
+        if cancelled {
+            self.refocus_front();
+            cx.notify();
+        }
+        cancelled
+    }
+
+    /// Which of every connection's recent files are gone, for the Files
+    /// group to grey: at launch and whenever the window comes forward. On
+    /// the blocking pool, since one on a stalled mount waits as long as it
+    /// does.
+    pub(crate) fn look_at_recent_files(&mut self, cx: &mut Context<Self>) {
+        let recent: Vec<(String, Vec<PathBuf>)> = self
+            .profiles
+            .iter()
+            .filter(|profile| !profile.recent_files.is_empty())
+            .map(|profile| (profile.id.clone(), profile.recent_files.clone()))
+            .collect();
+        if recent.is_empty() {
+            return;
+        }
+        let looked = spawn_blocking(cx.background_executor(), move || {
+            recent
+                .into_iter()
+                .map(|(id, paths)| {
+                    let gone = paths
+                        .into_iter()
+                        .filter(|path| matches!(path.try_exists(), Ok(false)))
+                        .collect::<HashSet<_>>();
+                    (id, gone)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |workspace, cx| {
+            let looked = looked.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                for (id, gone) in looked {
+                    if let Some(profile) = workspace.profiles.iter_mut().find(|p| p.id == id) {
+                        profile.missing_files = gone;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Save the buffer in front to its file, or ask where for an untitled
@@ -624,6 +757,7 @@ impl Workspace {
         if new_saved_query {
             self.reload_queries_of(profile_id, cx);
         }
+        self.remember_file(profile_id, &path, cx);
         self.note(note, cx);
         self.remember_profiles(cx);
         true

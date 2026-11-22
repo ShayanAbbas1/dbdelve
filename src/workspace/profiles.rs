@@ -36,7 +36,7 @@ fn mark_objects_stale(profile: &mut Profile) {
 }
 
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
-/// folders, its saved queries, then the catalog's schemas. Both trees draw
+/// folders, its files and saved queries, then the catalog's schemas. Both trees draw
 /// this, so a connection's rows are the same in either.
 pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::ExplorerTree {
     let catalog = match &profile.catalog {
@@ -50,7 +50,11 @@ pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::Exp
         &profile.shortcut_database(),
         filter,
     );
-    explorer.extend(explorer::queries(&profile.session.saved_queries, filter));
+    explorer.extend(explorer::files(
+        &profile.listed_files(),
+        &profile.session.saved_queries,
+        filter,
+    ));
     if let Some(catalog) = catalog {
         explorer.extend(build_explorer_tree(catalog, filter));
     }
@@ -152,6 +156,8 @@ impl Workspace {
             sidebar_density: Some(self.settings.density.slug().into()),
             sidebar_show_host: Some(self.settings.show_host),
             sidebar_show_sizes: Some(self.settings.show_sizes),
+            queries_move_dismissed: Some(self.settings.queries_move_dismissed)
+                .filter(|dismissed| *dismissed),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -314,6 +320,12 @@ impl Workspace {
                 .into_iter()
                 .take(OPEN_ROWS_CAP)
                 .collect(),
+            recent_files: stored
+                .recent_files
+                .into_iter()
+                .take(crate::session::RECENT_FILES_CAP)
+                .collect(),
+            missing_files: HashSet::new(),
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -380,6 +392,8 @@ impl Workspace {
             folds: BTreeMap::new(),
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            recent_files: Vec::new(),
+            missing_files: HashSet::new(),
             session,
         });
         if let Some(password) = password

@@ -703,6 +703,8 @@ impl Workspace {
         match command {
             Command::OpenObject(target) => self.open_explorer_target(target, window, cx),
             Command::OpenQuery(name) => self.open_saved_query(name, window, cx),
+            Command::OpenFile(path) => self.open_listed_file(path, window, cx),
+            Command::MoveSavedQueries => self.pick_queries_folder(window, cx),
             Command::OpenScratch => self.open_scratch_query(window, cx),
             Command::NewQuery => self.new_query(&NewQuery, window, cx),
             Command::RunQuery => self.run_query(&RunQuery, window, cx),

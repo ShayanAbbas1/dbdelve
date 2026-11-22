@@ -305,6 +305,10 @@ pub enum Command {
         centre: Option<String>,
     },
     OpenQuery(String),
+    /// A file of the connection's Files group, by its path.
+    OpenFile(std::path::PathBuf),
+    /// Pick a folder and move every saved query into it.
+    MoveSavedQueries,
     SetTarget(crate::db::Target),
     OpenScratch,
     NewQuery,
@@ -2340,13 +2344,24 @@ fn search_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item>
     items
 }
 
-/// The scratch buffer and every saved query.
+/// The scratch buffer, every file the sidebar's Files group lists, and every
+/// saved query.
 fn query_items(profile: &Profile) -> Vec<Item> {
     let saved = saved_query_icon(profile.config.engine().syntax());
     let scratch = Item::new("Scratch query", icon::SCRATCH_QUERY, Command::OpenScratch)
         .hint("scratch")
         .scope(Scope::Queries);
+    let files = profile.listed_files().into_iter().map(|path| {
+        Item::new(
+            crate::sql_file::file_name(&path),
+            saved,
+            Command::OpenFile(path),
+        )
+        .hint("file")
+        .scope(Scope::Queries)
+    });
     std::iter::once(scratch)
+        .chain(files)
         .chain(profile.session.saved_queries.iter().map(|name| {
             Item::new(name.clone(), saved, Command::OpenQuery(name.clone()))
                 .hint("query")
@@ -3717,6 +3732,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.push(bound(
             command("Cancel query", icon::CLOSE, Command::CancelQuery, QUERY),
             "cancel_query",
+        ));
+    }
+
+    // Every connection's, since the move takes them all.
+    if workspace.has_saved_queries() {
+        items.push(command(
+            "Move saved queries to a folder…",
+            icon::FOLDER,
+            Command::MoveSavedQueries,
+            QUERY,
         ));
     }
 

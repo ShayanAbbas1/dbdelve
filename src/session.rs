@@ -117,6 +117,11 @@ pub(crate) struct Profile {
     /// loaded waits for it; the tree owns a row once it holds it.
     pub(crate) open_rows: Vec<String>,
     pub(crate) selected_rows: Vec<String>,
+    /// The `.sql` files last opened or saved here, newest first
+    /// ([`remember_recent`]), and those of them found gone at the last look,
+    /// which the Files group greys.
+    pub(crate) recent_files: Vec<PathBuf>,
+    pub(crate) missing_files: HashSet<PathBuf>,
     pub(crate) session: Session,
 }
 
@@ -262,9 +267,9 @@ impl Profile {
         shortcut_database(self.config.target(), shown, || self.active_database())
     }
 
-    /// The sidebar row of the tab in front: its object's, or its saved
-    /// query's. A scratch query has none, and nor has an object the catalog
-    /// does not list.
+    /// The sidebar row of the tab in front: its object's, its saved query's
+    /// or its file's. A scratch query has none, and nor has an object the
+    /// catalog does not list.
     pub(crate) fn front_row(&self) -> Option<String> {
         match self.session.active_object() {
             // Listed under its own database, not under the connection's.
@@ -275,11 +280,32 @@ impl Profile {
                 }
                 _ => None,
             },
-            None => self
-                .session
-                .saved_query_of(self.session.active_query_tab()?)
-                .map(crate::explorer::query_row),
+            None => {
+                let tab = self.session.active_query_tab()?;
+                match self.session.saved_query_of(tab) {
+                    Some(name) => Some(crate::explorer::query_row(name)),
+                    None => Some(crate::explorer::file_row(&tab.file.as_ref()?.path)),
+                }
+            }
         }
+    }
+
+    /// What the sidebar's Files group lists besides the saved queries: the
+    /// recent files, then any file open in a tab they no longer hold. A saved
+    /// query's file is listed as the query, so not here.
+    pub(crate) fn listed_files(&self) -> Vec<PathBuf> {
+        let mut listed: Vec<PathBuf> = Vec::new();
+        let open = self
+            .session
+            .queries
+            .iter()
+            .filter_map(|tab| Some(&tab.file.as_ref()?.path));
+        for path in self.recent_files.iter().chain(open) {
+            if !listed.contains(path) && path.parent() != Some(&self.session.query_directory) {
+                listed.push(path.clone());
+            }
+        }
+        listed
     }
 
     /// How far the catalog an object of `database` is looked up in has got:
@@ -554,6 +580,7 @@ impl Profile {
                 .take(OPEN_ROWS_CAP)
                 .cloned()
                 .collect(),
+            recent_files: self.recent_files.clone(),
             ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
@@ -705,7 +732,7 @@ pub(crate) struct Session {
     /// dispatch path, so an unfocused editor makes the primary keystroke dead.
     pub(crate) editor_needs_focus: bool,
     /// Every query file this profile has, open in a tab or not: what the
-    /// sidebar's Queries group and the palette list.
+    /// sidebar's Files group and the palette list.
     pub(crate) saved_queries: Vec<String>,
     /// Where those files are, resolved as a file tab's path is, so a tab on
     /// one can be told by its path.
@@ -732,6 +759,9 @@ pub(crate) struct Session {
     /// has applied.
     pub(crate) pending_discard: Option<PendingDiscard>,
     pub(crate) pending_overwrite: Option<PendingOverwrite>,
+    /// The recent file found gone when its Files row was opened, while the
+    /// question whether to leave it off the list is up.
+    pub(crate) pending_forget: Option<PathBuf>,
     pub(crate) notice: Option<String>,
     /// What a statement's run cost beyond its result (`QueryResult::notice`),
     /// said only while the tab it ran on is in front, under any `notice`.
@@ -1221,6 +1251,7 @@ impl Session {
             query_rename_needs_focus: false,
             pending_discard: None,
             pending_overwrite: None,
+            pending_forget: None,
             notice,
             tab_notice: None,
             apply_review: None,
@@ -1700,6 +1731,7 @@ impl Session {
         self.query_rename_needs_focus = false;
         self.pending_discard = None;
         self.pending_overwrite = None;
+        self.pending_forget = None;
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
@@ -3666,6 +3698,16 @@ pub(crate) enum QueryState {
     Failed(DbError),
 }
 
+/// How many files a profile's recent list keeps.
+pub(crate) const RECENT_FILES_CAP: usize = 20;
+
+/// `path`, already resolved through its links, to the front of `recent`, once.
+pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, path: PathBuf) {
+    recent.retain(|held| *held != path);
+    recent.insert(0, path);
+    recent.truncate(RECENT_FILES_CAP);
+}
+
 /// The stored tabs, each holding a saved query by name as a build before file
 /// tabs wrote it, bound to that query's file instead. Nothing moves: the next
 /// Save writes the file where it is.
@@ -5230,6 +5272,22 @@ mod tests {
             sql::is_generated_write(&statement),
             "{statement} was refused"
         );
+    }
+
+    #[test]
+    fn the_recent_files_put_the_newest_first_once_and_keep_twenty() {
+        let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
+        let mut recent = Vec::new();
+        for n in 0..25 {
+            remember_recent(&mut recent, path(n));
+        }
+        assert_eq!(recent.len(), RECENT_FILES_CAP);
+        assert_eq!(recent[0], path(24));
+        assert_eq!(recent[19], path(5));
+        remember_recent(&mut recent, path(10));
+        assert_eq!(recent[0], path(10));
+        assert_eq!(recent.len(), RECENT_FILES_CAP);
+        assert_eq!(recent.iter().filter(|held| **held == path(10)).count(), 1);
     }
 
     #[test]

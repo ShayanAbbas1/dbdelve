@@ -10786,7 +10786,7 @@ fn a_saved_querys_row_in_the_connections_tree_has_its_menu(cx: &mut TestAppConte
         click_connections_row(cx, at);
         let query = scoped_row("b", None, &explorer::query_row("nightly"));
         if connections_row(&workspace, cx, &query).is_none() {
-            let group = scoped_row("b", None, explorer::QUERIES_GROUP);
+            let group = scoped_row("b", None, explorer::FILES_GROUP);
             let at = connections_row(&workspace, cx, &group).expect("b's queries are listed");
             click_connections_row(cx, at);
         }
@@ -13085,6 +13085,117 @@ fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_offer_to_move_saved_queries_shows_once_and_not_after_not_now(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "daily", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_on_sqlite(cx);
+        settle(cx);
+        assert!(cx.debug_bounds("queries-notice").is_some());
+        let not_now = cx
+            .debug_bounds("queries-notice-dismiss")
+            .expect("Not Now is drawn");
+        cx.simulate_click(not_now.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.debug_bounds("queries-notice").is_none());
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        assert!(
+            cx.debug_bounds("queries-notice").is_none(),
+            "Not Now is remembered"
+        );
+        assert!(workspace.read_with(cx, |workspace, _| workspace.has_saved_queries()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_move_files_each_connections_queries_and_repoints_a_dirty_tab_on_another(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        store::write_query("b", "nightly", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile("a", "A", ""),
+                sqlite_profile("b", "B/Reports", "")
+            ),
+        );
+        let queries = crate::sql_file::canonical(&store::query_directory("b").unwrap());
+        let legacy = queries.join("nightly.sql");
+        open_sql_file(&workspace, cx, &legacy);
+        cx.simulate_input("-- ");
+        assert!(front_dirty(&workspace, cx));
+
+        let folder = store::home().unwrap().join("Moved");
+        std::fs::create_dir_all(&folder).unwrap();
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_saved_queries(&folder, cx)
+        });
+        settle(cx);
+
+        let moved = crate::sql_file::canonical(&folder.join("B-Reports").join("nightly.sql"));
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "select 1");
+        assert!(!legacy.exists());
+        assert_eq!(front_file(&workspace, cx), Some(moved.clone()));
+        assert!(
+            front_dirty(&workspace, cx),
+            "the unsaved text stays unsaved"
+        );
+        assert_eq!(buffer(&workspace, cx), "-- select 1");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.check_front_file(window, cx))
+        });
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            None,
+            "the copy is no change"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let b = &workspace.profiles[1];
+            assert!(b.session.saved_queries.is_empty());
+            assert_eq!(b.recent_files, std::slice::from_ref(&moved));
+        });
+        assert!(cx.debug_bounds("queries-notice").is_some(), "the report");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("orders.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        let row = explorer::file_row(&path);
+        explorer_row(&workspace, &row, cx);
+
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_now(Tab::Query(id), window, cx)
+            })
+        });
+        settle(cx);
+        explorer_row(&workspace, &row, cx);
+        pick_from_explorer_menu(&workspace, cx, &row, 3);
+        settle(cx);
+        let listed = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.read(cx).index_of(&row.clone().into()).is_some()
+        });
+        assert!(!listed, "the row is gone");
+        assert!(path.exists(), "and the file is not");
         quit(workspace, cx);
     });
 }

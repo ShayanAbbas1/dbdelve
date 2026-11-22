@@ -119,7 +119,7 @@ const ICONS: [(&str, &IconData); 86] = [
     ("icons/unplug.svg", icondata_lu::LuUnplug),
 ];
 
-/// The Queries group's icon for a connection's query language.
+/// The Files group's icon for a connection's query language.
 pub fn queries_group_icon(syntax: Syntax) -> &'static str {
     match syntax {
         Syntax::Sql => icon::QUERIES_SQL,
@@ -175,7 +175,7 @@ pub mod icon {
     pub const SAVED_QUERY: &str = "icons/file-code.svg";
     pub const SAVED_QUERY_MONGO: &str = "icons/file-json.svg";
     pub const SAVED_QUERY_REDIS: &str = "icons/file-terminal.svg";
-    /// The Queries group, in the glyph of the language its queries are in.
+    /// The Files group, in the glyph of the language its queries are in.
     pub const QUERIES_SQL: &str = "icons/code.svg";
     pub const QUERIES_MONGO: &str = "icons/braces.svg";
     pub const QUERIES_REDIS: &str = "icons/terminal.svg";

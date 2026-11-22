@@ -22,6 +22,7 @@ mod objects;
 mod profiles;
 mod projects;
 mod queries;
+mod query_move;
 mod sidebar;
 mod stable_import;
 mod tabs;
@@ -94,6 +95,9 @@ pub(crate) struct Settings {
     pub(crate) verbose_logging: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
+    /// Whether the offer to move the saved queries to a folder was turned
+    /// down or taken, so it is not made again.
+    pub(crate) queries_move_dismissed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -145,6 +149,7 @@ impl Default for Settings {
             run_unreadable: false,
             verbose_logging: false,
             welcomed: false,
+            queries_move_dismissed: false,
             custom_keybindings: HashMap::new(),
             view_mode: ViewMode::default(),
             listing_scope: ListingScope::default(),
@@ -362,6 +367,7 @@ pub(crate) struct Workspace {
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
     pub(crate) cleanup_notices: Vec<crate::db::ssm::CleanupResult>,
+    pub(crate) queries_notice: Option<query_move::QueriesNotice>,
     /// Statements written for data files opened before their profile had
     /// connected: profile id, query tab, statement. Run once it has.
     pub(crate) runs_on_connect: Vec<(String, u64, String)>,
@@ -583,6 +589,7 @@ impl Workspace {
             stable_import: None,
             welcome_notice: None,
             cleanup_notices: Vec::new(),
+            queries_notice: None,
             runs_on_connect: Vec::new(),
             sql_directory: None,
             window_edited: false,
@@ -705,6 +712,8 @@ impl Workspace {
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
                 );
+                workspace.settings.queries_move_dismissed =
+                    stored_settings.queries_move_dismissed.unwrap_or(false);
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -785,6 +794,8 @@ impl Workspace {
         // A connection nothing connects at launch gets no other rebuild, and
         // the tree would sit empty over profiles that are all there.
         workspace.rebuild_connections(cx);
+        workspace.look_at_recent_files(cx);
+        workspace.offer_to_move_queries();
 
         // After the environment's form, which takes the notice over the
         // welcome surface when there is one. A load failure's last, since it
@@ -881,6 +892,7 @@ impl Workspace {
         cx.observe_window_activation(window, |workspace, window, cx| {
             if window.is_window_active() {
                 workspace.check_front_file(window, cx);
+                workspace.look_at_recent_files(cx);
             }
         })
         .detach();
@@ -1942,6 +1954,7 @@ impl Render for Workspace {
                     Vec::new(),
                 ))
                 .children(self.render_cleanup_notice(t, cx))
+                .children(self.render_queries_notice(t, cx))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
                     [
@@ -2794,6 +2807,7 @@ impl Render for Workspace {
                 ],
             ))
             .children(self.render_cleanup_notice(t, cx))
+            .children(self.render_queries_notice(t, cx))
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
@@ -2804,6 +2818,7 @@ impl Render for Workspace {
                     ("discard", self.render_discard_confirmation(cx)),
                     ("unsaved", self.render_unsaved_confirmation(cx)),
                     ("overwrite", self.render_overwrite_confirmation(cx)),
+                    ("forget-file", self.render_forget_file(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),

@@ -203,6 +203,58 @@ fn discard(temporary: &Path) -> io::Result<()> {
     fs::remove_file(temporary)
 }
 
+/// How moving one file went.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Move {
+    Done,
+    /// Something already has the name, and is left as it was.
+    Taken,
+    Failed(String),
+}
+
+/// Move `from` to `to` by copying, never by renaming: a rename fails across
+/// volumes, and a picked folder is often on another. `to` is made new, so a
+/// file already there is never written over, and `from` goes only once the
+/// copy is on disk. A copy that fails is removed and `from` kept, as is a
+/// copy whose source will not go, so either way one file is left.
+///
+/// The copy takes the folder's default permissions rather than the support
+/// directory's 0600: it is the user's file now, beside the ones their own
+/// editor makes there.
+pub(crate) fn move_file(from: &Path, to: &Path) -> Move {
+    let mut copy = match fs::OpenOptions::new().write(true).create_new(true).open(to) {
+        Ok(copy) => copy,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Move::Taken,
+        Err(error) => return Move::Failed(format!("Could not create {}: {error}", to.display())),
+    };
+    let copied = fs::File::open(from)
+        .and_then(|mut source| io::copy(&mut source, &mut copy))
+        .and_then(|_| copy.sync_all())
+        .and_then(|()| sync_directory(to));
+    drop(copy);
+    if let Err(error) = copied {
+        let _ = fs::remove_file(to);
+        return Move::Failed(format!("Could not copy {}: {error}", from.display()));
+    }
+    if let Err(error) = fs::remove_file(from) {
+        let _ = fs::remove_file(to);
+        return Move::Failed(format!("Could not remove {}: {error}", from.display()));
+    }
+    Move::Done
+}
+
+/// The new name's directory entry on disk too: a synced file under an entry
+/// a crash forgets is lost along with the source removed after it.
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// `path` with every link resolved, for a path that may not exist yet too: the
 /// deepest ancestor that does is resolved and the rest put back on it. Two
 /// tabs are on one file when their canonical paths are equal.
@@ -380,5 +432,38 @@ mod tests {
             with_sql_extension(PathBuf::from("/q/orders.txt")),
             PathBuf::from("/q/orders.txt")
         );
+    }
+
+    #[test]
+    fn a_move_copies_the_bytes_exactly_and_then_removes_the_source() {
+        let dir = scratch_dir("move");
+        let (from, to) = (dir.join("daily.sql"), dir.join("daily-moved.sql"));
+        let bytes = b"\xef\xbb\xbfSELECT 1;\r\n\xff";
+        fs::write(&from, bytes).unwrap();
+        assert_eq!(move_file(&from, &to), Move::Done);
+        assert_eq!(fs::read(&to).unwrap(), bytes);
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn a_move_onto_a_taken_name_writes_nothing_and_leaves_its_source() {
+        let dir = scratch_dir("move-taken");
+        let (from, to) = (dir.join("daily.sql"), dir.join("taken.sql"));
+        fs::write(&from, "mine").unwrap();
+        fs::write(&to, "theirs").unwrap();
+        assert_eq!(move_file(&from, &to), Move::Taken);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "theirs");
+        assert_eq!(fs::read_to_string(&from).unwrap(), "mine");
+    }
+
+    #[test]
+    fn a_copy_that_fails_is_removed_and_its_source_kept() {
+        let dir = scratch_dir("move-fails");
+        // A directory opens or reads as no file does, on every platform.
+        let (from, to) = (dir.join("daily.sql"), dir.join("moved.sql"));
+        fs::create_dir(&from).unwrap();
+        assert!(matches!(move_file(&from, &to), Move::Failed(_)));
+        assert!(!to.exists());
+        assert!(from.is_dir());
     }
 }

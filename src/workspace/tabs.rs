@@ -174,7 +174,13 @@ impl Workspace {
                 .get(id.as_ref())
                 .and_then(|shortcut| shortcut.query())
         });
-        if let Some(name) = query {
+        let file = profile
+            .listed_files()
+            .into_iter()
+            .find(|path| crate::explorer::file_row(path) == id.as_ref());
+        if let Some(path) = file {
+            self.open_listed_file(path, window, cx);
+        } else if let Some(name) = query {
             self.open_saved_query(name.to_string(), window, cx);
         } else if let Some(leaf) = leaf {
             self.open_explorer_target(leaf.target, window, cx);
@@ -1055,6 +1061,9 @@ impl Workspace {
             return;
         }
         if self.cancel_overwrite(cx) {
+            return;
+        }
+        if self.cancel_forget_file(cx) {
             return;
         }
         if self.cancel_discard_close(cx) {

@@ -3,6 +3,7 @@
 //! These were methods on `Workspace` in main.rs. Rust lets one inherent
 //! impl live in as many modules as it has concerns; they moved out whole.
 
+use std::path::Path;
 use std::time::Duration;
 
 use gpui::{Animation, AnimationExt, Div, PathPromptOptions, StyledText, ease_out_quint};
@@ -19,7 +20,7 @@ use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::{ConnectionTest, Reported, dialects, suggested_dialect};
 use crate::explorer::{
-    ExplorerLeaf, Landing, Member, PINNED_GROUP, Pin, QUERIES_GROUP, Shortcut, ShortcutDatabase,
+    ExplorerLeaf, FILES_GROUP, Landing, Member, PINNED_GROUP, Pin, Shortcut, ShortcutDatabase,
     Shortcuts, is_schema_row, landing, relation_copies, saved_query,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
@@ -1456,6 +1457,8 @@ impl Workspace {
             ("unsaved", _) => _ = self.cancel_discard_close(cx),
             ("overwrite", 0) => self.confirm_overwrite(window, cx),
             ("overwrite", _) => _ = self.cancel_overwrite(cx),
+            ("forget-file", 0) => self.confirm_forget_file(cx),
+            ("forget-file", _) => _ = self.cancel_forget_file(cx),
             ("delete", 0) => match deleting {
                 Some(PendingDelete::Query(name)) => self.delete_saved_query(name, window, cx),
                 Some(PendingDelete::Folder(name, _)) => self.delete_folder(name, cx),
@@ -1892,6 +1895,31 @@ impl Workspace {
                     "Overwrite",
                     Tone::Danger,
                     Self::confirm_overwrite,
+                ),
+            ],
+            cx,
+        ))
+    }
+
+    /// Remove / Keep, over a recent file found gone when its row was opened.
+    pub(crate) fn render_forget_file(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let path = self.profile()?.session.pending_forget.as_ref()?;
+        Some(self.question(
+            "forget-file",
+            "Open",
+            format!(
+                "{} is not there any more. Remove it from the list?",
+                crate::sql_file::file_name(path)
+            ),
+            [
+                ("keep-file", "Keep", Tone::Quiet, |workspace, _, cx| {
+                    workspace.cancel_forget_file(cx);
+                }),
+                (
+                    "forget-file",
+                    "Remove",
+                    Tone::Primary,
+                    |workspace, _, cx| workspace.confirm_forget_file(cx),
                 ),
             ],
             cx,
@@ -3129,6 +3157,8 @@ impl Workspace {
             .iter()
             .filter_map(|tab| profile.session.saved_query_of(tab).map(str::to_string))
             .collect();
+        let files = ListedFiles::of(profile);
+        let menu_files = files.clone();
         let renaming = profile.session.query_rename.as_ref().map(|rename| {
             (
                 rename.row.clone(),
@@ -3161,8 +3191,10 @@ impl Workspace {
                     let query = saved_query(id)
                         .or_else(|| shortcut.and_then(Shortcut::query))
                         .map(str::to_string);
+                    let file = files.paths.get(id).cloned();
+                    let file_missing = files.missing.contains(id);
                     let pinned_group = id == PINNED_GROUP;
-                    let group = id == QUERIES_GROUP || pinned_group;
+                    let group = id == FILES_GROUP || pinned_group;
                     // A shortcut is listed away from its schema, which is
                     // then all that tells two of the same name apart.
                     let schema = match shortcut {
@@ -3182,7 +3214,8 @@ impl Workspace {
                     let active = schema_row && active_schema.as_ref() == Some(&label);
                     let open = query
                         .as_ref()
-                        .is_some_and(|name| open_queries.contains(name));
+                        .is_some_and(|name| open_queries.contains(name))
+                        || files.open.contains(id);
                     let marker = match (active, open) {
                         (true, _) => Some((t.accent, "Current schema")),
                         (_, true) => Some((t.text_muted, "Open in a tab")),
@@ -3194,10 +3227,11 @@ impl Workspace {
                         .map_or(&[][..], Vec::as_slice);
                     // A schema is a row like any other, set apart by its icon
                     // and a little weight; a category only labels the run of
-                    // objects under it, in the voice of the Queries group.
+                    // objects under it, in the voice of the Files group.
                     let (label, row) = match (leaf, entry.depth()) {
-                        // Should be there and is not: greyed, and opens nothing.
-                        _ if missing => (
+                        // Should be there and is not: greyed, and opens nothing,
+                        // but for a file, which asks to leave the list.
+                        _ if missing || file_missing => (
                             highlighted(label, matched, t),
                             ListItem::new(index).text_color(t.text_muted),
                         ),
@@ -3205,10 +3239,15 @@ impl Workspace {
                             highlighted(label, matched, t),
                             ListItem::new(index).text_color(t.text),
                         ),
-                        _ if query.is_some() || matches!(shortcut, Some(Shortcut::Folder(_))) => (
-                            highlighted(label, matched, t),
-                            ListItem::new(index).text_color(t.text),
-                        ),
+                        _ if query.is_some()
+                            || file.is_some()
+                            || matches!(shortcut, Some(Shortcut::Folder(_))) =>
+                        {
+                            (
+                                highlighted(label, matched, t),
+                                ListItem::new(index).text_color(t.text),
+                            )
+                        }
                         (None, 0) if !group => (
                             highlighted(label, matched, t),
                             ListItem::new(index)
@@ -3235,11 +3274,13 @@ impl Workspace {
                                 ..
                             }),
                         ) => object_icon(object.kind),
-                        _ if query.is_some() || missing => saved_query_icon(syntax),
+                        _ if query.is_some() || file.is_some() || missing => {
+                            saved_query_icon(syntax)
+                        }
                         _ if entry.is_expanded() => icon::CHEVRON_DOWN,
                         _ => icon::CHEVRON_RIGHT,
                     };
-                    let heading_icon = if id == QUERIES_GROUP {
+                    let heading_icon = if id == FILES_GROUP {
                         Some(queries_group_icon(syntax))
                     } else if pinned_group {
                         Some(icon::PIN)
@@ -3267,7 +3308,7 @@ impl Workspace {
                                 .gap(px(layout::SPACE_SM))
                                 .min_w_0()
                                 .flex_1()
-                                .child(match missing {
+                                .child(match missing || file_missing {
                                     true => {
                                         row_icon_tinted(t, row_icon_path, None).into_any_element()
                                     }
@@ -3361,7 +3402,12 @@ impl Workspace {
                                     )
                                 }),
                         )
-                        .debug_selector(move || format!("explorer-row-{index}"));
+                        .debug_selector(move || format!("explorer-row-{index}"))
+                        .when_some(file.clone(), |row, path| {
+                            row.tooltip(move |window, cx| {
+                                Tooltip::new(path.display().to_string()).build(window, cx)
+                            })
+                        });
                     // A drag that starts while the database is not known
                     // carries nothing, as the menus offer nothing then.
                     let dragged = match (shortcut, &query, leaf) {
@@ -3411,6 +3457,14 @@ impl Workspace {
                     if rename.is_some() || missing {
                         return row;
                     }
+                    if let Some(path) = file {
+                        let workspace = workspace.clone();
+                        return row.on_click(move |_, window, cx| {
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.open_listed_file(path.clone(), window, cx);
+                            });
+                        });
+                    }
                     if let Some(name) = query {
                         let workspace = workspace.clone();
                         return row.on_click(move |_, window, cx| {
@@ -3445,6 +3499,9 @@ impl Workspace {
                             .map(|profile| profile.shortcuts.clone())
                     })
                     .unwrap_or_default();
+                if let Some(path) = menu_files.paths.get(id.as_ref()) {
+                    return file_row_menu(menu, path, &menu_profile, &menu_workspace);
+                }
                 if is_shortcut_row(&id, shortcut.as_ref()) {
                     return shortcut_row_menu(
                         menu,
@@ -3884,6 +3941,79 @@ pub(super) fn shortcut_row_menu(
         window,
         cx,
     )
+}
+
+/// What the Files group's rows of `profile` stand for, by row id, read once
+/// per frame for the tree's row closure.
+#[derive(Clone, Default)]
+pub(super) struct ListedFiles {
+    pub(super) paths: HashMap<String, PathBuf>,
+    pub(super) open: HashSet<String>,
+    /// Gone at the last look, and not open in a tab, which keeps its text.
+    pub(super) missing: HashSet<String>,
+}
+
+impl ListedFiles {
+    pub(super) fn of(profile: &Profile) -> Self {
+        let open: HashSet<String> = profile
+            .session
+            .queries
+            .iter()
+            .filter_map(|tab| Some(explorer::file_row(&tab.file.as_ref()?.path)))
+            .collect();
+        let missing = profile
+            .missing_files
+            .iter()
+            .map(|path| explorer::file_row(path))
+            .filter(|row| !open.contains(row))
+            .collect();
+        Self {
+            paths: profile
+                .listed_files()
+                .into_iter()
+                .map(|path| (explorer::file_row(&path), path))
+                .collect(),
+            open,
+            missing,
+        }
+    }
+}
+
+/// What revealing a file is called where it is revealed.
+#[cfg(target_os = "macos")]
+const REVEAL: &str = "Reveal in Finder";
+#[cfg(target_os = "windows")]
+const REVEAL: &str = "Reveal in File Explorer";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const REVEAL: &str = "Open Containing Folder";
+
+/// What a listed file's row offers, in either tree. Remove from List leaves
+/// the file where it is: deleting one is the file manager's job.
+pub(super) fn file_row_menu(
+    menu: PopupMenu,
+    path: &Path,
+    profile: &str,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    let item =
+        |label: &'static str,
+         act: fn(&mut Workspace, PathBuf, &mut Window, &mut Context<Workspace>)| {
+            let (workspace, profile, path) =
+                (workspace.clone(), profile.to_string(), path.to_path_buf());
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                on_profile(&workspace, &profile, cx, |workspace, cx| {
+                    act(workspace, path.clone(), window, cx)
+                });
+            })
+        };
+    menu.item(item("Open", |workspace, path, window, cx| {
+        workspace.open_listed_file(path, window, cx)
+    }))
+    .item(item(REVEAL, |_, path, _, cx| cx.reveal_path(&path)))
+    .separator()
+    .item(item("Remove from List", |workspace, path, _, cx| {
+        workspace.forget_recent_file(&path, cx)
+    }))
 }
 
 /// What a saved query's row offers on a right click: what its tab offers, for
@@ -4517,10 +4647,11 @@ fn revealed(row: gpui::Div, section: &'static str, index: usize, animate: bool) 
 
 /// Whether the sidebar draws its tree: with a catalog that lists something,
 /// and while the catalog is away too, so a connection that is down or still
-/// loading has its saved queries, folders and pins within reach.
+/// loading has its files, saved queries, folders and pins within reach.
 pub(super) fn explorer_drawn(profile: &Profile) -> bool {
     matches!(&profile.catalog, CatalogState::Loaded(catalog, _) if !catalog.schemas.is_empty())
         || !profile.session.saved_queries.is_empty()
+        || !profile.listed_files().is_empty()
         || profile.shortcuts != Shortcuts::default()
 }
 
