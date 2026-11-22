@@ -255,6 +255,15 @@ impl Workspace {
         if let Some(message) = notice {
             session.notice = Some(message);
         }
+        let held = self
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.session.queries)
+            .filter_map(|tab| Some(tab.file.as_ref()?.path.clone()))
+            .collect();
+        if let Some(message) = session.unbind_duplicates(held, cx) {
+            session.notice.get_or_insert(message);
+        }
         let id = stored.id.clone();
         self.profiles.push(Profile {
             id: stored.id,

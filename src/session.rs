@@ -10,7 +10,7 @@
 //! changed but their visibility.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -1408,9 +1408,40 @@ impl Session {
             .map(|tab| tab.id)
     }
 
-    /// Where the saved query `name` is on disk.
+    /// Where the saved query `name` is on disk, resolved as every bound path
+    /// is, so a query that is a link names the file a tab on it is bound to.
     pub(crate) fn saved_query_path(&self, name: &str) -> PathBuf {
-        self.query_directory.join(format!("{name}.sql"))
+        sql_file::canonical(&self.query_directory.join(format!("{name}.sql")))
+    }
+
+    /// Unbind every tab on a file `held` already has open, or an earlier tab
+    /// here does, keeping its text as an untitled buffer's: two tabs on one
+    /// file would save over each other. Restored paths can meet when a link
+    /// they were stored through now leads somewhere else. What to say about
+    /// it, when anything was unbound.
+    pub(crate) fn unbind_duplicates(
+        &mut self,
+        mut held: HashSet<PathBuf>,
+        cx: &App,
+    ) -> Option<String> {
+        let mut unbound = None;
+        for tab in &mut self.queries {
+            let Some(file) = &tab.file else {
+                continue;
+            };
+            if held.insert(file.path.clone()) {
+                continue;
+            }
+            unbound.get_or_insert_with(|| {
+                format!(
+                    "{} was open in two tabs, so one of them is untitled now.",
+                    sql_file::file_name(&file.path)
+                )
+            });
+            tab.file = None;
+            tab.refresh_dirty(cx);
+        }
+        unbound
     }
 
     /// The tab bound to the saved query `name`, if one is open.
@@ -3542,9 +3573,11 @@ fn adopted(
         .into_iter()
         .map(|mut stored| {
             if let Some(name) = stored.name.take() {
-                stored.path = stored
-                    .path
-                    .or_else(|| Some(query_directory.join(format!("{name}.sql"))));
+                stored.path = stored.path.or_else(|| {
+                    Some(sql_file::canonical(
+                        &query_directory.join(format!("{name}.sql")),
+                    ))
+                });
             }
             stored
         })
@@ -3560,7 +3593,7 @@ fn stored_text(
     profile_id: &str,
     stored: &store::StoredQueryTab,
 ) -> (Option<FileBinding>, String, Option<String>) {
-    let Some(path) = &stored.path else {
+    let Some(path) = stored.path.as_deref().map(sql_file::canonical) else {
         return match store::read_scratch(profile_id, stored.id) {
             Ok(scratch) => (None, scratch.unwrap_or_default(), None),
             Err(message) => (None, String::new(), Some(message)),
@@ -3573,16 +3606,12 @@ fn stored_text(
     // ponytail: read on the window's thread, as the scratch files beside it
     // are, so a file on a stalled mount holds the launch; reading the bound
     // files on the blocking pool before the tabs are built is the upgrade.
-    match sql_file::read(path) {
+    match sql_file::read(&path) {
         Ok(on_disk) => {
             let bom = on_disk.as_ref().is_some_and(|on_disk| on_disk.bom);
             let saved = on_disk.map(|on_disk| on_disk.text);
             let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
-            let file = FileBinding {
-                path: path.clone(),
-                saved,
-                bom,
-            };
+            let file = FileBinding { path, saved, bom };
             (Some(file), text, notice)
         }
         // Unbound rather than bound to text nobody has seen: Save would put
@@ -5063,6 +5092,32 @@ mod tests {
                 tab(None, Some("/q/a.sql")),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_query_that_is_a_link_is_bound_to_the_file_it_leads_to() {
+        store::tests::with_home(|| {
+            let home = sql_file::canonical(&store::home().unwrap());
+            let (queries, target) = (home.join("queries"), home.join("shared.sql"));
+            std::fs::create_dir_all(&queries).unwrap();
+            std::fs::write(&target, "SELECT 1").unwrap();
+            std::os::unix::fs::symlink(&target, queries.join("daily.sql")).unwrap();
+            let stored = |name: Option<&str>, path: Option<PathBuf>| store::StoredQueryTab {
+                id: 3,
+                name: name.map(str::to_string),
+                path,
+                active: true,
+                queued_results: 0,
+                database: None,
+                schema: None,
+            };
+
+            let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
+            assert_eq!(adopted, [stored(None, Some(target.clone()))]);
+            let (file, _, _) = stored_text("dev", &stored(None, Some(queries.join("daily.sql"))));
+            assert_eq!(file.map(|file| file.path), Some(target));
+        });
     }
 
     #[test]

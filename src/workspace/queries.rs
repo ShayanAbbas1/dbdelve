@@ -1713,7 +1713,6 @@ impl Workspace {
         let id = profile.id.clone();
         let holder = profile.session.tab_holding(&previous);
         let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries);
-        let renamed_to = profile.session.saved_query_path(&typed);
         let renamed = match refused {
             Some(message) => Err(message),
             None => store::rename_saved_query(&id, &previous, &typed),
@@ -1732,6 +1731,9 @@ impl Workspace {
             }
         }
         if let Some(profile) = self.profile_mut() {
+            // Resolved once it has moved: a query that is a link resolves to
+            // the file it leads to, and a tab on it stays where it was.
+            let renamed_to = profile.session.saved_query_path(&typed);
             if let Some(holder) = holder {
                 // Before the tab moves: the chip's old key is only in the strip
                 // until then.

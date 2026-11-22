@@ -5403,7 +5403,10 @@ open_objects = []
 
             write_query("dev", "weekly", "SELECT 2").unwrap();
             assert!(rename_saved_query("dev", "nightly", "weekly").is_err());
-            assert_eq!(read_query("dev", "weekly"), Ok(Some("SELECT 2".to_string())));
+            assert_eq!(
+                read_query("dev", "weekly"),
+                Ok(Some("SELECT 2".to_string()))
+            );
             assert_eq!(
                 rename_saved_query("dev", "gone", "other"),
                 Err("gone no longer exists.".to_string())

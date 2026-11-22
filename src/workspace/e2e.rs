@@ -12371,6 +12371,57 @@ fn a_relaunch_brings_a_file_tab_back_dirty_without_writing_its_file(cx: &mut Tes
     });
 }
 
+#[cfg(unix)]
+#[gpui::test]
+fn a_relaunch_with_two_tabs_on_one_file_keeps_both_buffers(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("shared.sql", "SELECT 1;");
+        let link = path.with_file_name("link.sql");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        cx.simulate_input("SELECT 2;");
+        // As a build that stored paths as they were picked would have left it.
+        workspace.update(cx, |workspace, _| {
+            let session = &mut workspace.profile_mut().expect("a connection").session;
+            let Tab::Query(id) = session.active else {
+                panic!("a query tab is in front");
+            };
+            session.query_tab_mut(id).expect("the tab").file = Some(crate::session::FileBinding {
+                path: link.clone(),
+                saved: Some("SELECT 1;".into()),
+                bom: false,
+            });
+        });
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        let buffers = workspace.read_with(cx, |workspace, cx| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let mut buffers: Vec<_> = session
+                .queries
+                .iter()
+                .map(|tab| {
+                    let path = tab.file.as_ref().map(|file| file.path.clone());
+                    (path, tab.editor.read(cx).value().to_string())
+                })
+                .collect();
+            buffers.sort();
+            buffers
+        });
+        assert_eq!(
+            buffers,
+            [
+                (None, String::new()),
+                (None, "SELECT 2;".to_string()),
+                (Some(path.clone()), "SELECT 1;".to_string()),
+            ]
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn opening_a_file_already_open_brings_its_tab_up(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
