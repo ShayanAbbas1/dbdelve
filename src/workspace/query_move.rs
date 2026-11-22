@@ -101,7 +101,7 @@ impl Workspace {
                 continue;
             }
             let directory = folder.join(subfolder);
-            if let Err(error) = std::fs::create_dir_all(&directory) {
+            if let Err(error) = sql_file::create_dirs(&directory) {
                 tracing::debug!(%error, "a connection's folder for its queries was not made");
                 failed += queries.len();
                 continue;

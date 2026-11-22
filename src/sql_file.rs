@@ -243,6 +243,31 @@ pub(crate) fn move_file(from: &Path, to: &Path) -> Move {
     Move::Done
 }
 
+/// `directory` and every parent of it missing, each new entry synced into the
+/// directory holding it before the next is made: a crash must not keep the
+/// removal of a query and lose the folder its copy went into.
+pub(crate) fn create_dirs(directory: &Path) -> io::Result<()> {
+    let mut missing = Vec::new();
+    let mut at = directory;
+    loop {
+        match fs::metadata(at) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(at);
+                at = at.parent().ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    for made in missing.into_iter().rev() {
+        match fs::create_dir(made) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+            _ => sync_directory(made)?,
+        }
+    }
+    Ok(())
+}
+
 /// The new name's directory entry on disk too: a synced file under an entry
 /// a crash forgets is lost along with the source removed after it.
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -443,6 +468,15 @@ mod tests {
         assert_eq!(move_file(&from, &to), Move::Done);
         assert_eq!(fs::read(&to).unwrap(), bytes);
         assert!(!from.exists());
+    }
+
+    #[test]
+    fn the_folders_a_move_needs_are_made_however_deep_and_again_without_harm() {
+        let dir = scratch_dir("move-dirs");
+        let deep = dir.join("Moved").join("Prod").join("2026");
+        create_dirs(&deep).unwrap();
+        assert!(deep.is_dir());
+        create_dirs(&deep).unwrap();
     }
 
     #[test]
