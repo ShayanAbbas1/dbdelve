@@ -352,14 +352,19 @@ pub struct StoredShortcut {
     pub kind: Option<String>,
 }
 
-/// One query buffer in the strip. The SQL itself is not here: a saved buffer
-/// lives in its query file and an unsaved one in its scratch file.
+/// One query buffer in the strip. The SQL itself is not here: a file tab's
+/// is in its file, an untitled one's in its scratch file, and a file tab's
+/// unsaved text in its scratch file too.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoredQueryTab {
     pub id: u64,
-    /// The saved query in this buffer, or absent for an unsaved one.
-    #[serde(default)]
+    /// A saved query's name, as a build before file tabs wrote it. Read once,
+    /// into [`Self::path`], and never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The file this tab is bound to, or absent for an untitled one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     #[serde(default)]
     pub active: bool,
     /// How many of this buffer's queued results are on disk, under
@@ -1559,12 +1564,17 @@ pub fn validate_query_name(name: &str) -> Result<(), String> {
 /// name, and deleting the old one would take the buffer away from an older
 /// build run against the same directory afterwards.
 pub fn read_scratch(profile_id: &str, tab: u64) -> Result<Option<String>, String> {
-    let directory = query_directory(profile_id)?;
-    match read_file(&directory.join(scratch_file(tab)))? {
+    match read_own_scratch(profile_id, tab)? {
         Some(sql) => Ok(Some(sql)),
-        None if tab == 0 => read_file(&directory.join(LEGACY_SCRATCH_FILE)),
+        None if tab == 0 => read_file(&query_directory(profile_id)?.join(LEGACY_SCRATCH_FILE)),
         None => Ok(None),
     }
+}
+
+/// [`read_scratch`] without the fallback, for a file tab: what an older
+/// build left is no file tab's unsaved text.
+pub fn read_own_scratch(profile_id: &str, tab: u64) -> Result<Option<String>, String> {
+    read_file(&query_directory(profile_id)?.join(scratch_file(tab)))
 }
 
 pub fn write_scratch(profile_id: &str, tab: u64, sql: &str) -> Result<(), String> {
@@ -2132,7 +2142,7 @@ fn expanded_against(path: &str, home: Option<&Path>) -> PathBuf {
     }
 }
 
-fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
+pub fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(profile_id) {
         return Err(format!("Profile id {reason}."));
     }
@@ -5569,6 +5579,32 @@ open_objects = []
     }
 
     #[test]
+    fn a_query_tab_written_before_file_tabs_keeps_its_name_and_has_no_path() {
+        let ProfileList { profiles, .. } = decode_profiles(
+            "\
+[[profiles]]
+id = \"dev\"
+name = \"Dev\"
+host = \"127.0.0.1\"
+database = \"dbdelve_dev\"
+user = \"dbdelve\"
+
+[[profiles.open_queries]]
+id = 4
+name = \"daily\"
+active = true
+",
+            &[],
+        )
+        .expect("an older open_queries entry must load");
+        let tab = &profiles[0].open_queries[0];
+        assert_eq!(
+            (tab.name.as_deref(), tab.path.as_deref()),
+            (Some("daily"), None)
+        );
+    }
+
+    #[test]
     fn open_queries_and_open_objects_both_survive_the_round_trip() {
         // Two arrays of tables in one profile: every scalar has to precede
         // both, and this is the encode that fails if one moves after them.
@@ -5611,6 +5647,7 @@ open_objects = []
                 StoredQueryTab {
                     id: 0,
                     name: None,
+                    path: None,
                     active: false,
                     queued_results: 0,
                     database: None,
@@ -5618,7 +5655,8 @@ open_objects = []
                 },
                 StoredQueryTab {
                     id: 4,
-                    name: Some("daily".into()),
+                    name: None,
+                    path: Some(PathBuf::from("/q/daily.sql")),
                     active: true,
                     queued_results: 2,
                     database: None,

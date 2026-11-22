@@ -318,7 +318,7 @@ pub enum Command {
     /// Flip the results pane between the rows and the plan.
     ShowPlan(bool),
     SaveQuery,
-    RenameQuery,
+    SaveQueryAs,
     /// Put the palette back up over the saved queries, to delete one.
     PickQueryToDelete,
     /// Ask before deleting this saved query, in the dialog the sidebar's
@@ -3343,7 +3343,7 @@ fn schema_items(profile: &Profile) -> Vec<Item> {
 /// bar while its rows are not loading.
 pub(crate) fn row_limit_target(session: &Session) -> Option<(LimitTarget, Option<usize>)> {
     if let Some(tab) = session.active_query_tab() {
-        return (!session.naming).then_some((LimitTarget::Query(tab.id), tab.row_limit));
+        return Some((LimitTarget::Query(tab.id), tab.row_limit));
     }
     let tab = session.active_object()?;
     match &tab.body {
@@ -3639,11 +3639,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         "new_query",
     )];
     if profile.config.engine().syntax() == Syntax::Sql {
-        items.push(command(
-            "Open SQL file…",
-            icon::SCRATCH_QUERY,
-            Command::OpenSqlFiles,
-            QUERY,
+        items.push(bound(
+            command(
+                "Open SQL file…",
+                icon::SCRATCH_QUERY,
+                Command::OpenSqlFiles,
+                QUERY,
+            ),
+            "open_sql_files",
         ));
     }
 
@@ -3690,19 +3693,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 "copy_plan",
             ));
         }
-        if session.open_query().is_some() {
-            items.push(command(
-                "Rename query…",
-                icon::RENAME,
-                Command::RenameQuery,
-                QUERY,
-            ));
-        } else {
-            items.push(bound(
-                command("Save query…", icon::SAVE, Command::SaveQuery, QUERY),
-                "rename_query_tab",
-            ));
-        }
+        items.push(bound(
+            command("Save", icon::SAVE, Command::SaveQuery, QUERY),
+            "save_query",
+        ));
+        items.push(bound(
+            command("Save as…", icon::SAVE, Command::SaveQueryAs, QUERY),
+            "save_query_as",
+        ));
     }
 
     // Where the status bar offers its Cancel: a run in flight, or a count.

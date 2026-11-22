@@ -3432,6 +3432,7 @@ fn first_buffer(name: Option<String>) -> Vec<store::StoredQueryTab> {
     vec![store::StoredQueryTab {
         id: 0,
         name,
+        path: None,
         active: true,
         queued_results: 0,
         database: None,
@@ -3809,6 +3810,7 @@ target = 'i-0123456789abcdef0'
         let blank = store::StoredQueryTab {
             id: 0,
             name: None,
+            path: None,
             active: true,
             queued_results: 0,
             database: None,
@@ -3833,6 +3835,7 @@ target = 'i-0123456789abcdef0'
         let open = vec![store::StoredQueryTab {
             id: 2,
             name: None,
+            path: None,
             active: false,
             queued_results: 0,
             database: None,

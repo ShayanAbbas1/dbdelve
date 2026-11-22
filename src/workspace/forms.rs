@@ -2976,7 +2976,7 @@ impl Workspace {
             .session
             .queries
             .iter()
-            .filter_map(|tab| tab.open_query.clone())
+            .filter_map(|tab| profile.session.saved_query_of(tab).map(str::to_string))
             .collect();
         let renaming = profile.session.query_rename.as_ref().map(|rename| {
             (

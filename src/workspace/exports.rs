@@ -345,8 +345,8 @@ impl Workspace {
             Some(tab) => tab.name.clone(),
             None => profile
                 .session
-                .open_query()
-                .map(str::to_string)
+                .active_query_tab()
+                .and_then(|tab| tab.file_stem())
                 .unwrap_or_else(|| "results".to_string()),
         }
     }

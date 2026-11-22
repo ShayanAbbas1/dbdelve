@@ -1095,15 +1095,6 @@ impl Workspace {
         if self.close_new_row(cx) {
             return;
         }
-        let Some(profile) = self.profile_mut() else {
-            return;
-        };
-        if profile.session.naming {
-            profile.session.naming = false;
-            profile.session.editor_needs_focus = true;
-            cx.notify();
-            return;
-        }
         // The tree has nothing to back out of, so `escape` there leaves it for
         // the surface in front, as leaving any field does.
         if self.explorer_focus.contains_focused(window, cx) {
@@ -1181,7 +1172,7 @@ impl Workspace {
             Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
             Focus::Diagram(handle) => handle.focus(window, cx),
             Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
-            Focus::Field(_) | Focus::Window => return,
+            Focus::Window => return,
         }
         // A hand-back asked for earlier would take the keyboard straight back.
         if let Some(profile) = self.profile_mut() {

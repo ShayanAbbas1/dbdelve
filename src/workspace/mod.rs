@@ -365,6 +365,12 @@ pub(crate) struct Workspace {
     /// Statements written for data files opened before their profile had
     /// connected: profile id, query tab, statement. Run once it has.
     pub(crate) runs_on_connect: Vec<(String, u64, String)>,
+    /// Where the last SQL file was opened or saved, for Save As to start in.
+    /// Kept for the session only.
+    pub(crate) sql_directory: Option<PathBuf>,
+    /// What the window's edited mark was last set to, so it is set only when
+    /// it changes rather than every frame.
+    pub(crate) window_edited: bool,
     /// Why the welcome surface's name field refused what was typed: a line
     /// of its own, so a refusal never covers the notice, which may be the
     /// only word that the profiles file failed to load.
@@ -574,6 +580,8 @@ impl Workspace {
             welcome_notice: None,
             cleanup_notices: Vec::new(),
             runs_on_connect: Vec::new(),
+            sql_directory: None,
+            window_edited: false,
             project_name_error: None,
             welcome_needs_focus: true,
             welcome_url,
@@ -1641,6 +1649,14 @@ impl Render for Workspace {
             self.menu_imports_rows = imports_rows;
             cx.set_menus(crate::app_menus(imports_rows));
         }
+        let edited = self
+            .profiles
+            .iter()
+            .any(|profile| profile.session.queries.iter().any(|tab| tab.dirty));
+        if edited != self.window_edited {
+            self.window_edited = edited;
+            window.set_window_edited(edited);
+        }
         self.track_shown_diagram(cx);
         self.settle_sidebar(window, cx);
         self.reveal_landed_column(window, cx);
@@ -1703,13 +1719,6 @@ impl Render for Workspace {
         let take_focus = self.profile_mut().and_then(|profile| {
             if form_open {
                 return None;
-            }
-            if profile.session.naming {
-                let wanted = profile.session.save_name_needs_focus;
-                return wanted.then(|| {
-                    profile.session.save_name_needs_focus = false;
-                    Focus::Field(profile.session.save_name.clone())
-                });
             }
             if !profile.session.editor_needs_focus {
                 return None;
@@ -1785,7 +1794,6 @@ impl Render for Workspace {
 
         match take_focus {
             Some(Focus::Buffer(editor)) => editor.focus_handle(cx).focus(window, cx),
-            Some(Focus::Field(input)) => input.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Diagram(handle)) => handle.focus(window, cx),
@@ -2580,6 +2588,7 @@ impl Render for Workspace {
 
         div()
             .id("workspace")
+            .key_context("Workspace")
             // A data file dropped anywhere on the window opens in DuckDB.
             .on_drop(cx.listener(Self::drop_files))
             .relative()
@@ -2628,6 +2637,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_logs_folder))
             .on_action(cx.listener(Self::copy_diagnostics))
+            .on_action(cx.listener(Self::open_sql_files_action))
             // Unregistered under the import dialog, which stops only the
             // mouse: these act on the tab it covers, out of sight, and their
             // menu items grey out with them.
@@ -2663,6 +2673,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::toggle_next_join))
                     .on_action(cx.listener(Self::new_row))
                     .on_action(cx.listener(Self::save_query))
+                    .on_action(cx.listener(Self::save_query_as))
                     .on_action(cx.listener(Self::close_tab))
                     .on_action(cx.listener(Self::close_all_tabs))
                     .on_action(cx.listener(Self::go_to_column))

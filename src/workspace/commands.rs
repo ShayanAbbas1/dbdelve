@@ -710,7 +710,7 @@ impl Workspace {
             Command::FormatQuery => self.format_query(&FormatQuery, window, cx),
             Command::ShowPlan(showing) => self.show_plan(showing, cx),
             Command::SaveQuery => self.save_query(&SaveQuery, window, cx),
-            Command::RenameQuery => self.rename_query(window, cx),
+            Command::SaveQueryAs => self.save_query_as(&crate::actions::SaveQueryAs, window, cx),
             Command::PickQueryToDelete => self.open_palette(PaletteMode::DeleteQuery, window, cx),
             Command::DeleteQuery(name) => self.ask_delete_saved_query(name, cx),
             Command::QueryHistory => {

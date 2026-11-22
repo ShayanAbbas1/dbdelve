@@ -166,6 +166,8 @@ actions!(
         SelectTheme,
         SelectDatabase,
         SaveQuery,
+        SaveQueryAs,
+        OpenSqlFiles,
         NewQuery,
         NextProfile,
         PreviousProfile,
