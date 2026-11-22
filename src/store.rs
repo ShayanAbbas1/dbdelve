@@ -382,6 +382,14 @@ pub struct StoredQueryTab {
     /// The schema in that database the tab runs in, where the engine picks one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    /// A file tab left with unsaved text: [`crate::sql_file::text_hash`] of
+    /// the file's text that text was written against. A file that reads
+    /// differently at relaunch was changed meanwhile, and the tab asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_hash: Option<String>,
+    /// Keep Mine was chosen and nothing saved since, so Save still asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept_mine: bool,
 }
 
 /// An opened table, view or routine, stored by name rather than by content: the
@@ -5646,6 +5654,8 @@ active = true
                     queued_results: 0,
                     database: None,
                     schema: None,
+                    saved_hash: None,
+                    kept_mine: false,
                 },
                 StoredQueryTab {
                     id: 4,
@@ -5655,6 +5665,8 @@ active = true
                     queued_results: 2,
                     database: None,
                     schema: None,
+                    saved_hash: None,
+                    kept_mine: false,
                 },
             ],
             open_objects: vec![StoredObject {

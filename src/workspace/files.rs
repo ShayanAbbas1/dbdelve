@@ -461,6 +461,7 @@ impl Workspace {
         }
         // `set_value` emits no change, so nothing else marks the tab.
         tab.refresh_dirty(cx);
+        self.profiles_unsaved = true;
         cx.notify();
     }
 
@@ -494,6 +495,7 @@ impl Workspace {
             file.conflict = None;
         }
         tab.refresh_dirty(cx);
+        self.profiles_unsaved = true;
         cx.notify();
     }
 
@@ -632,6 +634,8 @@ impl Workspace {
             .and_then(|profile| profile.session.query_tab_mut(id))
             .is_some_and(|tab| tab.refresh_dirty(cx));
         if changed {
+            // What a quit writes for the tab (`StoredQueryTab::saved_hash`).
+            self.profiles_unsaved = true;
             cx.notify();
         }
     }

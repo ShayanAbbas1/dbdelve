@@ -12975,3 +12975,49 @@ fn a_bar_button_pressed_from_the_keyboard_hands_it_back_to_the_buffer(cx: &mut T
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_relaunch_asks_about_a_change_made_while_the_app_was_closed(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "moved.sql");
+
+        close_window(workspace, cx);
+        std::fs::write(&path, "SELECT 333;").unwrap();
+        let (workspace, cx) = launch_again(cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;");
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::Asking)
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "kept.sql");
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.take_disk(id, false, window, cx)
+            });
+        });
+        settle(cx);
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::KeptMine)
+        );
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        quit(workspace, cx);
+    });
+}

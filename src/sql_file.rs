@@ -52,6 +52,18 @@ impl Stamp {
     }
 }
 
+/// A digest of a file's text and byte order mark that a relaunch can compare.
+/// FNV-1a by hand: std's `DefaultHasher` may change between Rust releases,
+/// and a collision costs only a question not asked.
+pub(crate) fn text_hash(text: &str, bom: bool) -> String {
+    let hash = std::iter::once(u8::from(bom))
+        .chain(text.bytes())
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{hash:016x}")
+}
+
 /// `path`'s stamp now, or `None` when nothing is there: one `stat`.
 pub(crate) fn stamp(path: &Path) -> io::Result<Option<Stamp>> {
     match fs::metadata(path) {

@@ -3134,6 +3134,17 @@ impl QueryTab {
                 .binding
                 .as_ref()
                 .and_then(|binding| binding.schema.clone()),
+            // Only for a dirty tab: a clean one has nothing to lose to a file
+            // changed while the app was closed.
+            saved_hash: self
+                .file
+                .as_ref()
+                .filter(|_| self.dirty)
+                .and_then(|file| Some(sql_file::text_hash(file.saved.as_deref()?, file.bom))),
+            kept_mine: self
+                .file
+                .as_ref()
+                .is_some_and(|file| file.conflict == Some(Conflict::KeptMine)),
         }
     }
 }
@@ -3721,13 +3732,14 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             let stamp = on_disk.as_ref().map(|on_disk| on_disk.stamp);
             let saved = on_disk.map(|on_disk| on_disk.text);
             let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
+            let conflict = restored_conflict(stored, saved.as_deref(), bom, &text);
             StoredText {
                 file: Some(FileBinding {
                     path,
                     saved,
                     bom,
                     stamp,
-                    conflict: None,
+                    conflict,
                 }),
                 text,
                 notice,
@@ -3742,6 +3754,22 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             notice: notice.or(Some(message)),
             scratch_unread,
         },
+    }
+}
+
+/// The conflict a file tab left with unsaved text comes back with, its file
+/// reading `saved` and its buffer `text`: the bar, when the file is not what
+/// that text was written against, or Keep Mine, as it was left.
+fn restored_conflict(
+    stored: &store::StoredQueryTab,
+    saved: Option<&str>,
+    bom: bool,
+    text: &str,
+) -> Option<Conflict> {
+    let saved = saved.filter(|saved| *saved != text)?;
+    match &stored.saved_hash {
+        Some(hash) if *hash != sql_file::text_hash(saved, bom) => Some(Conflict::Asking),
+        _ => stored.kept_mine.then_some(Conflict::KeptMine),
     }
 }
 
@@ -5206,6 +5234,8 @@ mod tests {
             queued_results: 0,
             database: None,
             schema: None,
+            saved_hash: None,
+            kept_mine: false,
         };
         let adopted = adopted(
             vec![
@@ -5242,6 +5272,8 @@ mod tests {
                 queued_results: 0,
                 database: None,
                 schema: None,
+                saved_hash: None,
+                kept_mine: false,
             };
 
             let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
@@ -5264,6 +5296,8 @@ mod tests {
                 queued_results: 0,
                 database: None,
                 schema: None,
+                saved_hash: None,
+                kept_mine: false,
             };
             let StoredText {
                 file, text, notice, ..
@@ -5339,6 +5373,35 @@ mod tests {
         };
         assert_eq!(gone.settle(None, true), Settle::Keep, "already said");
         assert_eq!(gone.settle(Some(written), true), Settle::Ask, "back again");
+    }
+
+    #[test]
+    fn a_relaunch_asks_again_where_the_file_moved_under_unsaved_text() {
+        let left = |saved_hash: Option<&str>, kept_mine| store::StoredQueryTab {
+            saved_hash: saved_hash.map(str::to_string),
+            kept_mine,
+            ..toml::from_str("id = 1").expect("a tab from before these fields")
+        };
+        let theirs = sql_file::text_hash("SELECT 1", false);
+        let ours = sql_file::text_hash("SELECT 0", false);
+        let conflict = |stored: &store::StoredQueryTab, text: &str| {
+            restored_conflict(stored, Some("SELECT 1"), false, text)
+        };
+        assert_eq!(conflict(&left(Some(&theirs), false), "mine"), None);
+        assert_eq!(
+            conflict(&left(Some(&ours), false), "mine"),
+            Some(Conflict::Asking)
+        );
+        assert_eq!(
+            conflict(&left(Some(&theirs), true), "mine"),
+            Some(Conflict::KeptMine)
+        );
+        assert_eq!(
+            conflict(&left(Some(&ours), false), "SELECT 1"),
+            None,
+            "clean"
+        );
+        assert_eq!(conflict(&left(None, false), "mine"), None);
     }
 
     #[test]
@@ -5555,6 +5618,8 @@ mod tests {
                     queued_results: 0,
                     database: None,
                     schema: None,
+                    saved_hash: None,
+                    kept_mine: false,
                 })
                 .collect::<Vec<_>>()
         };
