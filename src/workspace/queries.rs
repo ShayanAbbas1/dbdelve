@@ -1714,13 +1714,11 @@ impl Workspace {
         let holder = profile.session.tab_holding(&previous);
         let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries);
         let renamed_to = profile.session.saved_query_path(&typed);
-        let sql = match refused {
+        let renamed = match refused {
             Some(message) => Err(message),
-            None => store::read_query(&id, &previous)
-                .and_then(|sql| sql.ok_or_else(|| format!("{previous} no longer exists."))),
+            None => store::rename_saved_query(&id, &previous, &typed),
         };
-        let written = sql.and_then(|sql| store::save_query_as(&id, Some(&previous), &typed, &sql));
-        match written {
+        match renamed {
             Ok(()) => {}
             Err(message) => {
                 if let Some(rename) = self

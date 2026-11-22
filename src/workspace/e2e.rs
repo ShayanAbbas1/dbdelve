@@ -10760,7 +10760,7 @@ fn the_connections_trees_object_menu_is_simple_modes_menu(cx: &mut TestAppContex
 fn a_saved_querys_row_in_the_connections_tree_has_its_menu(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         crate::IGNORE_ENVIRONMENT.set(true);
-        store::save_query_as("b", None, "nightly", "select 1").expect("the query saves");
+        store::write_query("b", "nightly", "select 1").expect("the query saves");
         let (workspace, cx) = launch_connections(
             cx,
             "create table birds (name text);",

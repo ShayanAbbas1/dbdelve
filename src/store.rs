@@ -1473,10 +1473,12 @@ pub fn saved_queries(profile_id: &str) -> Vec<String> {
     names
 }
 
+#[cfg(test)]
 pub fn read_query(profile_id: &str, name: &str) -> Result<Option<String>, String> {
     read_file(&query_path(profile_id, name)?)
 }
 
+#[cfg(test)]
 pub fn write_query(profile_id: &str, name: &str, sql: &str) -> Result<(), String> {
     write_file(&query_path(profile_id, name)?, sql)
 }
@@ -1504,43 +1506,26 @@ pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     }
 }
 
-/// Write `sql` as `name`, moving the query's file there first when this
-/// renames `previous`.
-///
-/// The text is written under the old name before a rename, so a move that
-/// fails leaves it where it was. New saves and renames install their target
-/// atomically without replacing another file: directory enumeration is only
-/// an early name-conflict check, not protection against an unseen target.
-/// The native rename also handles case-only changes when both names address
-/// the same entry, without treating case variants as interchangeable files.
-pub fn save_query_as(
-    profile_id: &str,
-    previous: Option<&str>,
-    name: &str,
-    sql: &str,
-) -> Result<(), String> {
+/// Move the query `previous` to `name` and nothing else: its bytes and
+/// permissions stay as they are, since a tab bound to it may hold text the
+/// user has not saved, and the file may have been edited outside DBDelve.
+pub fn rename_saved_query(profile_id: &str, previous: &str, name: &str) -> Result<(), String> {
     if let Some(taken) = saved_queries(profile_id)
         .into_iter()
-        .find(|taken| Some(taken.as_str()) != previous && same_query_name(taken, name))
+        .find(|taken| taken != previous && same_query_name(taken, name))
     {
         return Err(format!("A query named {taken} already exists."));
     }
-    match previous {
-        Some(previous) if previous != name => {
-            write_query(profile_id, previous, sql)?;
-            let from = query_path(profile_id, previous)?;
-            let to = query_path(profile_id, name)?;
-            rename_query(&from, &to).map_err(|error| {
-                format!(
-                    "Could not rename {} to {}: {error}",
-                    from.display(),
-                    to.display()
-                )
-            })
-        }
-        Some(_) => write_query(profile_id, name, sql),
-        None => write_file_with(&query_path(profile_id, name)?, sql, rename_query),
-    }
+    let from = query_path(profile_id, previous)?;
+    let to = query_path(profile_id, name)?;
+    rename_query(&from, &to).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => format!("{previous} no longer exists."),
+        _ => format!(
+            "Could not rename {} to {}: {error}",
+            from.display(),
+            to.display()
+        ),
+    })
 }
 
 /// Whether two query names would name one file on a filesystem that ignores
@@ -5393,24 +5378,36 @@ open_objects = []
         });
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_rename_moves_the_file_and_a_failed_one_changes_nothing() {
+    fn renaming_a_query_moves_its_file_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+
         with_home(|| {
-            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            let directory = query_directory("dev").unwrap();
+            fs::create_dir_all(&directory).unwrap();
+            let daily = directory.join("daily.sql");
+            fs::write(&daily, "SELECT 1 -- edited elsewhere").unwrap();
+            fs::set_permissions(&daily, fs::Permissions::from_mode(0o644)).unwrap();
+
+            assert_eq!(rename_saved_query("dev", "daily", "nightly"), Ok(()));
+            let nightly = directory.join("nightly.sql");
             assert_eq!(
-                save_query_as("dev", Some("daily"), "nightly", "SELECT 1 -- edited"),
-                Ok(())
+                fs::read_to_string(&nightly).unwrap(),
+                "SELECT 1 -- edited elsewhere"
             );
-            assert_eq!(saved_queries("dev"), ["nightly"]);
             assert_eq!(
-                read_query("dev", "nightly"),
-                Ok(Some("SELECT 1 -- edited".to_string()))
+                fs::metadata(&nightly).unwrap().permissions().mode() & 0o777,
+                0o644
             );
 
-            // An old name that will not take the text stops the rename.
-            block("dev", "held.sql");
-            assert!(save_query_as("dev", Some("held"), "kept", "SELECT 2").is_err());
-            assert_eq!(read_query("dev", "kept"), Ok(None));
+            write_query("dev", "weekly", "SELECT 2").unwrap();
+            assert!(rename_saved_query("dev", "nightly", "weekly").is_err());
+            assert_eq!(read_query("dev", "weekly"), Ok(Some("SELECT 2".to_string())));
+            assert_eq!(
+                rename_saved_query("dev", "gone", "other"),
+                Err("gone no longer exists.".to_string())
+            );
         });
     }
 
@@ -5421,10 +5418,7 @@ open_objects = []
         with_home(|| {
             write_query("dev", "daily", "SELECT 1").expect("a query must write");
 
-            assert_eq!(
-                save_query_as("dev", Some("daily"), "Daily", "SELECT 1"),
-                Ok(())
-            );
+            assert_eq!(rename_saved_query("dev", "daily", "Daily"), Ok(()));
 
             assert_eq!(saved_queries("dev"), ["Daily"]);
             assert_eq!(read_query("dev", "Daily"), Ok(Some("SELECT 1".to_string())));
@@ -5433,7 +5427,7 @@ open_objects = []
 
     #[cfg(unix)]
     #[test]
-    fn saving_or_renaming_never_overwrites_a_query_hidden_by_directory_permissions() {
+    fn renaming_never_overwrites_a_query_hidden_by_directory_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         with_home(|| {
@@ -5442,15 +5436,13 @@ open_objects = []
             let directory = query_directory("dev").unwrap();
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o300)).unwrap();
             let hidden = fs::read_dir(&directory).is_err();
-            let saved = save_query_as("dev", None, "daily", "SELECT 9");
-            let renamed = save_query_as("dev", Some("other"), "daily", "SELECT 3");
+            let renamed = rename_saved_query("dev", "other", "daily");
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
 
-            assert!(saved.is_err());
             assert!(renamed.is_err());
             assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".into())));
             if hidden {
-                assert_eq!(read_query("dev", "other"), Ok(Some("SELECT 3".into())));
+                assert_eq!(read_query("dev", "other"), Ok(Some("SELECT 2".into())));
             }
         });
     }
@@ -5496,8 +5488,7 @@ open_objects = []
             write_query("dev", "daily", "SELECT 1").expect("a query must write");
             write_query("dev", "weekly", "SELECT 7").expect("a query must write");
 
-            assert!(save_query_as("dev", Some("daily"), "WEEKLY", "SELECT 1").is_err());
-            assert!(save_query_as("dev", None, "Weekly", "SELECT 9").is_err());
+            assert!(rename_saved_query("dev", "daily", "WEEKLY").is_err());
 
             assert_eq!(
                 read_query("dev", "weekly"),
