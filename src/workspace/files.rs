@@ -388,6 +388,7 @@ impl Workspace {
                 saved: Some(text),
                 bom,
             });
+            tab.scratch_unread = false;
             tab.refresh_dirty(cx);
         }
         self.sql_directory = path.parent().map(Path::to_path_buf);

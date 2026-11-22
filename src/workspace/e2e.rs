@@ -9717,6 +9717,12 @@ fn relaunch_closing(
     workspace: Entity<Workspace>,
     cx: &mut VisualTestContext,
 ) -> (Entity<Workspace>, &mut VisualTestContext) {
+    close_window(workspace, cx);
+    launch_again(cx)
+}
+
+/// The window gone, and with it the workspace, having written what it keeps.
+fn close_window(workspace: Entity<Workspace>, cx: &mut VisualTestContext) {
     let released = workspace.downgrade();
     cx.update(|window, _| window.remove_window());
     drop(workspace);
@@ -9728,6 +9734,11 @@ fn relaunch_closing(
         released.upgrade().is_none(),
         "the first workspace is released"
     );
+}
+
+/// A second window over the same home, once `close_window` has closed the
+/// first.
+fn launch_again(cx: &mut VisualTestContext) -> (Entity<Workspace>, &mut VisualTestContext) {
     let mut relaunched = None;
     let (_, cx) = cx.cx.add_window_view(|window, cx| {
         let entity = cx.new(|cx| Workspace::new(Vec::new(), window, cx));
@@ -12510,6 +12521,31 @@ fn a_link_dropped_with_its_file_opens_one_tab(cx: &mut TestAppContext) {
         assert_eq!(front_file(&workspace, cx), Some(path));
         assert_eq!(query_tab_count(&workspace, cx), before + 1);
         quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_scratch_file_that_will_not_read_back_is_left_for_later(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("draft.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_input("-- ");
+        let scratch = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("a connection in front");
+            let Tab::Query(id) = profile.session.active else {
+                panic!("a query tab is in front");
+            };
+            store::query_directory(&profile.id)
+                .unwrap()
+                .join(format!(".scratch-{id}.sql"))
+        });
+
+        close_window(workspace, cx);
+        std::fs::write(&scratch, b"-- \xff SELECT 1;").unwrap();
+        let (workspace, cx) = launch_again(cx);
+        quit(workspace, cx);
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"-- \xff SELECT 1;");
     });
 }
 

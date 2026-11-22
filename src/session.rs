@@ -2264,6 +2264,9 @@ pub(crate) struct QueryTab {
     /// and the window's edited mark read it every frame, and a file can be
     /// megabytes long.
     pub(crate) dirty: bool,
+    /// [`StoredText::scratch_unread`], until Save clears it. Closing the tab
+    /// discards the scratch file with the rest of it.
+    pub(crate) scratch_unread: bool,
     /// The statement behind this tab's grid.
     ///
     /// Held rather than derived from the buffer, unlike the sort path, and a
@@ -2926,10 +2929,16 @@ impl QueryTab {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
-        let (file, text, notice) = stored_text(profile_id, stored);
+        let StoredText {
+            file,
+            text,
+            notice,
+            scratch_unread,
+        } = stored_text(profile_id, stored);
         let mut tab = Self::new(
             profile_id, stored.id, text, file, engine, sorting, row_limit, window, cx,
         );
+        tab.scratch_unread = scratch_unread;
         tab.queued_results = stored.queued_results;
         // Kept as written, and handed to the driver as data on the first
         // run: a database the server no longer has fails that run with the
@@ -2981,6 +2990,7 @@ impl QueryTab {
             query: QueryState::Idle,
             file,
             dirty,
+            scratch_unread: false,
             last_query: None,
             sent_from: None,
             ran_from: None,
@@ -3585,24 +3595,40 @@ fn adopted(
         .collect()
 }
 
-/// The file a stored tab comes back bound to, the text it comes back holding,
-/// and what went wrong reading either. An untitled tab holds its scratch
-/// file. A file tab holds its scratch file when it was left with unsaved
-/// text, which is what makes it come back dirty, and its file when not; one
-/// whose file has gone stays bound to it, holding what it last had.
-fn stored_text(
-    profile_id: &str,
-    stored: &store::StoredQueryTab,
-) -> (Option<FileBinding>, String, Option<String>) {
-    let Some(path) = stored.path.as_deref().map(sql_file::canonical) else {
-        return match store::read_scratch(profile_id, stored.id) {
-            Ok(scratch) => (None, scratch.unwrap_or_default(), None),
-            Err(message) => (None, String::new(), Some(message)),
-        };
+/// What a stored tab comes back as.
+struct StoredText {
+    file: Option<FileBinding>,
+    text: String,
+    /// What went wrong reading the file or the scratch file.
+    notice: Option<String>,
+    /// The scratch file is there and could not be read: it may hold unsaved
+    /// text the buffer does not, so nothing writes or removes it until Save
+    /// or a close settles what the tab holds.
+    scratch_unread: bool,
+}
+
+/// What a stored tab comes back as. An untitled tab holds its scratch file.
+/// A file tab holds its scratch file when it was left with unsaved text,
+/// which is what makes it come back dirty, and its file when not; one whose
+/// file has gone stays bound to it, holding what it last had.
+fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
+    let path = stored.path.as_deref().map(sql_file::canonical);
+    let scratch = match &path {
+        None => store::read_scratch(profile_id, stored.id),
+        Some(_) => store::read_own_scratch(profile_id, stored.id),
     };
-    let (scratch, notice) = match store::read_own_scratch(profile_id, stored.id) {
+    let scratch_unread = scratch.is_err();
+    let (scratch, notice) = match scratch {
         Ok(scratch) => (scratch, None),
         Err(message) => (None, Some(message)),
+    };
+    let Some(path) = path else {
+        return StoredText {
+            file: None,
+            text: scratch.unwrap_or_default(),
+            notice,
+            scratch_unread,
+        };
     };
     // ponytail: read on the window's thread, as the scratch files beside it
     // are, so a file on a stalled mount holds the launch; reading the bound
@@ -3612,12 +3638,21 @@ fn stored_text(
             let bom = on_disk.as_ref().is_some_and(|on_disk| on_disk.bom);
             let saved = on_disk.map(|on_disk| on_disk.text);
             let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
-            let file = FileBinding { path, saved, bom };
-            (Some(file), text, notice)
+            StoredText {
+                file: Some(FileBinding { path, saved, bom }),
+                text,
+                notice,
+                scratch_unread,
+            }
         }
         // Unbound rather than bound to text nobody has seen: Save would put
         // the buffer over whatever the file holds.
-        Err(message) => (None, scratch.unwrap_or_default(), notice.or(Some(message))),
+        Err(message) => StoredText {
+            file: None,
+            text: scratch.unwrap_or_default(),
+            notice: notice.or(Some(message)),
+            scratch_unread,
+        },
     }
 }
 
@@ -3633,7 +3668,8 @@ impl QueryState {
 }
 
 /// Write every one of a profile's buffers to its scratch file, or remove the
-/// scratch of a file tab with nothing unsaved.
+/// scratch of a file tab with nothing unsaved. A scratch file that could not
+/// be read back is left as it is (`QueryTab::scratch_unread`).
 ///
 /// All of them rather than the one in front: a buffer that is not visible is
 /// still someone's unsaved work. The first failure is the one reported and
@@ -3641,7 +3677,12 @@ impl QueryState {
 /// than it has to.
 pub(crate) fn write_buffer(profile: &Profile, cx: &App) -> Result<(), String> {
     let mut failure = None;
-    for tab in &profile.session.queries {
+    for tab in profile
+        .session
+        .queries
+        .iter()
+        .filter(|tab| !tab.scratch_unread)
+    {
         let sql = tab.editor.read(cx).value().to_string();
         // Never the file itself: only Save writes the user's file.
         let written = match &tab.file {
@@ -5116,8 +5157,8 @@ mod tests {
 
             let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
             assert_eq!(adopted, [stored(None, Some(target.clone()))]);
-            let (file, _, _) = stored_text("dev", &stored(None, Some(queries.join("daily.sql"))));
-            assert_eq!(file.map(|file| file.path), Some(target));
+            let restored = stored_text("dev", &stored(None, Some(queries.join("daily.sql"))));
+            assert_eq!(restored.file.map(|file| file.path), Some(target));
         });
     }
 
@@ -5135,19 +5176,21 @@ mod tests {
                 database: None,
                 schema: None,
             };
-            let (file, text, notice) = stored_text("dev", &stored);
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
             assert_eq!(text, "SELECT 1");
             assert!(!is_dirty(file.as_ref(), &text));
             assert_eq!(notice, None);
 
             store::write_scratch("dev", 3, "SELECT 2").unwrap();
-            let (file, text, _) = stored_text("dev", &stored);
+            let StoredText { file, text, .. } = stored_text("dev", &stored);
             assert_eq!(text, "SELECT 2");
             assert!(is_dirty(file.as_ref(), &text));
 
             std::fs::remove_file(&path).unwrap();
             store::delete_scratch("dev", 3).unwrap();
-            let (file, text, _) = stored_text("dev", &stored);
+            let StoredText { file, text, .. } = stored_text("dev", &stored);
             let file = file.expect("still bound");
             assert_eq!((file.path.as_path(), text.as_str()), (path.as_path(), ""));
             assert!(
