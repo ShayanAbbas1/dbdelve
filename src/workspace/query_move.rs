@@ -143,12 +143,14 @@ impl Workspace {
             for profile in &mut self.profiles {
                 if let Some(held) = profile.recent_files.iter_mut().find(|held| **held == from) {
                     *held = to.clone();
+                    profile.recent_files_changed();
                     holders.push(profile.id.clone());
                 }
             }
             let profile = &mut self.profiles[index];
             profile.shortcuts.forget_query(&name);
             crate::session::remember_recent(&mut profile.recent_files, to);
+            profile.recent_files_changed();
         }
         for id in &owners {
             self.reload_queries_of(id, cx);

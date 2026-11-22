@@ -122,6 +122,9 @@ pub(crate) struct Profile {
     /// which the Files group greys.
     pub(crate) recent_files: Vec<PathBuf>,
     pub(crate) missing_files: HashSet<PathBuf>,
+    /// Bumped whenever the recent files or what is known of one changes, so a
+    /// look that set out before lands on nothing ([`Self::take_missing`]).
+    pub(crate) recent_generation: u64,
     pub(crate) session: Session,
 }
 
@@ -293,6 +296,21 @@ impl Profile {
     /// What the sidebar's Files group lists besides the saved queries: the
     /// recent files, then any file open in a tab they no longer hold. A saved
     /// query's file is listed as the query, so not here.
+    pub(crate) fn recent_files_changed(&mut self) {
+        self.recent_generation += 1;
+    }
+
+    /// What a look that set out at `generation` found gone, taken only if
+    /// nothing has changed since: a stale look would grey a file opened or
+    /// saved after it set out.
+    pub(crate) fn take_missing(&mut self, generation: u64, gone: HashSet<PathBuf>) {
+        if let Some(missing) =
+            still_missing(generation, self.recent_generation, gone, &self.recent_files)
+        {
+            self.missing_files = missing;
+        }
+    }
+
     pub(crate) fn listed_files(&self) -> Vec<PathBuf> {
         let mut listed: Vec<PathBuf> = Vec::new();
         let open = self
@@ -3701,6 +3719,19 @@ pub(crate) enum QueryState {
 /// How many files a profile's recent list keeps.
 pub(crate) const RECENT_FILES_CAP: usize = 20;
 
+fn still_missing(
+    looked_at: u64,
+    now: u64,
+    gone: HashSet<PathBuf>,
+    recent: &[PathBuf],
+) -> Option<HashSet<PathBuf>> {
+    (looked_at == now).then(|| {
+        gone.into_iter()
+            .filter(|path| recent.contains(path))
+            .collect()
+    })
+}
+
 /// `path`, already resolved through its links, to the front of `recent`, once.
 pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, path: PathBuf) {
     recent.retain(|held| *held != path);
@@ -5271,6 +5302,17 @@ mod tests {
         assert!(
             sql::is_generated_write(&statement),
             "{statement} was refused"
+        );
+    }
+
+    #[test]
+    fn a_look_at_the_recent_files_lands_only_if_nothing_changed_since() {
+        let gone: HashSet<PathBuf> = [PathBuf::from("/a.sql"), PathBuf::from("/b.sql")].into();
+        let recent = [PathBuf::from("/a.sql")];
+        assert_eq!(still_missing(3, 4, gone.clone(), &recent), None);
+        assert_eq!(
+            still_missing(4, 4, gone, &recent),
+            Some([PathBuf::from("/a.sql")].into())
         );
     }
 

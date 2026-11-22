@@ -326,6 +326,7 @@ impl Workspace {
                 .take(crate::session::RECENT_FILES_CAP)
                 .collect(),
             missing_files: HashSet::new(),
+            recent_generation: 0,
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -394,6 +395,7 @@ impl Workspace {
             selected_rows: Vec::new(),
             recent_files: Vec::new(),
             missing_files: HashSet::new(),
+            recent_generation: 0,
             session,
         });
         if let Some(password) = password

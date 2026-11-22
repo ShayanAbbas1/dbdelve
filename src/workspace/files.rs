@@ -286,13 +286,18 @@ impl Workspace {
         else {
             return;
         };
-        if path.parent() == Some(profile.session.query_directory.as_path())
-            || profile.recent_files.first().map(PathBuf::as_path) == Some(path)
-        {
+        if path.parent() == Some(profile.session.query_directory.as_path()) {
+            return;
+        }
+        profile.recent_files_changed();
+        let found = profile.missing_files.remove(path);
+        if profile.recent_files.first().map(PathBuf::as_path) == Some(path) {
+            if found {
+                cx.notify();
+            }
             return;
         }
         crate::session::remember_recent(&mut profile.recent_files, path.to_path_buf());
-        profile.missing_files.remove(path);
         self.profiles_unsaved = true;
         self.refresh_query_library(profile_id, cx);
     }
@@ -321,6 +326,7 @@ impl Workspace {
                 return;
             };
             profile.missing_files.insert(path.clone());
+            profile.recent_files_changed();
             profile.session.pending_forget = Some(path);
             cx.notify();
             return;
@@ -336,6 +342,7 @@ impl Workspace {
         };
         profile.recent_files.retain(|held| held != path);
         profile.missing_files.remove(path);
+        profile.recent_files_changed();
         let profile_id = profile.id.clone();
         self.refresh_query_library(&profile_id, cx);
         self.remember_profiles(cx);
@@ -370,11 +377,14 @@ impl Workspace {
     /// the blocking pool, since one on a stalled mount waits as long as it
     /// does.
     pub(crate) fn look_at_recent_files(&mut self, cx: &mut Context<Self>) {
-        let recent: Vec<(String, Vec<PathBuf>)> = self
+        let recent: Vec<(String, u64, Vec<PathBuf>)> = self
             .profiles
             .iter()
             .filter(|profile| !profile.recent_files.is_empty())
-            .map(|profile| (profile.id.clone(), profile.recent_files.clone()))
+            .map(|profile| {
+                let generation = profile.recent_generation;
+                (profile.id.clone(), generation, profile.recent_files.clone())
+            })
             .collect();
         if recent.is_empty() {
             return;
@@ -382,21 +392,21 @@ impl Workspace {
         let looked = spawn_blocking(cx.background_executor(), move || {
             recent
                 .into_iter()
-                .map(|(id, paths)| {
+                .map(|(id, generation, paths)| {
                     let gone = paths
                         .into_iter()
                         .filter(|path| matches!(path.try_exists(), Ok(false)))
                         .collect::<HashSet<_>>();
-                    (id, gone)
+                    (id, generation, gone)
                 })
                 .collect::<Vec<_>>()
         });
         cx.spawn(async move |workspace, cx| {
             let looked = looked.await;
             _ = workspace.update(cx, |workspace, cx| {
-                for (id, gone) in looked {
+                for (id, generation, gone) in looked {
                     if let Some(profile) = workspace.profiles.iter_mut().find(|p| p.id == id) {
-                        profile.missing_files = gone;
+                        profile.take_missing(generation, gone);
                     }
                 }
                 cx.notify();
