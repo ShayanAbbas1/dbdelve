@@ -80,9 +80,23 @@ pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
     let path = canonical(path);
     let name = file_name(&path);
     let directory = path.parent().unwrap_or(Path::new("."));
-    let permissions = fs::metadata(&path)
-        .ok()
-        .map(|metadata| metadata.permissions());
+    let permissions = match fs::metadata(&path) {
+        Ok(metadata) => {
+            // The rename only needs the directory writable, so it would
+            // replace a file its owner made read-only.
+            if metadata.is_file()
+                && let Err(error) = fs::OpenOptions::new().write(true).open(&path)
+            {
+                return Err(match error.kind() {
+                    io::ErrorKind::PermissionDenied => format!("{name} is read-only."),
+                    _ => format!("Could not save {name}: {error}"),
+                });
+            }
+            Some(metadata.permissions())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Could not save {name}: {error}")),
+    };
     let temporary = directory.join(format!(
         ".{name}.tmp-{}-{}",
         std::process::id(),
@@ -105,10 +119,27 @@ pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
         drop(file);
         fs::rename(&temporary, &path)
     })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
+    written.map_err(|error| match discard(&temporary) {
+        Ok(()) => format!("Could not save {name}: {error}"),
+        Err(left) => format!(
+            "Could not save {name}: {error}. {} was left beside it: {left}",
+            file_name(&temporary)
+        ),
+    })
+}
+
+/// Remove a staged copy that never replaced its file.
+fn discard(temporary: &Path) -> io::Result<()> {
+    // Windows will not delete a read-only file, and the copy may have been
+    // given the attribute along with the rest of the file's permissions.
+    #[cfg(windows)]
+    if let Ok(metadata) = fs::metadata(temporary) {
+        let mut permissions = metadata.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(temporary, permissions)?;
     }
-    written.map_err(|error| format!("Could not save {name}: {error}"))
+    fs::remove_file(temporary)
 }
 
 /// `path` with every link resolved, for a path that may not exist yet too: the
@@ -214,6 +245,28 @@ mod tests {
         assert_eq!(canonical(&link), target);
         // Nothing staged is left beside it.
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_a_read_only_file_and_leaves_it_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("read-only");
+        let path = dir.join("locked.sql");
+        fs::write(&path, "SELECT 1;").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        // Root writes it regardless, and so may Save.
+        if fs::OpenOptions::new().write(true).open(&path).is_err() {
+            assert_eq!(
+                write(&path, "SELECT 2;", false),
+                Err("locked.sql is read-only.".to_string())
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "SELECT 1;");
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 
