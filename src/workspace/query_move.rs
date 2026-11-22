@@ -95,11 +95,14 @@ impl Workspace {
             .collect();
         let subfolders = store::connection_folders(&names);
         let (mut moved, mut skipped, mut failed) = (0, 0, 0);
+        let mut copied = Vec::new();
+        let mut owners = Vec::new();
         for (index, subfolder) in subfolders.into_iter().enumerate() {
             let queries = self.profiles[index].session.saved_queries.clone();
             if queries.is_empty() {
                 continue;
             }
+            owners.push(self.profiles[index].id.clone());
             let directory = folder.join(subfolder);
             if let Err(error) = sql_file::create_dirs(&directory) {
                 tracing::debug!(%error, "a connection's folder for its queries was not made");
@@ -115,24 +118,48 @@ impl Workspace {
                     .join(format!("{name}.sql"));
                 let to = directory.join(format!("{name}.sql"));
                 let fresh = self.seen_as_it_is(&from);
-                match sql_file::move_file(&from, &to) {
-                    Move::Done => {
-                        moved += 1;
-                        let to = sql_file::canonical(&to);
-                        self.repoint_file_tab(&from, &to, fresh);
-                        let profile = &mut self.profiles[index];
-                        profile.shortcuts.forget_query(&name);
-                        crate::session::remember_recent(&mut profile.recent_files, to);
-                    }
+                match sql_file::copy_new(&from, &to) {
+                    Move::Done => copied.push((index, name, from, to, fresh)),
                     Move::Taken => skipped += 1,
                     Move::Failed(error) => {
-                        tracing::debug!(%error, "a saved query was not moved");
+                        tracing::debug!(%error, "a saved query was not copied");
                         failed += 1;
                     }
                 }
             }
-            let id = self.profiles[index].id.clone();
-            self.reload_queries_of(&id, cx);
+        }
+        // Only once every copy is on disk does any original go: a query that
+        // is a link to another reads nothing once that one has gone.
+        let mut holders = Vec::new();
+        for (index, name, from, to, fresh) in copied {
+            if let Err(error) = sql_file::remove_moved(&from, &to) {
+                tracing::debug!(%error, "a saved query was not moved");
+                failed += 1;
+                continue;
+            }
+            moved += 1;
+            let to = sql_file::canonical(&to);
+            holders.extend(self.repoint_file_tab(&from, &to, fresh));
+            for profile in &mut self.profiles {
+                if let Some(held) = profile.recent_files.iter_mut().find(|held| **held == from) {
+                    *held = to.clone();
+                    holders.push(profile.id.clone());
+                }
+            }
+            let profile = &mut self.profiles[index];
+            profile.shortcuts.forget_query(&name);
+            crate::session::remember_recent(&mut profile.recent_files, to);
+        }
+        for id in &owners {
+            self.reload_queries_of(id, cx);
+        }
+        // A connection none of whose queries moved lists a moved file where a
+        // tab or its recent files followed one there.
+        holders.retain(|holder| !owners.contains(holder));
+        holders.sort();
+        holders.dedup();
+        for id in holders {
+            self.refresh_query_library(&id, cx);
         }
         self.settings.queries_move_dismissed = true;
         self.queries_notice = Some(QueriesNotice::Report {
@@ -160,11 +187,9 @@ impl Workspace {
     }
 
     /// The tab bound to `from`, on whichever connection, bound to `to`
-    /// instead where its chip stands.
-    fn repoint_file_tab(&mut self, from: &Path, to: &Path, fresh: bool) {
-        let Some((index, id)) = self.tab_on_file(from) else {
-            return;
-        };
+    /// instead where its chip stands. The connection holding it, if any.
+    fn repoint_file_tab(&mut self, from: &Path, to: &Path, fresh: bool) -> Option<String> {
+        let (index, id) = self.tab_on_file(from)?;
         let session = &mut self.profiles[index].session;
         session.rekey(
             &TabKey::File(from.to_path_buf()),
@@ -176,6 +201,7 @@ impl Workspace {
                 file.stamp = sql_file::stamp(to).ok().flatten();
             }
         }
+        Some(self.profiles[index].id.clone())
     }
 
     /// Not Now, or Dismiss on the report. The offer is not made again;

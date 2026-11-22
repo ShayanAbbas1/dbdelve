@@ -13161,10 +13161,15 @@ fn the_move_files_each_connections_queries_and_repoints_a_dirty_tab_on_another(
             None,
             "the copy is no change"
         );
-        workspace.read_with(cx, |workspace, _| {
+        workspace.read_with(cx, |workspace, cx| {
             let b = &workspace.profiles[1];
             assert!(b.session.saved_queries.is_empty());
             assert_eq!(b.recent_files, std::slice::from_ref(&moved));
+            let a = &workspace.profiles[0];
+            assert_eq!(a.recent_files, std::slice::from_ref(&moved));
+            let tree = a.session.explorer_tree.read(cx);
+            assert!(tree.index_of(&explorer::file_row(&moved).into()).is_some());
+            assert!(tree.index_of(&explorer::file_row(&legacy).into()).is_none());
         });
         assert!(cx.debug_bounds("queries-notice").is_some(), "the report");
         quit(workspace, cx);
@@ -13196,6 +13201,34 @@ fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut 
         });
         assert!(!listed, "the row is gone");
         assert!(path.exists(), "and the file is not");
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_saved_query_that_links_to_another_moves_as_its_text_too(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "a", "select 1").expect("the query saves");
+        let queries = store::query_directory("e2e").unwrap();
+        std::os::unix::fs::symlink(queries.join("a.sql"), queries.join("b.sql")).unwrap();
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let folder = store::home().unwrap().join("Moved");
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_saved_queries(&folder, cx)
+        });
+        settle(cx);
+
+        let moved = folder.join("E2E");
+        assert_eq!(
+            std::fs::read_to_string(moved.join("a.sql")).unwrap(),
+            "select 1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.join("b.sql")).unwrap(),
+            "select 1"
+        );
+        assert!(std::fs::symlink_metadata(queries.join("b.sql")).is_err());
         quit(workspace, cx);
     });
 }

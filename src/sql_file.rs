@@ -203,7 +203,7 @@ fn discard(temporary: &Path) -> io::Result<()> {
     fs::remove_file(temporary)
 }
 
-/// How moving one file went.
+/// How copying one file for a move went.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Move {
     Done,
@@ -212,16 +212,16 @@ pub(crate) enum Move {
     Failed(String),
 }
 
-/// Move `from` to `to` by copying, never by renaming: a rename fails across
-/// volumes, and a picked folder is often on another. `to` is made new, so a
-/// file already there is never written over, and `from` goes only once the
-/// copy is on disk. A copy that fails is removed and `from` kept, as is a
-/// copy whose source will not go, so either way one file is left.
+/// The first half of moving `from` to `to`, by copying, never by renaming: a
+/// rename fails across volumes, and a picked folder is often on another. `to`
+/// is made new, so a file already there is never written over, and the copy
+/// and its directory entry are on disk before this returns. A copy that
+/// fails is removed. [`remove_moved`] is the second half.
 ///
 /// The copy takes the folder's default permissions rather than the support
 /// directory's 0600: it is the user's file now, beside the ones their own
 /// editor makes there.
-pub(crate) fn move_file(from: &Path, to: &Path) -> Move {
+pub(crate) fn copy_new(from: &Path, to: &Path) -> Move {
     let mut copy = match fs::OpenOptions::new().write(true).create_new(true).open(to) {
         Ok(copy) => copy,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Move::Taken,
@@ -232,15 +232,23 @@ pub(crate) fn move_file(from: &Path, to: &Path) -> Move {
         .and_then(|_| copy.sync_all())
         .and_then(|()| sync_directory(to));
     drop(copy);
-    if let Err(error) = copied {
-        let _ = fs::remove_file(to);
-        return Move::Failed(format!("Could not copy {}: {error}", from.display()));
+    match copied {
+        Ok(()) => Move::Done,
+        Err(error) => {
+            let _ = fs::remove_file(to);
+            Move::Failed(format!("Could not copy {}: {error}", from.display()))
+        }
     }
-    if let Err(error) = fs::remove_file(from) {
+}
+
+/// `from`, once [`copy_new`] has put it at `to`. One that will not go takes
+/// its copy with it, so one file is left either way. A link goes, never the
+/// file it leads to.
+pub(crate) fn remove_moved(from: &Path, to: &Path) -> Result<(), String> {
+    fs::remove_file(from).map_err(|error| {
         let _ = fs::remove_file(to);
-        return Move::Failed(format!("Could not remove {}: {error}", from.display()));
-    }
-    Move::Done
+        format!("Could not remove {}: {error}", from.display())
+    })
 }
 
 /// `directory` and every parent of it missing, each new entry synced into the
@@ -465,9 +473,12 @@ mod tests {
         let (from, to) = (dir.join("daily.sql"), dir.join("daily-moved.sql"));
         let bytes = b"\xef\xbb\xbfSELECT 1;\r\n\xff";
         fs::write(&from, bytes).unwrap();
-        assert_eq!(move_file(&from, &to), Move::Done);
+        assert_eq!(copy_new(&from, &to), Move::Done);
         assert_eq!(fs::read(&to).unwrap(), bytes);
+        assert!(from.exists(), "the copy alone removes nothing");
+        remove_moved(&from, &to).unwrap();
         assert!(!from.exists());
+        assert_eq!(fs::read(&to).unwrap(), bytes);
     }
 
     #[test]
@@ -485,7 +496,7 @@ mod tests {
         let (from, to) = (dir.join("daily.sql"), dir.join("taken.sql"));
         fs::write(&from, "mine").unwrap();
         fs::write(&to, "theirs").unwrap();
-        assert_eq!(move_file(&from, &to), Move::Taken);
+        assert_eq!(copy_new(&from, &to), Move::Taken);
         assert_eq!(fs::read_to_string(&to).unwrap(), "theirs");
         assert_eq!(fs::read_to_string(&from).unwrap(), "mine");
     }
@@ -496,7 +507,7 @@ mod tests {
         // A directory opens or reads as no file does, on every platform.
         let (from, to) = (dir.join("daily.sql"), dir.join("moved.sql"));
         fs::create_dir(&from).unwrap();
-        assert!(matches!(move_file(&from, &to), Move::Failed(_)));
+        assert!(matches!(copy_new(&from, &to), Move::Failed(_)));
         assert!(!to.exists());
         assert!(from.is_dir());
     }
