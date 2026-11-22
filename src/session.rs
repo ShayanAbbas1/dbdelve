@@ -3719,6 +3719,27 @@ pub(crate) enum QueryState {
 /// How many files a profile's recent list keeps.
 pub(crate) const RECENT_FILES_CAP: usize = 20;
 
+/// The recent files as `profiles.toml` holds them, as [`remember_recent`]
+/// would have left them: no saved query, each once, newest first, twenty.
+///
+/// ponytail: compared as written, not resolved through links, since a stat
+/// per path at launch waits on a stalled mount as long as it does. Every
+/// path DBDelve writes is already resolved, so only a hand edit can list a
+/// file twice; resolving on the blocking pool with the look at launch is
+/// the upgrade.
+pub(crate) fn restored_recent(stored: Vec<PathBuf>, query_directory: &Path) -> Vec<PathBuf> {
+    let mut recent = Vec::new();
+    for path in stored {
+        if recent.len() == RECENT_FILES_CAP {
+            break;
+        }
+        if path.parent() != Some(query_directory) && !recent.contains(&path) {
+            recent.push(path);
+        }
+    }
+    recent
+}
+
 fn still_missing(
     looked_at: u64,
     now: u64,
@@ -5303,6 +5324,18 @@ mod tests {
             sql::is_generated_write(&statement),
             "{statement} was refused"
         );
+    }
+
+    #[test]
+    fn the_recent_files_restore_without_saved_queries_or_repeats_and_keep_twenty() {
+        let queries = Path::new("/support/queries/e2e");
+        let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
+        let mut stored = vec![path(0), queries.join("q.sql"), path(1), path(0)];
+        stored.extend((2..30).map(path));
+        let recent = restored_recent(stored, queries);
+        assert_eq!(recent.len(), RECENT_FILES_CAP);
+        assert_eq!(recent[..3], [path(0), path(1), path(2)]);
+        assert_eq!(recent[19], path(19));
     }
 
     #[test]

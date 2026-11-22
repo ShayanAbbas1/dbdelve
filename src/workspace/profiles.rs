@@ -320,11 +320,10 @@ impl Workspace {
                 .into_iter()
                 .take(OPEN_ROWS_CAP)
                 .collect(),
-            recent_files: stored
-                .recent_files
-                .into_iter()
-                .take(crate::session::RECENT_FILES_CAP)
-                .collect(),
+            recent_files: crate::session::restored_recent(
+                stored.recent_files,
+                &session.query_directory,
+            ),
             missing_files: HashSet::new(),
             recent_generation: 0,
             session,
