@@ -71,8 +71,9 @@ pub(crate) fn decoded(bytes: Vec<u8>) -> Option<SqlText> {
 ///
 /// Staged beside the file and renamed over it, so a failed write never leaves
 /// half a file. A symlink is followed to its target, or the rename would
-/// replace the link with a regular file, and the file's permissions are kept:
-/// this is the user's file, not one of DBDelve's private ones.
+/// replace the link with a regular file, and the file's permissions are kept,
+/// a read-only one refused: this is the user's file, not one of DBDelve's
+/// private ones.
 pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -80,6 +81,11 @@ pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
     let path = canonical(path);
     let name = file_name(&path);
     let directory = path.parent().unwrap_or(Path::new("."));
+    // A link `canonical` could not resolve leads nowhere, and the rename
+    // would put a regular file where the link was.
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(format!("{name} is a link to a file that does not exist."));
+    }
     let permissions = match fs::metadata(&path) {
         Ok(metadata) => {
             // The rename only needs the directory writable, so it would
@@ -245,6 +251,27 @@ mod tests {
         assert_eq!(canonical(&link), target);
         // Nothing staged is left beside it.
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_a_link_that_leads_nowhere_and_leaves_the_link() {
+        let dir = scratch_dir("dangling");
+        let link = dir.join("link.sql");
+        std::os::unix::fs::symlink(dir.join("gone.sql"), &link).unwrap();
+
+        assert_eq!(
+            write(&link, "SELECT 1;", false),
+            Err("link.sql is a link to a file that does not exist.".to_string())
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!dir.join("gone.sql").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
