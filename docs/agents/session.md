@@ -645,7 +645,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   saved query's file is listed as the query instead. Opening a file in a
   tab, Save and Save As put its resolved path first in the connection's list
   (`session::remember_recent`: newest first, once, at most 20); so does the
-  move, for the connection each query was on. A row is named by its file,
+  move, for the connection each query was on. A launch reads the stored list
+  the same way (`session::restored_recent`), compared as written rather
+  than resolved, so no path is statted on the window's thread. Whatever
+  changes what a connection lists redraws its group, a tab closing on a
+  file it alone kept listed included. A row is named by its file,
   with its folder beside it where two listed share a name, and shows the
   full path on hover; its id is `file:` and the path, matched against the
   listed paths rather than parsed back, since a path need not be UTF-8.
@@ -656,33 +660,46 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   is looked at off the window's thread at launch and whenever the window
   comes forward (`Workspace::look_at_recent_files`), never per frame or
   per rebuild; a gone row is greyed, and opening it asks whether to remove
-  it from the list (the "forget-file" dialog). The palette's Queries scope
-  lists the same files beside the saved queries.
+  it from the list (the "forget-file" dialog). A look carries the profile's
+  `recent_generation`, bumped by every change to the list or to what is
+  known of a file, and lands only if it still matches
+  (`Profile::take_missing`), so a slow look never greys a file opened after
+  it set out. The palette's Queries scope lists the same files beside the
+  saved queries, named as the sidebar names them (`explorer::file_labels`),
+  with the full path beside each.
 - **The saved queries move to a folder only when asked.** A launch where a
   connection has saved queries left shows one line under the titlebar ("Your
   N saved queries are now files.") with Move to Folder…, Reveal and Not Now,
   until it is turned down or the move is made (`queries_move_dismissed` in
   `[settings]`); "Move saved queries to a folder…" stays in the palette
-  while any are left. The move asks for the folder with the system picker,
+  while any are left, with or without a connection in front. The move asks for the folder with the system picker,
   directories only, so macOS asks for access to that folder and never to
   Documents at launch, and `Workspace::move_saved_queries` is the seam the
   tests call with the folder. Each connection gets `<folder>/<name>/`, its
-  name made one safe folder name on every platform and suffixed ` 2`, ` 3`
+  name made one safe folder name on every platform (a name Windows reads as
+  a device before its first dot, `CON.reports` or `COM²`, gets a leading
+  `_`) and suffixed ` 2`, ` 3`
   where two meet without case (`store::connection_folders`), over every
   loaded connection in list order so the suffixes do not move with which
-  ones have queries left. Each query is copied, never renamed, since a
-  rename fails across volumes (`sql_file::move_file`): the copy is made with
-  create-new semantics, so a name taken there is skipped and reported and
-  its query stays; the bytes are copied as they are, synced with their
-  directory entry, and only then is the original removed. A copy that fails
-  is removed and the original kept, as is one whose original will not go. A
+  ones have queries left. Each folder the move makes is synced into its
+  parent as it is made (`sql_file::create_dirs`), so no original goes while
+  the path to its copy could still vanish in a crash. Each query is copied,
+  never renamed, since a rename fails across volumes (`sql_file::copy_new`):
+  the copy is made with create-new semantics, so a name taken there is
+  skipped and reported and its query stays; the bytes are copied as they
+  are and synced with their directory entry. Only once every copy has
+  landed is any original removed (`sql_file::remove_moved`), and only those
+  whose copy did. A copy that fails is removed and the original kept, as is
+  one whose original will not go. A
   copy takes the folder's default permissions rather than the support
   directory's 0600: it is the user's file now. A query that is a link moves
   as the text it reads, and the file it led to stays. A tab bound to a moved
   file, on any connection, is rebound where its chip stands, its unsaved
   text and scratch file untouched; it takes the copy's stamp only if it had
   seen the original as it was, so a change it had missed still settles on
-  the next look. The moved queries leave their folders and pins. The move
+  the next look. A connection whose tab or recent files followed a moved
+  file redraws its Files group too. The moved queries leave their folders
+  and pins. The move
   runs on the window's thread (`ponytail:` on `move_saved_queries`), which
   is also what keeps a Save to an old file from landing between its copy
   and its removal. It ends on the same line: moved, skipped and failed
