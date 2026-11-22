@@ -191,7 +191,7 @@ impl Workspace {
 
     /// The connection and tab bound to `path`, wherever it is open: one tab
     /// per file across the whole app, so no two buffers save over each other.
-    fn tab_on_file(&self, path: &Path) -> Option<(usize, u64)> {
+    pub(super) fn tab_on_file(&self, path: &Path) -> Option<(usize, u64)> {
         self.profiles
             .iter()
             .enumerate()

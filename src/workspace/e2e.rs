@@ -12423,6 +12423,69 @@ fn a_relaunch_with_two_tabs_on_one_file_keeps_both_buffers(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        store::write_query("b", "nightly", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile("a", "A", ""),
+                sqlite_profile("b", "B", "")
+            ),
+        );
+        let queries = crate::sql_file::canonical(&store::query_directory("b").unwrap());
+        open_sql_file(&workspace, cx, &queries.join("nightly.sql"));
+        let on_a = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profiles[0]
+                    .session
+                    .queries
+                    .iter()
+                    .filter_map(|tab| Some(tab.file.as_ref()?.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        workspace.update(cx, |workspace, cx| workspace.activate(1, cx));
+        settle(cx);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.start_query_rename("nightly".into(), "nightly".into(), window, cx);
+                let input = workspace
+                    .profile()
+                    .unwrap()
+                    .session
+                    .query_rename
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .clone();
+                input.update(cx, |input, cx| input.set_value("weekly", window, cx));
+                workspace.commit_query_rename(cx);
+            });
+        });
+        settle(cx);
+        assert_eq!(on_a(&workspace, cx), [queries.join("weekly.sql")]);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.delete_saved_query("weekly".into(), window, cx)
+            });
+        });
+        settle(cx);
+        assert_eq!(on_a(&workspace, cx), Vec::<std::path::PathBuf>::new());
+        assert!(!queries.join("weekly.sql").exists());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn opening_a_file_already_open_brings_its_tab_up(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

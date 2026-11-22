@@ -1391,7 +1391,7 @@ impl Workspace {
             return;
         };
         match discard.deleting {
-            Some(name) => self.delete_saved_query_now(name, window, cx),
+            Some((owner, name)) => self.delete_saved_query_now(owner, name, window, cx),
             None => {
                 for tab in discard.tabs {
                     self.close_now(tab, window, cx);

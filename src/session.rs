@@ -1746,11 +1746,12 @@ pub(crate) enum PendingDelete {
 }
 
 /// A close held up by the unapplied-edits question, and the saved query to
-/// delete once the tab goes, when deleting it is what closes the tab. More
+/// delete once the tab goes, by its profile's id and its name, when deleting
+/// it is what closes the tab: the tab can be on another connection. More
 /// than one tab only when Close All Tabs found edits in several.
 pub(crate) struct PendingDiscard {
     pub(crate) tabs: Vec<Tab>,
-    pub(crate) deleting: Option<String>,
+    pub(crate) deleting: Option<(String, String)>,
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a

@@ -1711,7 +1711,7 @@ impl Workspace {
             return;
         }
         let id = profile.id.clone();
-        let holder = profile.session.tab_holding(&previous);
+        let from = profile.session.saved_query_path(&previous);
         let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries);
         let renamed = match refused {
             Some(message) => Err(message),
@@ -1730,25 +1730,26 @@ impl Workspace {
                 return;
             }
         }
-        if let Some(profile) = self.profile_mut() {
-            // Resolved once it has moved: a query that is a link resolves to
-            // the file it leads to, and a tab on it stays where it was.
-            let renamed_to = profile.session.saved_query_path(&typed);
-            if let Some(holder) = holder {
-                // Before the tab moves: the chip's old key is only in the strip
-                // until then.
-                let from = TabKey::File(profile.session.saved_query_path(&previous));
-                profile
-                    .session
-                    .rekey(&from, TabKey::File(renamed_to.clone()));
-                if let Some(file) = profile
-                    .session
-                    .query_tab_mut(holder)
-                    .and_then(|tab| tab.file.as_mut())
-                {
-                    file.path = renamed_to;
-                }
+        // The tab on it may be on any connection: one tab per file across
+        // the app. Resolved once the file has moved, so a query that is a link
+        // resolves to the file it leads to, and a tab on that stays put.
+        if let Some((index, holder)) = self.tab_on_file(&from)
+            && let Some(renamed_to) = self
+                .profile()
+                .map(|profile| profile.session.saved_query_path(&typed))
+        {
+            let session = &mut self.profiles[index].session;
+            // Before the tab moves: the chip's old key is only in the strip
+            // until then.
+            session.rekey(&TabKey::File(from), TabKey::File(renamed_to.clone()));
+            if let Some(file) = session
+                .query_tab_mut(holder)
+                .and_then(|tab| tab.file.as_mut())
+            {
+                file.path = renamed_to;
             }
+        }
+        if let Some(profile) = self.profile_mut() {
             profile.session.notice = Some(format!("Renamed {previous} to {typed}."));
             profile.shortcuts.rename_query(&previous, &typed);
         }
@@ -1806,57 +1807,81 @@ impl Workspace {
             return;
         };
         profile.session.pending_delete = None;
-        let holder = profile.session.tab_holding(&name).map(Tab::Query);
+        let owner = profile.id.clone();
+        let path = profile.session.saved_query_path(&name);
+        let holder = self.bring_up_holder(&path, window, cx).map(Tab::Query);
         if let Some(tab) = holder.filter(|tab| self.has_unapplied_edits(*tab, cx)) {
             if let Some(profile) = self.profile_mut() {
                 profile.session.pending_discard = Some(PendingDiscard {
                     tabs: vec![tab],
-                    deleting: Some(name),
+                    deleting: Some((owner, name)),
                 });
             }
             cx.notify();
             return;
         }
-        self.delete_saved_query_now(name, window, cx);
+        self.delete_saved_query_now(owner, name, window, cx);
         self.refocus_front();
     }
 
-    /// The delete itself, once nothing is left to ask.
+    /// The tab bound to `path`, on whichever connection, with that connection
+    /// brought to the front: a tab is closed, and asked about, only there.
+    fn bring_up_holder(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let (index, id) = self.tab_on_file(path)?;
+        if self.active != Some(index) {
+            self.activate_chip(index, Tab::Query(id), window, cx);
+        }
+        (self.active == Some(index)).then_some(id)
+    }
+
+    /// The delete of `owner`'s query `name` itself, once nothing is left to
+    /// ask.
     pub(crate) fn delete_saved_query_now(
         &mut self,
+        owner: String,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(profile) = self.profile() else {
+        let Some(profile) = self.profiles.iter().find(|profile| profile.id == owner) else {
             return;
         };
-        let id = profile.id.clone();
-        let holder = profile.session.tab_holding(&name);
-        if let Err(message) = store::delete_query(&id, &name) {
+        let path = profile.session.saved_query_path(&name);
+        let holder = self.bring_up_holder(&path, window, cx);
+        if let Err(message) = store::delete_query(&owner, &name) {
             self.note(message, cx);
             return;
         }
         if let Some(holder) = holder {
             self.remove_query_tab(holder, window, cx);
         }
-        if let Some(profile) = self.profile_mut() {
-            profile.session.notice = Some(format!("Deleted {name}."));
+        self.note(format!("Deleted {name}."), cx);
+        if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == owner) {
             profile.shortcuts.forget_query(&name);
         }
-        self.reload_saved_queries(cx);
+        self.reload_queries_of(&owner, cx);
         self.remember_profiles(cx);
     }
 
     /// Read the profile in front's query files again, for a list that changed
     /// on disk, and redraw the sidebar that lists them.
     pub(crate) fn reload_saved_queries(&mut self, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile_mut() else {
+        if let Some(id) = self.profile().map(|profile| profile.id.clone()) {
+            self.reload_queries_of(&id, cx);
+        }
+    }
+
+    fn reload_queries_of(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        let id = profile.id.clone();
-        profile.session.saved_queries = store::saved_queries(&id);
-        self.refresh_query_library(&id, cx);
+        profile.session.saved_queries = store::saved_queries(id);
+        self.refresh_query_library(id, cx);
         cx.notify();
     }
 
