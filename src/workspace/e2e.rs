@@ -13206,6 +13206,24 @@ fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut 
 }
 
 #[gpui::test]
+fn the_palette_offers_the_saved_queries_move_with_no_connection_in_front(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "a", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_on_sqlite(cx);
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.profile().is_none()));
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        assert!(
+            palette_labels(&workspace, cx)
+                .iter()
+                .any(|label| label == "Move saved queries to a folder…")
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_file_removed_from_the_list_while_open_leaves_it_as_its_tab_closes(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

@@ -3428,10 +3428,24 @@ fn welcome_items(workspace: &Workspace) -> Vec<Item> {
     let mut items = starting_items(workspace);
     items.extend(appearance_items(overrides));
     items.extend(workspace.update.iter().flat_map(update_items));
+    items.extend(move_queries_item(workspace));
     if !workspace.profiles.is_empty() || !workspace.unavailable.is_empty() {
         items.extend(connection_items(workspace));
     }
     items
+}
+
+/// Every connection's, since the move takes them all, so it needs none in
+/// front.
+fn move_queries_item(workspace: &Workspace) -> Option<Item> {
+    workspace.has_saved_queries().then(|| {
+        command(
+            "Move saved queries to a folder…",
+            icon::FOLDER,
+            Command::MoveSavedQueries,
+            QUERY,
+        )
+    })
 }
 
 /// The update's rows, as its pill offers them.
@@ -3735,15 +3749,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         ));
     }
 
-    // Every connection's, since the move takes them all.
-    if workspace.has_saved_queries() {
-        items.push(command(
-            "Move saved queries to a folder…",
-            icon::FOLDER,
-            Command::MoveSavedQueries,
-            QUERY,
-        ));
-    }
+    items.extend(move_queries_item(workspace));
 
     // Not gated on a query tab: a saved query need not be open to be deleted.
     if !session.saved_queries.is_empty() {
