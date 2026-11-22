@@ -12948,3 +12948,30 @@ fn closing_a_clean_tab_whose_file_was_deleted_behind_it_asks(cx: &mut TestAppCon
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn a_bar_button_pressed_from_the_keyboard_hands_it_back_to_the_buffer(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "keyboard.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        // Tab order runs from the bar's buttons into the buffer below them.
+        cx.update(|window, cx| window.focus_prev(cx));
+        settle(cx);
+        assert!(!editor_has_keyboard(&workspace, cx), "a bar button has it");
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::KeptMine)
+        );
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}

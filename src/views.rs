@@ -460,7 +460,7 @@ fn render_file_banner(
                     button("reload-file", "Reload", Tone::Quiet, Control::Compact, t).on_click(
                         move |_, window, cx| {
                             _ = reload.update(cx, |workspace, cx| {
-                                workspace.take_disk(id, true, window, cx);
+                                workspace.answer_file_bar(id, true, window, cx);
                             });
                         },
                     ),
@@ -469,7 +469,7 @@ fn render_file_banner(
                     button("keep-mine", "Keep Mine", Tone::Quiet, Control::Compact, t).on_click(
                         move |_, window, cx| {
                             _ = keep.update(cx, |workspace, cx| {
-                                workspace.take_disk(id, false, window, cx);
+                                workspace.answer_file_bar(id, false, window, cx);
                             });
                         },
                     ),

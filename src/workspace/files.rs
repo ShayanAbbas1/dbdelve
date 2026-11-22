@@ -464,6 +464,21 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Reload or Keep Mine, from the tab's bar. The bar goes with the
+    /// answer, and a button pressed from the keyboard goes with it, so the
+    /// keyboard goes back to the buffer rather than to nothing.
+    pub(crate) fn answer_file_bar(
+        &mut self,
+        id: u64,
+        reload: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.take_disk(id, reload, window, cx);
+        self.refocus_front();
+        cx.notify();
+    }
+
     /// Tab `id`'s file is gone: the tab keeps its text, stays bound and is
     /// dirty, and Save writes the file again.
     pub(super) fn mark_gone(&mut self, id: u64, cx: &mut Context<Self>) {
