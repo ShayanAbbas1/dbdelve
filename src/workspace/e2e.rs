@@ -12485,6 +12485,34 @@ fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
     });
 }
 
+#[cfg(unix)]
+#[gpui::test]
+fn a_link_dropped_with_its_file_opens_one_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("both.sql", "SELECT 1;");
+        let link = path.with_file_name("link.sql");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let before = query_tab_count(&workspace, cx);
+        cx.executor().allow_parking();
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_files(vec![link.clone(), path.clone()], window, cx)
+            });
+        });
+        for _ in 0..500 {
+            settle(cx);
+            if front_file(&workspace, cx).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert_eq!(query_tab_count(&workspace, cx), before + 1);
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn opening_a_file_already_open_brings_its_tab_up(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

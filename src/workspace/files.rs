@@ -140,8 +140,11 @@ impl Workspace {
         if read.is_empty() {
             return Vec::new();
         }
+        // A link and its file, picked together, are one file.
+        let mut seen = std::collections::HashSet::new();
         let (open, read): (Vec<_>, Vec<_>) = read
             .into_iter()
+            .filter(|(path, _)| seen.insert(path.clone()))
             .partition(|(path, _)| self.tab_on_file(path).is_some());
         let mut refused = Vec::new();
         if !read.is_empty() {
@@ -216,7 +219,8 @@ impl Workspace {
     }
 
     /// A new tab in front on the connection in front, bound to `path` and
-    /// holding `read`, by its id, or `None` when none could be made.
+    /// holding `read`, by its id, or `None` when none could be made. A file
+    /// open anywhere already brings its own tab up instead.
     pub(crate) fn open_file_tab(
         &mut self,
         path: PathBuf,
@@ -224,6 +228,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
+        let path = sql_file::canonical(&path);
+        if let Some((_, id)) = self.tab_on_file(&path) {
+            self.bring_up_file(&path, window, cx);
+            return Some(id);
+        }
         if let Err(message) = self.persist_buffer(cx) {
             self.note(message, cx);
             return None;
