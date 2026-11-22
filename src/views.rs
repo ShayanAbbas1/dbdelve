@@ -54,8 +54,9 @@ use crate::{
     result_grid::{NewValue, ResultGrid},
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
-        Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab, Said,
-        Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
+        Conflict, Explained, FileBinding, ObjectBody, ObjectTab, Profile, ProfileState, QueryState,
+        QueryTab, Said, Session, StructureState, Tab, insert_left_out, query_label,
+        result_pane_is_expanded,
     },
     sidebar::ViewMode,
     sql::Mode,
@@ -248,11 +249,13 @@ fn completion_target(editor: &Entity<EditorState>) -> Div {
 /// the query buffer and an opened relation differ in where their SQL came
 /// from, not in what they are. With no `bottom` -- results the user hid --
 /// the editor and its toolbar take the whole height.
+#[allow(clippy::too_many_arguments)]
 fn render_editor_surface(
     split: gpui::ElementId,
     editor: &Entity<EditorState>,
     font_size: f32,
     query: &QueryState,
+    banner: Option<AnyElement>,
     toolbar: AnyElement,
     bottom: Option<AnyElement>,
     cx: &mut Context<Workspace>,
@@ -300,6 +303,7 @@ fn render_editor_surface(
         .size_full()
         .flex()
         .flex_col()
+        .children(banner)
         .child(buffer)
         .child(toolbar);
     let Some(bottom) = bottom else {
@@ -415,9 +419,63 @@ fn render_query_surface(
         &tab.editor,
         editor_font_size,
         &tab.query,
+        tab.file
+            .as_ref()
+            .and_then(|file| render_file_banner(tab.id, file, cx)),
         render_query_toolbar(&profile.session, profile.config.target(), custom_limit, cx),
         bottom,
         cx,
+    )
+}
+
+/// A file tab's file when the disk no longer has what the tab last read or
+/// wrote: gone, which Save answers by writing it again, or changed under
+/// unsaved text, which the tab must not lose without being told.
+fn render_file_banner(
+    id: u64,
+    file: &FileBinding,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let asking = file.conflict == Some(Conflict::Asking);
+    let label = match () {
+        _ if file.saved.is_none() => "Deleted on disk",
+        _ if asking => "Changed on disk",
+        _ => return None,
+    };
+    let reload = cx.entity().downgrade();
+    let keep = reload.clone();
+    Some(
+        control_row()
+            .debug_selector(|| "file-banner".into())
+            .gap(px(layout::SPACE_SM))
+            .border_b_1()
+            .border_color(t.border)
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
+            .text_color(t.text_muted)
+            .child(label)
+            .child(div().flex_1())
+            .when(asking, |row| {
+                row.child(
+                    button("reload-file", "Reload", Tone::Quiet, Control::Compact, t).on_click(
+                        move |_, window, cx| {
+                            _ = reload.update(cx, |workspace, cx| {
+                                workspace.take_disk(id, true, window, cx);
+                            });
+                        },
+                    ),
+                )
+                .child(
+                    button("keep-mine", "Keep Mine", Tone::Quiet, Control::Compact, t).on_click(
+                        move |_, window, cx| {
+                            _ = keep.update(cx, |workspace, cx| {
+                                workspace.take_disk(id, false, window, cx);
+                            });
+                        },
+                    ),
+                )
+            })
+            .into_any_element(),
     )
 }
 

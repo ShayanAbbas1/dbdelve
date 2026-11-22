@@ -12404,6 +12404,8 @@ fn a_relaunch_with_two_tabs_on_one_file_keeps_both_buffers(cx: &mut TestAppConte
                 path: link.clone(),
                 saved: Some("SELECT 1;".into()),
                 bom: false,
+                stamp: None,
+                conflict: None,
             });
         });
 

@@ -20,7 +20,7 @@ use super::*;
 use crate::actions::{OpenSqlFiles, SaveQueryAs};
 use crate::connection_form::starting_mode;
 use crate::db::DUCKDB_IN_MEMORY;
-use crate::session::FileBinding;
+use crate::session::{Conflict, FileBinding, PendingOverwrite, Settle};
 use crate::sql_file::{self, SqlText, file_name};
 
 impl Workspace {
@@ -249,6 +249,8 @@ impl Workspace {
             path: path.clone(),
             saved: Some(read.text.clone()),
             bom: read.bom,
+            stamp: Some(read.stamp),
+            conflict: None,
         };
         let tab = QueryTab::new(
             &profile_id,
@@ -288,12 +290,193 @@ impl Workspace {
             return;
         };
         match &tab.file {
-            Some(file) => {
-                let (profile_id, id, path) = (profile.id.clone(), tab.id, file.path.clone());
-                self.save_tab(&profile_id, id, path, cx);
+            Some(_) => {
+                let id = tab.id;
+                self.save_in_place(vec![id], false, window, cx);
             }
             None => self.save_query_as(&SaveQueryAs, window, cx),
         }
+    }
+
+    /// Save each of the file tabs `ids` on the connection in front to its
+    /// own file, closing it once written when `close`. One whose file
+    /// someone else wrote since is left for the Overwrite question.
+    pub(crate) fn save_in_place(
+        &mut self,
+        ids: Vec<u64>,
+        close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let profile_id = profile.id.clone();
+        let mut asking = Vec::new();
+        let mut writing = Vec::new();
+        for id in ids {
+            let Some(file) = profile
+                .session
+                .query_tab(id)
+                .and_then(|tab| tab.file.as_ref())
+            else {
+                continue;
+            };
+            // ponytail: stat on the window's thread, as the write after it
+            // is; one call, but a stalled mount holds the window for it.
+            // A stat that fails is left for the write to report.
+            let now = sql_file::stamp(&file.path).ok().flatten();
+            match file.overwrites(now) {
+                true => asking.push(id),
+                false => writing.push((id, file.path.clone())),
+            }
+        }
+        for (id, path) in writing {
+            if self.save_tab(&profile_id, id, path, cx) && close {
+                self.close_now(Tab::Query(id), window, cx);
+            }
+        }
+        if asking.is_empty() {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            profile.session.pending_overwrite = Some(PendingOverwrite {
+                tabs: asking,
+                close,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Overwrite: write each tab the question was asked about over whatever
+    /// its file holds now.
+    pub(crate) fn confirm_overwrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((profile_id, pending)) = self.profile_mut().and_then(|profile| {
+            let pending = profile.session.pending_overwrite.take()?;
+            Some((profile.id.clone(), pending))
+        }) else {
+            return;
+        };
+        for id in pending.tabs {
+            let Some(path) = self
+                .profile()
+                .and_then(|profile| profile.session.query_tab(id))
+                .and_then(|tab| Some(tab.file.as_ref()?.path.clone()))
+            else {
+                continue;
+            };
+            if self.save_tab(&profile_id, id, path, cx) && pending.close {
+                self.close_now(Tab::Query(id), window, cx);
+            }
+        }
+        self.refocus_front();
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_overwrite(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_overwrite.take())
+            .is_some();
+        if cancelled {
+            self.refocus_front();
+            cx.notify();
+        }
+        cancelled
+    }
+
+    /// Look at the front tab's file and settle what changed on disk since
+    /// the tab last read or wrote it: on the window coming forward and on
+    /// the tab coming to the front.
+    ///
+    /// ponytail: a look on focus misses an edit made in another editor
+    /// while DBDelve keeps focus, so a buffer can be stale until the next
+    /// switch; a file watcher (`notify`) is the upgrade if anyone reports
+    /// it. The stat, and a reload's read, run on the window's thread.
+    pub(crate) fn check_front_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, settle)) = self.profile().and_then(|profile| {
+            let tab = profile.session.active_query_tab()?;
+            let file = tab.file.as_ref()?;
+            let now = sql_file::stamp(&file.path).ok()?;
+            Some((tab.id, file.settle(now, tab.dirty)))
+        }) else {
+            return;
+        };
+        match settle {
+            Settle::Keep => {}
+            Settle::Reload => self.take_disk(id, true, window, cx),
+            Settle::Ask => {
+                if let Some(file) = self.front_file_mut(id) {
+                    file.conflict = Some(Conflict::Asking);
+                }
+                cx.notify();
+            }
+            Settle::Gone => self.mark_gone(id, cx),
+        }
+    }
+
+    /// Tab `id` on the connection in front takes its file as it is on disk
+    /// now: into the buffer as well when `reload`, or, for Keep Mine, as
+    /// only the text the buffer is compared with, the next Save asking.
+    pub(crate) fn take_disk(
+        &mut self,
+        id: u64,
+        reload: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.front_file_mut(id).map(|file| file.path.clone()) else {
+            return;
+        };
+        let read = match sql_file::read(&path) {
+            Ok(Some(read)) => read,
+            Ok(None) => return self.mark_gone(id, cx),
+            Err(message) => return self.note(message, cx),
+        };
+        let Some(tab) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        if reload {
+            tab.editor.update(cx, |editor, cx| {
+                let at = editor.cursor().min(read.text.len());
+                editor.set_value(read.text.clone(), window, cx);
+                editor.set_selected_range(at..at, cx);
+            });
+        }
+        if let Some(file) = &mut tab.file {
+            file.saved = Some(read.text);
+            file.bom = read.bom;
+            file.stamp = Some(read.stamp);
+            file.conflict = (!reload).then_some(Conflict::KeptMine);
+        }
+        // `set_value` emits no change, so nothing else marks the tab.
+        tab.refresh_dirty(cx);
+        cx.notify();
+    }
+
+    /// Tab `id`'s file is gone: the tab keeps its text, stays bound and is
+    /// dirty, and Save writes the file again.
+    fn mark_gone(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        if let Some(file) = &mut tab.file {
+            file.saved = None;
+            file.stamp = None;
+            file.conflict = None;
+        }
+        tab.refresh_dirty(cx);
+        cx.notify();
+    }
+
+    fn front_file_mut(&mut self, id: u64) -> Option<&mut FileBinding> {
+        self.profile_mut()?.session.query_tab_mut(id)?.file.as_mut()
     }
 
     /// Ask where to save the buffer in front, then save it there and bind
@@ -347,29 +530,35 @@ impl Workspace {
     }
 
     /// Write tab `id` of `profile_id` to `path` exactly as it holds it, and
-    /// bind the tab there. Its scratch file goes once the file is written:
-    /// nothing is unsaved any more.
+    /// bind the tab there; whether it was written. Its scratch file goes once
+    /// the file is written: nothing is unsaved any more.
     ///
     /// ponytail: written on the window's thread, so a file on a stalled mount
     /// holds the window until the write gives up; the blocking pool is the
     /// upgrade, with the text written kept as the saved text.
-    fn save_tab(&mut self, profile_id: &str, id: u64, path: PathBuf, cx: &mut Context<Self>) {
+    fn save_tab(
+        &mut self,
+        profile_id: &str,
+        id: u64,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self
             .tab_on_file(&path)
             .is_some_and(|(index, other)| other != id || self.profiles[index].id != profile_id)
         {
             self.note(format!("{} is open in another tab.", file_name(&path)), cx);
-            return;
+            return false;
         }
         let Some(profile) = self
             .profiles
             .iter_mut()
             .find(|profile| profile.id == profile_id)
         else {
-            return;
+            return false;
         };
         let Some(tab) = profile.session.query_tab(id) else {
-            return;
+            return false;
         };
         let text = tab.editor.read(cx).value().to_string();
         let bom = tab.file.as_ref().is_some_and(|file| file.bom);
@@ -377,16 +566,21 @@ impl Workspace {
             Some(file) => TabKey::File(file.path.clone()),
             None => TabKey::Unsaved(id),
         };
-        if let Err(message) = sql_file::write(&path, &text, bom) {
-            self.note(message, cx);
-            return;
-        }
+        let stamp = match sql_file::write(&path, &text, bom) {
+            Ok(stamp) => stamp,
+            Err(message) => {
+                self.note(message, cx);
+                return false;
+            }
+        };
         profile.session.rekey(&from, TabKey::File(path.clone()));
         if let Some(tab) = profile.session.query_tab_mut(id) {
             tab.file = Some(FileBinding {
                 path: path.clone(),
                 saved: Some(text),
                 bom,
+                stamp: Some(stamp),
+                conflict: None,
             });
             tab.scratch_unread = false;
             tab.refresh_dirty(cx);
@@ -398,6 +592,7 @@ impl Workspace {
         };
         self.note(note, cx);
         self.remember_profiles(cx);
+        true
     }
 
     /// Mark tab `id` of `profile_id` dirty or clean as its editor now reads.
@@ -620,10 +815,7 @@ mod tests {
         );
         assert_eq!(
             sql_file::decoded(b"\xef\xbb\xbfSELECT 1; -- \xc3\xa9t\xc3\xa9\r\n".to_vec()),
-            Some(SqlText {
-                text: "SELECT 1; -- \u{e9}t\u{e9}\r\n".to_string(),
-                bom: true
-            })
+            Some(("SELECT 1; -- \u{e9}t\u{e9}\r\n".to_string(), true))
         );
     }
 

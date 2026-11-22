@@ -437,6 +437,10 @@ pub(crate) struct Workspace {
     pub(crate) dialog_choice: std::cell::Cell<usize>,
     /// What held the keyboard when the first dialog went up.
     pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
+    /// The tab in front, by its profile's id and its own, when its file was
+    /// last looked at: a tab reaching the front by any path is looked at
+    /// once, not every frame.
+    pub(crate) file_looked_at: Option<(String, u64)>,
     /// See [`Workspace::welcome_project_focus`].
     pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
     pub(crate) update: Option<update::Update>,
@@ -609,6 +613,7 @@ impl Workspace {
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
+            file_looked_at: None,
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
@@ -869,6 +874,14 @@ impl Workspace {
                 let _ = workspace.save_profiles(cx);
             }
             async {}
+        })
+        .detach();
+        // Another editor may have written the front tab's file while the
+        // window was behind it.
+        cx.observe_window_activation(window, |workspace, window, cx| {
+            if window.is_window_active() {
+                workspace.check_front_file(window, cx);
+            }
         })
         .detach();
         // Window release also persists when the window closes without Quit.
@@ -1705,6 +1718,21 @@ impl Render for Workspace {
         // bool test.
         if let Some(active @ Tab::Query(_)) = self.profile().map(|profile| profile.session.active) {
             self.hydrate_tab(active, window, cx);
+        }
+        // Here for the reason the snapshot is read here: a tab reaches the
+        // front along more paths than `activate_tab`.
+        let front = self.profile().and_then(|profile| {
+            let id = profile.session.active_query_tab()?.id;
+            Some((profile.id.as_str(), id))
+        });
+        if front
+            != self
+                .file_looked_at
+                .as_ref()
+                .map(|(profile, id)| (profile.as_str(), *id))
+        {
+            self.file_looked_at = front.map(|(profile, id)| (profile.to_string(), id));
+            self.check_front_file(window, cx);
         }
 
         // Deferred for the same reason plus one: an element has to be mounted
@@ -2774,6 +2802,7 @@ impl Render for Workspace {
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
+                    ("overwrite", self.render_overwrite_confirmation(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),

@@ -1450,6 +1450,8 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
+            ("overwrite", 0) => self.confirm_overwrite(window, cx),
+            ("overwrite", _) => _ = self.cancel_overwrite(cx),
             ("delete", 0) => match deleting {
                 Some(PendingDelete::Query(name)) => self.delete_saved_query(name, window, cx),
                 Some(PendingDelete::Folder(name, _)) => self.delete_folder(name, cx),
@@ -1802,6 +1804,98 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Overwrite / Cancel, over saving a file someone else wrote since the
+    /// tab read it.
+    pub(crate) fn render_overwrite_confirmation(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pending = self.profile()?.session.pending_overwrite.as_ref()?;
+        let question = match pending.tabs.as_slice() {
+            [id] => format!("{} changed on disk. Overwrite it?", self.file_name_of(*id)?),
+            tabs => format!("{} files changed on disk. Overwrite them?", tabs.len()),
+        };
+        Some(self.question(
+            "overwrite",
+            "Save",
+            question,
+            [
+                (
+                    "cancel-overwrite",
+                    "Cancel",
+                    Tone::Quiet,
+                    |workspace, _, cx| {
+                        workspace.cancel_overwrite(cx);
+                    },
+                ),
+                (
+                    "confirm-overwrite",
+                    "Overwrite",
+                    Tone::Danger,
+                    Self::confirm_overwrite,
+                ),
+            ],
+            cx,
+        ))
+    }
+
+    fn file_name_of(&self, id: u64) -> Option<String> {
+        let tab = self.profile()?.session.query_tab(id)?;
+        Some(crate::sql_file::file_name(&tab.file.as_ref()?.path))
+    }
+
+    /// A dialog asking one line, its buttons left to right, the last the
+    /// primary the ring opens on.
+    fn question<const N: usize>(
+        &self,
+        name: &'static str,
+        heading: &str,
+        question: String,
+        buttons: [(&'static str, &'static str, Tone, DialogAnswer); N],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = popup_theme(cx);
+        let buttons = buttons
+            .into_iter()
+            .enumerate()
+            .map(|(at, (id, label, tone, answer))| {
+                let workspace = cx.entity().downgrade();
+                self.choice(
+                    name,
+                    N - 1 - at,
+                    button(id, label, tone, Control::Standard, t).on_click(move |_, window, cx| {
+                        _ = workspace.update(cx, |workspace, cx| answer(workspace, window, cx));
+                    }),
+                    t,
+                )
+            });
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                dialog(t)
+                    .child(section_label(t, heading))
+                    .child(
+                        div()
+                            .text_size(px(layout::chrome(layout::TEXT_SM)))
+                            .text_color(t.text_muted)
+                            .child(question),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(layout::SPACE_SM))
+                            .children(buttons),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// An object's definition as the server wrote it, read-only: a header and a
@@ -4398,6 +4492,9 @@ fn footer_status(
         (None, None) => None,
     }
 }
+
+/// What a dialog button does when pressed.
+type DialogAnswer = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
 
 #[cfg(test)]
 mod tests {

@@ -731,6 +731,7 @@ pub(crate) struct Session {
     /// The tab a close is asking about, because it holds cell edits nobody
     /// has applied.
     pub(crate) pending_discard: Option<PendingDiscard>,
+    pub(crate) pending_overwrite: Option<PendingOverwrite>,
     pub(crate) notice: Option<String>,
     /// What a statement's run cost beyond its result (`QueryResult::notice`),
     /// said only while the tab it ran on is in front, under any `notice`.
@@ -1219,6 +1220,7 @@ impl Session {
             query_rename: None,
             query_rename_needs_focus: false,
             pending_discard: None,
+            pending_overwrite: None,
             notice,
             tab_notice: None,
             apply_review: None,
@@ -1697,6 +1699,7 @@ impl Session {
         self.query_rename = None;
         self.query_rename_needs_focus = false;
         self.pending_discard = None;
+        self.pending_overwrite = None;
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
@@ -1752,6 +1755,13 @@ pub(crate) enum PendingDelete {
 pub(crate) struct PendingDiscard {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) deleting: Option<(String, String)>,
+}
+
+/// File tabs whose Save is waiting on the Overwrite question, and whether
+/// each closes once written.
+pub(crate) struct PendingOverwrite {
+    pub(crate) tabs: Vec<u64>,
+    pub(crate) close: bool,
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a
@@ -2231,9 +2241,56 @@ pub(crate) struct FileBinding {
     pub(crate) path: PathBuf,
     /// The text as last read from or written to `path`, or `None` while
     /// nothing is there: a tab whose file has gone has unsaved work whatever
-    /// it holds.
+    /// it holds, and says the file was deleted.
     pub(crate) saved: Option<String>,
     pub(crate) bom: bool,
+    /// `path`'s stamp as of that read or write, `None` while nothing is there.
+    pub(crate) stamp: Option<sql_file::Stamp>,
+    pub(crate) conflict: Option<Conflict>,
+}
+
+/// The file changed on disk while its tab held changes of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Conflict {
+    /// The tab's bar asks Reload or Keep Mine.
+    Asking,
+    /// Keep Mine: the stamp is the file's again, so Save asks before writing
+    /// over what someone else wrote.
+    KeptMine,
+}
+
+/// What a look at a file tab's file does to the tab.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Settle {
+    Keep,
+    /// The tab has nothing unsaved, so it takes the file as it is now.
+    Reload,
+    /// Raise the bar: reloading would lose what the tab holds.
+    Ask,
+    /// Nothing is there any more.
+    Gone,
+}
+
+impl FileBinding {
+    /// What a tab on this file does about `now`, the file's stamp as a look
+    /// finds it, while it is `dirty` or not.
+    pub(crate) fn settle(&self, now: Option<sql_file::Stamp>, dirty: bool) -> Settle {
+        match now {
+            _ if now == self.stamp => Settle::Keep,
+            None => Settle::Gone,
+            Some(_) if self.conflict == Some(Conflict::Asking) => Settle::Keep,
+            Some(_) if dirty => Settle::Ask,
+            Some(_) => Settle::Reload,
+        }
+    }
+
+    /// Whether Save asks before writing over the file whose stamp is `now`:
+    /// someone else wrote it since the tab last read or wrote it, or did and
+    /// the user chose to keep their own text. A file that has gone has
+    /// nothing to overwrite.
+    pub(crate) fn overwrites(&self, now: Option<sql_file::Stamp>) -> bool {
+        self.conflict.is_some() || now.is_some_and(|now| self.stamp != Some(now))
+    }
 }
 
 /// Whether a tab holding `text` has changes its file does not. Compared
@@ -3636,10 +3693,17 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
     match sql_file::read(&path) {
         Ok(on_disk) => {
             let bom = on_disk.as_ref().is_some_and(|on_disk| on_disk.bom);
+            let stamp = on_disk.as_ref().map(|on_disk| on_disk.stamp);
             let saved = on_disk.map(|on_disk| on_disk.text);
             let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
             StoredText {
-                file: Some(FileBinding { path, saved, bom }),
+                file: Some(FileBinding {
+                    path,
+                    saved,
+                    bom,
+                    stamp,
+                    conflict: None,
+                }),
                 text,
                 notice,
                 scratch_unread,
@@ -5206,6 +5270,8 @@ mod tests {
             path: PathBuf::from("/q/a.sql"),
             saved: Some("SELECT 1".into()),
             bom: false,
+            stamp: None,
+            conflict: None,
         };
         assert!(
             !is_dirty(None, "anything"),
@@ -5213,6 +5279,55 @@ mod tests {
         );
         assert!(is_dirty(Some(&file), "SELECT 12"));
         assert!(!is_dirty(Some(&file), "SELECT 1"), "an undo back clears it");
+    }
+
+    fn file_read_at(stamp: sql_file::Stamp) -> FileBinding {
+        FileBinding {
+            path: PathBuf::from("/q/a.sql"),
+            saved: Some("SELECT 1".into()),
+            bom: false,
+            stamp: Some(stamp),
+            conflict: None,
+        }
+    }
+
+    #[test]
+    fn a_file_changed_on_disk_reloads_a_clean_tab_and_asks_a_dirty_one() {
+        let (read, written) = (sql_file::Stamp::of_len(8), sql_file::Stamp::of_len(9));
+        let mut file = file_read_at(read);
+        assert_eq!(file.settle(Some(read), true), Settle::Keep);
+        assert_eq!(file.settle(Some(written), false), Settle::Reload);
+        assert_eq!(file.settle(Some(written), true), Settle::Ask);
+        assert_eq!(file.settle(None, false), Settle::Gone);
+        file.conflict = Some(Conflict::Asking);
+        assert_eq!(
+            file.settle(Some(written), true),
+            Settle::Keep,
+            "the bar is already up"
+        );
+        assert_eq!(file.settle(None, true), Settle::Gone);
+
+        let gone = FileBinding {
+            saved: None,
+            stamp: None,
+            ..file_read_at(read)
+        };
+        assert_eq!(gone.settle(None, true), Settle::Keep, "already said");
+        assert_eq!(gone.settle(Some(written), true), Settle::Ask, "back again");
+    }
+
+    #[test]
+    fn save_asks_before_writing_over_a_file_someone_else_wrote() {
+        let (read, written) = (sql_file::Stamp::of_len(8), sql_file::Stamp::of_len(9));
+        let mut file = file_read_at(read);
+        assert!(!file.overwrites(Some(read)));
+        assert!(file.overwrites(Some(written)));
+        assert!(!file.overwrites(None), "a deleted file is written again");
+        file.conflict = Some(Conflict::KeptMine);
+        assert!(
+            file.overwrites(Some(read)),
+            "kept, but still theirs on disk"
+        );
     }
 
     #[test]

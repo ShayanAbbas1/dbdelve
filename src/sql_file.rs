@@ -5,6 +5,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 // ponytail: the editor holds the whole file, so a dump past this is refused
@@ -21,6 +22,43 @@ const BOM: &str = "\u{feff}";
 pub(crate) struct SqlText {
     pub(crate) text: String,
     pub(crate) bom: bool,
+    pub(crate) stamp: Stamp,
+}
+
+/// A file's modification time and length, as a read or write left it. One
+/// that differs at the next look means something else wrote the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Stamp {
+    pub(crate) fn of_len(len: u64) -> Self {
+        Self {
+            modified: None,
+            len,
+        }
+    }
+}
+
+/// `path`'s stamp now, or `None` when nothing is there: one `stat`.
+pub(crate) fn stamp(path: &Path) -> io::Result<Option<Stamp>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(Stamp::of(&metadata))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn file_name(path: &Path) -> String {
@@ -39,6 +77,10 @@ pub(crate) fn read(path: &Path) -> Result<Option<SqlText>, String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Could not open {name}: {error}")),
     };
+    let stamp = file
+        .metadata()
+        .map(|metadata| Stamp::of(&metadata))
+        .map_err(|error| format!("Could not read {name}: {error}"))?;
     // Bounded while reading, not by the size up front, which a file still
     // being written or a link to a device does not keep to.
     let mut bytes = Vec::new();
@@ -51,30 +93,28 @@ pub(crate) fn read(path: &Path) -> Result<Option<SqlText>, String> {
             MAX_BYTES >> 20
         ));
     }
-    decoded(bytes)
-        .map(Some)
-        .ok_or_else(|| format!("{name} is not UTF-8 text."))
+    let (text, bom) = decoded(bytes).ok_or_else(|| format!("{name} is not UTF-8 text."))?;
+    Ok(Some(SqlText { text, bom, stamp }))
 }
 
-pub(crate) fn decoded(bytes: Vec<u8>) -> Option<SqlText> {
+/// The text of `bytes`, and whether a byte order mark came off the front.
+pub(crate) fn decoded(bytes: Vec<u8>) -> Option<(String, bool)> {
     let text = String::from_utf8(bytes).ok()?;
     Some(match text.strip_prefix(BOM) {
-        Some(rest) => SqlText {
-            text: rest.to_string(),
-            bom: true,
-        },
-        None => SqlText { text, bom: false },
+        Some(rest) => (rest.to_string(), true),
+        None => (text, false),
     })
 }
 
-/// Write `text` to `path` as it is, behind the byte order mark the file had.
+/// Write `text` to `path` as it is, behind the byte order mark the file had,
+/// and the file's stamp once it is there.
 ///
 /// Staged beside the file and renamed over it, so a failed write never leaves
 /// half a file. A symlink is followed to its target, or the rename would
 /// replace the link with a regular file, and the file's permissions are kept,
 /// a read-only one refused: this is the user's file, not one of DBDelve's
 /// private ones.
-pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
+pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<Stamp, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
@@ -113,7 +153,7 @@ pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
         .create_new(true)
         .open(&temporary)
         .map_err(|error| format!("Could not save {name}: {error}"))?;
-    let written = (|| {
+    let written = (|| -> io::Result<Stamp> {
         if bom {
             file.write_all(BOM.as_bytes())?;
         }
@@ -122,8 +162,11 @@ pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<(), String> {
             file.set_permissions(permissions)?;
         }
         file.sync_all()?;
+        // Off the staged copy, which the rename moves without touching.
+        let stamp = Stamp::of(&file.metadata()?);
         drop(file);
-        fs::rename(&temporary, &path)
+        fs::rename(&temporary, &path)?;
+        Ok(stamp)
     })();
     written.map_err(|error| match discard(&temporary) {
         Ok(()) => format!("Could not save {name}: {error}"),
@@ -195,15 +238,22 @@ mod tests {
         let path = dir.join("q.sql");
         fs::write(&path, b"\xef\xbb\xbfSELECT 1;\r\n").unwrap();
         let read = read(&path).unwrap().unwrap();
-        assert_eq!(
-            read,
-            SqlText {
-                text: "SELECT 1;\r\n".into(),
-                bom: true
-            }
-        );
+        assert_eq!((read.text.as_str(), read.bom), ("SELECT 1;\r\n", true));
         write(&path, "SELECT 2;\r\n", read.bom).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"\xef\xbb\xbfSELECT 2;\r\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_files_stamp_is_what_its_read_and_write_left_until_someone_else_writes() {
+        let dir = scratch_dir("stamp");
+        let path = dir.join("q.sql");
+        assert_eq!(stamp(&path).unwrap(), None);
+        let written = write(&path, "SELECT 1;", false).unwrap();
+        assert_eq!(stamp(&path).unwrap(), Some(written));
+        assert_eq!(read(&path).unwrap().unwrap().stamp, written);
+        fs::write(&path, "SELECT 12;").unwrap();
+        assert_ne!(stamp(&path).unwrap(), Some(written));
         fs::remove_dir_all(&dir).unwrap();
     }
 
