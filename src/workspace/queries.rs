@@ -1874,7 +1874,7 @@ impl Workspace {
         }
     }
 
-    fn reload_queries_of(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn reload_queries_of(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };

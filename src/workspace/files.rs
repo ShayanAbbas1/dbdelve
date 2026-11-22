@@ -573,6 +573,9 @@ impl Workspace {
                 return false;
             }
         };
+        // Save As into the saved queries' folder adds one the sidebar lists.
+        let new_saved_query = from != TabKey::File(path.clone())
+            && path.parent() == Some(profile.session.query_directory.as_path());
         profile.session.rekey(&from, TabKey::File(path.clone()));
         if let Some(tab) = profile.session.query_tab_mut(id) {
             tab.file = Some(FileBinding {
@@ -590,6 +593,9 @@ impl Workspace {
             Ok(()) => format!("Saved {}.", file_name(&path)),
             Err(message) => message,
         };
+        if new_saved_query {
+            self.reload_queries_of(profile_id, cx);
+        }
         self.note(note, cx);
         self.remember_profiles(cx);
         true
