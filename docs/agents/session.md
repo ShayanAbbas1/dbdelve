@@ -551,13 +551,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   added newline, line endings as the editor holds them (the input keeps
   CRLF), the byte order mark put back, staged beside the file and renamed
   over it, the file's permissions kept and a link written through to its
-  target. Save on an untitled tab is Save As, which asks with the save panel
+  target. A read-only file and a link that leads nowhere are refused rather
+  than replaced, which the rename alone would do. Save on an untitled tab is Save As, which asks with the save panel
   (`.sql` added when no extension was typed, refused when that names a file
   already there, since the panel asked only about the name typed), writes,
   and binds the tab there;
   the old file of a file tab is left as it was. Open SQL File, the palette and
   a drop open each file in a tab bound to it, under the 4 MB cap and UTF-8
-  check (`sql_file::read`).
+  check (`sql_file::read`). Every bound path is resolved
+  (`sql_file::canonical`): at open, at adoption, in the sidebar and at
+  restore, so a link and its file are one tab; two restored tabs that meet
+  leave the later one untitled with its text (`Session::unbind_duplicates`).
 - **Saved queries are files where they already are.** A profile's saved
   queries stay under `queries/<profile id>/` and are listed in the sidebar's
   Queries group and the palette (`Session::saved_queries`); opening one opens
@@ -567,13 +571,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   `Session::saved_query_of` can tell a tab on one. Closing a tab never deletes
   a file. Only an explicit Delete (the sidebar row's menu, or "Delete saved
   query…" in the palette, both through one dialog) removes a saved query, and
-  closes a tab bound to it; a tab holding cell edits nobody applied asks first,
+  closes a tab bound to it on whichever connection holds it, brought to the
+  front first; a tab holding cell edits nobody applied asks first,
   as any close does (`PendingDiscard::deleting`), and the file stays until it
   is told. A file already removed outside the app counts as deleted, so its
   stale library row and open tab can still be removed. Rename… on a sidebar row
-  turns the row into a field (`Session::query_rename`) that renames through
-  `store::save_query_as` the file as it is on disk, and repoints a tab bound to
-  it, whose unsaved text stays unsaved. A rename is one native atomic
+  turns the row into a field (`Session::query_rename`) that moves the file
+  (`store::rename_saved_query`), its bytes and permissions untouched, and
+  repoints a tab bound to it on any connection, whose unsaved text stays
+  unsaved. A rename is one native atomic
   no-overwrite move, never a write under the new name and a delete of the old
   one: on a case-insensitive filesystem `daily` and `Daily` are one file. A
   name taken in any case is refused. Staging files are private to each writer.
@@ -668,7 +674,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   file tab's scratch without the legacy fallback below). A file gone at
   relaunch leaves its tab bound, holding its last scratch text or nothing,
   and dirty; one that cannot be read unbinds the tab, since Save would write
-  over text nobody has seen. A tab's path is `StoredQueryTab::path`, left out
+  over text nobody has seen. A scratch file that cannot be read back is
+  left alone (`QueryTab::scratch_unread`), never rewritten or removed, until
+  Save or a close settles the tab. A tab's path is `StoredQueryTab::path`, left out
   for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
   writes, timers or retries. A crash or forced termination can lose edits
