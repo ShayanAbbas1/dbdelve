@@ -12880,3 +12880,29 @@ fn save_as_into_the_saved_queries_folder_lists_the_query(cx: &mut TestAppContext
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn save_after_keep_mine_recreates_a_file_deleted_since_without_asking(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "kept-then-gone.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.take_disk(id, false, window, cx)
+            });
+        });
+        settle(cx);
+
+        std::fs::remove_file(&path).unwrap();
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        quit(workspace, cx);
+    });
+}

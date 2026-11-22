@@ -324,9 +324,8 @@ impl Workspace {
             };
             // ponytail: stat on the window's thread, as the write after it
             // is; one call, but a stalled mount holds the window for it.
-            // A stat that fails is left for the write to report.
-            let now = sql_file::stamp(&file.path).ok().flatten();
-            match file.overwrites(now) {
+            let now = sql_file::stamp(&file.path);
+            match file.overwrites(&now) {
                 true => asking.push(id),
                 false => writing.push((id, file.path.clone())),
             }

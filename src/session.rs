@@ -2291,9 +2291,15 @@ impl FileBinding {
     /// Whether Save asks before writing over the file whose stamp is `now`:
     /// someone else wrote it since the tab last read or wrote it, or did and
     /// the user chose to keep their own text. A file that has gone has
-    /// nothing to overwrite.
-    pub(crate) fn overwrites(&self, now: Option<sql_file::Stamp>) -> bool {
-        self.conflict.is_some() || now.is_some_and(|now| self.stamp != Some(now))
+    /// nothing to overwrite, whatever was kept; one that could not be
+    /// stat'ed is asked about only over a known conflict, the write saying
+    /// what is wrong.
+    pub(crate) fn overwrites(&self, now: &std::io::Result<Option<sql_file::Stamp>>) -> bool {
+        match now {
+            Ok(None) => false,
+            Ok(Some(now)) => self.conflict.is_some() || self.stamp != Some(*now),
+            Err(_) => self.conflict.is_some(),
+        }
     }
 }
 
@@ -5323,14 +5329,24 @@ mod tests {
     #[test]
     fn save_asks_before_writing_over_a_file_someone_else_wrote() {
         let (read, written) = (sql_file::Stamp::of_len(8), sql_file::Stamp::of_len(9));
+        let unknown = || Err(std::io::Error::other("no stat"));
         let mut file = file_read_at(read);
-        assert!(!file.overwrites(Some(read)));
-        assert!(file.overwrites(Some(written)));
-        assert!(!file.overwrites(None), "a deleted file is written again");
+        assert!(!file.overwrites(&Ok(Some(read))));
+        assert!(file.overwrites(&Ok(Some(written))));
+        assert!(
+            !file.overwrites(&Ok(None)),
+            "a deleted file is written again"
+        );
+        assert!(!file.overwrites(&unknown()), "the write says why");
         file.conflict = Some(Conflict::KeptMine);
         assert!(
-            file.overwrites(Some(read)),
+            file.overwrites(&Ok(Some(read))),
             "kept, but still theirs on disk"
+        );
+        assert!(file.overwrites(&unknown()));
+        assert!(
+            !file.overwrites(&Ok(None)),
+            "kept, then deleted: nothing to overwrite"
         );
     }
 
