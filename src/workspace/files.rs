@@ -325,7 +325,11 @@ impl Workspace {
             // ponytail: stat on the window's thread, as the write after it
             // is; one call, but a stalled mount holds the window for it.
             let now = sql_file::stamp(&file.path);
-            match file.overwrites(&now) {
+            let on_disk = || {
+                let read = sql_file::read(&file.path).ok()??;
+                Some((read.text, read.bom))
+            };
+            match file.overwrites(&now, on_disk) {
                 true => asking.push(id),
                 false => writing.push((id, file.path.clone())),
             }
@@ -391,7 +395,11 @@ impl Workspace {
     /// ponytail: a look on focus misses an edit made in another editor
     /// while DBDelve keeps focus, so a buffer can be stale until the next
     /// switch; a file watcher (`notify`) is the upgrade if anyone reports
-    /// it. The stat, and a reload's read, run on the window's thread.
+    /// it. The stat, and a reload's read, run on the window's thread. It
+    /// trusts the stamp alone, so a same-length edit inside one tick of a
+    /// coarse clock, or by a tool that keeps timestamps, is not seen here;
+    /// Save compares the text before writing, so nothing is overwritten
+    /// unasked, and comparing on every look is the upgrade.
     pub(crate) fn check_front_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((id, settle)) = self.profile().and_then(|profile| {
             let tab = profile.session.active_query_tab()?;

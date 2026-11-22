@@ -2294,10 +2294,25 @@ impl FileBinding {
     /// nothing to overwrite, whatever was kept; one that could not be
     /// stat'ed is asked about only over a known conflict, the write saying
     /// what is wrong.
-    pub(crate) fn overwrites(&self, now: &std::io::Result<Option<sql_file::Stamp>>) -> bool {
+    ///
+    /// An equal stamp is not trusted alone: a coarse clock, or a tool that
+    /// keeps timestamps, leaves a same-length edit with the old one. So the
+    /// file's text and byte order mark (`on_disk`, `None` when it will not
+    /// read) are compared with the saved text, under the 4 MB cap a cheap
+    /// read.
+    pub(crate) fn overwrites(
+        &self,
+        now: &std::io::Result<Option<sql_file::Stamp>>,
+        on_disk: impl FnOnce() -> Option<(String, bool)>,
+    ) -> bool {
         match now {
             Ok(None) => false,
-            Ok(Some(now)) => self.conflict.is_some() || self.stamp != Some(*now),
+            Ok(Some(now)) => {
+                self.conflict.is_some()
+                    || self.stamp != Some(*now)
+                    || on_disk().as_ref().map(|(text, bom)| (text.as_str(), *bom))
+                        != self.saved.as_deref().map(|saved| (saved, self.bom))
+            }
             Err(_) => self.conflict.is_some(),
         }
     }
@@ -5330,22 +5345,28 @@ mod tests {
     fn save_asks_before_writing_over_a_file_someone_else_wrote() {
         let (read, written) = (sql_file::Stamp::of_len(8), sql_file::Stamp::of_len(9));
         let unknown = || Err(std::io::Error::other("no stat"));
+        let as_saved = || Some(("SELECT 1".to_string(), false));
         let mut file = file_read_at(read);
-        assert!(!file.overwrites(&Ok(Some(read))));
-        assert!(file.overwrites(&Ok(Some(written))));
+        assert!(!file.overwrites(&Ok(Some(read)), as_saved));
+        assert!(file.overwrites(&Ok(Some(written)), as_saved));
         assert!(
-            !file.overwrites(&Ok(None)),
+            file.overwrites(&Ok(Some(read)), || Some(("SELECT 2".into(), false))),
+            "the stamp kept, the text not"
+        );
+        assert!(file.overwrites(&Ok(Some(read)), || None), "will not read");
+        assert!(
+            !file.overwrites(&Ok(None), as_saved),
             "a deleted file is written again"
         );
-        assert!(!file.overwrites(&unknown()), "the write says why");
+        assert!(!file.overwrites(&unknown(), as_saved), "the write says why");
         file.conflict = Some(Conflict::KeptMine);
         assert!(
-            file.overwrites(&Ok(Some(read))),
+            file.overwrites(&Ok(Some(read)), as_saved),
             "kept, but still theirs on disk"
         );
-        assert!(file.overwrites(&unknown()));
+        assert!(file.overwrites(&unknown(), as_saved));
         assert!(
-            !file.overwrites(&Ok(None)),
+            !file.overwrites(&Ok(None), as_saved),
             "kept, then deleted: nothing to overwrite"
         );
     }
