@@ -12927,3 +12927,24 @@ fn save_asks_about_an_outside_edit_that_kept_the_files_stamp(cx: &mut TestAppCon
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn closing_a_clean_tab_whose_file_was_deleted_behind_it_asks(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("only-copy.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::remove_file(&path).unwrap();
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        assert!(is_open(&workspace, cx, &path));
+        press(cx, "enter");
+        settle(cx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}

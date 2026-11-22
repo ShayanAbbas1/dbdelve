@@ -466,7 +466,7 @@ impl Workspace {
 
     /// Tab `id`'s file is gone: the tab keeps its text, stays bound and is
     /// dirty, and Save writes the file again.
-    fn mark_gone(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(super) fn mark_gone(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(tab) = self
             .profile_mut()
             .and_then(|profile| profile.session.query_tab_mut(id))

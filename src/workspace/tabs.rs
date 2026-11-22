@@ -1265,6 +1265,7 @@ impl Workspace {
             self.close_or_ask_to_save(clean, window, cx);
             return;
         }
+        self.look_before_closing(&clean, cx);
         let (unsaved, clean): (Vec<Tab>, Vec<Tab>) = clean
             .into_iter()
             .partition(|tab| self.has_unsaved_file(*tab));
@@ -1290,6 +1291,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.look_before_closing(&tabs, cx);
         let (unsaved, clean): (Vec<Tab>, Vec<Tab>) = tabs
             .into_iter()
             .partition(|tab| self.has_unsaved_file(*tab));
@@ -1307,6 +1309,28 @@ impl Workspace {
             });
         }
         cx.notify();
+    }
+
+    /// Mark each clean file tab among `tabs` whose file has gone since it was
+    /// last looked at: a tab behind another is looked at only when it comes
+    /// forward, and its buffer is now the only copy of the text. One stat
+    /// each. A file changed rather than gone leaves nothing of the user's
+    /// in a clean buffer, so it closes unasked.
+    fn look_before_closing(&mut self, tabs: &[Tab], cx: &mut Context<Self>) {
+        for tab in tabs {
+            let Tab::Query(id) = *tab else {
+                continue;
+            };
+            let gone = self
+                .profile()
+                .and_then(|profile| profile.session.query_tab(id)?.file.as_ref())
+                .is_some_and(|file| {
+                    file.saved.is_some() && matches!(crate::sql_file::stamp(&file.path), Ok(None))
+                });
+            if gone {
+                self.mark_gone(id, cx);
+            }
+        }
     }
 
     /// A file tab holding text its file does not. An untitled tab is never
