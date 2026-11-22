@@ -1455,10 +1455,7 @@ impl Workspace {
 
     /// Close a query tab, and its scratch file with it: an untitled buffer is
     /// its text, and closing one is discarding both. A file tab's file stays
-    /// as it was last saved.
-    ///
-    /// ponytail: a file tab's unsaved text goes with it, unasked; the
-    /// Save / Don't Save / Cancel question is the upgrade.
+    /// as it was last saved; `ask_before_close` asked about its unsaved text.
     pub(crate) fn close_buffer(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.remove_query_tab(id, window, cx);
     }
@@ -1815,6 +1812,7 @@ impl Workspace {
                 profile.session.pending_discard = Some(PendingDiscard {
                     tabs: vec![tab],
                     deleting: Some((owner, name)),
+                    unsaved: false,
                 });
             }
             cx.notify();

@@ -1315,6 +1315,7 @@ impl Workspace {
                 if all { 3 } else { 2 }
             }
             Some("stable-import") => self.stable_import_buttons(),
+            Some("unsaved") => 3,
             Some("import-rows") | None => 0,
             Some(_) => 2 + checkbox,
         }
@@ -1450,6 +1451,9 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
+            ("unsaved", 0) => self.save_and_close(window, cx),
+            ("unsaved", 2) => self.confirm_discard_close(window, cx),
+            ("unsaved", _) => _ = self.cancel_discard_close(cx),
             ("overwrite", 0) => self.confirm_overwrite(window, cx),
             ("overwrite", _) => _ = self.cancel_overwrite(cx),
             ("delete", 0) => match deleting {
@@ -1715,7 +1719,17 @@ impl Workspace {
 
     pub(crate) fn render_discard_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = popup_theme(cx);
-        let held = self.profile()?.session.pending_discard.as_ref()?.tabs.len();
+        let discard = self.profile()?.session.pending_discard.as_ref()?;
+        if discard.unsaved {
+            return None;
+        }
+        // Close All Tabs holds the unsaved files with them, for the question
+        // after this one.
+        let held = discard
+            .tabs
+            .iter()
+            .filter(|tab| self.has_unapplied_edits(**tab, cx))
+            .count();
         let cancel_workspace = cx.entity().downgrade();
         let discard_workspace = cancel_workspace.clone();
 
@@ -1804,6 +1818,49 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Save / Don't Save / Cancel, over closing file tabs with unsaved
+    /// changes.
+    pub(crate) fn render_unsaved_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = &self.profile()?.session;
+        let discard = session
+            .pending_discard
+            .as_ref()
+            .filter(|discard| discard.unsaved)?;
+        let (heading, question) = match discard.tabs.as_slice() {
+            [Tab::Query(id)] => (
+                "Close tab",
+                format!("Save changes to {}?", self.file_name_of(*id)?),
+            ),
+            tabs => (
+                "Close tabs",
+                format!("Save changes to {} files?", tabs.len()),
+            ),
+        };
+        Some(self.question(
+            "unsaved",
+            heading,
+            question,
+            [
+                (
+                    "dont-save",
+                    "Don't Save",
+                    Tone::Danger,
+                    Self::confirm_discard_close,
+                ),
+                (
+                    "cancel-unsaved",
+                    "Cancel",
+                    Tone::Quiet,
+                    |workspace, _, cx| {
+                        workspace.cancel_discard_close(cx);
+                    },
+                ),
+                ("save-unsaved", "Save", Tone::Primary, Self::save_and_close),
+            ],
+            cx,
+        ))
     }
 
     /// Overwrite / Cancel, over saving a file someone else wrote since the

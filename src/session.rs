@@ -1751,14 +1751,18 @@ pub(crate) enum PendingDelete {
 /// A close held up by the unapplied-edits question, and the saved query to
 /// delete once the tab goes, by its profile's id and its name, when deleting
 /// it is what closes the tab: the tab can be on another connection. More
-/// than one tab only when Close All Tabs found edits in several.
+/// than one tab only when Close All Tabs found edits in several, or edits
+/// and unsaved files, which are asked about once the edits are discarded.
 pub(crate) struct PendingDiscard {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) deleting: Option<(String, String)>,
+    /// Asking Save / Don't Save about file tabs with unsaved changes, rather
+    /// than about cell edits.
+    pub(crate) unsaved: bool,
 }
 
 /// File tabs whose Save is waiting on the Overwrite question, and whether
-/// each closes once written.
+/// each closes once written, as Save in the close question asked.
 pub(crate) struct PendingOverwrite {
     pub(crate) tabs: Vec<u64>,
     pub(crate) close: bool,

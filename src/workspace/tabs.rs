@@ -1237,7 +1237,8 @@ impl Workspace {
     }
 
     /// Close every tab in the strip. The ones holding unapplied cell edits are
-    /// left for a single question once the rest have gone.
+    /// left for a single question once the rest have gone, and file tabs with
+    /// unsaved changes for one Save question after it.
     pub(crate) fn close_all_tabs(
         &mut self,
         _: &CloseAllTabs,
@@ -1257,22 +1258,67 @@ impl Workspace {
         // snapshot and refreshes its rows only to be closed straight after.
         let mut tabs = profile.session.strip_tabs();
         tabs.sort_by_key(|tab| *tab == active);
-        let (dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
+        let (mut dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
             .into_iter()
             .partition(|tab| self.has_unapplied_edits(*tab, cx));
+        if dirty.is_empty() {
+            self.close_or_ask_to_save(clean, window, cx);
+            return;
+        }
+        let (unsaved, clean): (Vec<Tab>, Vec<Tab>) = clean
+            .into_iter()
+            .partition(|tab| self.has_unsaved_file(*tab));
         for tab in clean {
             self.close_now(tab, window, cx);
         }
-        if dirty.is_empty() {
-            return;
-        }
+        dirty.extend(unsaved);
         if let Some(profile) = self.profile_mut() {
             profile.session.pending_discard = Some(PendingDiscard {
                 tabs: dirty,
                 deleting: None,
+                unsaved: false,
             });
         }
         cx.notify();
+    }
+
+    /// Close `tabs`, but leave the file tabs among them with unsaved changes
+    /// for one Save / Don't Save question.
+    fn close_or_ask_to_save(
+        &mut self,
+        tabs: Vec<Tab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (unsaved, clean): (Vec<Tab>, Vec<Tab>) = tabs
+            .into_iter()
+            .partition(|tab| self.has_unsaved_file(*tab));
+        for tab in clean {
+            self.close_now(tab, window, cx);
+        }
+        if unsaved.is_empty() {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            profile.session.pending_discard = Some(PendingDiscard {
+                tabs: unsaved,
+                deleting: None,
+                unsaved: true,
+            });
+        }
+        cx.notify();
+    }
+
+    /// A file tab holding text its file does not. An untitled tab is never
+    /// asked about, and nor is one whose scratch file would not read back,
+    /// which holds nothing the user has seen.
+    pub(crate) fn has_unsaved_file(&self, tab: Tab) -> bool {
+        let Tab::Query(id) = tab else {
+            return false;
+        };
+        self.profile()
+            .and_then(|profile| profile.session.query_tab(id))
+            .is_some_and(|tab| tab.dirty && !tab.scratch_unread)
     }
 
     /// Close a tab, asking first if it holds cell edits nobody has applied.
@@ -1289,13 +1335,14 @@ impl Workspace {
     ) {
         self.stage_row_inputs(cx);
         if !self.has_unapplied_edits(tab, cx) {
-            self.close_now(tab, window, cx);
+            self.close_or_ask_to_save(vec![tab], window, cx);
             return;
         }
         if let Some(profile) = self.profile_mut() {
             profile.session.pending_discard = Some(PendingDiscard {
                 tabs: vec![tab],
                 deleting: None,
+                unsaved: false,
             });
         }
         cx.notify();
@@ -1385,7 +1432,9 @@ impl Workspace {
         .detach();
     }
 
-    /// Close the tab the discard prompt was raised over, edits and all.
+    /// Close the tab the discard prompt was raised over, edits and all, or,
+    /// over unsaved files, Don't Save. Discarded edits still leave a file
+    /// tab's unsaved text to ask about.
     pub(crate) fn confirm_discard_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(discard) = self
             .profile_mut()
@@ -1395,13 +1444,46 @@ impl Workspace {
         };
         match discard.deleting {
             Some((owner, name)) => self.delete_saved_query_now(owner, name, window, cx),
-            None => {
+            None if discard.unsaved => {
                 for tab in discard.tabs {
                     self.close_now(tab, window, cx);
                 }
             }
+            None => self.close_or_ask_to_save(discard.tabs, window, cx),
         }
-        self.refocus_front();
+        self.refocus_unless_asking();
+    }
+
+    /// Save in the close question: each file written closes, and one that
+    /// cannot be written stays open, saying why.
+    pub(crate) fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discard) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_discard.take())
+        else {
+            return;
+        };
+        let ids = discard
+            .tabs
+            .into_iter()
+            .filter_map(|tab| match tab {
+                Tab::Query(id) => Some(id),
+                Tab::Object(_) => None,
+            })
+            .collect();
+        self.save_in_place(ids, true, window, cx);
+        self.refocus_unless_asking();
+    }
+
+    /// Focus back on the tab in front, unless what was just answered raised
+    /// another question, which holds the keyboard itself.
+    fn refocus_unless_asking(&mut self) {
+        let asking = self.profile().is_some_and(|profile| {
+            profile.session.pending_discard.is_some() || profile.session.pending_overwrite.is_some()
+        });
+        if !asking {
+            self.refocus_front();
+        }
     }
 
     pub(crate) fn cancel_discard_close(&mut self, cx: &mut Context<Self>) -> bool {
