@@ -475,23 +475,10 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
 /// alongside its folder's name.
 pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTree {
     let mut builder = Builder::new(filter);
-    let name = |path: &Path| {
-        path.file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned()
-    };
-    let file_rows = files.iter().map(|path| {
-        let own = name(path);
-        let shared = files
-            .iter()
-            .any(|other| other != path && name(other) == own);
-        let label = match path.parent().and_then(Path::file_name) {
-            Some(folder) if shared => format!("{own} — {}", folder.to_string_lossy()),
-            _ => own,
-        };
-        (file_row(path), label)
-    });
+    let file_rows = files
+        .iter()
+        .map(|path| file_row(path))
+        .zip(file_labels(files));
     let query_rows = queries.iter().map(|name| (query_row(name), name.clone()));
     let children: Vec<TreeItem> = file_rows
         .chain(query_rows)
@@ -515,6 +502,25 @@ pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTre
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
     }
+}
+
+/// Each of `files` by its name, and by its folder too where another listed
+/// beside it has the same name.
+pub fn file_labels(files: &[PathBuf]) -> Vec<String> {
+    let name = crate::sql_file::file_name;
+    files
+        .iter()
+        .map(|path| {
+            let own = name(path);
+            let shared = files
+                .iter()
+                .any(|other| other != path && name(other) == own);
+            match path.parent().and_then(Path::file_name) {
+                Some(folder) if shared => format!("{own} — {}", folder.to_string_lossy()),
+                _ => own,
+            }
+        })
+        .collect()
 }
 
 /// The id of the sidebar's Pinned group, listed above everything else.

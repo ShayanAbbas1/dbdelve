@@ -13224,6 +13224,25 @@ fn the_palette_offers_the_saved_queries_move_with_no_connection_in_front(cx: &mu
 }
 
 #[gpui::test]
+fn the_palette_names_files_of_one_name_by_their_folders_too(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        for folder in ["reports", "billing"] {
+            std::fs::create_dir_all(store::home().unwrap().join(folder)).unwrap();
+            let path = user_sql_file(&format!("{folder}/orders.sql"), "SELECT 1;");
+            open_sql_file(&workspace, cx, &path);
+        }
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        let labels = palette_labels(&workspace, cx);
+        for label in ["orders.sql — reports", "orders.sql — billing"] {
+            assert!(labels.iter().any(|held| held == label), "{label}");
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_file_removed_from_the_list_while_open_leaves_it_as_its_tab_closes(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

@@ -2351,14 +2351,14 @@ fn query_items(profile: &Profile) -> Vec<Item> {
     let scratch = Item::new("Scratch query", icon::SCRATCH_QUERY, Command::OpenScratch)
         .hint("scratch")
         .scope(Scope::Queries);
-    let files = profile.listed_files().into_iter().map(|path| {
-        Item::new(
-            crate::sql_file::file_name(&path),
-            saved,
-            Command::OpenFile(path),
-        )
-        .hint("file")
-        .scope(Scope::Queries)
+    let listed = profile.listed_files();
+    let labels = crate::explorer::file_labels(&listed);
+    let files = listed.into_iter().zip(labels).map(|(path, label)| {
+        let detail = path.display().to_string();
+        Item::new(label, saved, Command::OpenFile(path))
+            .detail(detail)
+            .hint("file")
+            .scope(Scope::Queries)
     });
     std::iter::once(scratch)
         .chain(files)
