@@ -572,10 +572,13 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   closes, which deletes the scratch file. Save writes each file and closes
   only the ones written: a refused write keeps its tab and says why, and a
   file changed on disk goes to the Overwrite question first, whose
-  Overwrite then closes it. An untitled tab never asks, being kept anyway,
-  and nor does a tab whose scratch file would not read back
-  (`scratch_unread`), which holds nothing the user has seen. Quit never
-  asks: that is hot exit, below. Deleting a saved query closes its tab
+  Overwrite then closes it. An untitled tab never asks, being kept anyway.
+  A clean file tab is stat'ed before a close decides
+  (`Workspace::look_before_closing`): one behind another is looked at only
+  when it comes forward, so a file deleted behind it would otherwise close
+  with the only copy of its text. A file changed rather than gone leaves
+  nothing of the user's in a clean buffer, so that closes unasked. Quit
+  never asks: that is hot exit, below. Deleting a saved query closes its tab
   without this question, the Delete having been asked.
 - **A file changed on disk is noticed on focus, not watched.** The front
   tab's file is stat'ed when the window becomes active
@@ -586,13 +589,28 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`FileBinding::settle`) reloads a clean tab silently, keeping the cursor
   offset, and refreshes its dirty mark by hand, since `set_value` emits no
   change; under unsaved text it raises a bar on the tab, "Changed on disk",
-  with Reload and Keep Mine. Keep Mine takes the file as the saved text
-  and its stamp but leaves `Conflict::KeptMine`, so the next Save asks.
-  Save asks Overwrite / Cancel whenever the file's stamp is not the one
-  the tab last read or wrote, or Keep Mine was chosen
-  (`FileBinding::overwrites`); a file that has gone has nothing to
-  overwrite. An edit made outside while DBDelve keeps focus is missed until
-  the next look (a `ponytail:` on `check_front_file`).
+  with Reload and Keep Mine, either of which hands the keyboard back to the
+  buffer, since a button pressed from the keyboard goes with the bar. Keep
+  Mine takes the file as the saved text and its stamp but leaves
+  `Conflict::KeptMine`, so the next Save asks. Save asks Overwrite / Cancel
+  whenever the file's stamp is not the one the tab last read or wrote, its
+  text and byte order mark are not the saved ones, or Keep Mine was chosen
+  (`FileBinding::overwrites`). The text is compared because an equal stamp
+  is no proof: a coarse clock, or a tool that keeps timestamps, leaves a
+  same-length edit with the old one. A file that has gone has nothing to
+  overwrite, Keep Mine or not; one that will not stat asks only over a known
+  conflict, and the write says what is wrong. The look on focus trusts the
+  stamp alone, and an edit made outside while DBDelve keeps focus is missed
+  until the next look (a `ponytail:` on `check_front_file`); Save's
+  comparison is what keeps either from being overwritten unasked.
+- **A conflict outlives a relaunch.** A dirty file tab stores the hash of
+  the text its edits were written against (`StoredQueryTab::saved_hash`,
+  `sql_file::text_hash`, FNV-1a because std's hasher may change between
+  releases) and whether Keep Mine was chosen (`kept_mine`). A file that
+  reads differently at relaunch raises the bar; Keep Mine comes back as it
+  was, so Save still asks (`restored_conflict`). Either flips with the
+  dirty mark or an answer to the bar, which marks the profiles unsaved so a
+  quit writes them.
 - **A file deleted on disk keeps its tab bound and dirty**, its saved
   text `None`, and the tab says "Deleted on disk" in the same bar. Save
   writes the file again. A file missing at relaunch comes back the same
@@ -711,8 +729,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   relaunch leaves its tab bound, holding its last scratch text or nothing,
   dirty and saying "Deleted on disk"; one that cannot be read unbinds the tab, since Save would write
   over text nobody has seen. A scratch file that cannot be read back is
-  left alone (`QueryTab::scratch_unread`), never rewritten or removed, until
-  Save or a close settles the tab. A tab's path is `StoredQueryTab::path`, left out
+  renamed aside to `.scratch-<id>.unread-<n>.sql`, which nothing writes or
+  deletes, and the restore notice names it; the tab then keeps its unsaved
+  text as any other. A rename needs only the directory, so it works where
+  the file will not read. Where even that fails the file is left alone
+  (`QueryTab::scratch_unread`) for the tab's life: never written, and
+  removed by neither Save nor a close, while the tab still asks on close. A tab's path is `StoredQueryTab::path`, left out
   for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
   writes, timers or retries. A crash or forced termination can lose edits
