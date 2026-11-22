@@ -386,8 +386,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   carrying the `Tab` it was issued for, and an id that no longer resolves drops
   the result rather than landing it somewhere. Indexing would put a slow query's
   rows into whatever tab had slid into that slot.
-- **A `QueryTab` owns its own editor, grid, `QueryState`, saved-query name
-  (`open_query`) and `last_query`.** Do not reintroduce a single shared editor
+- **A `QueryTab` owns its own editor, grid, `QueryState`, file binding
+  (`file`) and `last_query`.** Do not reintroduce a single shared editor
   for anything.
   Results visibility is per tab and not persisted. The first streamed result
   reveals a hidden pane; hiding it again lasts through later batches while
@@ -496,8 +496,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   while typing; Slowest and Most rows put unmeasured runs last). `secondary-k f`
   and `secondary-k o` cycle them, scoped to `Palette > Input`: an Option
   chord types a character on macOS and would take it from the field, and the
-  unscoped `secondary-shift-f` (Format Query), `secondary-shift-s` and
-  `secondary-k s` would each win over a scoped binding. Both
+  unscoped `secondary-shift-f` (Format Query) and `secondary-shift-s` would
+  each win over a scoped binding. Both
   reset when the palette opens, so a filter left on cannot hide a run later.
 - **`showing_messages` is a tab flag beside `showing_plan`, not a value of
   `Queue::showing`.** Selecting Messages leaves the selected result to return
@@ -534,24 +534,49 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   then name a tab that is gone, which every lookup by id already answers with
   `None`, and focus falls back to the window so the bindings that open a tab
   still work.
-- **Closing a tab never deletes a saved query.** The strip holds open tabs
-  only; every query file a profile has is listed in the sidebar's Queries
-  group and the palette, open or not (`Session::saved_queries`). Closing a
-  saved query's tab writes its text to its file and keeps the file; only an
-  explicit Delete (the sidebar row's menu, or "Delete saved query…" in the
-  palette, both through one dialog) removes it. Deleting a query whose tab is
-  open closes that tab, its text with it; a tab holding cell edits nobody
-  applied asks first, as any close does (`PendingDiscard::deleting`), and the
-  file stays until it is told. A file already removed outside the app counts
-  as deleted, so its stale library row and open tab can still be removed.
-  Rename… on a sidebar row turns the row into a field
-  (`Session::query_rename`) that renames through `store::save_query_as`,
-  the tab's own path, so an open tab follows the name. A rename is one native
-  atomic no-overwrite move, never a write under the new name and a delete of
-  the old one: on a case-insensitive filesystem `daily` and `Daily` are one
-  file. A name taken in any case is refused. New saves also install their
-  target without replacing an existing entry; a missed directory listing is
-  not permission to overwrite it. Staging files are private to each writer.
+- **A query tab is untitled or bound to a `.sql` file** (`QueryTab::file`,
+  a `FileBinding`: the path, the text as last read or written, and whether
+  the file began with a byte order mark). The path is resolved through every
+  link (`sql_file::canonical`), and one file has one tab across the whole
+  app: opening a path already open brings that tab and its connection
+  forward (`Workspace::bring_up_file`), and Save As refuses a path another
+  tab holds. A tab is dirty while its text differs from the saved text
+  (`session::is_dirty`), compared rather than flagged so an undo back clears
+  it; `QueryTab::dirty` caches it from the editor's change event, because the
+  strip and the window's edited mark read it every frame. An untitled tab is
+  never dirty. The chip names the file's stem, with its folder beside it
+  while another open file shares the stem, the full path on hover, and a dot
+  in the close button's place that gives way to it under the pointer.
+  **Save writes the buffer as it is** (`sql_file::write`): no formatting, no
+  added newline, line endings as the editor holds them (the input keeps
+  CRLF), the byte order mark put back, staged beside the file and renamed
+  over it, the file's permissions kept and a link written through to its
+  target. Save on an untitled tab is Save As, which asks with the save panel
+  (`.sql` added when no extension was typed, refused when that names a file
+  already there, since the panel asked only about the name typed), writes,
+  and binds the tab there;
+  the old file of a file tab is left as it was. Open SQL File, the palette and
+  a drop open each file in a tab bound to it, under the 4 MB cap and UTF-8
+  check (`sql_file::read`).
+- **Saved queries are files where they already are.** A profile's saved
+  queries stay under `queries/<profile id>/` and are listed in the sidebar's
+  Queries group and the palette (`Session::saved_queries`); opening one opens
+  a file tab on that path, and a tab stored by a build before file tabs, with
+  a `name` and no `path`, is bound to it at load (`session::adopted`).
+  `Session::query_directory` is that directory resolved as a tab's path is, so
+  `Session::saved_query_of` can tell a tab on one. Closing a tab never deletes
+  a file. Only an explicit Delete (the sidebar row's menu, or "Delete saved
+  query…" in the palette, both through one dialog) removes a saved query, and
+  closes a tab bound to it; a tab holding cell edits nobody applied asks first,
+  as any close does (`PendingDiscard::deleting`), and the file stays until it
+  is told. A file already removed outside the app counts as deleted, so its
+  stale library row and open tab can still be removed. Rename… on a sidebar row
+  turns the row into a field (`Session::query_rename`) that renames through
+  `store::save_query_as` the file as it is on disk, and repoints a tab bound to
+  it, whose unsaved text stays unsaved. A rename is one native atomic
+  no-overwrite move, never a write under the new name and a delete of the old
+  one: on a case-insensitive filesystem `daily` and `Daily` are one file. A
+  name taken in any case is refused. Staging files are private to each writer.
 - **Folders and pins are shortcuts** (`explorer::Shortcuts` on `Profile`,
   stored as the profile's `folders` and `pins`, left out when empty). Adding
   an object or a saved query to a folder, or pinning it, leaves its row where
@@ -633,17 +658,23 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Category folds are kept across a refresh but not saved. Stale ids are left
   in `folds`: harmless, and a dropped schema may come back. A duplicate takes
   the folds with the folders.
-- **A named buffer persists to its query file, an unnamed one to its own
-  `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
-  opening another query, or normal quit/window close persists the buffers.
-  Closing a saved query's tab also writes it before the tab is removed.
+- **Every buffer persists to its own `.scratch-{id}.sql`; only Save writes a
+  file tab's file.** A connection switch, opening another query, and quit or
+  window close write each untitled buffer, and each file tab's text while it
+  is dirty, to the tab's scratch file, and remove a clean file tab's (`write_buffer`).
+  That is hot exit: quitting asks nothing and loses nothing, and on relaunch a
+  file tab reads its file as the saved text and its scratch, when there is
+  one, as its buffer, so it comes back dirty (`stored_text`, which reads a
+  file tab's scratch without the legacy fallback below). A file gone at
+  relaunch leaves its tab bound, holding its last scratch text or nothing,
+  and dirty; one that cannot be read unbinds the tab, since Save would write
+  over text nobody has seen. A tab's path is `StoredQueryTab::path`, left out
+  for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
-  writes, timers or retries. There are no background buffer writes to order
-  against rename or deletion, so neither needs a per-tab write gate.
-  A crash or forced termination can lose edits since the last write.
-  Giving an unnamed tab a query name removes that tab's old scratch only
-  after the query write succeeds. A cleanup error stays visible without
-  undoing the saved query, and a failed query write keeps the scratch.
+  writes, timers or retries. A crash or forced termination can lose edits
+  since the last write. Closing a tab deletes its scratch; a file tab's
+  unsaved text goes with it unasked until the close prompt exists. A
+  successful Save or Save As removes the tab's scratch.
   `store::read_scratch(id, 0)` migrates the single `.scratch.sql` an older
   build left behind, and `StoredProfile::open_query` is still read for the same
   reason and never written.
@@ -871,6 +902,13 @@ one waiting on a column ignores whatever is typed into it.
   Collision checks compare parsed keystrokes (`secondary-m` and `cmd-m` are
   equivalent there), and Settings reads the same effective chords as startup,
   so a suppressed Minimize default is shown as unbound, not as a conflict.
+  `secondary-s` is Save in the query editor (`Editor > Input`) and Apply Edits
+  everywhere else. Apply Edits is scoped to the workspace's root
+  (`Workspace`) rather than left global, because a global binding outranks
+  every scoped one and Save could never take the chord; the conflict check
+  treats `Workspace` as on every path and lists the pair in `INERT_IN`. Save
+  As has no default chord, since `secondary-shift-s` is Toggle Sidebar's;
+  Open SQL File is `secondary-o`.
 
 ## The connection form
 
