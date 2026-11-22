@@ -1473,11 +1473,20 @@ impl Workspace {
         };
         let in_front = (profile.session.active == Tab::Query(id))
             .then(|| profile.session.fallback(Tab::Query(id)));
-        let scratch_unread = profile.session.queries.remove(position).scratch_unread;
+        let closed = profile.session.queries.remove(position);
         profile.session.forget(Tab::Query(id));
+        // A file removed from the list while open stayed listed by its tab.
+        let unlisted = closed
+            .file
+            .as_ref()
+            .is_some_and(|file| !profile.listed_files().contains(&file.path));
+        let scratch_unread = closed.scratch_unread;
         let profile_id = profile.id.clone();
         if let Some(fallback) = in_front {
             self.front_after_close(fallback, window, cx);
+        }
+        if unlisted {
+            self.refresh_query_library(&profile_id, cx);
         }
 
         if !scratch_unread && let Err(message) = store::delete_scratch(&profile_id, id) {

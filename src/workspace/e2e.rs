@@ -13205,6 +13205,34 @@ fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut 
     });
 }
 
+#[gpui::test]
+fn a_file_removed_from_the_list_while_open_leaves_it_as_its_tab_closes(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("orders.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        let row = explorer::file_row(&path);
+        explorer_row(&workspace, &row, cx);
+        workspace.update(cx, |workspace, cx| workspace.forget_recent_file(&path, cx));
+        settle(cx);
+        explorer_row(&workspace, &row, cx);
+
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_now(Tab::Query(id), window, cx)
+            })
+        });
+        settle(cx);
+        let listed = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.read(cx).index_of(&row.clone().into()).is_some()
+        });
+        assert!(!listed, "the row went with the tab");
+        quit(workspace, cx);
+    });
+}
+
 #[cfg(unix)]
 #[gpui::test]
 fn a_saved_query_that_links_to_another_moves_as_its_text_too(cx: &mut TestAppContext) {
