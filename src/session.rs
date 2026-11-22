@@ -2346,8 +2346,8 @@ pub(crate) struct QueryTab {
     /// and the window's edited mark read it every frame, and a file can be
     /// megabytes long.
     pub(crate) dirty: bool,
-    /// [`StoredText::scratch_unread`], until Save clears it. Closing the tab
-    /// discards the scratch file with the rest of it.
+    /// [`StoredText::scratch_unread`], for the tab's life: neither Save nor
+    /// a close removes that file, the one copy of whatever it holds.
     pub(crate) scratch_unread: bool,
     /// The statement behind this tab's grid.
     ///
@@ -3694,9 +3694,9 @@ struct StoredText {
     text: String,
     /// What went wrong reading the file or the scratch file.
     notice: Option<String>,
-    /// The scratch file is there and could not be read: it may hold unsaved
-    /// text the buffer does not, so nothing writes or removes it until Save
-    /// or a close settles what the tab holds.
+    /// The scratch file is there, could not be read, and could not be moved
+    /// aside: it may hold unsaved text the buffer does not, so nothing writes
+    /// or removes it.
     scratch_unread: bool,
 }
 
@@ -3710,10 +3710,18 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
         None => store::read_scratch(profile_id, stored.id),
         Some(_) => store::read_own_scratch(profile_id, stored.id),
     };
-    let scratch_unread = scratch.is_err();
-    let (scratch, notice) = match scratch {
-        Ok(scratch) => (scratch, None),
-        Err(message) => (None, Some(message)),
+    // Set aside, the tab is free to keep its unsaved text again; left where
+    // it is, nothing may write or remove it, and so nothing keeps the tab's.
+    let (scratch, notice, scratch_unread) = match scratch {
+        Ok(scratch) => (scratch, None, false),
+        Err(message) => match store::set_aside_scratch(profile_id, stored.id) {
+            Ok(aside) => (
+                None,
+                Some(format!("{message} It was kept as {}.", aside.display())),
+                false,
+            ),
+            Err(_) => (None, Some(message), true),
+        },
     };
     let Some(path) = path else {
         return StoredText {

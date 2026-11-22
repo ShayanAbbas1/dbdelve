@@ -1334,15 +1334,14 @@ impl Workspace {
     }
 
     /// A file tab holding text its file does not. An untitled tab is never
-    /// asked about, and nor is one whose scratch file would not read back,
-    /// which holds nothing the user has seen.
+    /// asked about.
     pub(crate) fn has_unsaved_file(&self, tab: Tab) -> bool {
         let Tab::Query(id) = tab else {
             return false;
         };
         self.profile()
             .and_then(|profile| profile.session.query_tab(id))
-            .is_some_and(|tab| tab.dirty && !tab.scratch_unread)
+            .is_some_and(|tab| tab.dirty)
     }
 
     /// Close a tab, asking first if it holds cell edits nobody has applied.

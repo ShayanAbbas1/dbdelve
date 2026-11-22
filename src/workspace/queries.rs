@@ -1473,14 +1473,14 @@ impl Workspace {
         };
         let in_front = (profile.session.active == Tab::Query(id))
             .then(|| profile.session.fallback(Tab::Query(id)));
-        profile.session.queries.remove(position);
+        let scratch_unread = profile.session.queries.remove(position).scratch_unread;
         profile.session.forget(Tab::Query(id));
         let profile_id = profile.id.clone();
         if let Some(fallback) = in_front {
             self.front_after_close(fallback, window, cx);
         }
 
-        if let Err(message) = store::delete_scratch(&profile_id, id) {
+        if !scratch_unread && let Err(message) = store::delete_scratch(&profile_id, id) {
             self.note(message, cx);
         }
         // The tab is gone, so its snapshot has nothing left to come back to --

@@ -586,6 +586,7 @@ impl Workspace {
         };
         let text = tab.editor.read(cx).value().to_string();
         let bom = tab.file.as_ref().is_some_and(|file| file.bom);
+        let scratch_unread = tab.scratch_unread;
         let from = match &tab.file {
             Some(file) => TabKey::File(file.path.clone()),
             None => TabKey::Unsaved(id),
@@ -609,11 +610,14 @@ impl Workspace {
                 stamp: Some(stamp),
                 conflict: None,
             });
-            tab.scratch_unread = false;
             tab.refresh_dirty(cx);
         }
         self.sql_directory = path.parent().map(Path::to_path_buf);
-        let note = match crate::store::delete_scratch(profile_id, id) {
+        let deleted = match scratch_unread {
+            true => Ok(()),
+            false => crate::store::delete_scratch(profile_id, id),
+        };
+        let note = match deleted {
             Ok(()) => format!("Saved {}.", file_name(&path)),
             Err(message) => message,
         };

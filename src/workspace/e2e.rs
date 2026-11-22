@@ -12526,28 +12526,95 @@ fn a_link_dropped_with_its_file_opens_one_tab(cx: &mut TestAppContext) {
     });
 }
 
+/// A dirty file tab on `name` whose scratch file holds bytes that are not
+/// UTF-8 when the app comes back up, and the paths of the file and the
+/// scratch file. `before_launch` runs with the app closed.
+fn relaunch_over_an_unreadable_scratch<'a>(
+    workspace: Entity<Workspace>,
+    cx: &'a mut VisualTestContext,
+    name: &str,
+    before_launch: impl FnOnce(&std::path::Path),
+) -> (
+    Entity<Workspace>,
+    &'a mut VisualTestContext,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let path = open_dirty_file(&workspace, cx, name);
+    let (_, scratch) = front_scratch(&workspace, cx);
+    close_window(workspace, cx);
+    std::fs::write(&scratch, b"-- \xff SELECT 1;").unwrap();
+    before_launch(scratch.parent().unwrap());
+    let (workspace, cx) = launch_again(cx);
+    bring_back(&workspace, cx, &path);
+    (workspace, cx, path, scratch)
+}
+
 #[gpui::test]
-fn a_scratch_file_that_will_not_read_back_is_left_for_later(cx: &mut TestAppContext) {
+fn a_scratch_file_that_will_not_read_back_is_set_aside_and_the_tab_carries_on(
+    cx: &mut TestAppContext,
+) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
-        let path = user_sql_file("draft.sql", "SELECT 1;");
-        open_sql_file(&workspace, cx, &path);
-        cx.simulate_input("-- ");
-        let scratch = workspace.read_with(cx, |workspace, _| {
-            let profile = workspace.profile().expect("a connection in front");
-            let Tab::Query(id) = profile.session.active else {
-                panic!("a query tab is in front");
-            };
-            store::query_directory(&profile.id)
+        let (workspace, cx, path, scratch) =
+            relaunch_over_an_unreadable_scratch(workspace, cx, "draft.sql", |_| {});
+        let aside = scratch.with_file_name(
+            scratch
+                .file_name()
                 .unwrap()
-                .join(format!(".scratch-{id}.sql"))
+                .to_string_lossy()
+                .replace(".sql", ".unread-1.sql"),
+        );
+        assert_eq!(std::fs::read(&aside).unwrap(), b"-- \xff SELECT 1;");
+        workspace.read_with(cx, |workspace, _| {
+            let notice = workspace.profile().unwrap().session.notice.clone();
+            assert!(notice.is_some_and(|notice| notice.contains(".unread-1.sql")));
         });
 
-        close_window(workspace, cx);
-        std::fs::write(&scratch, b"-- \xff SELECT 1;").unwrap();
-        let (workspace, cx) = launch_again(cx);
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "xSELECT 1;", "hot exit kept it");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"-- \xff SELECT 1;");
         quit(workspace, cx);
-        assert_eq!(std::fs::read(&scratch).unwrap(), b"-- \xff SELECT 1;");
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_scratch_file_that_cannot_be_moved_aside_is_never_deleted(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let lock = |directory: &std::path::Path, mode| {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let (workspace, cx, path, scratch) =
+            relaunch_over_an_unreadable_scratch(workspace, cx, "stuck.sql", |directory| {
+                lock(directory, 0o555)
+            });
+        // Root renames regardless, and so the tab carries on as above.
+        if scratch.exists() {
+            cx.simulate_input("x");
+            cx.simulate_keystrokes("secondary-w");
+            settle(cx);
+            assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+            press(cx, "left");
+            press(cx, "left");
+            press(cx, "enter");
+            settle(cx);
+            assert!(!is_open(&workspace, cx, &path));
+            assert_eq!(std::fs::read(&scratch).unwrap(), b"-- \xff SELECT 1;");
+        }
+        lock(scratch.parent().unwrap(), 0o755);
+        quit(workspace, cx);
     });
 }
 

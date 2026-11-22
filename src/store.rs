@@ -1574,6 +1574,22 @@ pub fn write_scratch(profile_id: &str, tab: u64, sql: &str) -> Result<(), String
     write_file(&query_directory(profile_id)?.join(scratch_file(tab)), sql)
 }
 
+/// Move tab `tab`'s scratch file, which would not read, out of the way of
+/// the tab's own writes, to a name nothing writes or deletes, and say where.
+/// A rename needs only the directory, so this works where the file cannot
+/// be read, and the bytes stay as they were for the user to recover.
+pub fn set_aside_scratch(profile_id: &str, tab: u64) -> Result<PathBuf, String> {
+    let directory = query_directory(profile_id)?;
+    let from = directory.join(scratch_file(tab));
+    let to = (1..)
+        .map(|n| directory.join(format!(".scratch-{tab}.unread-{n}.sql")))
+        .find(|to| fs::symlink_metadata(to).is_err())
+        .expect("some name is free");
+    fs::rename(&from, &to)
+        .map(|()| to)
+        .map_err(|error| format!("Could not move {}: {error}", from.display()))
+}
+
 /// A file that is not there is not a failure: closing a buffer nothing was ever
 /// typed into leaves no file to delete.
 pub fn delete_scratch(profile_id: &str, tab: u64) -> Result<(), String> {
