@@ -39,6 +39,11 @@ const CALL_CAP: usize = 8;
 // them; sixteen leaves room without letting a loop hold a thread each forever.
 const PRESENCE_CAP: usize = 16;
 
+// ponytail: an answer is at most `wire::REPLY_LIMIT`, more than a socket
+// buffer holds on macOS, so a caller that stops reading would park the writer
+// and keep its call's place; a live shim reads it at once.
+const REPLY_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct Shared {
     stop: AtomicBool,
     /// Numbers every connection. Calls are numbered from it too.
@@ -318,7 +323,7 @@ fn call(
     // A dropped sender is a call that ended without an answer: nothing is
     // written, and the stream closing is what the caller sees.
     if let Ok(reply) = answers.recv()
-        && !deliver(stream, &reply, &gone)
+        && !deliver(stream, &reply, &gone, REPLY_WRITE_TIMEOUT)
     {
         let _ = inbound.send(Inbound::Undelivered { id });
     }
@@ -361,12 +366,16 @@ fn watch_for_hangup(
 /// the flag was read has closed its end, and Rust ignores `SIGPIPE`, so the
 /// write fails with `EPIPE` instead of ending the process.
 ///
-/// The stream stays as it is and is never read here: the hangup reader holds a
+/// The stream stays blocking and is never read here: the hangup reader holds a
 /// handle on the same open file description, so changing how this one blocks
 /// would change that read too, and it would return at once and read as a
-/// hangup.
-fn deliver(stream: &UnixStream, reply: &Reply, gone: &AtomicBool) -> bool {
+/// hangup. A send timeout is the socket's own and leaves reads alone; a write
+/// that outlasts `within` is one that did not arrive.
+fn deliver(stream: &UnixStream, reply: &Reply, gone: &AtomicBool, within: Duration) -> bool {
     if gone.load(Ordering::Acquire) {
+        return false;
+    }
+    if stream.set_write_timeout(Some(within)).is_err() {
         return false;
     }
     let mut writer = stream;
@@ -658,7 +667,7 @@ mod tests {
         // Open peer, flag clear: written, and the peer reads the frame.
         let (server, mut peer) = UnixStream::pair().expect("a pair of sockets");
         let gone = AtomicBool::new(false);
-        assert!(deliver(&server, &reply, &gone));
+        assert!(deliver(&server, &reply, &gone, REPLY_WRITE_TIMEOUT));
         let mut read = vec![0u8; frame.len()];
         peer.set_read_timeout(Some(Duration::from_secs(5)))
             .expect("the timeout is set");
@@ -668,12 +677,12 @@ mod tests {
 
         // Peer gone, flag clear: the write itself fails.
         drop(peer);
-        assert!(!deliver(&server, &reply, &gone));
+        assert!(!deliver(&server, &reply, &gone, REPLY_WRITE_TIMEOUT));
 
         // Flag set, peer open: nothing is written.
         let (server, mut peer) = UnixStream::pair().expect("a pair of sockets");
         let gone = AtomicBool::new(true);
-        assert!(!deliver(&server, &reply, &gone));
+        assert!(!deliver(&server, &reply, &gone, REPLY_WRITE_TIMEOUT));
         peer.set_read_timeout(Some(Duration::from_millis(100)))
             .expect("the timeout is set");
         let silent = peer.read(&mut [0u8; 1]).expect_err("nothing was written");
@@ -681,6 +690,24 @@ mod tests {
             silent.kind(),
             ErrorKind::WouldBlock | ErrorKind::TimedOut
         ));
+    }
+
+    #[test]
+    fn an_answer_the_caller_does_not_read_gives_up_at_its_deadline() {
+        // Far more than any socket buffer holds, so the write must wait.
+        let reply = Reply {
+            status: Status::Executed,
+            text: "a".repeat(8 * 1024 * 1024),
+        };
+        let (server, _silent) = UnixStream::pair().expect("a pair of sockets");
+        let started = Instant::now();
+        assert!(!deliver(
+            &server,
+            &reply,
+            &AtomicBool::new(false),
+            Duration::from_millis(200)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
