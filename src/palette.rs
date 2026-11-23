@@ -4993,6 +4993,8 @@ fn beside_import(command: &Command) -> bool {
             | Command::DownloadUpdate(_)
             | Command::InstallUpdate
             | Command::RestartIntoUpdate(_)
+            // The kill switch is never out of reach.
+            | Command::DisconnectAgents
     )
 }
 
@@ -5045,6 +5047,11 @@ mod tests {
 
     // `Failed` holds the platform's installer, which a test cannot build
     // here; `Ready` is the same row as a retry without the download.
+    #[test]
+    fn the_kill_switch_stays_beside_an_import() {
+        assert!(beside_import(&Command::DisconnectAgents));
+    }
+
     #[test]
     fn an_update_installed_elsewhere_offers_a_restart_into_it() {
         let installed = std::path::PathBuf::from("/home/me/.local/bin/dbdelve");
