@@ -1406,8 +1406,12 @@ impl Workspace {
         // included, and whether or not the profile is open: narrowing needs no
         // consent, and one definition of a changed target is all there is to
         // keep in step.
+        // The hide is recorded whatever this window's flag says: a grant saved
+        // by another window for the old target must not be taken on for the
+        // new one by the save below.
         let engine_changed = profile.config.engine() != config.engine();
-        let hide = (engine_changed || target_changed) && profile.agent_visible;
+        let hide = engine_changed || target_changed;
+        let was_visible = profile.agent_visible;
         // Edits staged against the rows the old config reached say nothing
         // about the new one's, where the same key can name another row; kept,
         // a Row view's next leave would send one there unread. A config that
@@ -1440,8 +1444,8 @@ impl Workspace {
                 *edit_mode = edit_mode.on(target);
             }
         }
-        if hide {
-            self.set_agent_visible(id, false, cx);
+        // Saved by `remember_profiles` below.
+        if hide && self.withdraw_agent_visibility(id, cx) && was_visible {
             let notice = if engine_changed {
                 format!("{name} is hidden from agents because its engine changed.")
             } else {

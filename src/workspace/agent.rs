@@ -747,22 +747,38 @@ impl Workspace {
     /// the prompt when it grants. Asked for `false` it hides at once, because
     /// narrowing needs no confirmation.
     pub(crate) fn set_agent_visible(&mut self, id: &str, visible: bool, cx: &mut Context<Self>) {
+        if !visible {
+            if self.withdraw_agent_visibility(id, cx) {
+                self.remember_profiles(cx);
+                cx.notify();
+            }
+            return;
+        }
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        if visible {
-            if self.agent_visibility_prompt.as_deref() != Some(id) {
-                return;
-            }
-            self.agent_visibility_prompt = None;
+        if self.agent_visibility_prompt.as_deref() != Some(id) {
+            return;
         }
-        profile.agent_visible = visible;
+        self.agent_visibility_prompt = None;
+        profile.agent_visible = true;
         self.agent.visibility_choices.insert(id.to_string());
-        if !visible {
-            self.reject_calls_for(id, cx);
-        }
         self.remember_profiles(cx);
         cx.notify();
+    }
+
+    /// The hide of [`Self::set_agent_visible`] without its save, for a caller
+    /// that saves next: the flag goes down, the hide is this window's pending
+    /// choice, so the save writes it whatever the file holds, and the
+    /// profile's calls are rejected. False when no profile has the id.
+    pub(crate) fn withdraw_agent_visibility(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
+            return false;
+        };
+        profile.agent_visible = false;
+        self.agent.visibility_choices.insert(id.to_string());
+        self.reject_calls_for(id, cx);
+        true
     }
 
     /// Answer every call waiting on this profile `rejected`, oldest first, each

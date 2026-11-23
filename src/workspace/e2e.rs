@@ -11351,6 +11351,38 @@ fn a_failed_save_keeps_the_hide_and_the_kill_switch_for_the_next(cx: &mut TestAp
     });
 }
 
+#[gpui::test]
+fn a_new_target_hides_a_grant_this_window_had_not_taken_on_yet(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("dev", "Dev", ""));
+        assert!(!agent_visible(&workspace, cx, "dev"));
+
+        // Another window granted it, for the target this one still has.
+        let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        list.profiles
+            .iter_mut()
+            .find(|profile| profile.id == "dev")
+            .expect("the profile was saved")
+            .agent_visible = true;
+        store::save_profiles(&list).expect("the other window saves");
+
+        // A timeout is a change `needs_reconnect` sees and `retargets` does not.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let mut config = workspace.profiles[0].config.clone();
+            if let ConnectionConfig::Sqlite {
+                statement_timeout, ..
+            } = &mut config
+            {
+                *statement_timeout += 1;
+            }
+            workspace.save_profile("dev", "Dev".into(), config, None, window, cx);
+        });
+        assert!(!agent_visible(&workspace, cx, "dev"));
+        assert!(!saved_visible("dev"));
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }
