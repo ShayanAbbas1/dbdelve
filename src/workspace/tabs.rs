@@ -1044,6 +1044,11 @@ impl Workspace {
             self.cancel_quit(cx);
             return;
         }
+        // Drawn over the connection form, so it closes before the form does,
+        // and before the project naming drawn in it.
+        if self.form.is_some() && self.close_agent_audit(cx) {
+            return;
+        }
         // Backs out of naming a new project to the list, as its × does,
         // rather than out of everything typed into the form.
         if let Some(form) = &mut self.form
@@ -1052,10 +1057,6 @@ impl Workspace {
             form.naming_project = false;
             form.needs_focus = Some(form.name.clone());
             cx.notify();
-            return;
-        }
-        // Drawn over the connection form, so it closes before the form does.
-        if self.form.is_some() && self.close_agent_audit(cx) {
             return;
         }
         if self.form.is_some() {

@@ -15667,6 +15667,37 @@ fn an_entry_is_capped_when_the_agent_was_given_fewer_rows_than_there_were() {
 
 #[cfg(unix)]
 #[gpui::test]
+fn escape_closes_the_agent_audit_before_the_project_naming_under_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        run_command(&workspace, cx, Command::NewConnection);
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .form
+                .as_mut()
+                .expect("the form is open")
+                .naming_project = true;
+            workspace.show_agent_activity(cx);
+        });
+        settle(cx);
+
+        cx.dispatch_action(crate::actions::ShowEditor);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.agent_audit_open, "the dialog on top went first");
+            assert!(
+                workspace
+                    .form
+                    .as_ref()
+                    .is_some_and(|form| form.naming_project),
+                "the naming under it was left as it was"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_agent_audit_opens_from_the_popover_and_hands_the_keyboard_back(cx: &mut TestAppContext) {
     use crate::{actions::ShowAgentActivity, agent::Status};
 
