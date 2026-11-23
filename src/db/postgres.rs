@@ -7366,6 +7366,36 @@ mod tests {
         assert_eq!(databases.current.as_deref(), Some("postgres"));
     }
 
+    /// A database name no other run uses, so a test never drops one it did
+    /// not create: `prefix`, then this process and the time.
+    fn scratch_name(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        format!("{prefix}_{}_{nanos}", std::process::id())
+    }
+
+    /// Creates `name` from `maintenance`, failing rather than dropping a
+    /// database that already has the name, and only then arms its drop.
+    fn create_scratch<'a>(
+        maintenance: &'a crate::db::Connection,
+        name: &str,
+        at: &str,
+    ) -> Scratch<'a> {
+        let create = format!("CREATE DATABASE {name} TEMPLATE template0");
+        maintenance
+            .query(
+                &create,
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap_or_else(|error| panic!("{at}: `{create}` failed: {error}"));
+        Scratch(
+            maintenance,
+            format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
+        )
+    }
+
     /// Drops the scratch database when the test ends, panicking or not.
     /// The result is ignored: the test's own failure is the one worth
     /// reading.
@@ -7385,35 +7415,26 @@ mod tests {
     /// because the dev database is shared and an extension is database-wide,
     /// and it needs a role that can create a database and install an
     /// untrusted extension, which is a superuser on the compose server. The
-    /// database is dropped before it is created and again when the test ends,
-    /// so a run stopped by a signal costs a re-run and not a manual cleanup.
+    /// database is named for this run and dropped when the test ends; a run
+    /// stopped by a signal leaves it behind, to drop by hand.
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_extension_carriers_agree_with_the_server() {
         use crate::db::{CancelToken as Cancel, Connection as Any};
         use crate::sql;
 
-        // Named for this test alone, and large objects live per database, so
+        // Named for this run alone, and large objects live per database, so
         // nothing another scenario writes can collide with the oids below.
-        const SCRATCH: &str = "dbdelve_carriers_975";
+        let scratch_db = scratch_name("dbdelve_carriers_975");
         let at = "live_extension_carriers_agree_with_the_server";
-        let drop_scratch = format!("DROP DATABASE IF EXISTS {SCRATCH} WITH (FORCE)");
 
         let maintenance = live_profile();
-        for statement in [
-            drop_scratch.clone(),
-            format!("CREATE DATABASE {SCRATCH} TEMPLATE template0"),
-        ] {
-            maintenance
-                .query(&statement, &Cancel::default(), Fetch::default())
-                .unwrap_or_else(|error| panic!("{at}: `{statement}` failed: {error}"));
-        }
         // Declared after `maintenance` and before the scratch connection, so
         // it drops between them: the drop's FORCE ends the scratch session.
-        let _scratch = Scratch(&maintenance, drop_scratch);
+        let _scratch = create_scratch(&maintenance, &scratch_db, at);
         let scratch = Any::Postgres(
             Connection::open(&ServerConfig {
-                database: SCRATCH.into(),
+                database: scratch_db.clone(),
                 ..live_config()
             })
             .expect("the scratch database should open"),
@@ -7444,7 +7465,7 @@ mod tests {
                 .set_read_only(on)
                 .unwrap_or_else(|error| panic!("{at}: {error}"));
         };
-        let canary = format!("INSERT INTO {SCRATCH} (id) VALUES (975)");
+        let canary = format!("INSERT INTO {scratch_db} (id) VALUES (975)");
         let refused = || {
             let error = scratch
                 .query(&canary, &Cancel::default(), Fetch::default())
@@ -7483,7 +7504,7 @@ mod tests {
         install("CREATE EXTENSION xml2");
         install("CREATE EXTENSION dblink");
         install("CREATE EXTENSION postgis");
-        run(&format!("CREATE TABLE {SCRATCH} (id int)"));
+        run(&format!("CREATE TABLE {scratch_db} (id int)"));
 
         // `crosstab` releasing the hold: the canary write is refused, the
         // carrier runs, and the same write then goes through.
@@ -7495,7 +7516,7 @@ mod tests {
         run(&canary);
         hold(false);
         controlled();
-        run(&format!("DELETE FROM {SCRATCH} WHERE id = 975"));
+        run(&format!("DELETE FROM {scratch_db} WHERE id = 975"));
 
         // Every case arms the hold, runs, asserts, lowers the hold and runs
         // the control before the next begins, so the order of the cases
@@ -7738,7 +7759,7 @@ mod tests {
     fn live_every_function_adminpack_owns_is_on_the_deny_or_egress_list() {
         use crate::db::{CancelToken as Cancel, Connection as Any};
 
-        const SCRATCH: &str = "dbdelve_adminpack";
+        let scratch_db = scratch_name("dbdelve_adminpack");
         let at = "live_every_function_adminpack_owns_is_on_the_deny_or_egress_list";
         let maintenance = live_profile();
         let ask = |connection: &Any, sql: &str| {
@@ -7772,19 +7793,12 @@ mod tests {
             return;
         }
 
-        let drop_scratch = format!("DROP DATABASE IF EXISTS {SCRATCH} WITH (FORCE)");
-        for statement in [
-            drop_scratch.clone(),
-            format!("CREATE DATABASE {SCRATCH} TEMPLATE template0"),
-        ] {
-            ask(&maintenance, &statement);
-        }
         // Declared after `maintenance` and before the scratch connection, so
         // it drops between them: the drop's FORCE ends the scratch session.
-        let _scratch = Scratch(&maintenance, drop_scratch);
+        let _scratch = create_scratch(&maintenance, &scratch_db, at);
         let scratch = Any::Postgres(
             Connection::open(&ServerConfig {
-                database: SCRATCH.into(),
+                database: scratch_db.clone(),
                 ..live_config()
             })
             .expect("the scratch database should open"),
