@@ -12738,6 +12738,8 @@ fn the_save_chord_in_the_grid_applies_edits(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_relaunch_brings_a_file_tab_back_dirty_without_writing_its_file(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
+        // CI's live job sets `PG*`, whose profile would be put in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = user_sql_file("draft.sql", "SELECT 1;");
         open_sql_file(&workspace, cx, &path);
@@ -12766,6 +12768,8 @@ fn a_relaunch_brings_a_file_tab_back_dirty_without_writing_its_file(cx: &mut Tes
 #[gpui::test]
 fn a_relaunch_with_two_tabs_on_one_file_keeps_both_buffers(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
+        // CI's live job sets `PG*`, whose profile would be put in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = user_sql_file("shared.sql", "SELECT 1;");
         let link = path.with_file_name("link.sql");
@@ -13494,6 +13498,8 @@ fn escape_takes_down_forget_file_before_the_overwrite_under_it(cx: &mut TestAppC
 #[gpui::test]
 fn a_file_gone_at_relaunch_comes_back_saying_it_was_deleted(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
+        // CI's live job sets `PG*`, whose profile would be put in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = open_dirty_file(&workspace, cx, "vanished.sql");
         let (id, _) = front_scratch(&workspace, cx);
