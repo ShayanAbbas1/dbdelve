@@ -62,13 +62,26 @@ struct Written<'a> {
     rows: Vec<(String, bool)>,
     /// How many of `rows` are written.
     kept: usize,
+    /// How many of the written rows have a clipped cell, kept as rows are
+    /// dropped so the header asked for after each drop need not rescan them.
+    kept_clipped: usize,
     /// The names were too many to list, and the rows went with them.
     unlisted: bool,
 }
 
 impl Written<'_> {
     fn clipped(&self) -> bool {
-        self.rows[..self.kept].iter().any(|(_, clipped)| *clipped)
+        self.kept_clipped > 0
+    }
+
+    /// Stop writing the last written row, and say how many bytes that saves.
+    fn drop_last(&mut self) -> usize {
+        self.kept -= 1;
+        let (line, clipped) = &self.rows[self.kept];
+        if *clipped {
+            self.kept_clipped -= 1;
+        }
+        line.len()
     }
 
     fn cut(&self, further: usize) -> Option<String> {
@@ -117,8 +130,7 @@ pub(crate) fn text(tables: &[Table], further: usize, note: Option<&str>) -> Stri
             // Nothing is left to drop: the leading lines are all there is.
             return assemble(&written, &head, &note);
         };
-        last.kept -= 1;
-        body -= last.rows[last.kept].0.len();
+        body -= last.drop_last();
     }
 }
 
@@ -153,6 +165,7 @@ fn write(table: &Table) -> Written<'_> {
             ),
             rows: Vec::new(),
             kept: 0,
+            kept_clipped: 0,
             unlisted: true,
         };
     }
@@ -180,6 +193,7 @@ fn write(table: &Table) -> Written<'_> {
         table,
         lead,
         kept: rows.len(),
+        kept_clipped: rows.iter().filter(|(_, clipped)| *clipped).count(),
         rows,
         unlisted: false,
     }
@@ -549,6 +563,27 @@ mod tests {
         // A cell of exactly the cap is left alone.
         let whole = text(&[wide(1, &"x".repeat(CELL_CAP), Total::Exact(1))], 0, None);
         assert!(whole.starts_with("truncated: none (1 row)\n"));
+    }
+
+    #[test]
+    fn a_clipped_row_dropped_for_the_budget_takes_its_reason_with_it() {
+        // Twelve long rows nearly fill the budget, so the clipped thirteenth
+        // is the one dropped, and with it the only clipped cell.
+        let mut table = wide(13, &"a".repeat(1_900), Total::Exact(13));
+        table.rows[12][0] = Some("x".repeat(CELL_CAP + 1));
+        let out = text(&[table.clone()], 0, None);
+        assert_eq!(
+            out.lines().next(),
+            Some("truncated: 12 of 13 rows shown (byte budget)")
+        );
+
+        // The same clipped row first, and it is still written.
+        table.rows.rotate_right(1);
+        let out = text(&[table], 0, None);
+        assert_eq!(
+            out.lines().next(),
+            Some("truncated: 12 of 13 rows shown (byte budget, clipped cells)")
+        );
     }
 
     #[test]
