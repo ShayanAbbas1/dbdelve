@@ -323,8 +323,12 @@ fn visible_lines(
     marker: HighlightStyle,
 ) -> Vec<(String, Highlights)> {
     let seen = visible(text);
-    let mut runs = seen.remap(&code_highlights(text, syntax, Code::Statement, theme));
-    runs.extend(seen.map.iter().map(|(_, shown)| (shown.clone(), marker)));
+    let markers: Vec<Range<usize>> = seen.map.iter().map(|(_, shown)| shown.clone()).collect();
+    let runs = with_markers(
+        seen.remap(&code_highlights(text, syntax, Code::Statement, theme)),
+        &markers,
+        marker,
+    );
     let mut start = 0;
     seen.display
         .split('\n')
@@ -342,6 +346,33 @@ fn visible_lines(
             (line.to_string(), own)
         })
         .collect()
+}
+
+/// `runs` with every marker cut out of them and drawn in `marker` instead,
+/// in order and never overlapping, as a text's highlights must be: a run that
+/// spans a marker (a string holding one) is split around it. `markers` are in
+/// order and disjoint, as [`visible`] makes them.
+fn with_markers(runs: Highlights, markers: &[Range<usize>], marker: HighlightStyle) -> Highlights {
+    let mut out = Vec::with_capacity(runs.len() + markers.len() * 2);
+    for (range, style) in runs {
+        let mut at = range.start;
+        let first = markers.partition_point(|shown| shown.end <= range.start);
+        for shown in markers[first..]
+            .iter()
+            .take_while(|shown| shown.start < range.end)
+        {
+            if at < shown.start {
+                out.push((at..shown.start, style));
+            }
+            at = at.max(shown.end);
+        }
+        if at < range.end {
+            out.push((at..range.end, style));
+        }
+    }
+    out.extend(markers.iter().map(|shown| (shown.clone(), marker)));
+    out.sort_by_key(|(range, _)| range.start);
+    out
 }
 
 /// How big a statement is as the reader sees it: the lines drawn, and its bytes
@@ -1895,6 +1926,42 @@ mod tests {
         assert_eq!(seen.remap(&[(0..7, style)])[0].0, 0..14);
         assert_eq!(seen.remap(&[(7..11, style)])[0].0, 14..16);
         assert_eq!(seen.remap(&[(9..11, style)])[0].0, 14..16);
+    }
+
+    #[test]
+    fn a_marker_inside_a_coloured_run_splits_it_and_nothing_overlaps() {
+        let theme = HighlightTheme::default_dark();
+        let marker = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let text = "SELECT 'a\u{200b}b', 'c\u{202e}' FROM t";
+        for (line, runs) in visible_lines(text, Syntax::Sql, &theme, marker) {
+            for pair in runs.windows(2) {
+                assert!(
+                    pair[0].0.end <= pair[1].0.start,
+                    "{line}: {:?} overlaps or precedes {:?}",
+                    pair[0].0,
+                    pair[1].0
+                );
+            }
+            for (range, style) in &runs {
+                let drawn = &line[range.clone()];
+                if drawn.starts_with("[U+") {
+                    assert_eq!(*style, marker, "{drawn}");
+                } else {
+                    assert!(
+                        !drawn.contains("[U+"),
+                        "a marker kept the run's colour: {drawn}"
+                    );
+                }
+            }
+            assert!(
+                runs.iter()
+                    .any(|(range, _)| &line[range.clone()] == "[U+200B]")
+            );
+            assert!(runs.iter().any(|(range, _)| &line[range.clone()] == "'a"));
+        }
     }
 
     #[test]
