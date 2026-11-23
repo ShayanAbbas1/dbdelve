@@ -195,7 +195,7 @@ impl Analysis {
                     value,
                     share,
                     tier: share.map(Tier::of_share),
-                    misestimate: misestimate(&plan.nodes, index),
+                    misestimate: misestimate(&plan.nodes, index, engine),
                     parallel: parallel[index],
                 }
             })
@@ -261,8 +261,9 @@ fn findings(nodes: &[NodeAnalysis]) -> Vec<Finding> {
 /// input first, so what is under one is read to the end.
 ///
 /// Postgres reports both counts per loop, so they compare as they stand; zero
-/// is read as one so neither side divides by it.
-fn misestimate(nodes: &[PlanNode], index: usize) -> Option<Misestimate> {
+/// is read as one so neither side divides by it, and a fraction above zero,
+/// like MySQL's `rows=0.05`, is kept as it is.
+fn misestimate(nodes: &[PlanNode], index: usize, engine: Engine) -> Option<Misestimate> {
     let node = &nodes[index];
     let (estimated, actual) = (node.estimated?.rows, node.actual?.rows);
     // A count that is NaN or too large for a float to hold is text the server
@@ -270,7 +271,8 @@ fn misestimate(nodes: &[PlanNode], index: usize) -> Option<Misestimate> {
     if !estimated.is_finite() || !actual.is_finite() {
         return None;
     }
-    let (estimated, actual) = (estimated.max(1.0), actual.max(1.0));
+    let nonzero = |count: f64| if count == 0.0 { 1.0 } else { count };
+    let (estimated, actual) = (nonzero(estimated), nonzero(actual));
     let factor = (actual / estimated).max(estimated / actual);
     let tier = Tier::of_misestimate(factor)?;
     let direction = if actual > estimated {
@@ -279,7 +281,7 @@ fn misestimate(nodes: &[PlanNode], index: usize) -> Option<Misestimate> {
         Direction::Over
     };
 
-    let stopped = stopped_early(nodes, index);
+    let stopped = stopped_early(nodes, index, engine);
     (!(direction == Direction::Over && stopped)).then_some(Misestimate {
         factor,
         direction,
@@ -292,7 +294,7 @@ fn misestimate(nodes: &[PlanNode], index: usize) -> Option<Misestimate> {
 /// child but the first). The walk up ends at the first operator that reads all
 /// of its input before it returns a row, since nothing above it can cut the
 /// node short.
-fn stopped_early(nodes: &[PlanNode], index: usize) -> bool {
+fn stopped_early(nodes: &[PlanNode], index: usize, engine: Engine) -> bool {
     let mut depth = nodes[index].depth;
     // The child of the next ancestor found that the walk came up through.
     let mut branch = index;
@@ -301,7 +303,7 @@ fn stopped_early(nodes: &[PlanNode], index: usize) -> bool {
             continue;
         }
         let label = ancestor.label.to_lowercase();
-        if reads_all_input(&label) {
+        if reads_all_input(&label, engine) {
             return false;
         }
         let inner = branch != above + 1;
@@ -318,15 +320,17 @@ fn stopped_early(nodes: &[PlanNode], index: usize) -> bool {
 
 /// Whether an operator, by its lowercased label, consumes every row beneath it
 /// before it produces one. A `Hash` is the build side of a hash join; a group
-/// aggregate streams its groups and is not listed.
+/// aggregate streams its groups and is not listed. MySQL's `Materialize` fills
+/// its temporary table before reading it back; Postgres's stores rows only as
+/// they are first asked for, so a `Limit` above one still stops its input.
 ///
 /// ponytail: labels are matched by the engine's own words for these operators;
 /// an operator not named here is read as passing rows along, which can only
 /// hide a misestimate that a `Limit` above would have explained anyway.
-fn reads_all_input(label: &str) -> bool {
+fn reads_all_input(label: &str, engine: Engine) -> bool {
     label == "hash"
         || label.starts_with("sort")
-        || label.starts_with("materialize")
+        || (label.starts_with("materialize") && engine != Engine::Postgres)
         || label.starts_with("temporary table")
         || (label.contains("aggregate") && !label.starts_with("group"))
 }
@@ -383,7 +387,8 @@ fn workers_of(nodes: &[PlanNode], gather: usize) -> Option<u32> {
 }
 
 /// Each node's own planner cost: its `total_cost` less its direct children's,
-/// never below zero. A child with no estimate costs its parent nothing here.
+/// never below zero. A child with no estimate, or one that is not finite, costs
+/// its parent nothing here, and a node whose own total is not finite has none.
 fn own_costs(nodes: &[PlanNode]) -> Vec<Option<f64>> {
     // The node each one hangs from is the nearest one above it that is
     // shallower.
@@ -396,7 +401,9 @@ fn own_costs(nodes: &[PlanNode]) -> Vec<Option<f64>> {
         {
             path.pop();
         }
-        if let (Some(parent), Some(estimated)) = (path.last(), node.estimated) {
+        if let (Some(parent), Some(estimated)) = (path.last(), node.estimated)
+            && estimated.total_cost.is_finite()
+        {
             children[*parent] += estimated.total_cost;
         }
         path.push(index);
@@ -404,7 +411,10 @@ fn own_costs(nodes: &[PlanNode]) -> Vec<Option<f64>> {
     nodes
         .iter()
         .zip(children)
-        .map(|(node, children)| Some((node.estimated?.total_cost - children).max(0.0)))
+        .map(|(node, children)| {
+            let total = node.estimated?.total_cost;
+            total.is_finite().then(|| (total - children).max(0.0))
+        })
         .collect()
 }
 
@@ -881,6 +891,9 @@ mod tests {
         // Zero is read as one, so nothing divides by it.
         assert_eq!(missed(0.0, 20.0), Some((20.0, Under, Tier::Warm)));
         assert_eq!(missed(1.0, 0.0), None);
+        // A fraction above zero is a count, not a zero: 0.05 rows against 20
+        // is 400 times under, not the 20 times a floor at one would make it.
+        assert_eq!(missed(0.05, 20.0), Some((400.0, Under, Tier::Hot)));
         assert_eq!(missed(100.0, 1000.0), Some((10.0, Under, Tier::Warm)));
         assert_eq!(missed(100.0, 999.0), None);
         let (factor, direction, tier) = missed(10.0, 999.0).unwrap();
@@ -1010,6 +1023,50 @@ mod tests {
             node("Seq Scan on b", 2, 100_000.0, 1.0),
         ];
         assert_eq!(miss(hashed, 3), Some(100_000.0));
+    }
+
+    #[test]
+    fn a_postgres_materialize_passes_a_limit_through_and_a_mysql_one_does_not() {
+        let miss = |engine: Engine| {
+            let plan = Plan {
+                nodes: vec![
+                    node("Limit", 0, 10.0, 10.0),
+                    node("Materialize", 1, 10.0, 10.0),
+                    node("Seq Scan on big", 2, 1_000_000.0, 10.0),
+                ],
+                ..Plan::default()
+            };
+            Analysis::new(&plan, engine).nodes[2]
+                .misestimate
+                .map(|miss| miss.factor)
+        };
+        // Postgres stores rows as they are asked for, so the `Limit` stopped
+        // the scan; MySQL fills its table first, so the scan ran to the end.
+        assert_eq!(miss(Engine::Postgres), None);
+        assert_eq!(miss(Engine::MySql), Some(100_000.0));
+    }
+
+    #[test]
+    fn a_cost_that_is_not_finite_is_neither_a_node_cost_nor_subtracted() {
+        let costed = |label: &str, depth: usize, total_cost: f64| PlanNode {
+            label: label.into(),
+            depth,
+            estimated: Some(explain::Estimated {
+                startup_cost: 0.0,
+                total_cost,
+                rows: 1.0,
+                width: 0,
+            }),
+            ..PlanNode::default()
+        };
+        let costs = own_costs(&[
+            costed("Hash Join", 0, 100.0),
+            costed("Seq Scan on a", 1, f64::INFINITY),
+            costed("Seq Scan on b", 1, 30.0),
+            costed("Sort", 0, f64::NAN),
+            costed("Seq Scan on c", 1, 5.0),
+        ]);
+        assert_eq!(costs, [Some(70.0), None, Some(30.0), None, Some(5.0)]);
     }
 
     #[test]
