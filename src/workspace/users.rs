@@ -300,8 +300,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
-            UsersEvent::Select(name) => self.read_reach(id, name.clone(), cx),
-            UsersEvent::Reports => self.read_reports(id, cx),
+            UsersEvent::Select(name, request) => self.read_reach(id, name.clone(), *request, cx),
+            UsersEvent::Reports(request) => self.read_reports(id, *request, cx),
             UsersEvent::NewRole { login } => {
                 self.open_role_form(id, RoleFormKind::New { login: *login }, window, cx)
             }
@@ -334,7 +334,7 @@ impl Workspace {
         }
     }
 
-    fn read_reach(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
+    fn read_reach(&mut self, id: &str, name: String, request: u64, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -342,9 +342,8 @@ impl Workspace {
             return;
         };
         let (id, generation) = (id.to_string(), profile.generation);
-        let asked = name.clone();
         let read = spawn_blocking(cx.background_executor(), move || {
-            connection.apart()?.role_reach(&asked)
+            connection.apart()?.role_reach(&name)
         });
         cx.spawn(async move |workspace, cx| {
             let result = read.await;
@@ -357,14 +356,14 @@ impl Workspace {
                     Err(error) => Loaded::Failed(error.message),
                 };
                 if let Some(view) = workspace.users_view_of(&id) {
-                    view.update(cx, |view, cx| view.set_reach(&name, reach, cx));
+                    view.update(cx, |view, cx| view.set_reach(request, reach, cx));
                 }
             });
         })
         .detach();
     }
 
-    fn read_reports(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn read_reports(&mut self, id: &str, request: u64, cx: &mut Context<Self>) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -375,7 +374,11 @@ impl Workspace {
             // rather than wait on a read nothing started.
             if let Some(view) = self.users_view_of(id) {
                 view.update(cx, |view, cx| {
-                    view.set_reports(Loaded::Failed("the roles have not been read".into()), cx)
+                    view.set_reports(
+                        request,
+                        Loaded::Failed("the roles have not been read".into()),
+                        cx,
+                    )
                 });
             }
             return;
@@ -395,7 +398,7 @@ impl Workspace {
                     Err(error) => Loaded::Failed(error.message),
                 };
                 if let Some(view) = workspace.users_view_of(&id) {
-                    view.update(cx, |view, cx| view.set_reports(reports, cx));
+                    view.update(cx, |view, cx| view.set_reports(request, reports, cx));
                 }
             });
         })

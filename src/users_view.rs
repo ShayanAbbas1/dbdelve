@@ -27,10 +27,11 @@ pub enum Loaded<T> {
 
 /// What the tab asks the workspace to do.
 pub enum UsersEvent {
-    /// A row was picked: read what it can reach.
-    Select(String),
-    /// The Reports were opened: read them.
-    Reports,
+    /// A row was picked: read what it can reach. The answer lands only
+    /// while it carries the request the view last asked under.
+    Select(String, u64),
+    /// The Reports were opened: read them, under a request as `Select`'s.
+    Reports(u64),
     NewRole {
         login: bool,
     },
@@ -49,6 +50,11 @@ pub struct UsersView {
     roles: Loaded<Arc<Roles>>,
     selected: Option<String>,
     reach: Option<Loaded<Reach>>,
+    /// The last read of what a row reaches and of the Reports: an older
+    /// answer, which can land after a newer one, is dropped. By request and
+    /// not by name, since the same row picked again is a newer read.
+    reach_request: u64,
+    reports_request: u64,
     reports_shown: bool,
     reports: Option<Loaded<Reports>>,
 }
@@ -193,6 +199,8 @@ impl UsersView {
             roles: Loaded::Loading,
             selected: None,
             reach: None,
+            reach_request: 0,
+            reports_request: 0,
             reports_shown: false,
             reports: None,
         }
@@ -229,12 +237,10 @@ impl UsersView {
         let ready = matches!(roles, Loaded::Ready(_));
         self.roles = roles;
         if let Some(name) = self.selected.clone().filter(|_| ready) {
-            self.reach = Some(Loaded::Loading);
-            cx.emit(UsersEvent::Select(name));
+            self.ask_reach(name, cx);
         }
         if self.reports_shown && ready {
-            self.reports = Some(Loaded::Loading);
-            cx.emit(UsersEvent::Reports);
+            self.ask_reports(cx);
         }
         cx.notify();
     }
@@ -246,22 +252,36 @@ impl UsersView {
         }
         self.reports_shown = false;
         self.selected = Some(name.to_string());
-        self.reach = Some(Loaded::Loading);
-        cx.emit(UsersEvent::Select(name.to_string()));
+        self.ask_reach(name.to_string(), cx);
         cx.notify();
     }
 
-    /// What `name` reaches, if it is still the pick.
-    pub fn set_reach(&mut self, name: &str, reach: Loaded<Reach>, cx: &mut Context<Self>) {
-        if self.selected.as_deref() == Some(name) {
+    fn ask_reach(&mut self, name: String, cx: &mut Context<Self>) {
+        self.reach_request += 1;
+        self.reach = Some(Loaded::Loading);
+        cx.emit(UsersEvent::Select(name, self.reach_request));
+    }
+
+    fn ask_reports(&mut self, cx: &mut Context<Self>) {
+        self.reports_request += 1;
+        self.reports = Some(Loaded::Loading);
+        cx.emit(UsersEvent::Reports(self.reports_request));
+    }
+
+    /// What the pick reaches, if `request` is still the last one asked.
+    pub fn set_reach(&mut self, request: u64, reach: Loaded<Reach>, cx: &mut Context<Self>) {
+        if request == self.reach_request {
             self.reach = Some(reach);
             cx.notify();
         }
     }
 
-    pub fn set_reports(&mut self, reports: Loaded<Reports>, cx: &mut Context<Self>) {
-        self.reports = Some(reports);
-        cx.notify();
+    /// The Reports, if `request` is still the last one asked.
+    pub fn set_reports(&mut self, request: u64, reports: Loaded<Reports>, cx: &mut Context<Self>) {
+        if request == self.reports_request {
+            self.reports = Some(reports);
+            cx.notify();
+        }
     }
 
     fn show_reports(&mut self, shown: bool, cx: &mut Context<Self>) {
@@ -270,8 +290,7 @@ impl UsersView {
         }
         self.reports_shown = shown;
         if shown && !matches!(self.reports, Some(Loaded::Ready(_) | Loaded::Loading)) {
-            self.reports = Some(Loaded::Loading);
-            cx.emit(UsersEvent::Reports);
+            self.ask_reports(cx);
         }
         cx.notify();
     }
@@ -1113,6 +1132,39 @@ mod tests {
             reports_csv(&odd),
             "report,name,count\nSuperusers,\"a\rb\",\nSuperusers,\"c,d\",\n"
         );
+    }
+
+    #[gpui::test]
+    fn an_older_read_of_reach_or_reports_never_replaces_a_newer_one(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let view = cx.new(|_| UsersView::new("main".into()));
+        let reach = |owns| {
+            Loaded::Ready(Reach {
+                owns,
+                ..Reach::default()
+            })
+        };
+        view.update(cx, |view, cx| {
+            view.selected = Some("ana".into());
+            view.ask_reach("ana".into(), cx);
+            let first = view.reach_request;
+            // The same row asked again: the first answer is not this one's.
+            view.ask_reach("ana".into(), cx);
+            view.set_reach(first, reach(1), cx);
+            assert!(matches!(view.reach, Some(Loaded::Loading)));
+            view.set_reach(view.reach_request, reach(2), cx);
+            assert!(matches!(&view.reach, Some(Loaded::Ready(read)) if read.owns == 2));
+            view.set_reach(first, reach(1), cx);
+            assert!(matches!(&view.reach, Some(Loaded::Ready(read)) if read.owns == 2));
+
+            view.ask_reports(cx);
+            let first = view.reports_request;
+            view.ask_reports(cx);
+            view.set_reports(first, Loaded::Failed("old".into()), cx);
+            assert!(matches!(view.reports, Some(Loaded::Loading)));
+            view.set_reports(view.reports_request, Loaded::Ready(Reports::default()), cx);
+            assert!(view.reports().is_some());
+        });
     }
 
     #[test]
