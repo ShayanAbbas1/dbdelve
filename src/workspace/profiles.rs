@@ -4194,7 +4194,9 @@ fn run_startup(
 /// without mentioning it; a plugin profile is held back here instead, because
 /// read as Postgres it would be saved as one.
 /// What a stored profile connects to, read as a restore reads it, or `None`
-/// when a restore could not read it at all.
+/// when a restore could not read it at all, or read its engine only as the
+/// Postgres stand-in it opens with a notice: that stand-in is not what the
+/// file names, so no grant is matched against it.
 pub(super) fn stored_target(
     stored: &store::StoredProfile,
     plugins: &[&'static Plugin],
@@ -4204,9 +4206,10 @@ pub(super) fn stored_target(
         None => SslMode::default(),
         Some(slug) => SslMode::parse(slug).unwrap_or(SslMode::VerifyFull),
     };
-    restored_config(stored, sslmode, plugins)
-        .ok()
-        .map(|(config, _)| config)
+    match restored_config(stored, sslmode, plugins) {
+        Ok((config, None)) => Some(config),
+        Ok((_, Some(_))) | Err(_) => None,
+    }
 }
 
 fn restored_config(
@@ -4932,6 +4935,20 @@ target = 'i-0123456789abcdef0'
             stored_config(&file("database = ''"), Engine::DuckDb, SslMode::default()),
             ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0)
         );
+    }
+
+    #[test]
+    fn a_stored_engine_read_only_as_a_stand_in_has_no_target() {
+        let file = |engine: &str| -> store::StoredProfile {
+            toml::from_str(&format!(
+                "id = 'dev'\nname = 'Dev'\nhost = 'db.internal'\nuser = 'ada'\n\
+                 database = 'orders'\nengine = '{engine}'\n"
+            ))
+            .expect("a profile")
+        };
+        assert!(stored_target(&file("postgres"), &[]).is_some());
+        // Read as Postgres with a notice: not the target the file names.
+        assert_eq!(stored_target(&file("no-such-engine"), &[]), None);
     }
 
     #[test]
