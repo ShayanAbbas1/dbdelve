@@ -307,6 +307,11 @@ impl UsersView {
         cx.emit(UsersEvent::Reports(self.reports_request));
     }
 
+    #[cfg(test)]
+    pub(crate) fn reach(&self) -> Option<&Loaded<Reach>> {
+        self.reach.as_ref()
+    }
+
     /// What the pick reaches, if `request` is still the last one asked.
     pub fn set_reach(&mut self, request: u64, reach: Loaded<Reach>, cx: &mut Context<Self>) {
         if request == self.reach_request {

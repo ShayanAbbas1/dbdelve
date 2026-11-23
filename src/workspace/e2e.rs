@@ -6286,6 +6286,43 @@ fn a_users_and_roles_tab_is_never_saved_with_the_session(cx: &mut TestAppContext
     });
 }
 
+/// Each Users and roles tab numbers its own reads from one: a read the closed
+/// tab asked for lands on that tab, never on the one opened since, which has
+/// asked under the same number.
+#[gpui::test]
+fn a_reach_read_lands_on_the_tab_that_asked_for_it(cx: &mut TestAppContext) {
+    use crate::users_view::Loaded;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let fresh = workspace.update_in(cx, |workspace, window, cx| {
+            let closed = users_tab_on(workspace, window, cx);
+            let view = |workspace: &Workspace, tab| {
+                (workspace.profile().unwrap().session.objects.iter())
+                    .find(|object| object.id == tab)
+                    .and_then(|object| match &object.body {
+                        ObjectBody::Users { view, .. } => Some(view.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let asked = view(workspace, closed);
+            let id = workspace.profile().unwrap().id.clone();
+            workspace.read_reach(&id, asked.downgrade(), "ana".into(), 1, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.session.objects.retain(|object| object.id != closed);
+            let opened = users_tab_on(workspace, window, cx);
+            let fresh = view(workspace, opened);
+            fresh.update(cx, |view, cx| view.select("bob", cx));
+            fresh
+        });
+        settle(cx);
+        fresh.read_with(cx, |view, _| {
+            assert!(matches!(view.reach(), Some(Loaded::Loading)));
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_role_change_whose_users_tab_closed_under_it_leaves_the_roles_to_be_read_again(
     cx: &mut TestAppContext,

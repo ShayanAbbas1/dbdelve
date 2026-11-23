@@ -14,6 +14,8 @@
 use std::io::Write as _;
 use std::sync::{Mutex, PoisonError};
 
+use gpui::WeakEntity;
+
 use super::*;
 
 use crate::db::roles::{self, NewRole, ObjectGrants, Role, RoleEdit, RoleGrants};
@@ -353,8 +355,8 @@ impl Workspace {
                     .unwrap_or_else(|| profile.name.clone());
                 let view = cx.new(|_| UsersView::new(server));
                 let profile_id = id.to_string();
-                cx.subscribe_in(&view, window, move |workspace, _, event, window, cx| {
-                    workspace.users_event(&profile_id, event, window, cx)
+                cx.subscribe_in(&view, window, move |workspace, view, event, window, cx| {
+                    workspace.users_event(&profile_id, view, event, window, cx)
                 })
                 .detach();
                 let results = result_grid::new_grid(window, cx);
@@ -412,13 +414,16 @@ impl Workspace {
     fn users_event(
         &mut self,
         id: &str,
+        view: &Entity<UsersView>,
         event: &UsersEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            UsersEvent::Select(name, request) => self.read_reach(id, name.clone(), *request, cx),
-            UsersEvent::Reports(request) => self.read_reports(id, *request, cx),
+            UsersEvent::Select(name, request) => {
+                self.read_reach(id, view.downgrade(), name.clone(), *request, cx)
+            }
+            UsersEvent::Reports(request) => self.read_reports(id, view.downgrade(), *request, cx),
             UsersEvent::NewRole { login } => {
                 self.open_role_form(id, RoleFormKind::New { login: *login }, window, cx)
             }
@@ -451,7 +456,16 @@ impl Workspace {
         }
     }
 
-    fn read_reach(&mut self, id: &str, name: String, request: u64, cx: &mut Context<Self>) {
+    /// What `name` reaches, for `view`, the tab that asked: a request is
+    /// numbered by its own view, and a tab opened since counts from one again.
+    pub(crate) fn read_reach(
+        &mut self,
+        id: &str,
+        view: WeakEntity<UsersView>,
+        name: String,
+        request: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -473,15 +487,20 @@ impl Workspace {
                     Ok(reach) => Loaded::Ready(reach),
                     Err(error) => Loaded::Failed(error.message),
                 };
-                if let Some(view) = workspace.users_view_of(&id) {
-                    view.update(cx, |view, cx| view.set_reach(request, reach, cx));
-                }
+                _ = view.update(cx, |view, cx| view.set_reach(request, reach, cx));
             });
         })
         .detach();
     }
 
-    fn read_reports(&mut self, id: &str, request: u64, cx: &mut Context<Self>) {
+    /// The Reports, for `view`, as [`Self::read_reach`] answers its own.
+    fn read_reports(
+        &mut self,
+        id: &str,
+        view: WeakEntity<UsersView>,
+        request: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -490,15 +509,13 @@ impl Workspace {
         else {
             // The reports are read against the roles; with none read, say so
             // rather than wait on a read nothing started.
-            if let Some(view) = self.users_view_of(id) {
-                view.update(cx, |view, cx| {
-                    view.set_reports(
-                        request,
-                        Loaded::Failed("the roles have not been read".into()),
-                        cx,
-                    )
-                });
-            }
+            _ = view.update(cx, |view, cx| {
+                view.set_reports(
+                    request,
+                    Loaded::Failed("the roles have not been read".into()),
+                    cx,
+                )
+            });
             return;
         };
         let (id, generation) = (id.to_string(), profile.generation);
@@ -518,9 +535,7 @@ impl Workspace {
                     Ok(reports) => Loaded::Ready(reports),
                     Err(error) => Loaded::Failed(error.message),
                 };
-                if let Some(view) = workspace.users_view_of(&id) {
-                    view.update(cx, |view, cx| view.set_reports(request, reports, cx));
-                }
+                _ = view.update(cx, |view, cx| view.set_reports(request, reports, cx));
             });
         })
         .detach();
