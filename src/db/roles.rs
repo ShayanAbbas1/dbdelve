@@ -79,6 +79,60 @@ impl Roles {
     pub fn inherits(&self, member: &str, role: &str) -> bool {
         !(self.not_inherited.iter()).any(|(m, r)| m == member && r == role)
     }
+
+    /// Why a new role may not be made a member of `name`: it is a
+    /// superuser or [`privileged_name`], or belongs to one, however far up.
+    /// Inheriting or not: a member can `SET ROLE` to what it belongs to.
+    pub fn refuses_membership(&self, name: &str) -> Option<String> {
+        let mut seen = vec![name];
+        let mut index = 0;
+        while let Some(&role) = seen.get(index) {
+            index += 1;
+            let reason = match self.role(role) {
+                _ if privileged_name(role) => "a privileged role",
+                Some(found) if found.superuser => "a superuser",
+                _ => {
+                    for (member, of) in &self.memberships {
+                        if member == role && !seen.contains(&of.as_str()) {
+                            seen.push(of);
+                        }
+                    }
+                    continue;
+                }
+            };
+            return Some(match role == name {
+                true => format!("{name} is {reason}; a role made here is never a member of one."),
+                false => format!(
+                    "{name} belongs to {role}, {reason}; a role made here is never a member of one."
+                ),
+            });
+        }
+        None
+    }
+}
+
+/// The predefined roles a new role is never made a member of from here:
+/// each reaches past the database's own grants, to the server's files and
+/// programs (`pg_execute_server_program`, `pg_read_server_files`,
+/// `pg_write_server_files`, any one a way to superuser), to other sessions
+/// (`pg_signal_backend`, `pg_signal_autovacuum_worker`), to the server's
+/// own work (`pg_checkpoint`, `pg_create_subscription`), or to every table
+/// a superuser's code trusts (`pg_write_all_data`).
+pub const PRIVILEGED_ROLES: &[&str] = &[
+    "pg_execute_server_program",
+    "pg_read_server_files",
+    "pg_write_server_files",
+    "pg_signal_backend",
+    "pg_signal_autovacuum_worker",
+    "pg_checkpoint",
+    "pg_create_subscription",
+    "pg_write_all_data",
+];
+
+/// Whether `IN ROLE` refuses `name` whatever the server says of it: the
+/// bootstrap superuser `postgres`, and [`PRIVILEGED_ROLES`].
+pub fn privileged_name(name: &str) -> bool {
+    name == "postgres" || PRIVILEGED_ROLES.contains(&name)
 }
 
 /// One privilege held on an object.
@@ -732,6 +786,56 @@ mod tests {
         );
         assert!(role_grants_sql(name, false).contains(r"E'x\\''"));
         assert!(owns_sql("plain", true).contains("rolname = 'plain'"));
+    }
+
+    fn role(name: &str, superuser: bool) -> Role {
+        Role {
+            name: name.into(),
+            login: false,
+            superuser,
+            password_expires: None,
+            expired: false,
+            connection_limit: None,
+            has_password: None,
+            last_login: None,
+        }
+    }
+
+    #[test]
+    fn a_new_role_is_never_made_a_member_of_a_way_into_superuser() {
+        let roles = Roles {
+            roles: vec![
+                role("root", true),
+                role("admins", false),
+                role("ops", false),
+                role("reporting", false),
+            ],
+            memberships: vec![
+                ("admins".into(), "root".into()),
+                ("ops".into(), "admins".into()),
+                ("reporting".into(), "pg_read_all_data".into()),
+            ],
+            // Not inheriting still lets a member `SET ROLE`.
+            not_inherited: vec![("admins".into(), "root".into())],
+            records_logins: false,
+        };
+        assert!(
+            roles
+                .refuses_membership("root")
+                .unwrap()
+                .contains("a superuser")
+        );
+        let far = roles.refuses_membership("ops").expect("ops reaches root");
+        assert!(far.contains("belongs to root"), "{far}");
+        for name in [
+            "postgres",
+            "pg_execute_server_program",
+            "pg_write_server_files",
+        ] {
+            assert!(roles.refuses_membership(name).is_some(), "{name}");
+        }
+        assert_eq!(roles.refuses_membership("reporting"), None);
+        assert_eq!(roles.refuses_membership("pg_read_all_data"), None);
     }
 
     #[test]

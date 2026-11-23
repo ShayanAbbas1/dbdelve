@@ -541,13 +541,15 @@ impl Workspace {
                 if name.is_empty() {
                     return Err("A role needs a name.".into());
                 }
+                let member_of = names_in(&value(&form.member_of));
+                self.refused_membership(&form.profile, &member_of)?;
                 let role = NewRole {
                     name,
                     login: *login,
                     password: password.filter(|_| *login),
                     connection_limit: limit_in(&value(&form.limit))?,
                     password_expires: date_in(&value(&form.expires))?,
-                    member_of: names_in(&value(&form.member_of)),
+                    member_of,
                 };
                 let title = if *login { "Create user" } else { "Create role" };
                 Ok((roles::create_role(&role), title))
@@ -569,6 +571,26 @@ impl Workspace {
                 Some(password) => Ok((roles::reset_password(name, &password), "Reset password")),
                 None => Err("Type the new password.".into()),
             },
+        }
+    }
+
+    /// Refuses a membership that is a way into superuser, by what the roles
+    /// read say of each: one the gate would not know by name is a
+    /// superuser of another name, or a role that belongs to one.
+    fn refused_membership(&self, id: &str, member_of: &[String]) -> Result<(), String> {
+        if member_of.is_empty() {
+            return Ok(());
+        }
+        let profile = self.profiles.iter().find(|profile| profile.id == id);
+        let Some(RolesState::Loaded(roles)) = profile.map(|profile| &profile.roles) else {
+            return Err("Member of waits on the roles being read.".into());
+        };
+        match member_of
+            .iter()
+            .find_map(|name| roles.refuses_membership(name))
+        {
+            Some(reason) => Err(reason),
+            None => Ok(()),
         }
     }
 

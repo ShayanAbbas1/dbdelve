@@ -383,7 +383,9 @@ names the row in its place.
 `sql::is_generated_role_change` before it is shown in the apply review. It
 reads the sqlparser tree, Postgres only, and admits exactly what `db::roles`
 writes: one new role, `LOGIN` or `NOLOGIN` said, `CONNECTION LIMIT` a bare
-non-negative number, `VALID UNTIL` a string, `IN ROLE`, and a password only
+non-negative number, `VALID UNTIL` a string, `IN ROLE` (never `postgres`
+nor a predefined role that reaches the server's files, programs or other
+sessions, `db::roles::PRIVILEGED_ROLES`), and a password only
 as a SCRAM-SHA-256 verifier the server takes as one (`'SCRAM-SHA-256$…'`,
 decoded: an iteration count above 0, a base64 salt, and two keys of 32
 bytes each; anything else Postgres would store as the password), so no
@@ -391,7 +393,11 @@ statement carrying a password in the clear gets through whoever wrote it;
 or `ALTER ROLE … WITH`
 those same options. Never `SUPERUSER`, `CREATEDB`, `CREATEROLE`,
 `REPLICATION`, `BYPASSRLS`, a rename, a `SET`, a `DROP` or a grant on an
-object. The run is `execute_and_then` like any edit, so `sql::classify` reads
+object. "Never `SUPERUSER`" covers membership too: a member can `SET ROLE`
+to what it belongs to, so the gate refuses those names, and the role form,
+which has the roles read, also refuses a superuser of any other name and a
+role that belongs to a superuser or a privileged role, however far up
+(`Roles::refuses_membership`). The run is `execute_and_then` like any edit, so `sql::classify` reads
 it (Full, as every role statement is) and the mode decides.
 
 Two things are left out because sqlparser 0.63 cannot read them, which would

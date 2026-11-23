@@ -1289,7 +1289,7 @@ fn role_change(statement: &Statement) -> bool {
             replication: None,
             connection_limit,
             valid_until,
-            in_role: _,
+            in_role,
             in_group,
             role,
             user,
@@ -1300,6 +1300,17 @@ fn role_change(statement: &Statement) -> bool {
                 && password.as_ref().is_none_or(verifier)
                 && connection_limit.as_ref().is_none_or(number)
                 && valid_until.as_ref().is_none_or(string)
+                // Never a way into superuser: `postgres` and the predefined
+                // roles that reach the server's files, programs or sessions.
+                // A superuser of another name is the form's to refuse, which
+                // has the roles read (`Roles::refuses_membership`).
+                && in_role.iter().all(|role| {
+                    let name = match role.quote_style {
+                        Some(_) => role.value.clone(),
+                        None => role.value.to_lowercase(),
+                    };
+                    !crate::db::roles::privileged_name(&name)
+                })
                 && in_group.is_empty()
                 && role.is_empty()
                 && user.is_empty()
@@ -6050,6 +6061,15 @@ mod tests {
             // store the whole string as the password.
             "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5:c2VydmVy';",
             "CREATE ROLE ana LOGIN SUPERUSER;",
+            // Ways into superuser, by membership.
+            "CREATE ROLE ana LOGIN IN ROLE postgres;",
+            "CREATE ROLE ana LOGIN IN ROLE \"postgres\";",
+            "CREATE ROLE ana LOGIN IN ROLE POSTGRES;",
+            "CREATE ROLE ana LOGIN IN ROLE reporting, pg_execute_server_program;",
+            "CREATE ROLE ana NOLOGIN IN ROLE \"pg_write_server_files\";",
+            "CREATE ROLE ana NOLOGIN IN ROLE pg_read_server_files;",
+            "CREATE ROLE ana NOLOGIN IN ROLE pg_signal_backend;",
+            "CREATE ROLE ana NOLOGIN IN ROLE pg_checkpoint;",
             "CREATE ROLE ana;",
             "ALTER ROLE ana SUPERUSER;",
             "ALTER ROLE ana RENAME TO bo;",
