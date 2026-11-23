@@ -1269,8 +1269,9 @@ carries, engine by engine:
 - **File engines are opened read-only by the engine.** SQLite and DuckDB open
   with the engine's read-only flag, and Turso takes `PRAGMA query_only`, so a
   write the gate misjudged still cannot change the file.
-- **Every server session opened for an agent's read starts read-only.** On Postgres,
-  MySQL and MariaDB the hold rides in the connection's config
+- **On Postgres, MySQL and MariaDB every session opened for an agent's read
+  starts read-only; elsewhere what holds it varies by engine.** On those three
+  the hold rides in the connection's config
   (`with_read_only_hold`), so the side session `sizes()` reads through and the
   sessions that cancel a statement carry it from their first statement. SQL
   Server, Snowflake and Redis take no session setting, and ClickHouse carries
