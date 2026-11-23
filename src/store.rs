@@ -739,6 +739,12 @@ pub struct StoredSettings {
     /// directory was turned down or taken. Absent until either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queries_move_dismissed: Option<bool>,
+    /// The edit mode a new table tab starts in: `classic`, `draft` or `row`.
+    /// Absent reads as classic, which is how every file written before it
+    /// edited, and a slug this build cannot read reads as classic too. Not
+    /// written while the default is classic. A scalar, above the tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_mode: Option<String>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -4832,6 +4838,7 @@ open_objects = []
                 sidebar_show_host: Some(false),
                 sidebar_show_sizes: Some(false),
                 queries_move_dismissed: Some(true),
+                edit_mode: Some("row".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),

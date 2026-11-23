@@ -135,6 +135,10 @@ impl Workspace {
         let focused = results.update(cx, |table, cx| {
             crate::result_grid::reveal_column(table, col, window, cx)
         });
+        // The ring moved without a table event, which is what would have
+        // staged the input it closed; left recorded, a later move would stage
+        // that text over an edit of the same cell made in between.
+        self.flush_left_row(&results, cx);
         // The grid holds the keyboard now. Closing the palette asked for the
         // tab's own focus back, which in a query tab is the editor, and the
         // next render would hand it there, leaving the arrow keys typing.
@@ -325,7 +329,9 @@ impl Workspace {
                 crate::palette::listed_imports(source, side)
                     .position(|(_, candidate)| candidate.name == picked)
             }
-            PaletteMode::Schema => self.profile().and_then(crate::palette::active_schema_row),
+            PaletteMode::Schema(pick) => self
+                .profile()
+                .and_then(|profile| crate::palette::active_schema_row(profile, pick)),
             PaletteMode::MoveToProject(index) => self.profiles.get(index).and_then(|profile| {
                 crate::palette::current_project_row(index, &profile.id, &self.projects)
             }),
@@ -807,6 +813,8 @@ impl Workspace {
             }
             Command::SelectSchema => self.select_schema(window, cx),
             Command::SetSchema(name) => _ = self.set_schema(name, cx),
+            Command::PickSchemaToExport => self.pick_schema_to_export(window, cx),
+            Command::ExportSchema(name) => self.open_schema_export(name, cx),
             Command::SetTheme(side, theme) => self.set_theme(side, *theme, window, cx),
             Command::BrowseThemes(source, side) => {
                 self.open_palette(PaletteMode::ImportTheme(source, side), window, cx)
@@ -870,6 +878,7 @@ impl Workspace {
             Command::NodeAction(node, action) => self.run_node_action(&node, action, window, cx),
             Command::SelectionAction(action) => self.run_selection_action(action, window, cx),
             Command::SetViewSorting(client) => self.set_view_sorting(client, window, cx),
+            Command::SetEditMode(mode) => self.set_edit_mode(mode, cx),
             Command::FollowForeignKey => self.follow_foreign_key(&FollowForeignKey, window, cx),
             // The button only adds the bar, and the pointer that pressed it
             // goes on to click into it; the keyboard has to be put there.

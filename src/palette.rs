@@ -139,6 +139,13 @@ impl Scope {
     }
 }
 
+/// What a pick in the schema list does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemaPick {
+    Activate,
+    Export,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// The palette proper, narrowed to one scope.
@@ -157,8 +164,10 @@ pub enum Mode {
     ImportTheme(user::Source, Option<Appearance>),
     /// The databases on the active profile's server, as last fetched.
     Database,
-    /// The schemas in the active profile's catalog, to pick the active one.
-    Schema,
+    /// The schemas in the active profile's catalog, for what the pick is for.
+    /// One mode with the purpose in it, as [`Mode::Font`] has its slot: the
+    /// list is the same list, and only the row's destination differs.
+    Schema(SchemaPick),
     /// The columns of the grid in front, to jump to one of them.
     Columns,
     /// The row limits the tab in front's menu offers, and a number of one's
@@ -222,7 +231,8 @@ impl Mode {
             Mode::Theme(Some(Appearance::Dark)) => "Pick a dark theme…",
             Mode::ImportTheme(..) => "Import a theme…",
             Mode::Database => "Switch database…",
-            Mode::Schema => "Switch schema…",
+            Mode::Schema(SchemaPick::Activate) => "Switch schema…",
+            Mode::Schema(SchemaPick::Export) => "Export a schema…",
             Mode::Columns => "Go to a column…",
             Mode::RowLimit => "Set the row limit…",
             Mode::Engine => "Pick an engine…",
@@ -253,7 +263,7 @@ impl Mode {
             Mode::Theme(Some(side)) => side.theme_label(),
             Mode::ImportTheme(..) => "Import theme",
             Mode::Database => "Databases",
-            Mode::Schema => "Schemas",
+            Mode::Schema(_) => "Schemas",
             Mode::Columns => "Columns",
             Mode::RowLimit => "Row limit",
             Mode::Engine => "Engines",
@@ -436,6 +446,9 @@ pub enum Command {
     /// Put the palette back up over the catalog's schemas.
     SelectSchema,
     SetSchema(String),
+    /// Put the palette back up over the catalog's schemas, to export one.
+    PickSchemaToExport,
+    ExportSchema(String),
     /// Put the palette back up over the font list for this slot.
     PickFont(FontSlot),
     SetFont(FontSlot, String),
@@ -472,6 +485,8 @@ pub enum Command {
     SortActiveColumn,
     /// The status bar's Client (`true`) or Server.
     SetViewSorting(bool),
+    /// The status bar's Classic, Draft or Row, on the table in front.
+    SetEditMode(crate::session::EditMode),
     /// The explorer menu's Copy DDL, for the relation in front.
     CopyDdl,
     /// The explorer menu's other copies: put this on the clipboard, and
@@ -1252,7 +1267,7 @@ impl Palette {
             (Mode::Search(_), Some(profile)) => search_items(workspace, profile, cx),
             (Mode::Font(slot), _) => font_items(slot, cx),
             (Mode::Database, Some(profile)) => database_items(profile),
-            (Mode::Schema, Some(profile)) => schema_items(profile),
+            (Mode::Schema(pick), Some(profile)) => schema_items(profile, pick),
             (Mode::Columns, Some(profile)) => column_items(profile, cx),
             (Mode::RowLimit, Some(profile)) => row_limit_items(&profile.session),
             (Mode::Search(_), None) => welcome_items(workspace),
@@ -3321,34 +3336,42 @@ pub(crate) fn active_engine_row(workspace: &Workspace) -> Option<usize> {
 }
 
 /// Where [`schema_items`] lists the active schema, for the palette to open on.
-pub(crate) fn active_schema_row(profile: &Profile) -> Option<usize> {
-    schema_items(profile)
+pub(crate) fn active_schema_row(profile: &Profile, pick: SchemaPick) -> Option<usize> {
+    schema_items(profile, pick)
         .iter()
         .position(|item| item.hint.as_ref() == "active")
 }
 
 /// The catalog's schemas by name, the active one marked as the current
 /// database is.
-fn schema_items(profile: &Profile) -> Vec<Item> {
+fn schema_items(profile: &Profile, pick: SchemaPick) -> Vec<Item> {
     let CatalogState::Loaded(catalog, _) = &profile.catalog else {
         return Vec::new();
     };
-    let active = profile.active_schema();
-    catalog
+    let names = catalog
         .by_name()
         .into_iter()
-        .map(|(_, schema)| {
-            let hint = if active == Some(schema.name.as_str()) {
+        .map(|(_, schema)| &schema.name);
+    schema_items_from(names, profile.schema_in().as_deref(), pick)
+}
+
+fn schema_items_from<'a>(
+    names: impl Iterator<Item = &'a String>,
+    active: Option<&str>,
+    pick: SchemaPick,
+) -> Vec<Item> {
+    names
+        .map(|name| {
+            let hint = if active == Some(name.as_str()) {
                 "active"
             } else {
                 ""
             };
-            Item::new(
-                schema.name.clone(),
-                icon::SCHEMA,
-                Command::SetSchema(schema.name.clone()),
-            )
-            .hint(hint)
+            let command = match pick {
+                SchemaPick::Activate => Command::SetSchema(name.clone()),
+                SchemaPick::Export => Command::ExportSchema(name.clone()),
+            };
+            Item::new(name.clone(), icon::SCHEMA, command).hint(hint)
         })
         .collect()
 }
@@ -3960,7 +3983,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             }
             // Only on a row dbdelve can name by its primary key -- the same
             // condition that makes a cell of it editable.
-            if workspace.has_nameable_row(cx) {
+            // In a Draft view the gesture marks the row, or removes an added
+            // one; it deletes nothing until the draft is applied.
+            if workspace.has_markable_row(cx) {
+                items.push(command(
+                    "Mark row for deletion",
+                    icon::DELETE,
+                    Command::DeleteRow,
+                    ROWS,
+                ));
+            } else if workspace.has_nameable_row(cx) {
                 items.push(command(
                     "Delete row…",
                     icon::DELETE,
@@ -4321,6 +4353,20 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             RESULTS,
         ));
     }
+    // The status bar's edit modes: one row for each the view is not in.
+    let edit_mode = crate::views::view_edit_mode(profile);
+    if let Some(mode) = edit_mode {
+        for other in crate::session::EditMode::offered(profile.config.target())
+            .filter(|other| *other != mode)
+        {
+            items.push(command(
+                &format!("Edit in {} mode", other.label()),
+                icon::RENAME,
+                Command::SetEditMode(other),
+                RESULTS,
+            ));
+        }
+    }
     // Not the active cell's: the columns come back whichever cell is ringed.
     if let Some(hidden) = shown_grid
         .map(|grid| grid.hidden_columns())
@@ -4364,7 +4410,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
     // pair of buttons is conditional too.
     if workspace.has_pending_edits(cx) {
         items.push(command(
-            "Apply edits",
+            crate::views::apply_label(edit_mode),
             icon::SAVE,
             Command::ApplyEdits,
             EDITS,
@@ -4565,6 +4611,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "Select schema…",
             icon::PROJECT,
             Command::SelectSchema,
+            CONNECTION,
+        ));
+    }
+    if profile.config.target().exports_schema().is_some() {
+        items.push(command(
+            "Export Schema as SQL…",
+            icon::SAVE,
+            Command::PickSchemaToExport,
             CONNECTION,
         ));
     }
@@ -5372,7 +5426,18 @@ mod tests {
                 == Some(Mode::Confirm(Target::Unavailable(0)))
         );
         assert!(open(Mode::Confirm(Target::Connection(0)), true).is_none());
-        assert!(open(Mode::Schema, true).is_none());
+        assert!(open(Mode::Schema(SchemaPick::Activate), true).is_none());
+    }
+
+    #[test]
+    fn the_schema_list_exports_or_activates_as_it_was_opened_for() {
+        let names = ["main".to_string(), "sales".to_string()];
+        let rows = |pick| schema_items_from(names.iter(), Some("sales"), pick);
+        let exporting = rows(SchemaPick::Export);
+        assert!(matches!(&exporting[1].command, Command::ExportSchema(name) if name == "sales"));
+        assert_eq!(exporting[1].hint.as_ref(), "active");
+        let activating = rows(SchemaPick::Activate);
+        assert!(matches!(&activating[0].command, Command::SetSchema(name) if name == "main"));
     }
 
     #[test]
@@ -5508,7 +5573,8 @@ mod tests {
             assert!(open(mode) == Some(mode));
         }
         for mode in [
-            Mode::Schema,
+            Mode::Schema(SchemaPick::Activate),
+            Mode::Schema(SchemaPick::Export),
             Mode::Database,
             Mode::Columns,
             Mode::DeleteQuery,

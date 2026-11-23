@@ -464,6 +464,21 @@ pub struct SqlSpec {
     pub row_terms: bool,
     /// How a grid edit writes bytes, `None` where it writes none.
     pub binary_literal: Option<BinaryLiteral>,
+    /// Whether the write gate reads `c IS NULL` beside equalities in a one-row
+    /// predicate, for a row named by every value on an engine whose drafts are
+    /// verified: the apply re-reads the row and counts what the write changed,
+    /// so a predicate matching two rows is caught inside the transaction.
+    /// ClickHouse reads the same term under [`SqlSpec::row_terms`] and needs no
+    /// second switch. A plugin that speaks one of these dialects reads it too.
+    pub null_terms: bool,
+    /// Whether the write gate admits a reviewed draft: several statements
+    /// holding a one-row `INSERT` or `DELETE`. Only where the grid writes one,
+    /// since admitting a shape nothing writes widens the gate for nobody.
+    pub drafts: bool,
+    /// Whether `"…"` is a string literal rather than a name, as under MySQL's
+    /// and MariaDB's default `sql_mode`. Not read off `identifier_quote`:
+    /// ClickHouse quotes with backticks and still reads `"x"` as a name.
+    pub double_quoted_strings: bool,
     /// What completion offers beside the catalog: the functions and value
     /// expressions the dialect has built in.
     pub builtins: &'static [Builtin],
@@ -508,6 +523,9 @@ impl SqlSpec {
         transactions: true,
         row_terms: false,
         binary_literal: None,
+        null_terms: false,
+        drafts: false,
+        double_quoted_strings: false,
         builtins: &[],
     };
 
@@ -776,6 +794,51 @@ pub enum UnreadableFloor {
     FirstKeyword,
 }
 
+/// How the `CREATE` statements [`Connection::ddl`](super::Connection::ddl)
+/// reads name their table, which a file's `INSERT`s have to match, or a file
+/// run in another schema creates its tables there and fills the ones it came
+/// from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DdlNames {
+    Qualified,
+    Unqualified,
+    /// Qualified, but for a table of the schema named, which is bare.
+    QualifiedOutside(&'static str),
+}
+
+impl DdlNames {
+    /// Whether the DDL of a table of `schema` names it with its schema.
+    pub fn qualifies(self, schema: &str) -> bool {
+        match self {
+            Self::Qualified => true,
+            Self::Unqualified => false,
+            Self::QualifiedOutside(bare) => schema != bare,
+        }
+    }
+}
+
+/// What a schema export's file has to do to run back on this engine: name
+/// its tables as the DDL does, and get rows past the foreign keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaExport {
+    pub names: DdlNames,
+    pub foreign_keys: ForeignKeyReplay,
+}
+
+/// How an exported file gets rows into tables that reference one another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignKeyReplay {
+    /// Created without their keys, which are added after the rows.
+    AddedAfterRows,
+    /// The file's session runs with checks off, by the pair of statements
+    /// [`checks_off`](super::checks_off) gives.
+    ChecksOff,
+    /// Declared and never enforced, or not had at all.
+    NotEnforced,
+    /// A cycle has no file that runs back, so it is refused by name.
+    RefusesCycles,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Abilities {
     pub edits: bool,
@@ -786,6 +849,9 @@ pub struct Abilities {
     pub imports: bool,
     pub assigns_default: bool,
     pub copies_ddl: bool,
+    /// Whether a schema exports as one file of its DDL and rows, and how. `None`
+    /// where the DDL does not run back as written.
+    pub exports_schema: Option<SchemaExport>,
     pub switches_database: bool,
     pub switches_database_in_session: bool,
     /// The catalog lists every database on the server, each as a schema,
@@ -816,6 +882,7 @@ impl Abilities {
         imports: false,
         assigns_default: false,
         copies_ddl: false,
+        exports_schema: None,
         switches_database: false,
         switches_database_in_session: false,
         catalog_lists_databases: false,
@@ -888,6 +955,8 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
+        null_terms: true,
+        drafts: true,
         params: Params::Dollar,
         // One simple-query submission is already one implicit transaction.
         implicit_transaction: true,
@@ -914,6 +983,10 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Qualified,
+            foreign_keys: ForeignKeyReplay::AddedAfterRows,
+        }),
         switches_database: true,
         picks_schema: true,
         lists_sequences: true,
@@ -946,6 +1019,9 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
+        drafts: true,
+        double_quoted_strings: true,
         identifier_quote: IdentifierQuote::Backtick,
         // Unless `NO_BACKSLASH_ESCAPES` is set, which is not dbdelve's to know
         // or to set.
@@ -977,6 +1053,10 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Unqualified,
+            foreign_keys: ForeignKeyReplay::ChecksOff,
+        }),
         switches_database: true,
         // No `picks_schema`: the database is the schema.
         catalog_lists_databases: true,
@@ -1012,6 +1092,9 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
+        drafts: true,
+        double_quoted_strings: true,
         identifier_quote: IdentifierQuote::Backtick,
         backslash_escapes: true,
         // Refused even into a `timestamp`, which MariaDB reads in the
@@ -1042,6 +1125,10 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Unqualified,
+            foreign_keys: ForeignKeyReplay::ChecksOff,
+        }),
         switches_database: true,
         catalog_lists_databases: true,
         draws_diagrams: true,
@@ -1084,6 +1171,8 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
+        drafts: true,
         nul_text: NulText::PipedChar,
         boolean_literal: BooleanLiteral::OneZero,
         truncate: Truncate::DeleteFrom,
@@ -1189,6 +1278,8 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
+        null_terms: true,
+        drafts: true,
         nul_text: NulText::PipedChr,
         skip_duplicates: SkipDuplicates::OnConflictDoNothing {
             needs_unique_key: true,
@@ -1211,6 +1302,12 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(SchemaExport {
+            // `duckdb_tables().sql` names the schema of a table outside
+            // `main`, and never its database.
+            names: DdlNames::QualifiedOutside("main"),
+            foreign_keys: ForeignKeyReplay::RefusesCycles,
+        }),
         // The databases attached to the instance the profile opened.
         switches_database: true,
         // Reopening a file detaches everything attached to it, and an
@@ -1321,6 +1418,8 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints::DEFAULT,
     sql: SqlSpec {
+        null_terms: true,
+        drafts: true,
         nul_text: NulText::AddedNchar,
         national_strings: true,
         boolean_literal: BooleanLiteral::OneZero,
@@ -1362,6 +1461,10 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
         imports: true,
         assigns_default: true,
         copies_ddl: true,
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Qualified,
+            foreign_keys: ForeignKeyReplay::AddedAfterRows,
+        }),
         switches_database: true,
         lists_sequences: true,
         // No `picks_schema`: the default schema is the login's.
@@ -1577,6 +1680,10 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         inserts_into_views: true,
         imports: true,
         copies_ddl: true,
+        exports_schema: Some(SchemaExport {
+            names: DdlNames::Qualified,
+            foreign_keys: ForeignKeyReplay::NotEnforced,
+        }),
         switches_database: true,
         catalog_lists_databases: true,
         chunk_refusal: Some("ClickHouse has no transaction, so each chunk is kept as it lands."),

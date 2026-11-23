@@ -19,11 +19,12 @@ use crate::tls;
 use super::ssh::{self, Bridged, SocketBridge};
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
-    Catalog, Column, DbError, EditTarget, Engine, Feed, Fetch, GraphCancel, QueryResult, Reference,
-    RelationKind, Row, RowBuilder, SchemaGraph, ServerConfig, Sizes, Stopped, Structure,
-    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
-    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, create_table,
-    non_utf8_error, optional_cell, plain_error, required_cell, terminated,
+    ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, ExportDdl, Feed, Fetch,
+    GraphCancel, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch, SchemaGraph,
+    Sending, Sequences, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
+    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
+    assemble_sequences, assemble_sizes, assemble_structure, create_table, non_utf8_error,
+    optional_cell, plain_error, required_cell, split_foreign_keys, terminated,
 };
 
 mod pgpass;
@@ -493,26 +494,45 @@ ORDER BY class.relname, table_constraint.conname, key.key_position
 
 // Keyed by oid rather than by name: two schemas can hold a table of the same
 // name, and the row description says exactly which one the server read.
-const PRIMARY_KEY_SQL: &str = "
+//
+// A table with no primary key answers too, every `in_primary_key` 'no', so that
+// it can be named by every column; a view, a foreign table and the rest have
+// nothing to write back to and answer nothing. The type is the bare name for
+// a built-in and schema-qualified for any other, so a user's `int4` is not
+// taken for the built-in one.
+const EDIT_COLUMNS_SQL: &str = "
 SELECT
     namespace.nspname AS schema_name,
     class.relname AS table_name,
     attribute.attnum AS attribute_number,
     attribute.attname AS column_name,
     CASE WHEN attribute.attnum = ANY (index_entry.indkey) THEN 'yes' ELSE 'no' END
-        AS in_primary_key
--- An inner join on the primary index is what makes a table without one
--- return nothing, which is the same answer as a table DBDelve cannot identify
--- rows in.
-FROM pg_catalog.pg_index AS index_entry
-JOIN pg_catalog.pg_class AS class
-    ON class.oid = index_entry.indrelid
+        AS in_primary_key,
+    CASE WHEN type_namespace.nspname = 'pg_catalog' THEN type.typname::text
+         ELSE type_namespace.nspname || '.' || type.typname END AS type_name,
+    -- `attgenerated` is new in 12, so it is read through the row as JSON, where
+    -- an older server has no such key rather than no such column: NULL makes
+    -- this say 'no', which is right there. 'v' is PostgreSQL 18's virtual column.
+    CASE WHEN to_jsonb(attribute) ->> 'attgenerated' IN ('s', 'v') THEN 'yes' ELSE 'no' END
+        AS is_generated,
+    -- What decides whether a float renders with every digit it needs to read
+    -- back as itself (`floats_round_trip`).
+    current_setting('extra_float_digits') AS extra_float_digits,
+    current_setting('server_version_num') AS server_version_num
+FROM pg_catalog.pg_class AS class
 JOIN pg_catalog.pg_namespace AS namespace
     ON namespace.oid = class.relnamespace
 JOIN pg_catalog.pg_attribute AS attribute
     ON attribute.attrelid = class.oid
-WHERE index_entry.indrelid = {oid}
+JOIN pg_catalog.pg_type AS type
+    ON type.oid = attribute.atttypid
+JOIN pg_catalog.pg_namespace AS type_namespace
+    ON type_namespace.oid = type.typnamespace
+LEFT JOIN pg_catalog.pg_index AS index_entry
+    ON index_entry.indrelid = class.oid
     AND index_entry.indisprimary
+WHERE class.oid = {oid}
+    AND (index_entry.indrelid IS NOT NULL OR class.relkind = 'r')
     AND attribute.attnum > 0
     AND NOT attribute.attisdropped
 ORDER BY attribute.attnum
@@ -918,6 +938,9 @@ struct Driver {
     connection: Option<Socket>,
     /// The server's notices, as psql prints them, in the order they came.
     notices: Vec<String>,
+    /// Each notice's SQLSTATE, beside `notices`: what the apply reads to
+    /// learn its `BEGIN` was inside a transaction already open.
+    codes: Vec<String>,
 }
 
 impl Driver {
@@ -931,6 +954,7 @@ impl Driver {
             runtime,
             connection,
             notices,
+            codes,
         } = self;
         runtime.block_on(poll_fn(|cx| {
             while let Some(socket) = connection {
@@ -938,6 +962,7 @@ impl Driver {
                     Poll::Pending => break,
                     Poll::Ready(Some(Ok(AsyncMessage::Notice(notice)))) => {
                         notices.push(notice_text(&notice));
+                        codes.push(notice.code().code().to_string());
                     }
                     Poll::Ready(Some(Ok(_))) => {}
                     Poll::Ready(Some(Err(error))) => {
@@ -1128,6 +1153,7 @@ impl Connection {
                 runtime,
                 connection: Some(connection),
                 notices: Vec::new(),
+                codes: Vec::new(),
             },
             _bridged: bridged,
         };
@@ -1222,6 +1248,18 @@ impl Connection {
             server: self.server.clone(),
             ..Self::connect(&self.server(), self.route.clone())?
         })
+    }
+
+    /// [`Self::alongside`] with an empty `search_path`, for reading text meant
+    /// to run on another session. The catalog's functions (`format_type`,
+    /// `pg_get_expr`, `pg_get_constraintdef`, `pg_get_indexdef`) name a schema
+    /// only where the path does not reach it, and the path here would start
+    /// with the profile's schema; empty, every name they write is qualified,
+    /// as pg_dump reads them.
+    pub fn alongside_unpathed(&self) -> Result<Self, DbError> {
+        let own = self.alongside()?;
+        own.internal_query("SELECT pg_catalog.set_config('search_path', '', false)")?;
+        Ok(own)
     }
 
     /// A session on `database`, for the (connection, database) pair: a new
@@ -1336,24 +1374,22 @@ impl Connection {
         self.run(sql, false, Fetch::default(), None)
     }
 
-    /// `bound` is the schema to put the session back on first, itself `None`
-    /// for its own default, when the run is a bound tab's.
-    fn run(
+    /// Sends `sql` on the session `client` holds and reads what comes back, with
+    /// the number of commands the submission held. The lock-free core of
+    /// [`Connection::run`], which is also what a verified apply sends every
+    /// statement of its sequence through under the one lock it holds. It does
+    /// no describe of its own: a refused `Parse` aborts an open transaction.
+    ///
+    /// `bound` is [`Connection::run`]'s, already applied by the caller: it only
+    /// says whether streamed rows may be typed on the side session.
+    fn ran(
         &self,
+        client: &mut Client,
         sql: &str,
         typed: bool,
         fetch: Fetch,
         bound: Option<Option<&str>>,
-    ) -> Result<QueryResult, DbError> {
-        let mut client = self.client.lock().map_err(|_| DbError {
-            message: "The connection is unavailable after an earlier internal failure.".into(),
-            position: None,
-        })?;
-        let held = fetch.hold()?;
-        if let Some(schema) = bound {
-            set_search_path(&mut client, schema).map_err(super::unplaced)?;
-        }
-
+    ) -> Result<(QueryResult, usize), DbError> {
         // Timed from here, not from the call: one client serialises a profile's
         // queries, and time spent waiting behind the catalog load is not time
         // the server spent on this statement.
@@ -1362,9 +1398,10 @@ impl Connection {
             client: inner,
             driver,
             ..
-        } = &mut *client;
+        } = client;
         let failed = |error: Error| query_error(&error, sql);
         driver.notices.clear();
+        driver.codes.clear();
         let mut messages = Box::pin(
             driver
                 .block_on(inner.simple_query_raw(sql))
@@ -1400,6 +1437,135 @@ impl Connection {
         if typed {
             result.messages = notices;
         }
+        Ok((result, commands))
+    }
+
+    /// Applies `steps` as one verified sequence on this session, under one
+    /// acquisition of its lock, so no other tab's statement runs between the
+    /// re-reads and the writes: see [`super::run_verified`]. Every statement
+    /// goes through [`Self::ran`] untyped, so no describe runs inside the
+    /// transaction. A count is the command tag's, the
+    /// rows the statement matched, so a write a `BEFORE` row trigger or a rule
+    /// skipped counts none. `proceed` says no once a Cancel has come.
+    pub fn apply_verified(
+        &self,
+        steps: &[VerifiedStep],
+        proceed: &dyn Fn() -> bool,
+    ) -> ApplyOutcome {
+        let failed = |error| ApplyOutcome::Failed {
+            stage: ApplyStage::Begin,
+            error,
+        };
+        let mut client = match self.client.lock() {
+            Ok(client) => client,
+            Err(_) => {
+                return failed(plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                ));
+            }
+        };
+        // Registers the run, so a Cancel finds the session, and checks for one
+        // that came first, as `run` does before it touches the session.
+        if !proceed() {
+            return failed(plain_error("Cancelled before it was sent.".into()));
+        }
+        // Read off the held client after each statement and handed to the
+        // lost test, which cannot take the lock `send` holds: only an error at
+        // `COMMIT` with the socket gone is an outcome nobody can know.
+        let closed = std::cell::Cell::new(false);
+        // The grid shows a spatial cell as the WKT it rendered after the
+        // fetch, and an untyped read returns the server's EWKB, so each read
+        // renders those columns, named by the cells as fetched, the same way:
+        // a change confined to one is a change like any other.
+        let spatial: HashSet<&str> = steps
+            .iter()
+            .flat_map(|step| &step.before)
+            .filter(|cell| cell.column_type.as_deref().is_some_and(is_spatial))
+            .map(|cell| cell.column.as_str())
+            .collect();
+        let mut send = |sql: &str, sending: Sending| {
+            if sending == Sending::Open {
+                // A plain `BEGIN` first: inside the user's own transaction
+                // Postgres runs it as nothing but a warning, 25001, where
+                // `BEGIN ISOLATION LEVEL` would fail once that transaction had
+                // read anything, and abort it with its pending work.
+                let begun = self.ran(&mut client, "BEGIN", false, Fetch::default(), None);
+                closed.set(client.client.is_closed());
+                begun?;
+                // Refused with nothing more sent: the `BEGIN` changed nothing,
+                // and the transaction is the user's to end.
+                if client.driver.codes.iter().any(|code| code == "25001") {
+                    return Err(super::in_a_transaction());
+                }
+                // Under `REPEATABLE READ` every read of the apply sees the one
+                // snapshot its first re-read took, and a write to a row
+                // another transaction changed after it fails with 40001 rather
+                // than overwriting that change. The transaction is the
+                // apply's own now, so a failure here ends it.
+                let set = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ";
+                return match self.ran(&mut client, set, false, Fetch::default(), None) {
+                    Ok((result, _)) => Ok(result),
+                    Err(error) => {
+                        if !client.client.is_closed() {
+                            let _ =
+                                self.ran(&mut client, "ROLLBACK", false, Fetch::default(), None);
+                        }
+                        closed.set(client.client.is_closed());
+                        Err(error)
+                    }
+                };
+            }
+            let sql = match sending {
+                // A closed connection took its transaction with it.
+                Sending::Abandon if client.client.is_closed() => return Ok(QueryResult::default()),
+                _ => sql,
+            };
+            let result = self
+                .ran(&mut client, sql, false, Fetch::default(), None)
+                .map(|(mut result, _)| {
+                    if sending == Sending::Read && !spatial.is_empty() {
+                        let columns: Vec<bool> = result
+                            .columns
+                            .iter()
+                            .map(|column| spatial.contains(column.name.as_str()))
+                            .collect();
+                        for row in &mut result.rows {
+                            format_spatial_row(row, &columns);
+                        }
+                    }
+                    result
+                });
+            closed.set(client.client.is_closed());
+            result
+        };
+        super::run_verified(
+            Engine::Postgres,
+            steps,
+            &mut send,
+            proceed,
+            &|_| false,
+            &|_| closed.get(),
+        )
+    }
+
+    /// `bound` is the schema to put the session back on first, itself `None`
+    /// for its own default, when the run is a bound tab's.
+    fn run(
+        &self,
+        sql: &str,
+        typed: bool,
+        fetch: Fetch,
+        bound: Option<Option<&str>>,
+    ) -> Result<QueryResult, DbError> {
+        let mut client = self.client.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        let held = fetch.hold()?;
+        if let Some(schema) = bound {
+            set_search_path(&mut client, schema).map_err(super::unplaced)?;
+        }
+        let (mut result, commands) = self.ran(&mut client, sql, typed, fetch, bound)?;
 
         // Types are learned after the statement ran, and only from a single
         // statement that returned columns. A refused `Parse` is an error
@@ -1435,7 +1601,7 @@ impl Connection {
         // query through it, so the lock has to go before the question is asked.
         drop(held);
         drop(client);
-        result.edit = self.edit_target(&probed);
+        (result.edit, result.read_only_reason) = self.edit_target(sql, &probed);
 
         Ok(result)
     }
@@ -1447,15 +1613,35 @@ impl Connection {
     /// A failure answers "no" too — this runs after the user's statement
     /// already succeeded, and a catalog query refused inside a transaction the
     /// user has aborted must not turn that success into an error.
-    fn edit_target(&self, probed: &[ProbedColumn]) -> Option<EditTarget> {
-        let table = sole_table(probed)?;
-        let catalog = self
-            .internal_query(&PRIMARY_KEY_SQL.replace("{oid}", &table.to_string()))
-            .ok()?;
+    fn edit_target(
+        &self,
+        sql: &str,
+        probed: &[ProbedColumn],
+    ) -> (Option<EditTarget>, Option<String>) {
+        let Some(table) = sole_table(probed) else {
+            return (None, None);
+        };
+        let Ok(catalog) =
+            self.internal_query(&EDIT_COLUMNS_SQL.replace("{oid}", &table.to_string()))
+        else {
+            return (None, None);
+        };
         // ponytail: one catalog round trip per result set, no cache. A map from
         // oid to key held on the connection is the upgrade path if the trip
         // shows up in query timings.
-        resolve_edit_target(probed, &keyed_table(&catalog)?)
+        let Some(table) = keyed_table(&catalog) else {
+            return (None, None);
+        };
+        // Provenance names a column's table, never which instance of it: the
+        // two sides of a self-join each read `t`, and every-column matching
+        // would then name a row that is neither. Only a plain read of one
+        // table is edited by its values.
+        if table.key.is_empty()
+            && let Err(why) = crate::sql::table_read_or_why(Engine::Postgres, sql)
+        {
+            return (None, Some(why.reason().into()));
+        }
+        edit_outcome(probed, &table)
     }
 
     /// `ask` on the side session, opened if there is none or the last one
@@ -1660,6 +1846,327 @@ impl Connection {
     /// populated. `relpartbound`, `attfdwoptions`, `pg_get_serial_sequence`
     /// and `relispopulated` are where each is.
     pub fn ddl(&self, schema: &str, relation: &str, kind: RelationKind) -> Result<String, DbError> {
+        Ok(self.render_ddl(schema, relation, kind, false)?.create)
+    }
+
+    /// A table's DDL with its foreign keys left to statements of their own.
+    ///
+    /// A table in an inheritance is refused: its DDL writes no `INHERITS` or
+    /// `PARTITION OF`, so a child would come back on its own, and a parent's
+    /// rows are read without `ONLY`, so they hold every child's too, which a
+    /// file holding the children as well writes twice. The partitions of a
+    /// partitioned table in the schema never reach here; a partition whose
+    /// parent is in another schema, and old-style inheritance, do.
+    ///
+    /// ponytail: refused rather than written. The upgrade is `INHERITS` (or
+    /// `PARTITION OF … FOR VALUES` from `relpartbound`) in the DDL and `ONLY`
+    /// on a parent's rows.
+    pub fn export_ddl(&self, schema: &str, relation: &str) -> Result<ExportDdl, DbError> {
+        let name = Engine::Postgres.qualified(schema, relation);
+        let family = self.internal_query(&format!(
+            "SELECT
+                 (SELECT pg_catalog.string_agg(
+                      parent_namespace.nspname || '.' || parent.relname, ', '
+                      ORDER BY parent_namespace.nspname, parent.relname)
+                  FROM pg_catalog.pg_inherits AS inheritance
+                  JOIN pg_catalog.pg_class AS parent ON parent.oid = inheritance.inhparent
+                  JOIN pg_catalog.pg_namespace AS parent_namespace
+                      ON parent_namespace.oid = parent.relnamespace
+                  WHERE inheritance.inhrelid = {0}::regclass) AS parents,
+                 (SELECT pg_catalog.string_agg(
+                      child_namespace.nspname || '.' || child.relname, ', '
+                      ORDER BY child_namespace.nspname, child.relname)
+                  FROM pg_catalog.pg_inherits AS inheritance
+                  JOIN pg_catalog.pg_class AS child ON child.oid = inheritance.inhrelid
+                  JOIN pg_catalog.pg_namespace AS child_namespace
+                      ON child_namespace.oid = child.relnamespace
+                  WHERE inheritance.inhparent = {0}::regclass) AS children",
+            Engine::Postgres.quote_literal(&name)
+        ))?;
+        let row = family.rows.first().cloned().unwrap_or_default();
+        if let Some(parents) = optional_cell(&family, &row, "parents") {
+            return Err(plain_error(format!(
+                "it inherits from {parents}, which an export does not write yet."
+            )));
+        }
+        if let Some(children) = optional_cell(&family, &row, "children") {
+            return Err(plain_error(format!(
+                "{children} inherit from it, which an export does not write yet."
+            )));
+        }
+        self.render_ddl(schema, relation, RelationKind::Table, true)
+    }
+
+    /// The sequences columns of `tables` own, as the statements that bring
+    /// them back: created before the tables whose defaults name them, set
+    /// where they stood after the rows are in.
+    ///
+    /// A sequence of the schema their defaults name that none of them owns
+    /// (one shared, or one an unexported table owns) is created and set too,
+    /// owned by nothing: its owner is not in the file. One in another schema
+    /// is that schema's to bring back.
+    ///
+    /// ponytail: a default naming an exported identity column's sequence is
+    /// refused. The upgrade is pg_dump's: the column's identity added after
+    /// the tables with `ADD GENERATED … (SEQUENCE NAME …)`, ahead of the
+    /// tables whose defaults name it.
+    pub fn export_sequences(&self, schema: &str, tables: &[String]) -> Result<Sequences, DbError> {
+        let mut sequences = Sequences::default();
+        if tables.is_empty() {
+            return Ok(sequences);
+        }
+        let names: Vec<String> = tables
+            .iter()
+            .map(|table| Engine::Postgres.quote_literal(table))
+            .collect();
+        // Not `pg_sequences`, which reads where every sequence in the database
+        // stands, so one dropped by another session meanwhile fails the read.
+        // `owned` is each sequence a column of `tables` owns, as `serial` or
+        // as an identity; `named` is each other sequence of the schema their
+        // defaults name.
+        let tables_sql = format!(
+            "table_namespace.nspname = {} AND table_class.relname IN ({})",
+            Engine::Postgres.quote_literal(schema),
+            names.join(", ")
+        );
+        // An identity column's sequence is created by its table's `CREATE`,
+        // under a name of the server's choosing and only once that table is,
+        // so a default naming it would replay against no such sequence.
+        let borrowed = self.internal_query(&format!(
+            "SELECT table_class.relname || '.' || attribute.attname AS borrower,
+                 sequence_class.relname AS sequence_name,
+                 owner_class.relname || '.' || owner_attribute.attname AS owner
+             FROM pg_catalog.pg_depend AS dependency
+             JOIN pg_catalog.pg_attrdef AS attribute_default
+                 ON attribute_default.oid = dependency.objid
+             JOIN pg_catalog.pg_class AS table_class
+                 ON table_class.oid = attribute_default.adrelid
+             JOIN pg_catalog.pg_namespace AS table_namespace
+                 ON table_namespace.oid = table_class.relnamespace
+             JOIN pg_catalog.pg_attribute AS attribute
+                 ON attribute.attrelid = table_class.oid
+                 AND attribute.attnum = attribute_default.adnum
+             JOIN pg_catalog.pg_class AS sequence_class
+                 ON sequence_class.oid = dependency.refobjid AND sequence_class.relkind = 'S'
+             JOIN pg_catalog.pg_depend AS identity
+                 ON identity.objid = sequence_class.oid AND identity.deptype = 'i'
+                 AND identity.classid = 'pg_catalog.pg_class'::regclass
+                 AND identity.refclassid = 'pg_catalog.pg_class'::regclass
+             JOIN pg_catalog.pg_class AS owner_class ON owner_class.oid = identity.refobjid
+             JOIN pg_catalog.pg_attribute AS owner_attribute
+                 ON owner_attribute.attrelid = owner_class.oid
+                 AND owner_attribute.attnum = identity.refobjsubid
+             WHERE dependency.classid = 'pg_catalog.pg_attrdef'::regclass
+                 AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                 AND {tables_sql}
+                 AND owner_class.relnamespace = table_namespace.oid
+                 AND owner_class.relname IN ({})
+             ORDER BY 1",
+            names.join(", ")
+        ))?;
+        if let Some(row) = borrowed.rows.first() {
+            let cell = |name: &str| required_cell(&borrowed, row, name);
+            return Err(plain_error(format!(
+                "the default of {} takes its values from {}, the sequence of the identity \
+                 column {}, which the file cannot name: its table's CREATE makes it under a \
+                 name of its own. Export one of the two tables without the other.",
+                cell("borrower")?,
+                cell("sequence_name")?,
+                cell("owner")?
+            )));
+        }
+        let result = self.internal_query(&format!(
+            "WITH owned AS (
+                 SELECT dependency.objid AS sequence_oid,
+                     table_class.relname AS table_name,
+                     attribute.attname AS column_name,
+                     attribute.attnum AS position,
+                     dependency.deptype::text AS owner_kind
+                 FROM pg_catalog.pg_depend AS dependency
+                 JOIN pg_catalog.pg_class AS table_class
+                     ON table_class.oid = dependency.refobjid
+                 JOIN pg_catalog.pg_namespace AS table_namespace
+                     ON table_namespace.oid = table_class.relnamespace
+                 JOIN pg_catalog.pg_attribute AS attribute
+                     ON attribute.attrelid = table_class.oid
+                     AND attribute.attnum = dependency.refobjsubid
+                 WHERE dependency.classid = 'pg_catalog.pg_class'::regclass
+                     AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND dependency.deptype IN ('a', 'i')
+                     AND {tables_sql}
+             ), named AS (
+                 SELECT DISTINCT dependency.refobjid AS sequence_oid,
+                     NULL::name AS table_name,
+                     NULL::name AS column_name,
+                     NULL::int2 AS position,
+                     'n' AS owner_kind
+                 FROM pg_catalog.pg_depend AS dependency
+                 JOIN pg_catalog.pg_attrdef AS attribute_default
+                     ON attribute_default.oid = dependency.objid
+                 JOIN pg_catalog.pg_class AS table_class
+                     ON table_class.oid = attribute_default.adrelid
+                 JOIN pg_catalog.pg_namespace AS table_namespace
+                     ON table_namespace.oid = table_class.relnamespace
+                 WHERE dependency.classid = 'pg_catalog.pg_attrdef'::regclass
+                     AND dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND {tables_sql}
+                     AND dependency.refobjid NOT IN (SELECT sequence_oid FROM owned)
+                     AND dependency.refobjid IN (
+                         SELECT oid FROM pg_catalog.pg_class
+                         WHERE relnamespace = table_namespace.oid
+                     )
+             )
+             SELECT sequence_namespace.nspname AS sequence_schema,
+                 sequence_class.relname AS sequence_name,
+                 wanted.table_name,
+                 wanted.column_name,
+                 wanted.owner_kind,
+                 pg_catalog.format_type(sequence.seqtypid, NULL) AS data_type,
+                 sequence.seqstart::text AS start_value,
+                 sequence.seqmin::text AS min_value,
+                 sequence.seqmax::text AS max_value,
+                 sequence.seqincrement::text AS increment_by,
+                 sequence.seqcycle::text AS cycle,
+                 sequence.seqcache::text AS cache_size,
+                 CASE WHEN access.readable
+                     THEN pg_catalog.pg_sequence_last_value(sequence_class.oid)::text
+                 END AS last_value,
+                 access.readable::text AS readable,
+                 pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT')::text
+                     AS selectable
+             FROM (SELECT * FROM owned UNION ALL SELECT * FROM named) AS wanted
+             JOIN pg_catalog.pg_class AS sequence_class
+                 ON sequence_class.oid = wanted.sequence_oid AND sequence_class.relkind = 'S'
+             JOIN pg_catalog.pg_namespace AS sequence_namespace
+                 ON sequence_namespace.oid = sequence_class.relnamespace
+             JOIN pg_catalog.pg_sequence AS sequence ON sequence.seqrelid = sequence_class.oid
+             CROSS JOIN LATERAL (
+                 SELECT pg_catalog.has_sequence_privilege(sequence_class.oid, 'SELECT, USAGE')
+                     AS readable
+             ) AS access
+             ORDER BY wanted.table_name NULLS LAST, wanted.position,
+                 sequence_namespace.nspname, sequence_class.relname"
+        ))?;
+        for row in &result.rows {
+            let cell = |name: &str| required_cell(&result, row, name);
+            let sequence =
+                Engine::Postgres.qualified(cell("sequence_schema")?, cell("sequence_name")?);
+            let kind = cell("owner_kind")?;
+            // `last_value` is NULL for a role that may not read the sequence,
+            // and for one whose next value is not yet taken: never used, or
+            // set by `setval(…, false)`. Only the sequence itself says where
+            // the second stands.
+            let set = match optional_cell(&result, row, "last_value") {
+                Some(last) => Some((last.to_string(), "true".to_string())),
+                None if cell("selectable")? == "true" => {
+                    let state = self.internal_query(&format!(
+                        "SELECT last_value::text AS last_value, is_called::text AS is_called \
+                         FROM {sequence}"
+                    ))?;
+                    let row = state
+                        .rows
+                        .first()
+                        .ok_or_else(|| plain_error(format!("{sequence} has no state to read.")))?;
+                    Some((
+                        required_cell(&state, row, "last_value")?.to_string(),
+                        required_cell(&state, row, "is_called")?.to_string(),
+                    ))
+                }
+                None => {
+                    sequences.unreadable.push(sequence.clone());
+                    None
+                }
+            };
+            // The definition and the value are read apart, the value from the
+            // sequence as it stands now: an `ALTER SEQUENCE` and a `setval`
+            // committed in between pair the old bounds with a value only the
+            // new ones allow, which a replay refuses.
+            if let Some((last, _)) = &set
+                && outside_bounds(last, cell("min_value")?, cell("max_value")?)
+            {
+                return Err(plain_error(format!(
+                    "{sequence} was changed while it was read: it stands at {last}, \
+                     outside the bounds read with it. Export it again."
+                )));
+            }
+            let set = set.map(|(last, called)| format!("{last}, {called}"));
+            // A sequence an identity column owns is created by its table, and
+            // a `named` one by no table at all.
+            let column_of = || -> Result<(String, String), DbError> {
+                Ok((
+                    Engine::Postgres.qualified(schema, cell("table_name")?),
+                    Engine::Postgres.quote_identifier(cell("column_name")?),
+                ))
+            };
+            if kind != "i" {
+                sequences.before_tables.push(format!(
+                    "CREATE SEQUENCE {sequence} AS {} INCREMENT BY {} MINVALUE {} MAXVALUE {} \
+                     START WITH {} CACHE {} {};",
+                    cell("data_type")?,
+                    cell("increment_by")?,
+                    cell("min_value")?,
+                    cell("max_value")?,
+                    cell("start_value")?,
+                    cell("cache_size")?,
+                    if cell("cycle")? == "true" {
+                        "CYCLE"
+                    } else {
+                        "NO CYCLE"
+                    },
+                ));
+                if kind == "a" {
+                    let (table, column) = column_of()?;
+                    sequences.owned_by.push(format!(
+                        "ALTER SEQUENCE {sequence} OWNED BY {table}.{column};"
+                    ));
+                }
+                if let Some(set) = set {
+                    sequences.values.push(format!(
+                        "SELECT pg_catalog.setval({}, {set});",
+                        Engine::Postgres.quote_literal(&sequence)
+                    ));
+                }
+            } else {
+                let (table, column) = column_of()?;
+                let start = cell("start_value")?;
+                // The table's `GENERATED … AS IDENTITY` names none of its
+                // sequence's options, so the column is given them as they were.
+                // The new sequence stands at the default start, which a
+                // descending one's bounds refuse, so it restarts in the same
+                // statement.
+                sequences.identity.push(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} SET INCREMENT BY {} \
+                     SET MINVALUE {} SET MAXVALUE {} SET START WITH {start} RESTART WITH {start} \
+                     SET CACHE {} SET {};",
+                    cell("increment_by")?,
+                    cell("min_value")?,
+                    cell("max_value")?,
+                    cell("cache_size")?,
+                    if cell("cycle")? == "true" {
+                        "CYCLE"
+                    } else {
+                        "NO CYCLE"
+                    },
+                ));
+                if let Some(set) = set {
+                    sequences.values.push(format!(
+                        "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence({}, {}), {set});",
+                        Engine::Postgres.quote_literal(&table),
+                        Engine::Postgres.quote_literal(cell("column_name")?),
+                    ));
+                }
+            }
+        }
+        Ok(sequences)
+    }
+
+    fn render_ddl(
+        &self,
+        schema: &str,
+        relation: &str,
+        kind: RelationKind,
+        keys_apart: bool,
+    ) -> Result<ExportDdl, DbError> {
         let name = Engine::Postgres.qualified(schema, relation);
         let view = match kind {
             RelationKind::View => Some("VIEW"),
@@ -1693,10 +2200,17 @@ impl Connection {
                     statements.push(terminated(required_cell(&indexes, row, "definition")?));
                 }
             }
-            return Ok(statements.join("\n"));
+            return Ok(ExportDdl {
+                create: statements.join("\n"),
+                foreign_keys: Vec::new(),
+            });
         }
 
         let structure = self.structure(schema, relation)?;
+        let (structure, foreign_keys) = match keys_apart {
+            true => split_foreign_keys(Engine::Postgres, schema, relation, &structure),
+            false => (structure, Vec::new()),
+        };
         let storage = self.internal_query(&structure_sql(TABLE_STORAGE_SQL, schema, relation))?;
         if storage.rows.is_empty() {
             return Err(plain_error(format!("{schema} has no relation {relation}.")));
@@ -1736,13 +2250,17 @@ impl Connection {
             (Some(key), None) => ("TABLE", format!(" PARTITION BY {key}")),
             (None, None) => ("TABLE", String::new()),
         };
-        Ok(create_table(
+        let create = create_table(
             Engine::Postgres,
             &format!("CREATE {head} {name}"),
             &structure,
             &tail,
             |index| index.definition.clone(),
-        ))
+        );
+        Ok(ExportDdl {
+            create,
+            foreign_keys,
+        })
     }
 }
 
@@ -1806,8 +2324,31 @@ fn sole_table(probed: &[ProbedColumn]) -> Option<u32> {
 struct KeyedTable {
     schema: String,
     table: String,
-    columns: Vec<(i16, String)>,
+    columns: Vec<TableColumn>,
     key: Vec<i16>,
+    /// The session renders a float with every digit it needs to read back as
+    /// itself ([`floats_round_trip`]), so its text names its value.
+    floats_round_trip: bool,
+}
+
+struct TableColumn {
+    attribute: i16,
+    name: String,
+    /// [`EDIT_COLUMNS_SQL`]'s `type_name`.
+    type_name: String,
+    /// A generated column: matched, never set.
+    generated: bool,
+}
+
+/// Whether a session renders every float with the digits it needs to read
+/// back as itself. From 12 any `extra_float_digits` above 0 picks the shortest
+/// exact form. Before, it only adds digits, and below 3 a `float4` or a
+/// `float8` can still print the same text as a value beside it.
+fn floats_round_trip(extra_float_digits: i32, server_version_num: i32) -> bool {
+    match server_version_num >= 120_000 {
+        true => extra_float_digits > 0,
+        false => extra_float_digits >= 3,
+    }
 }
 
 fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
@@ -1819,6 +2360,16 @@ fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
         table: required_cell(result, first, "table_name").ok()?.to_string(),
         columns: Vec::new(),
         key: Vec::new(),
+        floats_round_trip: floats_round_trip(
+            required_cell(result, first, "extra_float_digits")
+                .ok()?
+                .parse()
+                .ok()?,
+            required_cell(result, first, "server_version_num")
+                .ok()?
+                .parse()
+                .ok()?,
+        ),
     };
 
     for row in &result.rows {
@@ -1826,16 +2377,167 @@ fn keyed_table(result: &QueryResult) -> Option<KeyedTable> {
             .ok()?
             .parse()
             .ok()?;
-        keyed.columns.push((
+        keyed.columns.push(TableColumn {
             attribute,
-            required_cell(result, row, "column_name").ok()?.to_string(),
-        ));
+            name: required_cell(result, row, "column_name").ok()?.to_string(),
+            type_name: required_cell(result, row, "type_name").ok()?.to_string(),
+            generated: required_cell(result, row, "is_generated").ok()? == "yes",
+        });
         if required_cell(result, row, "in_primary_key").ok()? == "yes" {
             keyed.key.push(attribute);
         }
     }
 
     Some(keyed)
+}
+
+/// What a result over `table` can be written back to, and when the answer is
+/// no for a reason the user can act on, that reason: a table with a primary
+/// key is named by it, one without by every column.
+fn edit_outcome(
+    probed: &[ProbedColumn],
+    table: &KeyedTable,
+) -> (Option<EditTarget>, Option<String>) {
+    if !table.key.is_empty() {
+        return (resolve_edit_target(probed, table), None);
+    }
+    resolve_keyless_target(probed, table)
+}
+
+/// Whether `=` against a column's value rendered as text finds it, for the
+/// type [`EDIT_COLUMNS_SQL`] names. Fail closed: only types the compose server
+/// was seen to match are listed.
+///
+/// ponytail: a type is added when
+/// `tests::live_every_listed_type_matches_its_row_by_its_rendered_text`
+/// exercises it. Left off: `json`, `xml`, `point` and `polygon` (no `=` of their
+/// own), `box`, `circle` and `path` (an `=` that compares size, so a row would
+/// match others it is not), `line` and `lseg` with them (never exercised), the
+/// PostGIS types (a rendering that loses the SRID), `bytea` (rendered as
+/// `\x…` and quoted as that text, which reads as those bytes only while
+/// `standard_conforming_strings` is on), and arrays, ranges, enums and domains.
+fn is_matchable(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "bpchar"
+            | "varchar"
+            | "text"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "numeric"
+            | "float4"
+            | "float8"
+            | "bool"
+            | "jsonb"
+            | "money"
+            | "interval"
+            | "uuid"
+            | "date"
+            | "time"
+            | "timetz"
+            | "timestamp"
+            | "timestamptz"
+    )
+}
+
+/// The target of a result set over a table with no primary key: every column
+/// of the table names the row, a NULL as `IS NULL`, the generated columns
+/// matched but never set. Or the reason it cannot be, when the user can do
+/// something about it.
+///
+/// Never a unique index, and never some of the columns: a column left out of
+/// the `WHERE` matches rows the user is not looking at, so a column that cannot
+/// be matched by its value, or that the result omits, makes the whole result
+/// read-only.
+fn resolve_keyless_target(
+    probed: &[ProbedColumn],
+    table: &KeyedTable,
+) -> (Option<EditTarget>, Option<String>) {
+    let attribute_of = |column: &ProbedColumn| column.table.and(column.attribute);
+    // As for a key: two result columns reading one table column are the two
+    // sides of a self-join, and a column computed beside the real ones is no
+    // table's row.
+    let mut origins = HashSet::new();
+    if !probed
+        .iter()
+        .map(attribute_of)
+        .all(|attribute| attribute.is_some_and(|attribute| origins.insert(attribute)))
+    {
+        return (None, None);
+    }
+    let refusal = |what: String| {
+        Some(format!(
+            "A table without a primary key is edited by matching every column, and {what}."
+        ))
+    };
+    if let Some(column) = table
+        .columns
+        .iter()
+        .find(|column| !is_matchable(&column.type_name))
+    {
+        return (
+            None,
+            refusal(format!(
+                "{} ({}) cannot be matched by its value",
+                column.name, column.type_name
+            )),
+        );
+    }
+    // At too low an `extra_float_digits` a float renders rounded, so its text
+    // misses its row or names another holding the rounded value.
+    if !table.floats_round_trip
+        && let Some(column) = table
+            .columns
+            .iter()
+            .find(|column| matches!(column.type_name.as_str(), "float4" | "float8"))
+    {
+        return (
+            None,
+            refusal(format!(
+                "{} ({}) cannot be matched by its value while extra_float_digits is too \
+                 low to print it exactly",
+                column.name, column.type_name
+            )),
+        );
+    }
+    let mut keys = Vec::new();
+    let mut fixed = Vec::new();
+    for column in &table.columns {
+        let Some(at) = probed
+            .iter()
+            .position(|probed| attribute_of(probed) == Some(column.attribute))
+        else {
+            return (
+                None,
+                refusal(format!("{} is not in the result", column.name)),
+            );
+        };
+        keys.push(at);
+        if column.generated {
+            fixed.push(at);
+        }
+    }
+    let columns = probed
+        .iter()
+        .map(|probed| {
+            let attribute = attribute_of(probed)?;
+            table
+                .columns
+                .iter()
+                .find(|column| column.attribute == attribute)
+                .map(|column| column.name.clone())
+        })
+        .collect();
+    let target = EditTarget {
+        schema: table.schema.clone(),
+        table: table.table.clone(),
+        columns,
+        keys,
+        row_match: RowMatch::EveryColumn { fixed },
+        ..Default::default()
+    };
+    (Some(target), None)
 }
 
 /// The probe's provenance decided against one table's catalog entry.
@@ -1884,8 +2586,8 @@ fn resolve_edit_target(probed: &[ProbedColumn], table: &KeyedTable) -> Option<Ed
                 table
                     .columns
                     .iter()
-                    .find(|(number, _)| *number == attribute)
-                    .map(|(_, name)| name.clone())
+                    .find(|column| column.attribute == attribute)
+                    .map(|column| column.name.clone())
             })
             .collect(),
         keys,
@@ -1898,6 +2600,20 @@ fn schema_sql(template: &str, schema: &str) -> String {
 }
 
 /// A relation name is user data and can contain a quote.
+/// Whether a sequence's `value` lies outside its `minimum` and `maximum`, all
+/// as the server prints them. Text that does not read as a bigint is taken as
+/// inside: the server's, not this check's, to refuse.
+fn outside_bounds(value: &str, minimum: &str, maximum: &str) -> bool {
+    match (
+        value.parse::<i64>(),
+        minimum.parse::<i64>(),
+        maximum.parse::<i64>(),
+    ) {
+        (Ok(value), Ok(minimum), Ok(maximum)) => value < minimum || value > maximum,
+        _ => false,
+    }
+}
+
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
     super::structure_sql(super::Engine::Postgres, template, schema, relation)
 }
@@ -2286,7 +3002,10 @@ fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ForeignKey, IndexKind, RelationKind, RoutineKind, SslMode, result, rows};
+    use crate::db::{
+        ApplyOutcome, CancelToken, Drift, FetchedCell, ForeignKey, IndexKind, RelationKind,
+        RoutineKind, SslMode, StepKind, result, rows,
+    };
 
     fn config() -> ServerConfig {
         ServerConfig {
@@ -2303,6 +3022,27 @@ mod tests {
             ssh: None,
             schema: None,
         }
+    }
+
+    /// `attgenerated` is new in PostgreSQL 12: named bare, a server before it
+    /// refuses the query, the refusal is swallowed, and every result set there
+    /// loses its edit target.
+    #[test]
+    fn every_catalog_query_a_result_set_or_table_open_runs_reads_attgenerated_through_the_row_as_json()
+     {
+        for (name, sql) in [
+            ("EDIT_COLUMNS_SQL", EDIT_COLUMNS_SQL),
+            ("STRUCTURE_COLUMNS_SQL", STRUCTURE_COLUMNS_SQL),
+        ] {
+            assert!(
+                !sql.contains("attribute.attgenerated"),
+                "{name} reads attgenerated on the attribute alias directly"
+            );
+        }
+        assert!(
+            EDIT_COLUMNS_SQL.contains("to_jsonb(attribute) ->> 'attgenerated'"),
+            "EDIT_COLUMNS_SQL does not read attgenerated through the row as JSON"
+        );
     }
 
     /// The server the `live_` tests talk to, from the standard `PG*` variables.
@@ -2348,6 +3088,15 @@ mod tests {
             ..parts
         };
         assert!(compose_sequence("s", "n", &parts).ends_with(" NO CYCLE;"));
+    }
+
+    #[test]
+    fn a_sequence_value_is_checked_against_the_bounds_read_with_it() {
+        assert!(!outside_bounds("5", "1", "10"));
+        assert!(!outside_bounds("-5", "-9223372036854775808", "-1"));
+        assert!(outside_bounds("50", "1", "10"));
+        assert!(outside_bounds("0", "1", "10"));
+        assert!(!outside_bounds("not a number", "1", "10"));
     }
 
     #[test]
@@ -2463,13 +3212,19 @@ mod tests {
             table: "accounts".into(),
             columns: columns
                 .iter()
-                .map(|(attribute, name, _)| (*attribute, (*name).to_string()))
+                .map(|(attribute, name, _)| TableColumn {
+                    attribute: *attribute,
+                    name: (*name).to_string(),
+                    type_name: "text".into(),
+                    generated: false,
+                })
                 .collect(),
             key: columns
                 .iter()
                 .filter(|(_, _, in_key)| *in_key)
                 .map(|(attribute, _, _)| *attribute)
                 .collect(),
+            floats_round_trip: true,
         }
     }
 
@@ -3890,7 +4645,663 @@ mod tests {
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
         generated_writes_round_trip,
+        generated_draft_round_trip,
+        verified_draft_round_trip,
+        verified_keyless_round_trip,
     );
+
+    /// Drops a scratch table and its trigger function when a test ends, panicking or not.
+    struct ScratchTable<'a>(&'a crate::db::Connection, &'static str);
+
+    impl ScratchTable<'_> {
+        fn drop_all(&self) {
+            for sql in [
+                format!("DROP TABLE IF EXISTS {} CASCADE", self.1),
+                format!("DROP FUNCTION IF EXISTS {}_fn()", self.1),
+            ] {
+                let _ = self
+                    .0
+                    .query(&sql, &CancelToken::default(), Fetch::default());
+            }
+        }
+    }
+
+    impl Drop for ScratchTable<'_> {
+        fn drop(&mut self) {
+            self.drop_all();
+        }
+    }
+
+    /// The cells of the one row `select` reads, as the grid would hold them
+    /// after a fetch of its own.
+    fn read_cells(connection: &crate::db::Connection, select: &str) -> Vec<FetchedCell> {
+        let result = connection
+            .query(select, &CancelToken::default(), Fetch::default())
+            .unwrap_or_else(|error| panic!("`{select}`: {error}"));
+        let row = result.rows.first().expect("the row is there to read");
+        result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| FetchedCell {
+                column: column.name.clone(),
+                text: row.get(index).map(str::to_string),
+                cell_type: None,
+                column_type: column.data_type.clone(),
+            })
+            .collect()
+    }
+
+    fn keyless(columns: &[(i16, &str, &str, bool)]) -> KeyedTable {
+        KeyedTable {
+            schema: "public".into(),
+            table: "sightings".into(),
+            columns: columns
+                .iter()
+                .map(|(attribute, name, type_name, generated)| TableColumn {
+                    attribute: *attribute,
+                    name: (*name).to_string(),
+                    type_name: (*type_name).to_string(),
+                    generated: *generated,
+                })
+                .collect(),
+            key: Vec::new(),
+            floats_round_trip: true,
+        }
+    }
+
+    /// At `extra_float_digits` 0 or less, the default before Postgres 12, a
+    /// float renders rounded: `0.30000000000000004` as `0.3`, whose literal
+    /// names a row holding exactly 0.3. A keyless table with a float is then
+    /// not edited by value; one without is.
+    #[test]
+    fn a_rounded_float_rendering_leaves_a_keyless_table_with_a_float_read_only() {
+        let rounded = |columns: &[(i16, &str, &str, bool)]| KeyedTable {
+            floats_round_trip: false,
+            ..keyless(columns)
+        };
+        let (target, reason) = edit_outcome(
+            &probed(&[("text", Some(42), Some(1)), ("float8", Some(42), Some(2))]),
+            &rounded(&[(1, "bird", "text", false), (2, "weight", "float8", false)]),
+        );
+        assert!(target.is_none());
+        assert_eq!(
+            reason.as_deref(),
+            Some(
+                "A table without a primary key is edited by matching every column, and \
+                 weight (float8) cannot be matched by its value while extra_float_digits \
+                 is too low to print it exactly."
+            )
+        );
+        let (target, _) = edit_outcome(
+            &probed(&[("text", Some(42), Some(1)), ("int4", Some(42), Some(2))]),
+            &rounded(&[(1, "bird", "text", false), (2, "seen", "int4", false)]),
+        );
+        assert!(target.is_some(), "no float, nothing rounded");
+    }
+
+    /// Before 12, `extra_float_digits` 1 or 2 still prints a `float4` or a
+    /// `float8` short of the digits it needs; only 3 is exact there.
+    #[test]
+    fn a_float_matches_by_its_text_before_12_only_at_three_extra_digits() {
+        assert!(floats_round_trip(1, 120_000));
+        assert!(!floats_round_trip(0, 170_000));
+        assert!(!floats_round_trip(0, 110_022));
+        assert!(!floats_round_trip(1, 110_022));
+        assert!(!floats_round_trip(2, 110_022));
+        assert!(floats_round_trip(3, 110_022));
+    }
+
+    #[test]
+    fn a_table_without_a_primary_key_is_matched_by_every_column_or_read_only_with_a_reason() {
+        use crate::db::RowMatch;
+        let table = keyless(&[
+            (1, "bird", "text", false),
+            (2, "place", "varchar", false),
+            (3, "seen", "int4", false),
+            (4, "weight", "float8", false),
+            (5, "tag", "uuid", false),
+        ]);
+        let whole = probed(&[
+            ("text", Some(42), Some(1)),
+            ("varchar", Some(42), Some(2)),
+            ("int4", Some(42), Some(3)),
+            ("float8", Some(42), Some(4)),
+            ("uuid", Some(42), Some(5)),
+        ]);
+        let (target, reason) = edit_outcome(&whole, &table);
+        let target = target.expect("every column is of a listed type");
+        assert_eq!(target.keys, [0, 1, 2, 3, 4]);
+        assert_eq!(target.row_match, RowMatch::EveryColumn { fixed: vec![] });
+        assert_eq!(reason, None);
+
+        // Table order, whatever order the result lists them in.
+        let (reordered, _) = edit_outcome(
+            &probed(&[
+                ("varchar", Some(42), Some(2)),
+                ("text", Some(42), Some(1)),
+                ("int4", Some(42), Some(3)),
+                ("float8", Some(42), Some(4)),
+                ("uuid", Some(42), Some(5)),
+            ]),
+            &table,
+        );
+        assert_eq!(reordered.expect("reordered").keys, [1, 0, 2, 3, 4]);
+
+        let (tagged, _) = edit_outcome(
+            &probed(&[
+                ("text", Some(42), Some(1)),
+                ("text", Some(42), Some(2)),
+                ("text", Some(42), Some(3)),
+            ]),
+            &keyless(&[
+                (1, "bird", "text", false),
+                (2, "place", "text", false),
+                (3, "label", "text", true),
+            ]),
+        );
+        assert_eq!(
+            tagged.expect("a generated column is matched").row_match,
+            RowMatch::EveryColumn { fixed: vec![2] }
+        );
+
+        let refused = |column: &str| {
+            Some(format!(
+                "A table without a primary key is edited by matching every column, \
+                 and {column} cannot be matched by its value."
+            ))
+        };
+        // `bytea`, whose literal reads as its bytes only under one setting, the
+        // types with no `=` of their own, an `=` that compares size, and the
+        // ones PostGIS adds.
+        for type_name in [
+            "bytea",
+            "json",
+            "xml",
+            "point",
+            "polygon",
+            "box",
+            "circle",
+            "line",
+            "lseg",
+            "path",
+            "cidr",
+            "public.geometry",
+            "public.geography",
+            "_int4",
+            "int4range",
+            "public.mood",
+        ] {
+            let (target, reason) = edit_outcome(
+                &probed(&[("text", Some(42), Some(1)), (type_name, Some(42), Some(2))]),
+                &keyless(&[(1, "bird", "text", false), (2, "shape", type_name, false)]),
+            );
+            assert!(target.is_none(), "{type_name}");
+            assert_eq!(
+                reason,
+                refused(&format!("shape ({type_name})")),
+                "{type_name}"
+            );
+        }
+        for type_name in [
+            "bpchar",
+            "varchar",
+            "text",
+            "int2",
+            "int4",
+            "int8",
+            "numeric",
+            "float4",
+            "float8",
+            "bool",
+            "jsonb",
+            "money",
+            "interval",
+            "uuid",
+            "date",
+            "time",
+            "timetz",
+            "timestamp",
+            "timestamptz",
+        ] {
+            let (target, reason) = edit_outcome(
+                &probed(&[(type_name, Some(42), Some(1))]),
+                &keyless(&[(1, "one", type_name, false)]),
+            );
+            assert!(target.is_some(), "{type_name}");
+            assert_eq!(reason, None, "{type_name}");
+        }
+
+        // A column the result leaves out would be left out of the WHERE.
+        let (target, reason) = edit_outcome(&probed(&[("text", Some(42), Some(1))]), &table);
+        assert!(target.is_none());
+        assert_eq!(
+            reason,
+            Some(
+                "A table without a primary key is edited by matching every column, \
+                 and place is not in the result."
+                    .to_string()
+            )
+        );
+        // Computed beside real columns, and a self-join, are no table's rows.
+        let one = keyless(&[(1, "bird", "text", false)]);
+        assert_eq!(
+            edit_outcome(
+                &probed(&[("text", Some(42), Some(1)), ("int4", None, None)]),
+                &one
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            edit_outcome(
+                &probed(&[("text", Some(42), Some(1)), ("text", Some(42), Some(1))]),
+                &one
+            ),
+            (None, None)
+        );
+
+        let (keyed, reason) = edit_outcome(
+            &probed(&[("int4", Some(42), Some(1)), ("text", Some(42), Some(3))]),
+            &keyed(&[(1, "id", true), (3, "name", false)]),
+        );
+        assert_eq!(keyed.expect("keyed").row_match, RowMatch::Key);
+        assert_eq!(reason, None);
+    }
+
+    /// One column of each listed type, with a value that shows how it renders.
+    const TYPE_SAMPLES: &[(&str, &str)] = &[
+        ("char(3)", "'ab'"),
+        ("varchar(32)", "'h''e llo, \\ {a: 1}'"),
+        ("text", "E'tab\\there\\nnewline \u{fc}n\u{ef}'"),
+        ("smallint", "-300"),
+        ("integer", "42"),
+        ("bigint", "9007199254740993"),
+        ("numeric(10,2)", "-12.50"),
+        ("numeric", "'NaN'"),
+        ("real", "0.1"),
+        ("double precision", "0.30000000000000004"),
+        ("double precision", "'NaN'"),
+        ("double precision", "'Infinity'"),
+        ("boolean", "true"),
+        ("jsonb", "'{\"a\": [1,   2], \"b\": null}'"),
+        ("money", "1234.5"),
+        ("interval", "'1 year 2 months 3 days 04:05:06.789'"),
+        ("uuid", "'8F1F4D3A-1B2C-4D5E-8F90-123456789ABC'"),
+        ("date", "'2024-02-29'"),
+        ("date", "'infinity'"),
+        ("time", "'12:34:56.123456'"),
+        ("time with time zone", "'12:34:56+02'"),
+        ("timestamp", "'2024-02-29 12:34:56.123456'"),
+        ("timestamp with time zone", "'2024-06-01 00:00:00-07'"),
+        ("timestamp with time zone", "'-infinity'"),
+    ];
+
+    /// Types left off the list whose own `=` cannot compare their rows, or
+    /// finds a row again with another that is not it. `line` and `lseg` are
+    /// left off as well, with no such finding: an `lseg` is found by its ends.
+    const UNMATCHED_SAMPLES: &[(&str, &[&str])] = &[
+        ("json", &["'{\"a\": 1}'"]),
+        ("xml", &["'<a/>'"]),
+        ("point", &["'(1,2)'"]),
+        ("polygon", &["'((0,0),(1,1),(1,0))'"]),
+        ("box", &["'(2,2),(0,0)'", "'(4,1),(0,0)'"]),
+        ("circle", &["'<(0,0),1>'", "'<(5,5),1>'"]),
+        ("path", &["'[(0,0),(1,1)]'", "'[(5,5),(9,9)]'"]),
+    ];
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_every_listed_type_matches_its_row_by_its_rendered_text() {
+        let connection = live_profile();
+        let run = |sql: &str| connection.query(sql, &CancelToken::default(), Fetch::default());
+        let scratch = ScratchTable(&connection, "dbdelve_keyless_types");
+        scratch.drop_all();
+        let columns: Vec<String> = TYPE_SAMPLES
+            .iter()
+            .enumerate()
+            .map(|(index, (declared, _))| format!("c{index} {declared}"))
+            .collect();
+        let values: Vec<&str> = TYPE_SAMPLES.iter().map(|(_, value)| *value).collect();
+        run(&format!(
+            "CREATE TABLE dbdelve_keyless_types ({}); INSERT INTO dbdelve_keyless_types VALUES ({})",
+            columns.join(", "),
+            values.join(", ")
+        ))
+        .expect("the scratch table is built");
+
+        let read = run("SELECT * FROM dbdelve_keyless_types").expect("the row reads");
+        let edit = read.edit.clone().unwrap_or_else(|| {
+            panic!(
+                "every column is of a listed type: {:?}",
+                read.read_only_reason
+            )
+        });
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![] }
+        );
+        assert_eq!(edit.keys.len(), TYPE_SAMPLES.len());
+        for (index, (declared, value)) in TYPE_SAMPLES.iter().enumerate() {
+            let column = &read.columns[index];
+            let rendered = read.rows[0].get(index).expect("a value");
+            let literal = Engine::Postgres.quote_value(rendered, column.data_type.as_deref());
+            let counted = run(&format!(
+                "SELECT COUNT(*) FROM dbdelve_keyless_types WHERE {} = {literal}",
+                Engine::Postgres.quote_identifier(&column.name)
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message);
+            assert_eq!(
+                counted.as_deref(),
+                Ok("1"),
+                "{declared}: {value} -> {rendered}"
+            );
+        }
+
+        for (declared, rows) in UNMATCHED_SAMPLES {
+            let table = "dbdelve_keyless_probe";
+            let scratch = ScratchTable(&connection, table);
+            scratch.drop_all();
+            let inserts: Vec<String> = rows.iter().map(|row| format!("({row})")).collect();
+            run(&format!(
+                "CREATE TABLE {table} (c {declared}); INSERT INTO {table} VALUES {}",
+                inserts.join(", ")
+            ))
+            .expect("the scratch table is built");
+            let read = run(&format!("SELECT * FROM {table}")).expect("the rows read");
+            assert!(read.edit.is_none(), "{declared}");
+            assert!(
+                read.read_only_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(&format!("c ({declared})"))),
+                "{declared}: {:?}",
+                read.read_only_reason
+            );
+            let rendered = read.rows[0].get(0).expect("a value");
+            let counted = run(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE c = {}",
+                Engine::Postgres.quote_literal(rendered)
+            ))
+            .map(|result| result.rows[0].get(0).unwrap_or("NULL").to_string())
+            .map_err(|error| error.message);
+            assert_ne!(counted.as_deref(), Ok("1"), "{declared}: {rendered}");
+        }
+    }
+
+    fn typed(columns: &[(&str, &str)]) -> Vec<(String, String)> {
+        columns
+            .iter()
+            .map(|(column, kind)| ((*column).to_string(), (*kind).to_string()))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_verified_update_a_trigger_skipped_is_refused_and_rolled_back() {
+        let connection = live_profile();
+        let table = "verified_trigger_skip";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        connection
+            .query(
+                &format!(
+                    "CREATE TABLE {table} (id integer PRIMARY KEY, label text);
+                     CREATE FUNCTION {table}_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+                     BEGIN IF OLD.id = 1 THEN RETURN NULL; END IF; RETURN NEW; END $$;
+                     CREATE TRIGGER skip BEFORE UPDATE ON {table}
+                         FOR EACH ROW EXECUTE FUNCTION {table}_fn();
+                     INSERT INTO {table} VALUES (1, 'one'), (2, 'two')"
+                ),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the scratch table is built");
+        let types = typed(&[("id", "int4"), ("label", "text")]);
+        let batch = crate::sql::draft_batch(
+            Engine::Postgres,
+            &[crate::sql::DraftDelete {
+                schema: "public".into(),
+                table: table.into(),
+                keys: vec![("id".into(), "2".into())],
+                null_keys: Vec::new(),
+                types: types.clone(),
+            }],
+            &[crate::result_grid::PendingRow {
+                schema: "public".into(),
+                table: table.into(),
+                sets: vec![(
+                    "label".into(),
+                    crate::result_grid::NewValue::Value("changed".into()),
+                )],
+                keys: vec![("id".into(), "1".into())],
+                types,
+                ..crate::result_grid::PendingRow::default()
+            }],
+            &[],
+        )
+        .expect("the draft is written");
+        let read = |id: u32| {
+            read_cells(
+                &connection,
+                &format!("SELECT * FROM {table} WHERE id = {id}"),
+            )
+        };
+        let steps = crate::db::conformance::verified_steps(
+            Engine::Postgres,
+            &batch,
+            vec![(StepKind::Delete, read(2)), (StepKind::Update, read(1))],
+        );
+
+        assert_eq!(
+            connection.apply_verified(&steps, &CancelToken::default()),
+            ApplyOutcome::Miscounted {
+                step: 1,
+                count: Some(0)
+            }
+        );
+        let left = connection
+            .query(
+                &format!("SELECT id, label FROM {table} ORDER BY id"),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the table is read");
+        let rows: Vec<_> = left
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get(0).map(str::to_string),
+                    row.get(1).map(str::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("1".into()), Some("one".into())),
+                (Some("2".into()), Some("two".into()))
+            ],
+            "the deleted row came back with the rollback"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_keyless_edit_after_a_compacting_delete_is_refused() {
+        let connection = live_profile();
+        crate::db::conformance::keyless_edit_after_a_compacting_delete(
+            &connection,
+            Engine::Postgres,
+            "public",
+            &[
+                "CREATE TABLE public.queue (pos integer, name text)",
+                "CREATE OR REPLACE FUNCTION public.queue_compact() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN \
+                 UPDATE public.queue SET pos = pos - 1 WHERE pos > OLD.pos; \
+                 RETURN OLD; END $$",
+                "CREATE TRIGGER compact AFTER DELETE ON public.queue \
+                 FOR EACH ROW EXECUTE FUNCTION public.queue_compact()",
+            ],
+        );
+        let _ = connection.query(
+            "DROP FUNCTION public.queue_compact()",
+            &CancelToken::default(),
+            Fetch::default(),
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_an_apply_refused_inside_the_users_transaction_leaves_it_working() {
+        let connection = live_profile();
+        let table = "verified_inside_user_transaction";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        let run = |sql: &str| {
+            connection
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .unwrap_or_else(|error| panic!("`{sql}`: {error}"))
+        };
+        run(&format!(
+            "CREATE TABLE {table} (id integer PRIMARY KEY, label text);
+             INSERT INTO {table} VALUES (1, 'one')"
+        ));
+        let batch = crate::sql::draft_batch(
+            Engine::Postgres,
+            &[],
+            &[crate::result_grid::PendingRow {
+                schema: "public".into(),
+                table: table.into(),
+                sets: vec![(
+                    "label".into(),
+                    crate::result_grid::NewValue::Value("changed".into()),
+                )],
+                keys: vec![("id".into(), "1".into())],
+                types: typed(&[("id", "int4"), ("label", "text")]),
+                ..crate::result_grid::PendingRow::default()
+            }],
+            &[],
+        )
+        .expect("the draft is written");
+        let steps = crate::db::conformance::verified_steps(
+            Engine::Postgres,
+            &batch,
+            vec![(
+                StepKind::Update,
+                read_cells(&connection, &format!("SELECT * FROM {table} WHERE id = 1")),
+            )],
+        );
+        let super::super::Connection::Postgres(session) = &connection else {
+            unreachable!("live_profile opens Postgres");
+        };
+
+        // A transaction that has read already cannot change its isolation
+        // level: an apply that asked for one would abort the user's work.
+        run("BEGIN");
+        run(&format!("INSERT INTO {table} VALUES (2, 'two')"));
+        assert!(matches!(
+            session.apply_verified(&steps, &|| true),
+            ApplyOutcome::Failed {
+                stage: crate::db::ApplyStage::Begin,
+                ..
+            }
+        ));
+        let counted = run(&format!("SELECT count(*) FROM {table}"));
+        assert_eq!(counted.rows[0].get(0), Some("2"));
+        run("ROLLBACK");
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_spatial_cell_rendered_after_the_fetch_is_compared_as_rendered() {
+        let connection = live_profile();
+        let table = "verified_spatial_cell";
+        let scratch = ScratchTable(&connection, table);
+        scratch.drop_all();
+        connection
+            .query(
+                &format!(
+                    "CREATE TABLE {table} (id integer PRIMARY KEY, label text, geom geometry);
+                     INSERT INTO {table} VALUES (1, 'a', ST_GeomFromText('POINT(1 2)'))"
+                ),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the scratch table is built");
+        let draft = |label: &str| {
+            crate::sql::draft_batch(
+                Engine::Postgres,
+                &[],
+                &[crate::result_grid::PendingRow {
+                    schema: "public".into(),
+                    table: table.into(),
+                    sets: vec![(
+                        "label".into(),
+                        crate::result_grid::NewValue::Value(label.to_string().into()),
+                    )],
+                    keys: vec![("id".into(), "1".into())],
+                    types: typed(&[("id", "int4"), ("label", "text"), ("geom", "geometry")]),
+                    ..crate::result_grid::PendingRow::default()
+                }],
+                &[],
+            )
+            .expect("the draft is written")
+        };
+        let read = || read_cells(&connection, &format!("SELECT * FROM {table} WHERE id = 1"));
+        let apply = |before: Vec<FetchedCell>, label: &str| {
+            let steps = crate::db::conformance::verified_steps(
+                Engine::Postgres,
+                &draft(label),
+                vec![(StepKind::Update, before)],
+            );
+            connection.apply_verified(&steps, &CancelToken::default())
+        };
+
+        // What the grid shows is the WKT its own render made; the re-read
+        // inside the apply comes back as the server writes it.
+        let held = read();
+        let geom = held.iter().find(|cell| cell.column == "geom").unwrap();
+        assert_eq!(geom.column_type.as_deref(), Some("geometry"));
+        assert!(
+            geom.text
+                .as_deref()
+                .is_some_and(|text| text.starts_with("POINT")),
+            "{geom:?}"
+        );
+        assert!(
+            matches!(apply(held, "b"), ApplyOutcome::Applied { affected: 1, .. }),
+            "an unchanged row with a spatial cell applies"
+        );
+
+        let mut stale = read();
+        stale
+            .iter_mut()
+            .find(|cell| cell.column == "label")
+            .unwrap()
+            .text = Some("stale".into());
+        assert_eq!(
+            apply(stale, "c"),
+            ApplyOutcome::Drifted(vec![(0, Drift::Changed)]),
+            "a changed non-spatial cell is still compared"
+        );
+
+        // Another session moves the point after the fetch: the re-read, as
+        // rendered, differs from the WKT the grid holds.
+        let held = read();
+        connection
+            .query(
+                &format!("UPDATE {table} SET geom = ST_GeomFromText('POINT(3 4)') WHERE id = 1"),
+                &CancelToken::default(),
+                Fetch::default(),
+            )
+            .expect("the point moves");
+        assert_eq!(
+            apply(held, "d"),
+            ApplyOutcome::Drifted(vec![(0, Drift::Changed)]),
+            "a change confined to a spatial cell is seen"
+        );
+    }
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
@@ -4843,8 +6254,38 @@ mod tests {
 
     #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
-    fn live_a_table_without_a_primary_key_is_not_editable() {
-        // There is no predicate that names one of two identical rows.
+    fn live_a_generated_column_of_a_table_without_a_primary_key_is_matched_and_never_set() {
+        // A generated column cannot be written, so it is still matched on but
+        // named in `fixed`, and the write leaves it out.
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        connection
+            .query(
+                "CREATE TEMP TABLE dbdelve_generated (value integer, \
+                 doubled integer GENERATED ALWAYS AS (value * 2) STORED, label text)",
+                Fetch::default(),
+            )
+            .expect("the temporary table should be created");
+
+        let result = connection
+            .query(
+                "SELECT label, value, doubled FROM dbdelve_generated",
+                Fetch::default(),
+            )
+            .expect("query should succeed");
+
+        let edit = result.edit.expect("every column is of a listed type");
+        assert_eq!(edit.keys, [1, 2, 0]);
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![2] }
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_a_table_without_a_primary_key_is_edited_by_every_column() {
+        // There is no predicate that names one of two identical rows, so the
+        // rows are named by every value and a write is counted.
         let connection = Connection::open(&live_config()).expect("connection should open");
         connection
             .query(
@@ -4854,10 +6295,15 @@ mod tests {
             .expect("the temporary table should be created");
 
         let result = connection
-            .query("SELECT value, label FROM dbdelve_unkeyed", Fetch::default())
+            .query("SELECT label, value FROM dbdelve_unkeyed", Fetch::default())
             .expect("query should succeed");
 
-        assert!(result.edit.is_none());
+        let edit = result.edit.expect("both columns are of a listed type");
+        assert_eq!(edit.keys, [1, 0]);
+        assert_eq!(
+            edit.row_match,
+            crate::db::RowMatch::EveryColumn { fixed: vec![] }
+        );
     }
 
     #[test]
@@ -4880,6 +6326,220 @@ mod tests {
                 .all(|reference| reference.referenced_column != "number"),
             "a composite key names no single column: {references:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_export_ddl_adds_foreign_keys_after_the_rows() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; \
+             DROP TABLE IF EXISTS dbdelve_test_export_parent; \
+             CREATE TABLE dbdelve_test_export_parent (id bigint PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_export_child (id bigint PRIMARY KEY, parent_id bigint, \
+                 CONSTRAINT dbdelve_test_export_fk FOREIGN KEY (parent_id) \
+                     REFERENCES dbdelve_test_export_parent (id))",
+        );
+        let exported = connection.export_ddl("public", "dbdelve_test_export_child");
+        setup("DROP TABLE dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent");
+        let exported = exported.expect("the table's DDL should load");
+
+        assert!(
+            !exported.create.contains("FOREIGN KEY"),
+            "{}",
+            exported.create
+        );
+        assert_eq!(
+            exported.foreign_keys.len(),
+            1,
+            "{:?}",
+            exported.foreign_keys
+        );
+        assert!(exported.foreign_keys[0].starts_with(
+            "ALTER TABLE \"public\".\"dbdelve_test_export_child\" \
+             ADD CONSTRAINT \"dbdelve_test_export_fk\" FOREIGN KEY"
+        ));
+        setup("CREATE TABLE dbdelve_test_export_parent (id bigint PRIMARY KEY)");
+        let replayed = connection.query(
+            &format!("{}\n{}", exported.create, exported.foreign_keys.join("\n")),
+            Fetch::default(),
+        );
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_export_child; DROP TABLE dbdelve_test_export_parent",
+        );
+        replayed.expect("the table and its key should run on the server");
+    }
+
+    #[test]
+    #[ignore = "requires a local Postgres server configured through PG*"]
+    fn live_sequences_bring_serial_and_identity_back_to_where_they_were() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        let drop = "DROP TABLE IF EXISTS dbdelve_test_seq_serial; \
+                    DROP TABLE IF EXISTS dbdelve_test_seq_identity";
+        setup(drop);
+        setup(
+            "CREATE TABLE dbdelve_test_seq_serial (id serial PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_seq_identity (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY); \
+             INSERT INTO dbdelve_test_seq_serial DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_serial DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_serial DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_identity DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_identity DEFAULT VALUES; \
+             INSERT INTO dbdelve_test_seq_identity DEFAULT VALUES",
+        );
+        let tables = [
+            "dbdelve_test_seq_serial".to_string(),
+            "dbdelve_test_seq_identity".to_string(),
+        ];
+        let sequences = connection.export_sequences("public", &tables);
+        setup(drop);
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(
+            sequences.before_tables.len(),
+            1,
+            "{:?}",
+            sequences.before_tables
+        );
+        assert!(sequences.before_tables[0].starts_with(
+            "CREATE SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" AS integer INCREMENT BY 1"
+        ));
+        assert_eq!(sequences.identity.len(), 1, "{:?}", sequences.identity);
+        assert!(sequences.identity[0].starts_with(
+            "ALTER TABLE \"public\".\"dbdelve_test_seq_identity\" ALTER COLUMN \"id\" SET INCREMENT BY 1"
+        ));
+        // Each `setval` carries the 3 the rows reached.
+        assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);
+        assert!(
+            sequences
+                .values
+                .iter()
+                .all(|sql| sql.contains(", 3, true);"))
+        );
+        assert_eq!(
+            sequences.owned_by,
+            vec![
+                "ALTER SEQUENCE \"public\".\"dbdelve_test_seq_serial_id_seq\" \
+                 OWNED BY \"public\".\"dbdelve_test_seq_serial\".\"id\";"
+                    .to_string()
+            ]
+        );
+
+        // The proof is the server: replay it into emptied tables and the next
+        // value carries on after the rows that were there.
+        setup(&sequences.before_tables.join("\n"));
+        setup(
+            "CREATE TABLE dbdelve_test_seq_serial (id integer PRIMARY KEY DEFAULT \
+                 nextval('public.dbdelve_test_seq_serial_id_seq')); \
+             CREATE TABLE dbdelve_test_seq_identity (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY)",
+        );
+        setup(&sequences.values.join("\n"));
+        setup(&sequences.owned_by.join("\n"));
+        let next = |table: &str| {
+            connection
+                .query(
+                    &format!("INSERT INTO {table} DEFAULT VALUES RETURNING id"),
+                    Fetch::default(),
+                )
+                .map(|result| {
+                    result
+                        .rows
+                        .first()
+                        .and_then(|row| row.get(0).map(str::to_string))
+                })
+        };
+        let serial = next("dbdelve_test_seq_serial");
+        let identity = next("dbdelve_test_seq_identity");
+        setup(drop);
+        assert_eq!(serial.expect("serial inserts"), Some("4".to_string()));
+        assert_eq!(identity.expect("identity inserts"), Some("4".to_string()));
+    }
+
+    #[test]
+    #[ignore = "needs the dev Postgres"]
+    fn live_a_sequence_whose_next_value_is_not_taken_is_set_where_it_stands() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        // The catalog shows both a NULL `last_value`: one never used, and one
+        // `setval(…, false)` put at 50 for its next value.
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_seq_unused; \
+             DROP TABLE IF EXISTS dbdelve_test_seq_reset; \
+             CREATE TABLE dbdelve_test_seq_unused (id serial PRIMARY KEY); \
+             CREATE TABLE dbdelve_test_seq_reset (id serial PRIMARY KEY); \
+             SELECT setval('dbdelve_test_seq_reset_id_seq', 50, false)",
+        );
+        let sequences = connection.export_sequences(
+            "public",
+            &[
+                "dbdelve_test_seq_reset".to_string(),
+                "dbdelve_test_seq_unused".to_string(),
+            ],
+        );
+        setup("DROP TABLE dbdelve_test_seq_unused; DROP TABLE dbdelve_test_seq_reset");
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(sequences.values.len(), 2, "{:?}", sequences.values);
+        assert!(
+            sequences.values[0].ends_with(", 50, false);"),
+            "{:?}",
+            sequences.values
+        );
+        assert!(
+            sequences.values[1].ends_with(", 1, false);"),
+            "{:?}",
+            sequences.values
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the dev Postgres"]
+    fn live_an_unreadable_sequence_is_named_not_set_to_start() {
+        let connection = Connection::open(&live_config()).expect("connection should open");
+        let setup = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .expect("the fixture statements should run");
+        };
+        // `GRANT SELECT ON ALL TABLES` leaves the sequences out, so a role
+        // granted that reads every row and no sequence: the catalog shows it a
+        // NULL `last_value`, as it does a sequence never used.
+        setup(
+            "DROP TABLE IF EXISTS dbdelve_test_seq_hidden; \
+             DROP ROLE IF EXISTS dbdelve_test_no_sequences; \
+             CREATE ROLE dbdelve_test_no_sequences; \
+             CREATE TABLE dbdelve_test_seq_hidden (id serial PRIMARY KEY); \
+             INSERT INTO dbdelve_test_seq_hidden DEFAULT VALUES; \
+             GRANT SELECT ON dbdelve_test_seq_hidden TO dbdelve_test_no_sequences; \
+             SET ROLE dbdelve_test_no_sequences",
+        );
+        let sequences =
+            connection.export_sequences("public", &["dbdelve_test_seq_hidden".to_string()]);
+        setup(
+            "RESET ROLE; DROP TABLE dbdelve_test_seq_hidden; \
+             DROP ROLE dbdelve_test_no_sequences",
+        );
+        let sequences = sequences.expect("the sequences should load");
+
+        assert_eq!(
+            sequences.unreadable,
+            vec!["\"public\".\"dbdelve_test_seq_hidden_id_seq\"".to_string()]
+        );
+        assert!(sequences.values.is_empty(), "{:?}", sequences.values);
     }
 
     #[test]

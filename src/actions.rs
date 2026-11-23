@@ -7,7 +7,9 @@
 use gpui::{Action, actions};
 use serde::Deserialize;
 
-use crate::{db::ExplainMode, export::RowsAs, filter::Operator, import::Source, sql::Mode};
+use crate::{
+    db::ExplainMode, export::RowsAs, filter::Operator, import::Source, session::EditMode, sql::Mode,
+};
 
 /// A header click. The column is the one in the grid; which statement it
 /// belongs to is whatever surface is in front, because that is the grid the
@@ -125,6 +127,13 @@ pub(crate) struct SetQueryLimit {
     pub(crate) rows: Option<usize>,
 }
 
+/// How the view in front sends its edits, picked from the status bar's menu.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = dbdelve, no_json)]
+pub(crate) struct SetEditMode {
+    pub(crate) mode: EditMode,
+}
+
 /// Ask the server how it would run the statement under the cursor. The mode
 /// travels with the action because it is the user's choice at the menu, and the
 /// difference between the two is whether the statement is executed.
@@ -211,6 +220,10 @@ actions!(
         SetEmpty,
         SetDefault,
         RequestWriteMode,
+        // Dispatched by the grid when a step key finds no cell to step to and an
+        // input is open; no key binds it. The grid does not know the view's edit
+        // mode, so the workspace decides what the edge does.
+        StepPastEdge,
         FollowForeignKey,
         DeleteRow,
         ApplyEdits,

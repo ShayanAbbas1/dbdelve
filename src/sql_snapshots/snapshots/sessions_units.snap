@@ -679,9 +679,9 @@ source: src/sql_snapshots.rs
 [postgres] batch_repeats 0 => |ok|
 [postgres] batch_repeats 51 at the end => |ok|
 [mysql] statement 0..18 => |DECLARE @x int = 1|
-[mysql] statement 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[mysql] statement 20..46 => |SELECT @x\u{a}GO\u{a}SELECT * FROM|
 [mysql] queued 0..18 => |DECLARE @x int = 1|
-[mysql] queued 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[mysql] queued 20..46 => |SELECT @x\u{a}GO\u{a}SELECT * FROM|
 [mysql] queued in 0..9 0..18 => |DECLARE @x int = 1|
 [mysql] expected_sets => |1|
 [mysql] split_reads => (none)
@@ -690,9 +690,9 @@ source: src/sql_snapshots.rs
 [mysql] batch_repeats 0 => |ok|
 [mysql] batch_repeats 51 at the end => |ok|
 [mariadb] statement 0..18 => |DECLARE @x int = 1|
-[mariadb] statement 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[mariadb] statement 20..46 => |SELECT @x\u{a}GO\u{a}SELECT * FROM|
 [mariadb] queued 0..18 => |DECLARE @x int = 1|
-[mariadb] queued 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[mariadb] queued 20..46 => |SELECT @x\u{a}GO\u{a}SELECT * FROM|
 [mariadb] queued in 0..9 0..18 => |DECLARE @x int = 1|
 [mariadb] expected_sets => |1|
 [mariadb] split_reads => (none)
@@ -734,9 +734,9 @@ source: src/sql_snapshots.rs
 [duckdb] batch_repeats 0 => |ok|
 [duckdb] batch_repeats 51 at the end => |ok|
 [snowflake] statement 0..18 => |DECLARE @x int = 1|
-[snowflake] statement 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[snowflake] statement 20..46 => |SELECT @x\u{a}GO\u{a}SELECT * FROM|
 [snowflake] queued 0..18 => |DECLARE @x int = 1|
-[snowflake] queued 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[snowflake] queued 20..46 => |SELECT @x\u{a}GO\u{a}SELECT * FROM|
 [snowflake] queued in 0..9 0..18 => |DECLARE @x int = 1|
 [snowflake] expected_sets => |1|
 [snowflake] split_reads => (none)

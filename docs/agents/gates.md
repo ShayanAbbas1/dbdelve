@@ -44,8 +44,23 @@ it. Anything unsure is refused with its reason, leaving the rows shown. Rows
 go from the feed to a sibling `.partial` file renamed onto the chosen path
 only once whole, so a cancel or a failure leaves whatever was there.
 
-DBDelve _does_ write SQL when the user asks it to, and only then, always
-where the user can read it:
+**A schema export only reads, and writes the file the engine's own way.**
+Export Schema as SQL reads each chosen table's DDL and rows (through
+`relation_refetch`, each on its own, so the file is not a snapshot) and
+never runs a write. What the file needs to load back is data in
+`EngineSpec::exports_schema`, not a branch in the exporter: Postgres and SQL
+Server create tables without their foreign keys and add them after the rows,
+MySQL and MariaDB turn checks off for the file's session and restore them,
+ClickHouse needs nothing, DuckDB refuses a cycle by name. An engine whose
+DDL does not run back as written (Snowflake's `create or replace`, SQLite's
+triggers) has none and does not offer it. Postgres sequences are created and
+set with `setval`; one the role may not read refuses the rows rather than
+set it to its start. A partitioned table is named in the dialog and the
+header, not written. The file never contains `DROP` or `TRUNCATE`, whatever
+the engine.
+
+DBDelve _does_ write SQL when the user asks it to, and only then; outside Row
+mode, always where the user can read it before it runs:
 
 - On a view the server sorts, a header click asking for a sort splices the
   `ORDER BY` into the statement in the buffer, where it can be read, edited
@@ -53,10 +68,95 @@ where the user can read it:
   sorted in memory reorders the rows it holds and writes nothing;
   switching it to the server is an ask, and splices its keys the same way.
 - Grid edits on a query tab are appended to the buffer
-  (`sql::appended_statement`) and run from there. On an object tab, which
-  has no buffer, the statement is shown in a review dialog before it runs,
-  as it is on a query tab of an engine without unique keys
-  (`Engine::reviews_query_edits`), whose writes run only behind the guard.
+  (`sql::appended_statement`) and run from there only where the target
+  neither guards nor verifies them (`Target::reviews_query_apply`). On an
+  object tab, which has no buffer, the statement is shown in a review dialog
+  before it runs, as it is on a query tab of an engine without unique keys
+  (`Engine::reviews_query_edits`), whose writes run only behind the guard, and
+  on one whose apply is verified (`Target::verifies_applies`: the rows are
+  re-read and compared and each write counted, which a copy left in the buffer
+  would run without). A verified query-tab apply is not kept in the history for
+  the same reason, and no edit of a verifying target is sent without its
+  verification: `execute_unchecked` refuses one that arrives with none (`dbdelve
+  refused to send an edit it could not verify.`), so a path added later that
+  forgets to build one cannot send the text alone.
+  The exception is a relation tab's view in Row mode, which has no buffer and
+  no dialog: the row's `UPDATE` is sent as the row is left or saved
+  (`Workspace::save_row`), and that is the user's own act. It is gated by
+  `sql::is_generated_write_on`, mode-checked in `execute_and_then` as it is
+  sent, read back by `sql::row_read` under `sql::is_generated_select`, written
+  to history, and the last one is shown in the status line. On a target that
+  verifies applies (`Target::verifies_applies`) the send is one verified step:
+  the row is re-read and compared with the row as it was fetched before its
+  `UPDATE`, the `UPDATE` must count one row, and the read-back is taken inside
+  the same transaction. A row that drifted, or an `UPDATE` that counted any
+  other number, applies nothing and the row keeps its edits. A Classic or
+  Draft view sends nothing unread.
+  The New row form's `INSERT` and a lone Delete row's `DELETE` are reviewed as
+  before and run through the same verified apply on such a target: the
+  `INSERT` must count one row, and the `DELETE` re-reads its row first and
+  must count one.
+- A relation tab's Draft apply on a target that verifies it
+  (`Target::verifies_applies`: SQLite, DuckDB, Postgres, MySQL, MariaDB and SQL Server so
+  far, widened an engine at a time as each one's arm of `Connection::apply_verified` lands) is not sent as the text
+  the user read. The text is still what the user reads, and it is gated as it
+  always was (`sql::is_generated_write_on`, `sql::draft_deletes_match`); the
+  apply then cuts its statements out of that text (`sql::generated_writes`,
+  which sees through the `BEGIN`/`COMMIT` brackets the text may hold) and sends
+  them one at a time on one held session: a `BEGIN` of the apply's own
+  (`Engine::transaction_start`, or `BEGIN` where one submission is already
+  atomic), a `SELECT * … WHERE <the statement's own
+  predicate> LIMIT 2` (two rows already prove it ambiguous; SQL Server's arm
+  re-spells it as a preview is) for every `UPDATE` and `DELETE` (`sql::row_reread`, cut from the
+  statement's own parse tree and admitted by `sql::is_generated_select`) before
+  any write, the writes in the order the text holds them with each one's row
+  count checked, then `COMMIT`, or `ROLLBACK` on any refusal or failure before
+  it. Every re-read is compared whole, by column name and byte for byte, with
+  the row as the grid fetched it (copied by value when the review was written);
+  a row that differs or is gone writes nothing, keeps the draft and is named in
+  the review. A statement that does not count exactly one row rolls the whole
+  sequence back; a `DELETE` may count none only when its row is named by its
+  key (`VerifiedStep::by_key`) and a second read of it finds it gone, which an
+  earlier `DELETE` of the draft taking it along would leave, and a statement
+  something skipped (a trigger returning without writing) leaves its row there.
+  A row named by every value reads as gone once an earlier write changed one of
+  them, so there a `DELETE` counting none is a miscount. Such a row is proven
+  the one read only at its re-read: a trigger or a cascading foreign key fired
+  by an earlier write of the draft can move another row onto exactly its
+  values, and the write would count that row. So a keyless `UPDATE` or
+  `DELETE` after any earlier write is refused, inside the apply's transaction
+  and before any re-read (`db::rewrites::probe`, `KEYLESS_AFTER_A_WRITE`),
+  when the catalog shows a trigger on its table or on a table written before
+  it (or, on Postgres, a rule), or a foreign key from its table to one written
+  before it with `ON DELETE` or `ON UPDATE` `CASCADE`, `SET NULL` or `SET
+  DEFAULT`. SQLite, Postgres, MySQL, MariaDB and SQL Server read their
+  catalogs; DuckDB has no triggers and its foreign keys never cascade; any
+  other engine refuses. A first step, and a row named by its key, are never
+  asked about, so multi-row keyless drafts on a plain table still apply. While a transaction
+  the user opened is open on the connection (`Profile::in_transaction`, which
+  counts MySQL's `SET autocommit = 0` and SQL Server's `SET
+  IMPLICIT_TRANSACTIONS ON`) a verified apply is refused, at review and at Run
+  (`session::APPLY_IN_TRANSACTION`), because its own `BEGIN` and `COMMIT`
+  would end that transaction; the draft is kept. The arm asks the server too,
+  under the lock it holds, before its `BEGIN` (`Sending::Open`): SQLite and
+  DuckDB `is_autocommit`, MySQL and MariaDB `@@autocommit` and a `SET
+  TRANSACTION` refused with 1568 inside one, SQL Server `@@TRANCOUNT` and
+  `@@OPTIONS & 2`, Postgres the 25001 warning its `BEGIN` raises inside one.
+  There is no `FOR UPDATE`: the pinned grammar cannot read it.
+  Every re-read runs before any write, so a step's row waits from its re-read
+  through the rest of the re-reads and the writes before its own, many round
+  trips on a long draft. The isolation the apply runs under covers that
+  window: Postgres opens it `REPEATABLE READ` (a write to a row changed since
+  the snapshot fails with 40001), MySQL and MariaDB `SERIALIZABLE` (each
+  re-read holds a shared lock on its rows to the `COMMIT`), SQL Server runs
+  each re-read `REPEATABLE READ` (the same, by lock); SQLite has one writer and
+  DuckDB fails a conflicting write. MongoDB has no transaction, so a document
+  changed between its re-read and its write is overwritten. Targets that do not verify
+  keep `Connection::generated`. On MySQL and MariaDB a table whose storage
+  engine has no transactions (`information_schema.ENGINES.TRANSACTIONS`, so
+  MyISAM, Aria, MEMORY) is not editable at all: the `ROLLBACK` would undo
+  nothing, and a draft kept after a failure part way would send what already
+  ran again.
 - Import Rows shows every statement it will send in its dialog's SQL view
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
@@ -69,10 +169,12 @@ where the user can read it:
 
 Limits on what DBDelve may write. It never writes `DROP` or `TRUNCATE`
 into a buffer or onto the wire, whatever the user asked for. It writes
-`DELETE` only as the explicit deletion of one named row: by primary key (on
-an engine without unique keys, by all of the row's values as read, and only
-when exactly one row matches), from a direct ask, with the statement shown before it runs
-(`sql::delete_row`). The one exception to both is the explorer's
+`DELETE` only as the explicit deletion of one named row: by primary key (on a
+table with no primary key, by all of the row's values as read, a NULL as
+`IS NULL`, and only when exactly one row matches), from a direct ask, with the statement shown before it runs
+(`sql::delete_row`), or as one `DELETE` per row the user marked in a reviewed
+draft, each naming that row's key and shown with the rest of the draft before it
+runs. The one exception to both is the explorer's
 right-click menu, whose Copy DROP and Copy TRUNCATE (SQLite's spelling is
 `DELETE FROM`, MongoDB's `drop()` and `deleteMany({})`, Redis's Copy
 TRUNCATE `FLUSHDB`, with no Copy DROP) put the text on the
@@ -86,7 +188,7 @@ an unsorted grid.
 
 **Generated SQL passes a whitelist gate, and there is one per path.**
 `sql::is_generated_write` is the single gate every statement the grid writes
-passes first. It admits exactly four shapes:
+passes first. It admits exactly five shapes:
 
 - a batch of `UPDATE`s, optionally bracketed by a `BEGIN`/`COMMIT` the gate
   can see closed, each setting columns only to values DBDelve writes
@@ -116,10 +218,29 @@ passes first. It admits exactly four shapes:
   distinct, unqualified columns against single-quoted literals (or a bare
   `0x…` hex literal, SQL Server's spelling of bytes): no `OR`, no
   other operator, no subquery, no function call, no CTE beside it, no
-  `RETURNING`, no `LIMIT`, and nothing else in the submission. ClickHouse,
-  which has no unique key, is the one exception to the terms: a row is named
-  by every value, and a term may also be `toString(col) = '…'` (the only
-  function call admitted, over a bare column) or `col IS NULL`;
+  `RETURNING`, no `LIMIT`, and nothing else in the submission. A row with no
+  primary key is named by every value, so a term may also be `col IS NULL`
+  (never `IS NOT NULL`) on Postgres, MySQL, MariaDB, SQLite, DuckDB and SQL
+  Server (`SqlSpec::null_terms`); ClickHouse, whose drafts are not verified,
+  also admits `toString(col) = '…'` (the only function call admitted, over a
+  bare column) under `SqlSpec::row_terms`. The `IS NULL` term is read through
+  the spoken engine's spec, so a plugin that speaks one of those dialects is
+  admitted it too (`generated_writes`); its driver holds each statement to
+  exactly one row or saves nothing;
+- a draft: more than one statement, optionally bracketed as the first shape
+  is, each an `UPDATE`, an `INSERT` of exactly one row with no skip tail
+  (otherwise as the second shape reads it) or a `DELETE` of the third shape,
+  holding at least one `INSERT` or `DELETE`, with no comment anywhere in it
+  (`sql::draft_sequence`). The count of `delete` nodes in the whole tree must
+  equal the count of top-level statements that are such a `DELETE`, so one
+  hidden in a CTE beside an `UPDATE` is refused. Admitted only on a spec whose
+  grid writes a draft (`SqlSpec::drafts`: the six verified engines), so refused
+  on Snowflake, Turso and Generic, and on ClickHouse, whose one-row guard a
+  sequence cannot carry. A sequence's `UPDATE`s are read as a batch's are:
+  every set value one the first shape admits (the bytes literal included), and
+  the predicate not read on an engine that names a row by its key, so
+  `sql::draft_deletes_match`, not the gate, is what holds an `UPDATE` to one
+  row;
 - a submission that is exactly one lone `BEGIN`, `BEGIN TRANSACTION`,
   `COMMIT` or `ROLLBACK`, compared as text. These are the brackets of an
   import's transaction, which spans submissions on a connection of the
@@ -127,8 +248,8 @@ passes first. It admits exactly four shapes:
 
 Because it is a whitelist, `DROP` and `TRUNCATE` are refused structurally,
 anywhere in the tree, CTEs included (`sql::forbidden`), and so is every
-`delete` outside that one shape (`sql::deletes_anything`, checked on the
-`INSERT` and `UPDATE` arms). On an engine where a backslash escapes
+`delete` outside those shapes (`sql::deletes_anything`, checked on the
+`INSERT` and `UPDATE` arms; the draft's count of `delete` nodes). On an engine where a backslash escapes
 (`Engine::backslash_escapes`), a submission with any literal holding a quote
 after an odd run of backslashes is refused, in every arm
 (`sql::parse_gated`): the grammar ends the string there and the engine
@@ -187,24 +308,37 @@ can disagree. `sql::delete_matches_key` answers the half the gate cannot,
 whether the `WHERE` names exactly the row's key as a set. It is a readout,
 not a second gate: it admits nothing, and a caller runs both.
 
-**Multi-row deletion is not admitted.** When it is wanted, the path is the
-`BEGIN`/`COMMIT` bracketing multi-row edits already use: one `DELETE` per
-row, each naming its own key, never one predicate covering several.
+**Multi-row deletion by predicate is not admitted.** A reviewed draft may carry
+one `DELETE` per marked row, each naming its own key and table, inside the
+`BEGIN`/`COMMIT` bracketing multi-row edits already use, never one predicate
+covering several. The gate reads each `DELETE`'s shape and cannot know the key
+or the table, so `sql::draft_deletes_match` reads them out of the same parse
+tree, and the draft is reviewed only when both hold and the `DELETE`s it
+counts are the marks the grid holds. It holds the draft's `UPDATE`s to the
+same table and key, and its `INSERT`s to the same table.
 
 A cell is editable only when DBDelve can name its row by primary key; when
 it cannot, the grid stays read-only and says why, and never guesses at a
-predicate. An `INSERT` has no existing row to name, so a table without a
-primary key can be inserted into and not edited. That asymmetry is
-deliberate and belongs in anything that documents either feature.
+predicate.
 
-The one exception is an engine without unique keys (ClickHouse): a row is
-named by all of its values as read, and a write runs only when exactly one row
-matches. Before each `UPDATE`, `DELETE` or `ALTER` write, an exactly-one-row
-`COUNT(*)` with the identical predicate (`sql::row_guard`) must return one. An
-update on a table lacking the block columns is spelled `ALTER TABLE <t> UPDATE
-<assignments> WHERE <predicate> SETTINGS mutations_sync = 2`, exactly, with
-the setting last. A row that cannot be matched exactly stays read-only and says
-why.
+The one exception is a table with no primary key: a row is named by all of its
+values as read, a NULL as `IS NULL`, and a write runs only when exactly one row
+matches. Only a plain read of that one table (`sql::table_read`) is edited so:
+a self-join's columns each name the table, but not which row of it. On the six verified engines the re-read must return one row and the
+write must count one, inside the apply's transaction
+(`sql::draft_deletes_match` holds a `DELETE` to every column of the grid's
+key, as a set). On ClickHouse, before each `UPDATE`, `DELETE` or `ALTER` write,
+an exactly-one-row `COUNT(*)` with the identical predicate (`sql::row_guard`)
+must return one. An update on a table lacking the block columns is spelled
+`ALTER TABLE <t> UPDATE <assignments> WHERE <predicate> SETTINGS
+mutations_sync = 2`, exactly, with the setting last. A column that cannot be
+matched by equality (on SQLite, any declared type outside the INTEGER, TEXT
+and REAL affinities, a blob rendering as `x'…'` text no blob equals; on
+Postgres and DuckDB, any type not on the list
+`docs/agents/engines.md` gives, each listed because a test matched it on that
+engine) leaves the grid read-only and says why; it is never
+left out of the `WHERE`, and no unique key, rowid or subset of the columns
+names the row in its place.
 
 ## Connection modes, per engine
 

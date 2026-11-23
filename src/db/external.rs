@@ -330,7 +330,7 @@ impl Connection {
         cancel: &CancelToken,
         fetch: Fetch,
     ) -> Result<QueryResult, DbError> {
-        match sql::generated_writes(self.config.speaks, sql) {
+        match plugin_writes(self.config.speaks, sql)? {
             Some(statements) => self.write(statements, cancel),
             None => self.query(sql, cancel, fetch),
         }
@@ -1158,6 +1158,23 @@ fn unexpected(host: &Host, what: &str) -> DbError {
     ))
 }
 
+/// The writes a statement DBDelve wrote asks a plugin to run, or `None` for a
+/// read. A write the built-in gate admits but a plugin's does not (a draft's
+/// shapes, a NULL term) is refused rather than sent as a query, where it would
+/// run outside the driver's transaction and the plugin's own guard.
+fn plugin_writes(speaks: Engine, text: &str) -> Result<Option<Vec<String>>, DbError> {
+    match sql::plugin_generated_writes(speaks, text) {
+        Some(statements) => Ok(Some(statements)),
+        None if sql::generated_writes(speaks, text).is_some() => Err(DbError {
+            message: "dbdelve refused to run a statement it wrote itself: a plugin connection \
+                      does not take this write."
+                .into(),
+            position: None,
+        }),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::{Command, Stdio};
@@ -1454,6 +1471,25 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.rows_affected, Some(1));
         assert_eq!(last(&postgres), delete.trim_end_matches(';'));
+    }
+
+    #[test]
+    fn a_write_the_plugin_gate_refuses_is_refused_unsent_not_run_as_a_query() {
+        let connection = speaking(Engine::Postgres);
+        read(&connection, "pid");
+        let null = "DELETE FROM \"main\".\"accounts\" WHERE \"id\" = '2' AND \"b\" IS NULL";
+        assert!(crate::sql::generated_writes(Engine::Postgres, null).is_some());
+
+        let error = connection
+            .generated(null, &CancelToken::default(), None, None)
+            .unwrap_err();
+
+        assert!(
+            error.message.starts_with("dbdelve refused"),
+            "{}",
+            error.message
+        );
+        assert_eq!(last(&connection), "pid", "nothing reached the plugin");
     }
 
     #[test]

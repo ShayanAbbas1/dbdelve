@@ -51,6 +51,7 @@ use crate::{
     structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
+    workspace::SchemaExportDialog,
 };
 
 /// A connection and everything it owns.
@@ -241,6 +242,20 @@ impl Profile {
         self.config.schema().or(current)
     }
 
+    /// The schema the session is in, for a list of schemas to open on.
+    pub(crate) fn schema_in(&self) -> Option<String> {
+        let connected = match &self.state {
+            ProfileState::Connected(connection) => connection.current_schema(),
+            _ => None,
+        };
+        schema_in(
+            self.config.target(),
+            self.active_schema(),
+            self.active_database(),
+            connected,
+        )
+    }
+
     /// The database the connection is on: as last listed, else as the
     /// server spelled it on connecting, else as the profile names it, else
     /// the one it opened on. The server's spelling before the profile's, so
@@ -410,6 +425,11 @@ impl Profile {
     /// over them: the connection they were opened from has ended or been
     /// replaced, and a landing issued to it is dropped by its generation.
     ///
+    /// The schema export's dialog goes with them: its tick list and the keys
+    /// it read are the connection's being dropped, and its reads under the old
+    /// generation are dropped when they land, which would leave it reading
+    /// forever. A disconnect, a reconnect and a database switch all come here.
+    ///
     /// ponytail: a session lives as long as its connection and ends with
     /// nothing else, so a server with many databases expanded holds one
     /// session each until it disconnects. The upgrade is to close one when
@@ -417,6 +437,7 @@ impl Profile {
     pub(crate) fn drop_sessions(&mut self) {
         self.bound.clear();
         self.database_catalogs.clear();
+        self.session.schema_export = None;
     }
 
     /// Why an edit under `binding` is not sent, as far as is known before it
@@ -426,6 +447,17 @@ impl Profile {
         match self.bound.get(&binding.database) {
             Some(BoundSession::Open(bound)) => bound.write_refusal(&binding.database),
             _ => None,
+        }
+    }
+
+    /// Whether a transaction the user opened is open on the session `tab`'s
+    /// statements run on, which a verified apply's own `BEGIN` and `COMMIT`
+    /// would end: the profile's own for a tab of its database, the bound
+    /// session's for a tab bound to another.
+    pub(crate) fn transaction_open_for(&self, tab: Tab) -> bool {
+        match self.binding_of(tab) {
+            Some(binding) => self.bound_write_refusal(&binding).is_some(),
+            None => self.in_transaction,
         }
     }
 
@@ -780,6 +812,9 @@ pub(crate) struct Session {
     /// The recent file found gone when its Files row was opened, while the
     /// question whether to leave it off the list is up.
     pub(crate) pending_forget: Option<PathBuf>,
+    /// An action a landed row send released, waiting for render, which has the
+    /// `Window` its handler needs (`Workspace::resume_released`).
+    pub(crate) resume_after: Option<(Tab, AfterEdits)>,
     pub(crate) notice: Option<String>,
     /// What a statement's run cost beyond its result (`QueryResult::notice`),
     /// said only while the tab it ran on is in front, under any `notice`.
@@ -788,6 +823,12 @@ pub(crate) struct Session {
     /// has no buffer to put SQL in, so the modal is where the statement is on
     /// screen — and nothing runs until Run.
     pub(crate) apply_review: Option<ApplyReview>,
+    /// The tabs whose review was closed while their batch was still out, one
+    /// entry each, cleared by that tab's own landing. Such a grid takes no
+    /// edit until its run lands: the success that clears the draft would drop
+    /// one staged meanwhile unsaid. One per tab, since another tab's review
+    /// can be opened, run and closed while the first is still out.
+    pub(crate) draft_out: Vec<Tab>,
     /// The "Insert" form a preview tab is filling in. Beside `apply_review`
     /// because the two are halves of one flow: the form collects, the review
     /// shows the statement it generated, and only Run sends it.
@@ -800,6 +841,11 @@ pub(crate) struct Session {
     /// An export asked for over rows that are not the whole result, held
     /// until the user says which rows it writes.
     pub(crate) pending_export: Option<PendingExport>,
+    /// The tables, structure and rows a schema export is being chosen over.
+    pub(crate) schema_export: Option<SchemaExportDialog>,
+    /// Numbered across opens, so a read the dialog it was for has closed
+    /// before landing is not taken for the reopened one's.
+    pub(crate) last_schema_export: u64,
     /// The export of every row this connection is running, at most one.
     pub(crate) exporting: Option<Exporting>,
     /// The query tab whose queue stopped on a failed statement, held until
@@ -826,6 +872,13 @@ pub(crate) struct Session {
     pub(crate) last_structure_request: u64,
 }
 
+/// What a verified apply is refused with while a transaction the user opened
+/// is open on the connection, at review and at Run alike: the apply opens and
+/// ends a transaction of its own, and its `BEGIN` and `COMMIT` would end the
+/// user's (MySQL and MariaDB commit it at the `START TRANSACTION`).
+pub(crate) const APPLY_IN_TRANSACTION: &str =
+    "A transaction is open on this connection; the edits were not applied.";
+
 /// A generated statement waiting to be read and run.
 pub(crate) struct ApplyReview {
     /// The tab the edits came from, so the modal is shown over that surface
@@ -838,6 +891,34 @@ pub(crate) struct ApplyReview {
     pub(crate) sql: String,
     /// What the engine adds about running `sql`, one paragraph each.
     pub(crate) notes: Vec<String>,
+    /// What the last run of `sql` came to when it failed or was refused,
+    /// drawn where the statement is. Cleared when it runs again.
+    pub(crate) error: Option<String>,
+    /// Whether `sql` is the grid's draft, which a successful run clears. An
+    /// `INSERT` or a `DELETE` of the New row form or Delete row sends none of it.
+    pub(crate) edits: bool,
+    /// What a run of `sql` is verified against, when its target verifies an
+    /// apply (`Target::verifies_applies`). Kept for as long as the review is
+    /// open, since a refusal leaves it open and the next Run verifies again.
+    pub(crate) verify: Option<Verification>,
+    /// The profile generation its last Run went out on. A reconnect since
+    /// means that run's landing will be dropped, so the review may close.
+    pub(crate) ran_on: Option<u64>,
+}
+
+/// The rows a reviewed draft was written from, as they were fetched: one step
+/// for each statement of the batch, in the order the batch holds them, built
+/// when the review is written and handed to the apply with the run.
+#[derive(Clone)]
+pub(crate) struct Verification {
+    pub(crate) steps: Vec<crate::db::VerifiedStep>,
+    /// What each step's row is called in what the apply says of it, `rows[i]`
+    /// for step `i`: the key's `name = value` terms, or `added row N`.
+    pub(crate) rows: Vec<String>,
+    /// The draft row each step was written for, by what names it, `identities[i]`
+    /// for step `i` (`ResultGrid::draft_identities`). Empty for the one step of
+    /// a Row send or a form, whose failure applies nothing.
+    pub(crate) identities: Vec<crate::result_grid::StepRow>,
 }
 
 impl ApplyReview {
@@ -1155,6 +1236,7 @@ pub(crate) enum StaleResume {
     /// than the active one.
     Stage((usize, usize), NewValue),
     Delete,
+    NewRow,
 }
 
 impl Session {
@@ -1270,13 +1352,17 @@ impl Session {
             pending_discard: None,
             pending_overwrite: None,
             pending_forget: None,
+            resume_after: None,
             notice,
             tab_notice: None,
             apply_review: None,
+            draft_out: Vec::new(),
             insert_form: None,
             import_rows: None,
             pending_run: None,
             pending_export: None,
+            schema_export: None,
+            last_schema_export: 0,
             exporting: None,
             queue_failure: None,
             parked: Vec::new(),
@@ -1295,6 +1381,20 @@ impl Session {
                 .filter(|(tab, _)| *tab == self.active)
                 .map(|(_, notice)| notice.as_str())
         })
+    }
+
+    /// Says what became of an edit send that failed or was refused, where the
+    /// statement is: in the review when one covers `tab`, otherwise in the
+    /// tab's notice, beside the statement appended to its buffer.
+    pub(crate) fn edit_failed(&mut self, tab: Tab, message: String) {
+        match self
+            .apply_review
+            .as_mut()
+            .filter(|review| review.covers(tab))
+        {
+            Some(review) => review.error = Some(message),
+            None => self.tab_notice = Some((tab, message)),
+        }
     }
 
     pub(crate) fn query_tab(&self, id: u64) -> Option<&QueryTab> {
@@ -1337,11 +1437,12 @@ impl Session {
     /// Asked of the tab whose grid is being edited, which a blur can make a
     /// tab other than the active one.
     pub(crate) fn may_stage_into(&self, owner: Tab) -> bool {
-        may_stage_into(
-            self.apply_review.as_ref(),
-            self.import_rows.is_some(),
-            owner,
-        )
+        !self.draft_out.contains(&owner)
+            && may_stage_into(
+                self.apply_review.as_ref(),
+                self.import_rows.is_some(),
+                owner,
+            )
     }
 
     pub(crate) fn review_slot(&self, from: Tab, replaces_own: bool) -> ReviewSlot {
@@ -1354,6 +1455,45 @@ impl Session {
         match tab {
             Tab::Query(id) => self.query_tab(id).is_some(),
             Tab::Object(id) => self.objects.iter().any(|object| object.id == id),
+        }
+    }
+
+    /// Undoes what an action that is not going ahead changed before it asked:
+    /// a filter bar the user edited goes back to what it was. Every way a
+    /// parked [`AfterEdits`] can be dropped ends here, so the bars never show
+    /// a filter that did not run.
+    pub(crate) fn put_back(&mut self, tab: Tab, then: AfterEdits) {
+        if let (Tab::Object(id), AfterEdits::Filter { before: Some(rows) }) = (tab, then)
+            && let Some(ObjectBody::Relation { filters, .. }) = self
+                .objects
+                .iter_mut()
+                .find(|tab| tab.id == id)
+                .map(|tab| &mut tab.body)
+        {
+            *filters = rows;
+        }
+    }
+
+    /// Holds `then` for render to carry out once a landed send has released
+    /// it. One slot: an action already waiting is the user's own, and this
+    /// one is put back instead.
+    pub(crate) fn park_resume(&mut self, tab: Tab, then: AfterEdits) {
+        match self.resume_after {
+            Some(_) => self.put_back(tab, then),
+            None => self.resume_after = Some((tab, then)),
+        }
+    }
+
+    /// Owes relation tab `id` a read of its rows on its next visit, for rows
+    /// that no longer say what the server holds.
+    pub(crate) fn mark_stale(&mut self, id: u64) {
+        if let Some(ObjectBody::Relation { stale, .. }) = self
+            .objects
+            .iter_mut()
+            .find(|tab| tab.id == id)
+            .map(|tab| &mut tab.body)
+        {
+            *stale = true;
         }
     }
 
@@ -1611,6 +1751,26 @@ impl Session {
         }
     }
 
+    /// Every grid one named tab keeps rows in: its slot, the slot's own grid
+    /// while a queue's earlier result stands in for it, and each finished
+    /// result of a queue. The edits a requery would replace are in any of
+    /// them, so the question and the Discard that answers it read the same set.
+    pub(crate) fn tab_grids(&self, tab: Tab) -> Vec<Entity<TableState<ResultGrid>>> {
+        let mut grids: Vec<_> = self.results(tab).into_iter().cloned().collect();
+        if let Tab::Query(id) = tab
+            && let Some(query) = self.query_tab(id)
+        {
+            grids.extend(query.lent.iter().map(|(grid, _)| grid.clone()));
+            grids.extend(
+                query
+                    .queue
+                    .iter()
+                    .flat_map(|queue| queue.done.iter().map(|finished| finished.grid.clone())),
+            );
+        }
+        grids
+    }
+
     /// Whether one named tab has a statement in flight: its own slot, not
     /// whichever of a queue's results the switcher is showing.
     pub(crate) fn running(&self, tab: Tab) -> bool {
@@ -1655,6 +1815,34 @@ impl Session {
         }
     }
 
+    /// When one named tab's edits are sent: its own for a relation, `Draft` for
+    /// every other tab, which has no Row mode to be in.
+    pub(crate) fn edit_mode(&self, tab: Tab) -> EditMode {
+        match tab {
+            Tab::Query(_) => EditMode::Draft,
+            Tab::Object(id) => match self.objects.iter().find(|tab| tab.id == id) {
+                Some(ObjectTab {
+                    body: ObjectBody::Relation { edit_mode, .. },
+                    ..
+                }) => *edit_mode,
+                _ => EditMode::Draft,
+            },
+        }
+    }
+
+    /// `Some` only for a relation tab, the one view with a mode to change.
+    pub(crate) fn edit_mode_mut(&mut self, tab: Tab) -> Option<&mut EditMode> {
+        match tab {
+            Tab::Query(_) => None,
+            Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
+                ObjectBody::Relation { edit_mode, .. } => Some(edit_mode),
+                ObjectBody::Routine(_)
+                | ObjectBody::Structure { .. }
+                | ObjectBody::Diagram { .. } => None,
+            },
+        }
+    }
+
     /// Every live grid this session holds, across both tab strips. `results`
     /// and `slot` reach one grid by tab; this reaches all of them, for a
     /// setting that belongs to the connection rather than to a run --
@@ -1672,18 +1860,6 @@ impl Session {
                 | ObjectBody::Structure { .. }
                 | ObjectBody::Diagram { .. } => None,
             }))
-    }
-
-    /// Every grid `tab` holds: a query tab's queue and lent results as well as
-    /// its own slot, any of which can carry staged edits.
-    pub(crate) fn grids_of(&self, tab: Tab) -> Vec<&Entity<TableState<ResultGrid>>> {
-        match tab {
-            Tab::Query(id) => self
-                .query_tab(id)
-                .map(|tab| tab.grids().collect())
-                .unwrap_or_default(),
-            Tab::Object(_) => self.results(tab).into_iter().collect(),
-        }
     }
 
     /// Where a run's state and rows belong. Returning both together is what
@@ -1747,7 +1923,17 @@ impl Session {
         self.pending_delete = None;
         self.query_rename = None;
         self.query_rename_needs_focus = false;
-        self.pending_discard = None;
+        // The bars a dropped filter prompt was holding go back as Cancel puts
+        // them: they were changed before anything could ask, and the filter
+        // that ran is the one they have to describe.
+        if let Some(PendingDiscard { tab, then, .. }) = self.pending_discard.take() {
+            self.put_back(tab, then);
+        }
+        // An action released by a landed send does not follow the user to
+        // another tab or connection, and its bars go back like a Cancel's.
+        if let Some((tab, then)) = self.resume_after.take() {
+            self.put_back(tab, then);
+        }
         self.pending_overwrite = None;
         self.pending_forget = None;
         // A stopped statement must not survive a tab or profile switch and get
@@ -1798,17 +1984,118 @@ pub(crate) enum PendingDelete {
     Folder(String, usize),
 }
 
-/// A close held up by the unapplied-edits question, and the saved query to
-/// delete once the tab goes, by its profile's id and its name, when deleting
-/// it is what closes the tab: the tab can be on another connection. More
-/// than one tab only when Close All Tabs found edits in several, or edits
-/// and unsaved files, which are asked about once the edits are discarded.
+/// What a tab was asked to do while its grid held edits nobody had applied,
+/// kept as data so the prompt, and in Row mode the send, can carry it out once
+/// the edits are out of the way. Never a stored closure: every variant is the
+/// values the action was raised with, so a Discard runs what the user asked
+/// for and not what the tab has become since.
+#[derive(Clone)]
+pub(crate) enum AfterEdits {
+    /// Close the tab, and delete the saved query first when deleting it is
+    /// what closes the tab, by its profile's id and its name: the tab can be
+    /// on another connection.
+    Close { deleting: Option<(String, String)> },
+    /// A relation tab's statement again, with the filter, sort, row limit and
+    /// page offset the action produced. The tab's own are untouched until it
+    /// runs, so a cancelled page turn leaves the page on screen as it was.
+    Requery {
+        filter: String,
+        sort: Vec<SortKey>,
+        limit: Option<usize>,
+        offset: usize,
+    },
+    /// A relation tab's rows read again as they stand.
+    Refresh,
+    /// The filter bars as the user just changed them. `before` is what they
+    /// were, put back on Cancel: the bars are the tab's state and were changed
+    /// by the caller before anything could ask.
+    Filter { before: Option<Vec<FilterRow>> },
+    /// The view's sorting switched to the server (`false`) or to memory.
+    ViewSorting(bool),
+    /// A query tab's Run.
+    Run,
+    /// A header click on a grid holding edits: a query tab's, on the server, or
+    /// a Row view's, in memory.
+    Sort(usize),
+    /// One of a finished queue's statements run again, as `sql`.
+    Rerun { index: usize, sql: String },
+    /// Bring this tab forward. Only a Row view's row waits on this, sent first
+    /// (or asked about, when the server refused it): a Draft view's draft stays
+    /// with its tab, so a tab switch asks nothing.
+    Activate(Tab),
+    /// Switch the view's edit mode. Only a Row view's row waits on this, being
+    /// sent before the view becomes Draft or Classic (or asked about, when the
+    /// server refused it).
+    EditMode(EditMode),
+}
+
+impl AfterEdits {
+    /// The prompt's title, and the act that discards the edits as the subject
+    /// of its sentence.
+    fn leaves(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Close { .. } => ("Close tab", "Closing it"),
+            Self::Requery { .. }
+            | Self::Refresh
+            | Self::Filter { .. }
+            | Self::ViewSorting(_)
+            | Self::Sort(_) => ("Discard edits", "Reading the rows again"),
+            Self::Run | Self::Rerun { .. } => ("Discard edits", "Running the statement"),
+            // Reached only over a row the server refused: any other Row view's
+            // row is sent first, and a Draft view is not asked.
+            Self::Activate(_) => ("Discard edits", "Switching to another tab"),
+            Self::EditMode(_) => ("Discard edits", "Switching the edit mode"),
+        }
+    }
+
+    /// The prompt's title and its sentence: what the edits are discarded by.
+    pub(crate) fn discards(&self) -> (&'static str, String) {
+        let (title, act) = self.leaves();
+        (
+            title,
+            format!("This tab has cell edits that have not been applied. {act} discards them."),
+        )
+    }
+
+    /// The same prompt over a row of a Row view the server refused, whose
+    /// edits are all that Discard drops.
+    pub(crate) fn discards_refused_row(&self) -> (&'static str, String) {
+        let (title, act) = self.leaves();
+        (
+            title,
+            format!(
+                "The server refused a row of this tab, so its edits have not been applied. \
+                 {act} discards that row's edits."
+            ),
+        )
+    }
+}
+
+/// An action held up by the unapplied-edits question, and what to do once the
+/// edits are gone. One slot: the prompt covers the tab, so no second action can
+/// be raised behind it. Close All Tabs holds the other tabs it found edits in
+/// as `also`, closed with `tab` when the edits go.
 pub(crate) struct PendingDiscard {
-    pub(crate) tabs: Vec<Tab>,
-    pub(crate) deleting: Option<(String, String)>,
-    /// Asking Save / Don't Save about file tabs with unsaved changes, rather
-    /// than about cell edits.
+    pub(crate) tab: Tab,
+    pub(crate) then: AfterEdits,
+    /// The row of a Row view the server refused, when that is what the prompt
+    /// is over: Discard drops its edits and no other row's, which are sent as
+    /// the action meets them. `None` for a draft, all of whose edits go.
+    pub(crate) row: Option<usize>,
+    /// The other tabs Close All Tabs found edits in, discarded and closed
+    /// with `tab`, and the file tabs with unsaved changes it holds for the
+    /// Save question after. Empty for every other action.
+    pub(crate) also: Vec<Tab>,
+    /// Asking Save / Don't Save about file tabs with unsaved changes, `tab`
+    /// and `also`, rather than about cell edits.
     pub(crate) unsaved: bool,
+}
+
+impl PendingDiscard {
+    /// Every tab the question is over: `tab`, then `also`.
+    pub(crate) fn tabs(&self) -> impl Iterator<Item = Tab> + '_ {
+        std::iter::once(self.tab).chain(self.also.iter().copied())
+    }
 }
 
 /// File tabs whose Save is waiting on the Overwrite question, and whether
@@ -2375,6 +2662,71 @@ pub(crate) fn is_dirty(file: Option<&FileBinding>, text: &str) -> bool {
     file.is_some_and(|file| file.saved.as_deref() != Some(text))
 }
 
+/// When a view's edits are sent. `Classic`, the default, is how editing worked
+/// before a view had a mode: cell edits are held until Save shows their
+/// `UPDATE`s. `Draft` holds every edit until it is applied through the review.
+/// `Row` sends a row's `UPDATE` as the row is left or saved, with no review.
+/// Per view, because a table the user is correcting row by row and a result
+/// they are drafting a batch against want different answers; a new view starts
+/// from the Edit mode setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub(crate) enum EditMode {
+    #[default]
+    Classic,
+    Draft,
+    Row,
+}
+
+impl EditMode {
+    /// This mode, but `Draft` where the target does not offer Row: Row is
+    /// offered exactly where `Target::keeps_edits` holds, the targets whose edit
+    /// send keeps the grid and is verified, so a Row send is never made on one
+    /// that clears it. Classic and Draft are offered on every target.
+    pub(crate) fn on(self, target: Target) -> Self {
+        match (self, target.keeps_edits()) {
+            (Self::Row, false) => Self::Draft,
+            (mode, _) => mode,
+        }
+    }
+
+    /// The modes a view on `target` can be put in, in menu order: the ones
+    /// [`Self::on`] leaves as they are.
+    pub(crate) fn offered(target: Target) -> impl Iterator<Item = Self> {
+        Self::ALL
+            .into_iter()
+            .filter(move |mode| mode.on(target) == *mode)
+    }
+}
+
+impl EditMode {
+    pub(crate) const ALL: [EditMode; 3] = [EditMode::Classic, EditMode::Draft, EditMode::Row];
+
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Draft => "draft",
+            Self::Row => "row",
+        }
+    }
+
+    /// Absent or unknown is `Classic`, how every view edited before there was
+    /// a choice.
+    pub(crate) fn from_slug(slug: Option<&str>) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|mode| Some(mode.slug()) == slug)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Draft => "Draft",
+            Self::Row => "Row",
+        }
+    }
+}
+
 /// One query buffer, and everything that belongs to it.
 ///
 /// There used to be exactly one of these per profile, held directly on
@@ -2811,9 +3163,12 @@ fn apply_refresh<G: Clone + PartialEq>(
             (queue.lane(finished.start) == Some(queue.showing)).then(|| Refresh::Earlier {
                 index: queue.showing,
                 sql: finished.sql.clone(),
+                verify: None,
             })
         }
-        None => last_query.cloned().map(Refresh::Statement),
+        None => last_query
+            .cloned()
+            .map(|sql| Refresh::Statement { sql, verify: None }),
     }
 }
 
@@ -3475,6 +3830,9 @@ pub(crate) enum ObjectBody {
         /// this page alone, and is never written into `sort`, which is what
         /// the statement is rebuilt from.
         sorting: Sorting,
+        /// When this view's edits are sent. Per view and never in the tab's
+        /// snapshot, so a restored tab starts from the default.
+        edit_mode: EditMode,
         /// The `WHERE` expression this preview narrows the relation by, without
         /// the keyword; empty means none. The fifth control of the same kind as
         /// the sort, the limit and the offset: a change regenerates the
@@ -3657,21 +4015,76 @@ pub(crate) fn restored_state(grid: &store::StoredGrid) -> QueryState {
 
 /// What runs once a generated batch has succeeded.
 pub(crate) enum Refresh {
-    /// The query tab's stashed `SELECT`.
-    Statement(String),
+    /// The query tab's stashed `SELECT`. `verify` is what an applied edit's run
+    /// is checked against (see `Relation`); `None` for the tab's own re-run.
+    Statement {
+        sql: String,
+        verify: Option<Verification>,
+    },
     /// A queue's earlier result, `index` in `done`, which the batch runs in:
     /// it is lent the slot as the batch starts, and `sql`, its own statement,
     /// reads it again there. On the profile's own connection rather than one
     /// of its own, which would see neither the session's settings and
     /// temporary tables nor a transaction the batch wrote into, and in its
     /// own grid, so the last result is never blanked for it.
-    Earlier { index: usize, sql: String },
+    Earlier {
+        index: usize,
+        sql: String,
+        verify: Option<Verification>,
+    },
     /// `Earlier`'s re-read, which gives the slot back once it lands. That run
     /// is the user's statement and not dbdelve's, so it keeps the row limit.
     Return,
     /// A relation tab, refreshed the way its own controls refresh it — so it
-    /// picks up whatever sort and row limit the tab is now set to.
-    Relation(u64),
+    /// picks up whatever sort and row limit the tab is now set to. `verify` is
+    /// what a reviewed draft's run is checked against, which a run held by the
+    /// mode prompt keeps with it.
+    Relation {
+        id: u64,
+        verify: Option<Verification>,
+    },
+    /// A Row-mode send of one row's `UPDATE`, whose verified step reads the row
+    /// back by its key, landing in `row` of the grid whose rows are `rows_id`.
+    /// No refresh of the relation follows: the row is replaced where it stands.
+    Row {
+        row: usize,
+        rows_id: u64,
+        /// The cells that went with the send, by column, which the landing
+        /// clears: an edit staged on the row while it was out is not among them.
+        sent: Vec<(usize, NewValue)>,
+        /// The row the ring moved to when a row leave started the send, which a
+        /// refusal puts the ring back from; `None` for Save, which does not
+        /// move it.
+        to: Option<usize>,
+        /// What the user asked for that this row had to be saved before: a page
+        /// turn, a sort, a tab switch. Carried out only when the send lands.
+        then: Option<AfterEdits>,
+        /// The row's one verified step: the row read again and compared before
+        /// the `UPDATE`, the write counted, and the row read back inside the
+        /// same transaction. A Row send without one is refused
+        /// (`Workspace::execute_unchecked`).
+        verify: Option<Verification>,
+    },
+}
+
+impl Refresh {
+    /// The refresh of a query tab's edit, carrying what the run is checked
+    /// against. Any other refresh is returned as it is.
+    pub(crate) fn verified(mut self, check: Option<Verification>) -> Self {
+        if let Self::Statement { verify, .. } | Self::Earlier { verify, .. } = &mut self {
+            *verify = check;
+        }
+        self
+    }
+
+    /// The action a Row send was carrying, for a send that is dropped before
+    /// it runs: its owner puts back what the action had changed.
+    pub(crate) fn into_parked(self) -> Option<AfterEdits> {
+        match self {
+            Self::Row { then, .. } => then,
+            _ => None,
+        }
+    }
 }
 
 /// `Clone` because a queue keeps the state of every statement it has run
@@ -4062,6 +4475,21 @@ pub(crate) fn reveals_results(landed: &QueryState, produced_grid: bool) -> bool 
         }
 }
 
+/// The active schema where the engine picks one, the database where that is
+/// the schema, else the one the server put the session in: on SQL Server, the
+/// login's default.
+fn schema_in(
+    target: Target,
+    active: Option<&str>,
+    database: Option<String>,
+    connected: Option<&str>,
+) -> Option<String> {
+    match target.catalog_lists_databases() {
+        true => database,
+        false => active.or(connected).map(str::to_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4362,12 +4790,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_schema_a_session_is_in_is_its_database_or_its_default_where_none_is_picked() {
+        let database = || Some("shop".to_string());
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::ClickHouse] {
+            assert_eq!(
+                schema_in(Target::built_in(engine), None, database(), None).as_deref(),
+                Some("shop"),
+                "{engine:?}"
+            );
+        }
+        assert_eq!(
+            schema_in(
+                Target::built_in(Engine::SqlServer),
+                None,
+                database(),
+                Some("sales")
+            )
+            .as_deref(),
+            Some("sales")
+        );
+        assert_eq!(
+            schema_in(
+                Target::built_in(Engine::Postgres),
+                Some("picked"),
+                database(),
+                Some("public")
+            )
+            .as_deref(),
+            Some("picked")
+        );
+    }
+
     fn review_from(tab: Tab) -> ApplyReview {
         ApplyReview {
             tab,
             title: "Apply edits",
             sql: "UPDATE t SET a = 1".into(),
             notes: Vec::new(),
+            error: None,
+            edits: true,
+            verify: None,
+            ran_on: None,
         }
     }
 
@@ -4665,6 +5129,79 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_mode_reads_back_from_its_slug_and_anything_else_is_classic() {
+        assert_eq!(EditMode::default(), EditMode::Classic);
+        assert_eq!(
+            EditMode::ALL,
+            [EditMode::Classic, EditMode::Draft, EditMode::Row]
+        );
+        for mode in EditMode::ALL {
+            assert_eq!(EditMode::from_slug(Some(mode.slug())), mode);
+        }
+        for unknown in [None, Some(""), Some("instant")] {
+            assert_eq!(
+                EditMode::from_slug(unknown),
+                EditMode::Classic,
+                "{unknown:?}"
+            );
+        }
+        assert_eq!(
+            EditMode::Row.on(Target::built_in(Engine::Redis)),
+            EditMode::Draft
+        );
+        assert_eq!(
+            EditMode::Row.on(Target::built_in(Engine::Postgres)),
+            EditMode::Row
+        );
+        for engine in Engine::ALL {
+            for mode in [EditMode::Classic, EditMode::Draft] {
+                assert_eq!(mode.on(Target::built_in(engine)), mode, "{engine:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn row_mode_is_offered_on_mongodb_through_the_target_predicate() {
+        assert_eq!(
+            EditMode::Row.on(Target::built_in(Engine::MongoDb)),
+            EditMode::Row
+        );
+        for engine in [
+            Engine::Redis,
+            Engine::ClickHouse,
+            Engine::Snowflake,
+            Engine::Turso,
+        ] {
+            assert_eq!(
+                EditMode::Row.on(Target::built_in(engine)),
+                EditMode::Draft,
+                "{engine:?}"
+            );
+        }
+        let odbc = Box::leak(Box::new(crate::db::Plugin {
+            id: "odbc".into(),
+            name: "ODBC".into(),
+            version: "1".into(),
+            executable: "dbdelve-odbc".into(),
+        }));
+        let plugin = Target {
+            engine: Engine::Postgres,
+            driver: crate::db::Driver::Plugin(odbc),
+        };
+        assert_eq!(EditMode::Row.on(plugin), EditMode::Draft);
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|engine| Target::built_in(*engine).row_edits())
+        {
+            assert_eq!(
+                EditMode::Row.on(Target::built_in(engine)),
+                EditMode::Row,
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_views_sorting_survives_its_snapshot_and_an_unsorted_client_view_stays_client() {
         for sorting in [
             Sorting::Server,
@@ -4699,6 +5236,32 @@ mod tests {
             Sorting::new(settings.client_sort.unwrap_or(false)),
             Sorting::Server
         );
+    }
+
+    #[test]
+    fn settings_from_before_the_edit_mode_read_as_classic() {
+        let read = |text: &str| -> store::StoredSettings {
+            toml::from_str(text).expect("the settings must still decode")
+        };
+        let settings = read("color_titlebar = true");
+        assert_eq!(settings.edit_mode, None);
+        assert_eq!(
+            EditMode::from_slug(settings.edit_mode.as_deref()),
+            EditMode::Classic
+        );
+
+        for mode in EditMode::ALL {
+            let settings = read(&format!("edit_mode = \"{}\"", mode.slug()));
+            assert_eq!(EditMode::from_slug(settings.edit_mode.as_deref()), mode);
+        }
+        for unreadable in ["instant", ""] {
+            let settings = read(&format!("edit_mode = \"{unreadable}\""));
+            assert_eq!(
+                EditMode::from_slug(settings.edit_mode.as_deref()),
+                EditMode::Classic,
+                "{unreadable:?}"
+            );
+        }
     }
 
     #[test]
@@ -5032,18 +5595,18 @@ mod tests {
         let last = Some("SELECT 40".to_string());
         assert!(matches!(
             apply_refresh(Some(&finished_queue(0)), &12, last.as_ref()),
-            Some(Refresh::Earlier { index: 0, sql }) if sql == "SELECT 0"
+            Some(Refresh::Earlier { index: 0, sql, .. }) if sql == "SELECT 0"
         ));
         // A batch's later set has no statement of its own to ask again, and
         // the slot's is not it.
         assert!(apply_refresh(Some(&finished_queue(1)), &12, last.as_ref()).is_none());
         assert!(matches!(
             apply_refresh(Some(&finished_queue(2)), &12, last.as_ref()),
-            Some(Refresh::Statement(sql)) if sql == "SELECT 40"
+            Some(Refresh::Statement { sql, .. }) if sql == "SELECT 40"
         ));
         assert!(matches!(
             apply_refresh(None::<&Queue<usize>>, &12, last.as_ref()),
-            Some(Refresh::Statement(_))
+            Some(Refresh::Statement { .. })
         ));
         assert!(apply_refresh(Some(&finished_queue(2)), &12, None).is_none());
     }
@@ -5775,5 +6338,69 @@ mod tests {
         // a newer build's tabs -- must not hand out a live id.
         assert_eq!(next_query_id(1, &tabs(&[0, 4])), 5);
         assert_eq!(next_query_id(0, &tabs(&[])), 0);
+    }
+
+    #[test]
+    fn the_discard_prompt_names_what_discards_the_edits() {
+        let close = (
+            "Close tab",
+            "This tab has cell edits that have not been applied. Closing it discards them."
+                .to_string(),
+        );
+        assert_eq!(AfterEdits::Close { deleting: None }.discards(), close);
+        let reading = (
+            "Discard edits",
+            "This tab has cell edits that have not been applied. Reading the rows again \
+             discards them."
+                .to_string(),
+        );
+        for then in [
+            AfterEdits::Requery {
+                filter: String::new(),
+                sort: Vec::new(),
+                limit: Some(2),
+                offset: 2,
+            },
+            AfterEdits::Refresh,
+            AfterEdits::Filter { before: None },
+            AfterEdits::ViewSorting(false),
+            AfterEdits::Sort(1),
+        ] {
+            assert_eq!(then.discards(), reading);
+        }
+        let running = (
+            "Discard edits",
+            "This tab has cell edits that have not been applied. Running the statement \
+             discards them."
+                .to_string(),
+        );
+        assert_eq!(AfterEdits::Run.discards(), running);
+        assert_eq!(
+            AfterEdits::Rerun {
+                index: 0,
+                sql: "select 1".into()
+            }
+            .discards(),
+            running
+        );
+    }
+
+    #[test]
+    fn the_prompt_over_a_refused_row_says_whose_edits_go_and_what_discards_them() {
+        let refused = |then: AfterEdits| then.discards_refused_row().1;
+        assert_eq!(
+            refused(AfterEdits::Close { deleting: None }),
+            "The server refused a row of this tab, so its edits have not been applied. \
+             Closing it discards that row's edits."
+        );
+        assert!(refused(AfterEdits::Refresh).contains("Reading the rows again discards"));
+        assert!(
+            refused(AfterEdits::Activate(Tab::Query(0)))
+                .contains("Switching to another tab discards")
+        );
+        assert!(
+            refused(AfterEdits::EditMode(EditMode::Draft))
+                .contains("Switching the edit mode discards")
+        );
     }
 }

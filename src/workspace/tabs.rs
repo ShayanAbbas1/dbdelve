@@ -7,7 +7,7 @@ use super::sidebar::front_row_id;
 use super::*;
 use crate::actions::{FocusSidebar, OpenSidebarItem, ToggleResults, ToggleResultsFocus};
 use crate::explorer::Shortcut;
-use crate::session::PendingDiscard;
+use crate::session::{AfterEdits, PendingDiscard};
 use crate::sidebar::{ViewMode, connection_row};
 use crate::tab_drag::{self, Drag, Slot};
 
@@ -354,7 +354,7 @@ impl Workspace {
             });
         // Only the cells that need an input made or refilled are copied out,
         // since this runs every frame and a value can be a whole document.
-        type Binary = Option<(Option<result_grid::BinaryForm>, Option<NewValue>)>;
+        type Binary = Option<(Option<result_grid::BinaryForm>, Option<NewValue>, u64)>;
         let changed: Vec<(usize, Option<(gpui::SharedString, Binary)>)> = {
             let grid = results.read(cx).delegate();
             inputs.fields.resize_with(grid.columns().len(), || None);
@@ -371,17 +371,16 @@ impl Workspace {
                     // again only when what it is made from changed.
                     if binary.is_some()
                         && field.as_ref().is_some_and(|field| {
-                            field
-                                .binary
-                                .as_ref()
-                                .map(|(form, pending)| (*form, pending.as_ref()))
-                                == binary
+                            field.binary.as_ref().map(|(form, pending, replaced)| {
+                                (*form, pending.as_ref(), *replaced)
+                            }) == binary
                         })
                     {
                         return None;
                     }
                     let seed = grid.edit_seed(row, col);
-                    let binary = binary.map(|(form, pending)| (form, pending.cloned()));
+                    let binary =
+                        binary.map(|(form, pending, replaced)| (form, pending.cloned(), replaced));
                     (field
                         .as_ref()
                         .map(|field| (field.seed.as_ref(), &field.binary))
@@ -419,7 +418,7 @@ impl Workspace {
                         .binary
                         .as_ref()
                         .zip(binary.as_ref())
-                        .is_some_and(|((was, _), (now, _))| was != now);
+                        .is_some_and(|((was, _, _), (now, _, _))| was != now);
                     if typed != field.seed && typed != seed && !reformed {
                         continue;
                     }
@@ -500,7 +499,7 @@ impl Workspace {
     /// the frame this runs in. Focus goes back to the front for the reason
     /// `searched` gives.
     fn drop_row_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inputs = self.stage_row_inputs(cx);
+        let (inputs, _) = self.stage_row_inputs(cx);
         if inputs
             .iter()
             .any(|input| input.focus_handle(cx).is_focused(window))
@@ -511,15 +510,16 @@ impl Workspace {
     }
 
     /// Stage whatever Edit mode's inputs hold that is not staged yet, and hand
-    /// back the inputs. A close needs this before it asks whether a tab is
-    /// clean: the chip's button and the chords take no focus, so no blur comes
-    /// to stage a draft before the tab is gone.
+    /// back the inputs, and whether any input's text was refused. A close needs
+    /// this before it asks whether a tab is clean: the chip's button and the
+    /// chords take no focus, so no blur comes to stage a draft before the tab
+    /// is gone.
     fn stage_row_inputs(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> Vec<Entity<gpui_component::input::TextareaState>> {
+    ) -> (Vec<Entity<gpui_component::input::TextareaState>>, bool) {
         let Some(inputs) = self.row_panel.inputs.as_ref() else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         let inputs: Vec<_> = inputs
             .fields
@@ -527,10 +527,11 @@ impl Workspace {
             .flatten()
             .map(|field| field.input.clone())
             .collect();
+        let mut refused = false;
         for input in &inputs {
-            self.commit_row_input(input, cx);
+            refused |= !self.commit_row_input(input, cx);
         }
-        inputs
+        (inputs, refused)
     }
 
     /// Edit mode's input on a cell of the grid in front, if one is built.
@@ -1036,11 +1037,11 @@ impl Workspace {
         // Whatever is in front, in the order it is stacked: the palette paints
         // over the stale-edit prompt, the stopped-run prompt and the run
         // prompt, which paint over the export question, which paints over the
-        // discard-close confirmation, which paints over the delete
-        // confirmation, which paints over the import dialog, which paints
-        // over the apply review, which paints over the surface and the
-        // settings panel beside it -- so `escape` backs out
-        // of them in that order, one at a time. The palette stays first so
+        // schema export, which paints over the discard-close confirmation,
+        // which paints over the delete confirmation, which paints over the
+        // import dialog, which paints over the apply review, which paints over
+        // the surface and the settings panel beside it -- so `escape` backs
+        // out of them in that order, one at a time. The palette stays first so
         // that picking a font from inside settings closes the font list and
         // leaves the panel it was opened from standing.
         if self.cancel_stale_edit(cx) {
@@ -1066,6 +1067,9 @@ impl Workspace {
         if self.cancel_forget_file(cx) {
             return;
         }
+        if self.cancel_schema_export(cx) {
+            return;
+        }
         if self.cancel_discard_close(cx) {
             return;
         }
@@ -1078,7 +1082,8 @@ impl Workspace {
         if self.close_import(cx) {
             return;
         }
-        if self.close_apply_review(cx) {
+        // A Row view's dirty row is put back before the key is handed on.
+        if self.close_apply_review(cx) || self.revert_active_row(window, cx) {
             return;
         }
         if self.close_ddl_view(cx) {
@@ -1257,7 +1262,11 @@ impl Workspace {
         if self.palette.is_some() {
             return;
         }
-        self.stage_row_inputs(cx);
+        // Text the row panel could not stage stays with its row: closing now
+        // would either lose it or send the row without it.
+        if self.stage_row_inputs(cx).1 {
+            return;
+        }
         let Some(profile) = self.profile() else {
             return;
         };
@@ -1267,9 +1276,21 @@ impl Workspace {
         // snapshot and refreshes its rows only to be closed straight after.
         let mut tabs = profile.session.strip_tabs();
         tabs.sort_by_key(|tab| *tab == active);
-        let (mut dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
+        let (dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
             .into_iter()
-            .partition(|tab| self.has_unapplied_edits(*tab, cx));
+            .partition(|tab| self.would_lose_on_close(*tab, cx));
+        // A tab whose edits are being sent stays: closing it would cancel the
+        // send, leaving whether it was written unknown, and discard the rest.
+        let (busy, mut dirty): (Vec<Tab>, Vec<Tab>) = dirty.into_iter().partition(|tab| {
+            self.profile()
+                .is_some_and(|profile| profile.session.running(*tab))
+        });
+        if !busy.is_empty() {
+            self.note(
+                "A tab whose edits are still being sent was left open.".into(),
+                cx,
+            );
+        }
         if dirty.is_empty() {
             self.close_or_ask_to_save(clean, window, cx);
             return;
@@ -1281,11 +1302,18 @@ impl Workspace {
         for tab in clean {
             self.close_now(tab, window, cx);
         }
-        dirty.extend(unsaved);
         if let Some(profile) = self.profile_mut() {
+            // The tab in front, sorted last among those with edits, is the one
+            // the prompt is over; the others go with it, and the unsaved file
+            // tabs wait with them for the Save question.
+            let tab = dirty.pop().expect("dirty is not empty");
+            let mut also = dirty;
+            also.extend(unsaved);
             profile.session.pending_discard = Some(PendingDiscard {
-                tabs: dirty,
-                deleting: None,
+                tab,
+                then: AfterEdits::Close { deleting: None },
+                row: None,
+                also,
                 unsaved: false,
             });
         }
@@ -1311,9 +1339,13 @@ impl Workspace {
             return;
         }
         if let Some(profile) = self.profile_mut() {
+            let mut also = unsaved;
+            let tab = also.remove(0);
             profile.session.pending_discard = Some(PendingDiscard {
-                tabs: unsaved,
-                deleting: None,
+                tab,
+                then: AfterEdits::Close { deleting: None },
+                row: None,
+                also,
                 unsaved: true,
             });
         }
@@ -1365,32 +1397,174 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.stage_row_inputs(cx);
-        if !self.has_unapplied_edits(tab, cx) {
-            self.close_or_ask_to_save(vec![tab], window, cx);
+        // Refused text stops the close: the row is neither sent without it
+        // nor discarded with it.
+        if self.stage_row_inputs(cx).1 {
             return;
+        }
+        if !self.held_for_edits(tab, AfterEdits::Close { deleting: None }, cx) {
+            self.close_or_ask_to_save(vec![tab], window, cx);
+        }
+    }
+
+    /// Whether `then` is held back because `tab`'s grid holds edits nobody has
+    /// applied; `true` means the caller stops, having changed nothing.
+    ///
+    /// Asked on every target and engine alike: what a send does differs
+    /// between them, but an unapplied edit is replaced by a requery the same
+    /// way on all of them. The action waits on `pending_discard` as data, to be
+    /// carried out by [`Self::resume_after_edits`] if the user lets the edits
+    /// go.
+    ///
+    /// A Row view's row is one Row mode can save, so `then` goes with the row's
+    /// send (`save_row`) and is carried out, from render, only when that send
+    /// lands ([`Self::resume_released`]). A send that fails, or is stopped by the
+    /// mode, drops it and puts back what it had changed. The user repeats the
+    /// action, and a row the server has refused (it stays marked until it is
+    /// edited, reverted or sent) is not sent again: the prompt asks whether to
+    /// drop that row, and Discard drops it alone and carries the action out.
+    /// A Draft view is asked about every edit.
+    pub(crate) fn held_for_edits(
+        &mut self,
+        tab: Tab,
+        then: AfterEdits,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Text not yet staged is lost only by a close: any other action keeps
+        // the inputs, and the row panel stages its text when it is left.
+        let held = match then {
+            AfterEdits::Close { .. } => self.would_lose_on_close(tab, cx),
+            _ => self.has_unapplied_edits(tab, cx),
+        };
+        if !held {
+            return false;
+        }
+        if let Tab::Object(id) = tab
+            && let Some(profile) = self.profile()
+            && profile.session.edit_mode(tab) == EditMode::Row
+            && let Some(row) = profile
+                .session
+                .results(tab)
+                .and_then(|results| results.read(cx).delegate().row_to_send())
+        {
+            let refused = profile.session.results(tab).is_some_and(|results| {
+                results
+                    .read(cx)
+                    .delegate()
+                    .send_failure()
+                    .is_some_and(|(marked, _)| marked == row)
+            });
+            if profile.session.running(tab) {
+                self.note("The previous row is still being saved.".into(), cx);
+                self.put_back(tab, then);
+            } else if refused {
+                // The server has already refused this row as it stands (an
+                // edit clears the mark), so sending it again would only hear
+                // the same answer. The user is asked whether to drop it.
+                if let Some(profile) = self.profile_mut() {
+                    profile.session.pending_discard = Some(PendingDiscard {
+                        tab,
+                        then,
+                        row: Some(row),
+                        also: Vec::new(),
+                        unsaved: false,
+                    });
+                }
+                cx.notify();
+            } else if !self.save_row(id, row, None, Some(then.clone()), cx) {
+                // `save_row` said why it sent nothing.
+                self.put_back(tab, then);
+            }
+            return true;
+        }
+        // Edits in flight are neither the user's to discard nor ours to wait
+        // on: the send decides what becomes of them, and a prompt over them
+        // would answer before it has.
+        if !matches!(then, AfterEdits::Close { .. })
+            && self
+                .profile()
+                .is_some_and(|profile| profile.session.running(tab))
+        {
+            self.note("This tab's edits are still being sent.".into(), cx);
+            // What the action changed before it asked, a filter bar, goes back:
+            // the action is not going ahead.
+            self.put_back(tab, then);
+            return true;
         }
         if let Some(profile) = self.profile_mut() {
             profile.session.pending_discard = Some(PendingDiscard {
-                tabs: vec![tab],
-                deleting: None,
+                tab,
+                then,
+                row: None,
+                also: Vec::new(),
                 unsaved: false,
             });
         }
         cx.notify();
+        true
+    }
+
+    /// Undoes what an action that is not going ahead changed before it asked:
+    /// a filter bar the user edited goes back to what it was.
+    pub(crate) fn put_back(&mut self, tab: Tab, then: AfterEdits) {
+        if let Some(profile) = self.profile_mut() {
+            profile.session.put_back(tab, then);
+        }
+    }
+
+    /// Carries out the action a landed row send released, from render for the
+    /// `Window` its handler needs (`restore_objects` is the precedent). Waits
+    /// while the tab is still reading, since a requery over a read in flight
+    /// would be dropped; drops the action when its tab has gone. With rows still
+    /// edited, the handler meets [`Self::held_for_edits`] again and the next row
+    /// is sent.
+    pub(crate) fn resume_released(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some((tab, _)) = &profile.session.resume_after else {
+            return;
+        };
+        if profile.session.running(*tab) {
+            return;
+        }
+        let open = profile.session.results(*tab).is_some();
+        let Some((tab, then)) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.resume_after.take())
+        else {
+            return;
+        };
+        if open {
+            self.resume_after_edits(tab, then, window, cx);
+        } else {
+            self.put_back(tab, then);
+        }
+    }
+
+    /// Whether `tab`'s grids hold staged edits nobody has applied.
+    pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
+        self.profile().is_some_and(|profile| {
+            profile
+                .session
+                .tab_grids(tab)
+                .iter()
+                .any(|grid| grid.read(cx).delegate().has_pending())
+        })
     }
 
     /// Staged edits, and drafts that never became one: an open cell input,
     /// or a row panel field whose staging was refused. A close would lose
     /// either without a word.
-    pub(crate) fn has_unapplied_edits(&self, tab: Tab, cx: &App) -> bool {
+    pub(crate) fn would_lose_on_close(&self, tab: Tab, cx: &App) -> bool {
         let Some(profile) = self.profile() else {
             return false;
         };
-        let grids = profile.session.grids_of(tab).into_iter().any(|results| {
-            let grid = results.read(cx).delegate();
-            grid.has_pending() || grid.has_draft(cx)
-        });
+        let drafts = profile
+            .session
+            .tab_grids(tab)
+            .iter()
+            .any(|grid| grid.read(cx).delegate().has_draft(cx));
         let row_draft = self.row_panel.inputs.as_ref().is_some_and(|inputs| {
             inputs.tab == tab
                 && inputs.profile == profile.id
@@ -1400,7 +1574,7 @@ impl Workspace {
                     .flatten()
                     .any(|field| field.input.read(cx).value().as_str() != field.seed.as_str())
         });
-        grids || row_draft
+        self.has_unapplied_edits(tab, cx) || drafts || row_draft
     }
 
     /// Carry out a close that has been decided on.
@@ -1464,9 +1638,9 @@ impl Workspace {
         .detach();
     }
 
-    /// Close the tab the discard prompt was raised over, edits and all, or,
-    /// over unsaved files, Don't Save. Discarded edits still leave a file
-    /// tab's unsaved text to ask about.
+    /// Drop the edits of the tab the discard prompt was raised over, and do
+    /// what it was raised for, or, over unsaved files, Don't Save. Discarded
+    /// edits still leave a file tab's unsaved text to ask about.
     pub(crate) fn confirm_discard_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(discard) = self
             .profile_mut()
@@ -1474,16 +1648,62 @@ impl Workspace {
         else {
             return;
         };
-        match discard.deleting {
-            Some((owner, name)) => self.delete_saved_query_now(owner, name, window, cx),
-            None if discard.unsaved => {
-                for tab in discard.tabs {
-                    self.close_now(tab, window, cx);
-                }
+        if discard.unsaved {
+            for tab in discard.tabs().collect::<Vec<_>>() {
+                self.close_now(tab, window, cx);
             }
-            None => self.close_or_ask_to_save(discard.tabs, window, cx),
+            self.refocus_unless_asking();
+            cx.notify();
+            return;
+        }
+        // The grids the question read, every one of them: a Discard that left
+        // one holding edits would put the action back in front of the prompt.
+        let grids = self
+            .profile()
+            .map(|profile| {
+                std::iter::once(discard.tab)
+                    .chain(discard.also.iter().copied())
+                    .flat_map(|tab| profile.session.tab_grids(tab))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for grid in grids {
+            grid.update(cx, |table, cx| {
+                match discard.row {
+                    // The one row the server refused: another row's edits are
+                    // not the user's to lose here, and the action sends them.
+                    Some(row) => table.delegate_mut().discard_row(row),
+                    None => table.delegate_mut().discard_pending(),
+                }
+                table.refresh(cx);
+            });
+        }
+        if let Some(profile) = self.profile_mut() {
+            profile.session.drop_apply_review_of(discard.tab);
+            for tab in &discard.also {
+                profile.session.drop_apply_review_of(*tab);
+            }
+        }
+        // The row panel's text goes with the edits: left in its inputs, it
+        // would raise the same question again when the action is carried out.
+        let profile_id = self.profile().map(|profile| profile.id.clone());
+        if self.row_panel.inputs.as_ref().is_some_and(|inputs| {
+            Some(&inputs.profile) == profile_id.as_ref()
+                && (inputs.tab == discard.tab || discard.also.contains(&inputs.tab))
+        }) {
+            self.row_panel.inputs = None;
+        }
+        if discard.also.is_empty() {
+            self.resume_after_edits(discard.tab, discard.then, window, cx);
+        } else {
+            // Close All Tabs: the file tabs it held with the edits are asked
+            // about in one Save question, with any whose edits just went.
+            let mut tabs = discard.also;
+            tabs.push(discard.tab);
+            self.close_or_ask_to_save(tabs, window, cx);
         }
         self.refocus_unless_asking();
+        cx.notify();
     }
 
     /// Save in the close question: each file written closes, and one that
@@ -1496,8 +1716,7 @@ impl Workspace {
             return;
         };
         let ids = discard
-            .tabs
-            .into_iter()
+            .tabs()
             .filter_map(|tab| match tab {
                 Tab::Query(id) => Some(id),
                 Tab::Object(_) => None,
@@ -1518,16 +1737,81 @@ impl Workspace {
         }
     }
 
+    /// Carry out what was held back for `tab`'s edits, which are gone. Each
+    /// arm calls the handler the guard stands in, which passes it this time.
+    /// Anything but a close does nothing when `tab` is not the tab in front: a
+    /// prompt never acts on another tab.
+    pub(crate) fn resume_after_edits(
+        &mut self,
+        tab: Tab,
+        then: AfterEdits,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let in_front = self.profile().map(|profile| profile.session.active) == Some(tab);
+        match then {
+            AfterEdits::Close {
+                deleting: Some((owner, name)),
+            } => self.delete_saved_query_now(owner, name, window, cx),
+            // Asked again rather than closed outright: the rows a Row view
+            // still holds are sent first.
+            AfterEdits::Close { deleting: None } => self.ask_before_close(tab, window, cx),
+            _ if !in_front => self.put_back(tab, then),
+            AfterEdits::Requery {
+                filter,
+                sort,
+                limit,
+                offset,
+            } => {
+                if let Tab::Object(id) = tab {
+                    self.requery_relation(
+                        id,
+                        move |tab_filter, tab_sort, tab_limit, tab_offset| {
+                            *tab_filter = filter;
+                            *tab_sort = sort;
+                            *tab_limit = limit;
+                            *tab_offset = offset;
+                            true
+                        },
+                        cx,
+                    );
+                }
+            }
+            AfterEdits::Refresh => {
+                if let Tab::Object(id) = tab {
+                    self.refresh_relation(id, cx);
+                }
+            }
+            AfterEdits::Filter { .. } => {
+                if let Tab::Object(id) = tab {
+                    self.apply_filter(id, None, cx);
+                }
+            }
+            AfterEdits::ViewSorting(client) => self.set_view_sorting(client, window, cx),
+            AfterEdits::Run => self.run_query(&RunQuery, window, cx),
+            AfterEdits::Sort(column) => self.sort_column(&SortColumn { column }, window, cx),
+            AfterEdits::Rerun { index, sql } => {
+                self.rerun_queued(tab, index, sql, cx);
+            }
+            AfterEdits::Activate(next) => self.activate_tab(next, window, cx),
+            AfterEdits::EditMode(mode) => self.set_edit_mode(mode, cx),
+        }
+    }
+
+    /// Put the prompt away. A changed filter bar goes back to what it was: the
+    /// bars were changed before anything could ask, and are the state the tab
+    /// saves and restores from.
     pub(crate) fn cancel_discard_close(&mut self, cx: &mut Context<Self>) -> bool {
-        let cancelled = self
+        let Some(discard) = self
             .profile_mut()
             .and_then(|profile| profile.session.pending_discard.take())
-            .is_some();
-        if cancelled {
-            self.refocus_front();
-            cx.notify();
-        }
-        cancelled
+        else {
+            return false;
+        };
+        self.put_back(discard.tab, discard.then);
+        self.refocus_front();
+        cx.notify();
+        true
     }
 
     pub(crate) fn cancel_delete_query(&mut self, cx: &mut Context<Self>) -> bool {
