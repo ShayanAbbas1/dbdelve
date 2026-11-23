@@ -518,24 +518,31 @@ mod tests {
                 config: config.clone(),
                 teardown: teardown.to_string(),
             };
-            cleanup.run(&[teardown, setup]);
+            if let Err(error) = cleanup.run(&[teardown, setup]) {
+                panic!("the setup failed: {error}");
+            }
             cleanup
         }
 
-        fn run(&self, statements: &[&str]) {
-            let connection =
-                Connection::open(self.config.clone()).expect("the compose Postgres opens");
+        fn run(&self, statements: &[&str]) -> Result<(), String> {
+            let connection = Connection::open(self.config.clone())
+                .map_err(|error| format!("the compose Postgres did not open: {}", error.message))?;
             for sql in statements.iter().filter(|sql| !sql.is_empty()) {
                 connection
                     .query(sql, &CancelToken::default(), Fetch::default())
-                    .unwrap_or_else(|error| panic!("{sql}: {}", error.message));
+                    .map_err(|error| format!("{sql}: {}", error.message))?;
             }
+            Ok(())
         }
     }
 
     impl Drop for Cleanup {
+        /// Said, not panicked: a drop that panics while a failed test or setup
+        /// unwinds aborts the run and hides the first failure.
         fn drop(&mut self) {
-            self.run(&[&self.teardown]);
+            if let Err(error) = self.run(&[&self.teardown]) {
+                eprintln!("the teardown failed: {error}");
+            }
         }
     }
 
