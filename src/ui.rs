@@ -165,6 +165,10 @@ pub(crate) struct Visible {
     /// One entry per replaced character: its bytes in the source and its
     /// marker's bytes in the display, in source order.
     map: Vec<(Range<usize>, Range<usize>)>,
+    /// For each entry of `map`, how many bytes longer the display is than the
+    /// source once that entry and every one before it are replaced, so a
+    /// lookup is a binary search rather than a walk of the whole map.
+    grown: Vec<usize>,
 }
 
 impl Visible {
@@ -180,17 +184,19 @@ impl Visible {
     }
 
     fn at(&self, offset: usize) -> usize {
-        let mut growth = 0;
-        for (source, shown) in &self.map {
-            if offset <= source.start {
-                break;
-            }
-            if offset < source.end {
-                return shown.end;
-            }
-            growth += shown.len() - source.len();
+        // The entries that start before `offset`; only the last of them can
+        // hold it, as they are disjoint and in order.
+        let before = self
+            .map
+            .partition_point(|(source, _)| source.start < offset);
+        let Some(last) = before.checked_sub(1) else {
+            return offset;
+        };
+        let (source, shown) = &self.map[last];
+        if offset < source.end {
+            return shown.end;
         }
-        offset + growth
+        offset + self.grown[last]
     }
 }
 
@@ -275,7 +281,21 @@ pub(crate) fn visible(text: &str) -> Visible {
             display.push(c);
         }
     }
-    Visible { display, map }
+    let grown = map
+        .iter()
+        .scan(
+            0,
+            |grown, (source, shown): &(Range<usize>, Range<usize>)| {
+                *grown += shown.len() - source.len();
+                Some(*grown)
+            },
+        )
+        .collect();
+    Visible {
+        display,
+        map,
+        grown,
+    }
 }
 
 /// A statement as the editor colours it, one run per line, with every
@@ -1875,6 +1895,29 @@ mod tests {
         assert_eq!(seen.remap(&[(0..7, style)])[0].0, 0..14);
         assert_eq!(seen.remap(&[(7..11, style)])[0].0, 14..16);
         assert_eq!(seen.remap(&[(9..11, style)])[0].0, 14..16);
+    }
+
+    #[test]
+    fn every_source_offset_lands_where_a_walk_of_the_markers_puts_it() {
+        let text = "a\u{200b}b\u{202e}\u{202e}c\u{feff}\u{e0041}d\u{2800}";
+        let seen = visible(text);
+        // The walk the lookup replaced, kept here as the reference.
+        let walked = |offset: usize| {
+            let mut growth = 0;
+            for (source, shown) in &seen.map {
+                if offset <= source.start {
+                    break;
+                }
+                if offset < source.end {
+                    return shown.end;
+                }
+                growth += shown.len() - source.len();
+            }
+            offset + growth
+        };
+        for offset in 0..=text.len() {
+            assert_eq!(seen.at(offset), walked(offset), "offset {offset}");
+        }
     }
 
     #[test]
