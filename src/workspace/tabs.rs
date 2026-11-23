@@ -1061,10 +1061,10 @@ impl Workspace {
         if self.cancel_pending_export(cx) {
             return;
         }
-        if self.cancel_overwrite(cx) {
+        if self.cancel_forget_file(cx) {
             return;
         }
-        if self.cancel_forget_file(cx) {
+        if self.cancel_overwrite(cx) {
             return;
         }
         if self.cancel_schema_export(cx) {

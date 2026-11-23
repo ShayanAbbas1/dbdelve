@@ -13321,6 +13321,32 @@ fn a_deleted_file_written_again_says_it_changed_and_offers_reload(cx: &mut TestA
     });
 }
 
+/// A Save from the menu can raise Overwrite while Forget File is up, under
+/// it: `escape` takes down the one on top.
+#[gpui::test]
+fn escape_takes_down_forget_file_before_the_overwrite_under_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "under.sql");
+        let (id, _) = front_scratch(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            let session = &mut workspace.profile_mut().unwrap().session;
+            session.pending_forget = Some(path.clone());
+            session.pending_overwrite = Some(crate::session::PendingOverwrite {
+                tabs: vec![id],
+                close: false,
+            });
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("forget-file"));
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_file_gone_at_relaunch_comes_back_saying_it_was_deleted(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
