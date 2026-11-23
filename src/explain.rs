@@ -225,6 +225,16 @@ fn plan_of(holder: &mongodb::bson::Document, depth: usize, plan: &mut Plan) {
         push_stage(root, depth, plan);
     }
     if let Ok(stats) = holder.get_document("executionStats") {
+        // The whole statement's time as the server measured it, kept apart
+        // from the stages' estimates that shares are drawn from: a reply whose
+        // root stage carries no estimate still says how long it took. Only the
+        // reply's own, not a pipeline's `$cursor`, which is part of it.
+        if depth == 0
+            && let Some(ms) = stats.get("executionTimeMillis").and_then(millis)
+        {
+            plan.summary
+                .push(("Execution Time".into(), format!("{} ms", ms)));
+        }
         for (label, key) in [
             ("Documents returned", "nReturned"),
             ("Keys examined", "totalKeysExamined"),
@@ -571,6 +581,7 @@ fn fill_self_ms(nodes: &mut [PlanNode]) {
     // none is charged and their own times are left unknown (`shares_cte`).
     // With no consumer to be found it stays where it is printed.
     let mut children = vec![0.0; nodes.len()];
+    let mut shared = vec![false; nodes.len()];
     for (index, node) in nodes.iter().enumerate() {
         let Some(owner) = parent[index] else {
             continue;
@@ -581,7 +592,6 @@ fn fill_self_ms(nodes: &mut [PlanNode]) {
             .and_then(|heading| heading.strip_prefix("CTE "))
             .map(|name| {
                 let scan = format!("CTE Scan on {}", name.trim());
-    let mut shared = vec![false; nodes.len()];
                 (0..nodes.len())
                     .filter(|other| {
                         nodes[*other]
@@ -787,6 +797,7 @@ mod tests {
         assert_eq!(
             plan.summary,
             [
+                ("Execution Time".to_string(), "4 ms".to_string()),
                 ("Documents returned".to_string(), "3".to_string()),
                 ("Keys examined".to_string(), "3".to_string()),
                 ("Documents examined".to_string(), "3".to_string()),
@@ -806,7 +817,20 @@ mod tests {
         assert!(plan.nodes.iter().all(|node| node.actual.is_none()));
         // No stage carries a time, so nothing is weighed (D-20).
         assert_eq!(Analysis::new(&plan, Engine::MongoDb).total, None);
+        assert_eq!(Analysis::new(&plan, Engine::MongoDb).execution_ms, None);
         assert!(plan.summary.is_empty());
+    }
+
+    #[test]
+    fn a_reply_whose_stages_are_untimed_keeps_the_reported_duration() {
+        let plan = explain_reply(
+            r#"{"queryPlanner":{"winningPlan":{"stage":"COLLSCAN"}},"executionStats":{"nReturned":3,"executionTimeMillis":7,"executionStages":{"stage":"COLLSCAN","nReturned":3}},"ok":1}"#,
+        );
+        assert!(plan.nodes.iter().all(|node| node.actual.is_none()));
+        let analysis = Analysis::new(&plan, Engine::MongoDb);
+        assert_eq!(analysis.execution_ms, Some(7.0));
+        assert_eq!(analysis.total, None);
+        assert!(analysis.nodes.iter().all(|node| node.share.is_none()));
     }
 
     #[test]
@@ -1457,6 +1481,7 @@ Planning Time: broken"#,
         assert!(plan.nodes.iter().all(|node| !node.shares_cte));
         close(plan.nodes[0].self_ms, 30.0 - 1.0 - 8.0 - 6.0);
         assert_self_sums_to_root(&plan);
+    }
 
     #[test]
     fn a_cte_read_twice_is_not_split_between_its_consumers() {
@@ -1489,7 +1514,6 @@ Planning Time: broken"#,
                 .iter()
                 .find(|(name, _)| name == label)
                 .map(|(_, value)| value.as_str())
-    }
                 .unwrap()
         };
         let planning = entry("Planning");
