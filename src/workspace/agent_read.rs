@@ -812,10 +812,10 @@ impl Workspace {
                 lane.connection = None;
                 // What the open's error must not name, as the config the lane
                 // opened from says; the keychain's password is never in it.
-                ended.error = Some(audited_error(&scrubbed(
+                ended.error = Some(audited_open_error(
                     &error.message,
                     &lane.opened_from.identifying_text(),
-                )));
+                ));
                 (Status::Failed, OPEN_FAILED.to_string())
             }
             Ran::Done {
@@ -1056,6 +1056,13 @@ fn open_agent(
         let connection = Connection::open_for_agent(config)?;
         Ok((connection, hidden))
     })
+}
+
+/// What the audit keeps of an error opening the agent's connection. A
+/// password command's error can echo the secret it printed, so none of it is
+/// kept, as none of it is logged; the rest is scrubbed of `hidden`.
+fn audited_open_error(message: &str, hidden: &[String]) -> String {
+    audited_error(&scrubbed(crate::db::loggable_error(message), hidden))
 }
 
 /// The blocking half of any call: what `work` asks, on `connection`.
@@ -2396,6 +2403,20 @@ mod tests {
         let multibyte = "é".repeat(ERROR_CAP + 500);
         let clipped = scrubbed(&multibyte, &[]);
         assert!(clipped.starts_with("éé") && clipped.ends_with(" [clipped]"));
+    }
+
+    #[test]
+    fn a_password_commands_open_error_never_reaches_the_audit() {
+        let audited = audited_open_error(
+            "The password command failed: + echo secret-token",
+            &["db.internal".to_string()],
+        );
+        assert!(!audited.contains("secret-token"), "{audited}");
+        // A server's error is still kept, scrubbed.
+        assert_eq!(
+            audited_open_error("no route to db.internal", &["db.internal".to_string()]),
+            "no route to [hidden]"
+        );
     }
 
     #[test]
