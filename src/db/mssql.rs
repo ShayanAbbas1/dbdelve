@@ -870,6 +870,10 @@ struct InFlight {
     /// A Cancel that arrived while one was waiting, carried out when it gets
     /// the session.
     cancel_queued: bool,
+    /// A second handle on the socket of a login still replaying the startup
+    /// script, which a statement waiting on it has no bound on. A Cancel for
+    /// that statement shuts it down, which drops the login unsent to.
+    signing_in: Option<std::net::TcpStream>,
 }
 
 /// A live connection. Cloneable so a background task can take one without
@@ -996,9 +1000,13 @@ impl Connection {
         };
         // Session options last on a login are the script's: a login holds them
         // until the connection drops, so replaying here covers every one.
-        run_startup(&mut session, &self.startup, &self.server.database)?;
+        // Published for the while as a login's, so a Cancel can drop it.
+        self.in_flight().signing_in = socket.try_clone().ok();
+        let replayed = run_startup(&mut session, &self.startup, &self.server.database);
+        self.in_flight().signing_in = None;
         // Only once the script ran: a login it failed is dropped here, and
         // its socket with it, rather than kept open for a Cancel to find.
+        replayed?;
         self.in_flight().socket = Some(socket);
         Ok(session)
     }
@@ -1112,8 +1120,14 @@ impl Connection {
         self.graph.ask();
         if !in_flight.running {
             // Waiting behind a catalog load: stopping the load would let the
-            // statement run anyway.
+            // statement run anyway. Waiting on a login's startup script, which
+            // runs unbounded under no statement timeout: that login is dropped.
             in_flight.cancel_queued = in_flight.queued > 0;
+            if in_flight.cancel_queued
+                && let Some(socket) = &in_flight.signing_in
+            {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
             return Ok(());
         }
         in_flight.stopped = true;
@@ -3309,6 +3323,43 @@ mod tests {
                 .expect("nothing else holds it")
                 .is_none(),
             "and the ping did not log it in"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_cancel_drops_a_reconnect_stuck_in_its_startup_script() {
+        let mut connection = live();
+        connection.startup = vec!["WAITFOR DELAY '00:01:00'".to_string()].into();
+        *connection.session.lock().unwrap() = None;
+        let user = connection.clone();
+        let started = Instant::now();
+        let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));
+        while connection.in_flight().signing_in.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the login replays"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        connection.cancel().unwrap();
+
+        let error = run
+            .join()
+            .unwrap()
+            .expect_err("the statement was cancelled");
+        assert!(
+            error.message.starts_with("Cancelled before it started"),
+            "{}",
+            error.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "without the script's wait"
+        );
+        assert!(
+            connection.session.lock().unwrap().is_none(),
+            "the login is not kept"
         );
     }
 
