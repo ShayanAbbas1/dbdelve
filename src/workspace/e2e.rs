@@ -12738,7 +12738,8 @@ fn the_save_chord_in_the_grid_applies_edits(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_relaunch_brings_a_file_tab_back_dirty_without_writing_its_file(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
-        // CI's live job sets `PG*`, whose profile would be put in front on the relaunch.
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
         crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = user_sql_file("draft.sql", "SELECT 1;");
@@ -12768,7 +12769,8 @@ fn a_relaunch_brings_a_file_tab_back_dirty_without_writing_its_file(cx: &mut Tes
 #[gpui::test]
 fn a_relaunch_with_two_tabs_on_one_file_keeps_both_buffers(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
-        // CI's live job sets `PG*`, whose profile would be put in front on the relaunch.
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
         crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = user_sql_file("shared.sql", "SELECT 1;");
@@ -13023,6 +13025,9 @@ fn a_scratch_file_that_will_not_read_back_is_set_aside_and_the_tab_carries_on(
     cx: &mut TestAppContext,
 ) {
     store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let (workspace, cx, path, scratch) =
             relaunch_over_an_unreadable_scratch(workspace, cx, "draft.sql", |_| {});
@@ -13062,6 +13067,9 @@ fn a_scratch_file_that_cannot_be_moved_aside_is_never_deleted(cx: &mut TestAppCo
     use std::os::unix::fs::PermissionsExt;
 
     store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let lock = |directory: &std::path::Path, mode| {
             std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap()
@@ -13500,7 +13508,8 @@ fn escape_takes_down_forget_file_before_the_overwrite_under_it(cx: &mut TestAppC
 #[gpui::test]
 fn a_file_gone_at_relaunch_comes_back_saying_it_was_deleted(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
-        // CI's live job sets `PG*`, whose profile would be put in front on the relaunch.
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
         crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = open_dirty_file(&workspace, cx, "vanished.sql");
@@ -13672,6 +13681,9 @@ fn a_relaunch_asks_about_a_change_made_while_the_app_was_closed(cx: &mut TestApp
 #[gpui::test]
 fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
         let (workspace, cx) = launch_on_sqlite(cx);
         let path = open_dirty_file(&workspace, cx, "kept.sql");
         std::fs::write(&path, "SELECT 22;").unwrap();
@@ -13689,27 +13701,7 @@ fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
             front_conflict(&workspace, cx),
             Some(crate::session::Conflict::KeptMine)
         );
-        let diag = cx.update(|window, cx| {
-            let ws = workspace.read(cx);
-            let profile = ws.profile().unwrap();
-            format!(
-                "focused={:?} active={} form={} palette={} dialog={:?} needs_focus={} state={} notice={:?} sidebar={} import={} queries={} active_tab={:?} edtab={:?}",
-                window.focused(cx).is_some(),
-                window.is_window_active(),
-                ws.form.is_some(),
-                ws.palette.is_some(),
-                ws.dialog_in_front.get(),
-                profile.session.editor_needs_focus,
-                profile_state_of(ws, "e2e"),
-                profile.session.notice,
-                ws.explorer_focus.contains_focused(window, cx),
-                profile.session.import_rows.is_some(),
-                profile.session.queries.len(),
-                profile.session.active,
-                profile.session.queries.iter().find(|t| t.editor.focus_handle(cx).is_focused(window)).map(|t| t.id),
-            )
-        });
-        assert!(editor_has_keyboard(&workspace, cx), "{diag}");
+        assert!(editor_has_keyboard(&workspace, cx));
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
