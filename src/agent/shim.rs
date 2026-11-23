@@ -858,7 +858,15 @@ pub(crate) mod testing {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::{os::unix::net::UnixListener, sync::mpsc, thread};
+    use std::{
+        os::unix::net::UnixListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        thread,
+    };
 
     use serde_json::{Value, json};
 
@@ -986,6 +994,65 @@ mod tests {
     impl Drop for App {
         fn drop(&mut self) {
             self.listener.take();
+            let _ = std::fs::remove_dir_all(self.path.parent().expect("the path has a directory"));
+        }
+    }
+
+    /// The app side as raw wire: a plain socket that hands the test each call
+    /// frame exactly as the shim wrote it, and answers it. Presence frames are
+    /// not calls, so they are read and let go.
+    struct FrameCapture {
+        path: PathBuf,
+        written: mpsc::Receiver<String>,
+        stop: Arc<AtomicBool>,
+        worker: Option<thread::JoinHandle<()>>,
+    }
+
+    impl FrameCapture {
+        fn bound() -> Self {
+            use std::io::{BufRead, BufReader, Write};
+
+            let path = short_socket_path();
+            std::fs::create_dir_all(path.parent().expect("the path has a directory"))
+                .expect("the directory is made");
+            let listener = UnixListener::bind(&path).expect("the socket binds");
+            let (frames, written) = mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = Arc::clone(&stop);
+            let worker = thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stopping.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let Ok(mut stream) = stream else { return };
+                    // A peer that never finishes its line cannot hold up the drop.
+                    let _ = stream.set_read_timeout(Some(PATIENCE));
+                    let mut line = String::new();
+                    if BufReader::new(&stream).read_line(&mut line).is_ok()
+                        && line.contains("\"call\"")
+                    {
+                        let _ = frames.send(line);
+                        let _ = stream.write_all(b"{\"status\":\"executed\",\"text\":\"ok\"}\n");
+                    }
+                }
+            });
+            Self {
+                path,
+                written,
+                stop,
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for FrameCapture {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            // Wake the accept so the worker sees the flag and returns.
+            let _ = std::os::unix::net::UnixStream::connect(&self.path);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
             let _ = std::fs::remove_dir_all(self.path.parent().expect("the path has a directory"));
         }
     }
@@ -1431,24 +1498,8 @@ mod tests {
     fn execute_sql_takes_a_connection_and_a_statement_and_nothing_else() {
         // The app side reads the frame as the wire carries it, so the test
         // sees what the shim wrote and not what it meant to.
-        let path = short_socket_path();
-        std::fs::create_dir_all(path.parent().expect("the path has a directory"))
-            .expect("the directory is made");
-        let listener = UnixListener::bind(&path).expect("the socket binds");
-        let (frames, written) = mpsc::channel();
-        thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
-
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let mut line = String::new();
-                if BufReader::new(&stream).read_line(&mut line).is_ok() && line.contains("\"call\"")
-                {
-                    let _ = frames.send(line);
-                    let _ = stream.write_all(b"{\"status\":\"executed\",\"text\":\"ok\"}\n");
-                }
-            }
-        });
+        let capture = FrameCapture::bound();
+        let (path, written) = (capture.path.clone(), &capture.written);
         block_on(async {
             let mut client = Client::serve(Shim::new(Ok(path.clone())));
             client.initialize().await;
@@ -1482,31 +1533,14 @@ mod tests {
             assert_eq!(frame["connection"], "Orders");
             assert_eq!(frame["sql"], "SELECT 1");
         });
-        let _ = std::fs::remove_dir_all(path.parent().expect("the path has a directory"));
     }
 
     #[test]
     fn each_catalog_tool_takes_only_its_own_arguments() {
         // The app side reads the frame as the wire carries it, so the test
         // sees what the shim wrote and not what it meant to.
-        let path = short_socket_path();
-        std::fs::create_dir_all(path.parent().expect("the path has a directory"))
-            .expect("the directory is made");
-        let listener = UnixListener::bind(&path).expect("the socket binds");
-        let (frames, written) = mpsc::channel();
-        thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
-
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let mut line = String::new();
-                if BufReader::new(&stream).read_line(&mut line).is_ok() && line.contains("\"call\"")
-                {
-                    let _ = frames.send(line);
-                    let _ = stream.write_all(b"{\"status\":\"executed\",\"text\":\"ok\"}\n");
-                }
-            }
-        });
+        let capture = FrameCapture::bound();
+        let (path, written) = (capture.path.clone(), &capture.written);
         block_on(async {
             let mut client = Client::serve(Shim::new(Ok(path.clone())));
             client.initialize().await;
@@ -1659,29 +1693,12 @@ mod tests {
                 assert!(frame.get("table").is_none(), "{frame}");
             }
         });
-        let _ = std::fs::remove_dir_all(path.parent().expect("the path has a directory"));
     }
 
     #[test]
     fn explain_query_takes_a_statement_and_an_optional_analyze_flag() {
-        let path = short_socket_path();
-        std::fs::create_dir_all(path.parent().expect("the path has a directory"))
-            .expect("the directory is made");
-        let listener = UnixListener::bind(&path).expect("the socket binds");
-        let (frames, written) = mpsc::channel();
-        thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
-
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let mut line = String::new();
-                if BufReader::new(&stream).read_line(&mut line).is_ok() && line.contains("\"call\"")
-                {
-                    let _ = frames.send(line);
-                    let _ = stream.write_all(b"{\"status\":\"executed\",\"text\":\"ok\"}\n");
-                }
-            }
-        });
+        let capture = FrameCapture::bound();
+        let (path, written) = (capture.path.clone(), &capture.written);
         block_on(async {
             let mut client = Client::serve(Shim::new(Ok(path.clone())));
             client.initialize().await;
@@ -1734,7 +1751,6 @@ mod tests {
             let frame: Value = serde_json::from_str(&frame).expect("the frame is JSON");
             assert_eq!(frame["analyze"], true, "{frame}");
         });
-        let _ = std::fs::remove_dir_all(path.parent().expect("the path has a directory"));
     }
 
     #[test]
