@@ -444,6 +444,7 @@ impl Workspace {
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
+            catalog_include: Include::default(),
             schema_refresh: None,
             reread_after_load: false,
             databases: Databases::default(),
@@ -538,6 +539,7 @@ impl Workspace {
             auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
+            catalog_include: Include::default(),
             schema_refresh: None,
             reread_after_load: false,
             databases: Databases::default(),
@@ -1469,7 +1471,7 @@ impl Workspace {
         profile.schema_refresh = Some(profile.generation);
         let (id, generation) = (profile.id.clone(), profile.generation);
         let in_transaction = profile.in_transaction;
-        let shown = profile.shown();
+        let (shown, include) = (profile.shown(), profile.include.clone());
         let depth = profile.behaviour.depth;
         #[cfg(test)]
         if depth >= Depth::Routines {
@@ -1551,6 +1553,7 @@ impl Workspace {
                         catalog.set_sizes(&fresh);
                     }
                     profile.catalog = CatalogState::Loaded(catalog, routines);
+                    profile.catalog_include = include;
                     profile.session.structure_requests.clear();
                     mark_objects_stale(profile);
                     workspace.catalog_replaced(&id, generation, true, cx);
@@ -2620,7 +2623,7 @@ impl Workspace {
             self.catalog_landed(id, cx);
             return;
         };
-        let shown = profile.shown();
+        let (shown, include) = (profile.shown(), profile.include.clone());
         let catalog_task =
             spawn_blocking(cx.background_executor(), move || connection.catalog(&shown));
 
@@ -2633,7 +2636,10 @@ impl Workspace {
                         return;
                     };
                     profile.catalog = match result {
-                        Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
+                        Ok(catalog) => {
+                            profile.catalog_include = include;
+                            CatalogState::Loaded(catalog, Routines::Loading)
+                        }
                         Err(error) => {
                             // A failed read stored nothing drawn with the old filter, and every
                             // read takes `shown()` and the depth as it starts, so the next one

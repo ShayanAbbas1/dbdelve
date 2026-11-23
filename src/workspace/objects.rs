@@ -2603,7 +2603,8 @@ impl Workspace {
             let (got, waiting) = restorable(
                 profile.config.engine(),
                 profile.draws_diagrams(),
-                profile.filter_hides(stored.database.as_deref(), &stored.schema),
+                profile.filter_hides(stored.database.as_deref(), &stored.schema)
+                    || !profile.catalog_under_saved_filter(stored.database.as_deref()),
                 profile.catalog_state_of(stored.database.as_deref()),
                 std::slice::from_ref(stored),
             );
@@ -2719,7 +2720,9 @@ fn opened_from(catalog: &Catalog, target: ExplorerTarget) -> Option<OpenedObject
 /// routines failed to load keeps waiting, because a failed listing says nothing
 /// about whether the routine still exists. One in a schema or database the
 /// connection's filter hides, `hidden`, waits too: the narrowed catalog does
-/// not list it, which says nothing about whether it still exists either.
+/// not list it, which says nothing about whether it still exists either. So
+/// does one the filter has just come to show, until a catalog read under it
+/// lands.
 fn restorable(
     engine: Engine,
     draws: bool,

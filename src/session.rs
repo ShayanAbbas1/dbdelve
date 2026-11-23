@@ -145,6 +145,10 @@ pub(crate) struct Profile {
     /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
     pub(crate) session_changed: bool,
     pub(crate) catalog: CatalogState,
+    /// The include lists `catalog` was read under. Until a read under the
+    /// lists saved now lands, the catalog lacks what a newly shown schema
+    /// holds, so it cannot say a routine there is gone.
+    pub(crate) catalog_include: Include,
     /// The generation a schema refresh was started on. Compared rather than
     /// cleared, so a reconnect that drops the refresh's answer takes the
     /// refresh with it.
@@ -678,6 +682,13 @@ impl Profile {
             }
             _ => None,
         }
+    }
+
+    /// Whether the catalog read for `database` says what the saved filter
+    /// shows: another database's is dropped and read again on a save, the
+    /// own one only once the read [`Self::catalog_include`] names lands.
+    pub(crate) fn catalog_under_saved_filter(&self, database: Option<&str>) -> bool {
+        database.is_some() || self.catalog_include == self.include
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {

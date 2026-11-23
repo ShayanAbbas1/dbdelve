@@ -28157,6 +28157,61 @@ fn a_stored_script_on_an_engine_without_the_row_is_dropped_at_restore(cx: &mut T
     });
 }
 
+/// A filter just saved to show more is not yet in the catalog read under the
+/// old one: a stored routine waits for the read under the new one, and only a
+/// catalog read under it can say the routine is gone.
+#[gpui::test]
+fn a_stored_routine_waits_for_the_catalog_read_under_the_saved_filter(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let pending = || store::StoredObject {
+            database: None,
+            schema: "main".into(),
+            name: "digest()".into(),
+            routine: true,
+            structure: false,
+            diagram: false,
+            diagram_view: None,
+            kind: Default::default(),
+            filter: String::new(),
+            filter_engine: None,
+            origin: None,
+            filters: Vec::new(),
+            active: false,
+            bars: Vec::new(),
+        };
+        let waiting = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.pending_objects.len()
+            })
+        };
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            assert!(matches!(
+                profile.catalog,
+                CatalogState::Loaded(_, crate::session::Routines::Loaded)
+            ));
+            profile.include.schemas = vec!["audit".into()];
+            profile.session.pending_objects.push(pending());
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(waiting(&workspace, cx), 1, "kept for the catalog to come");
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.catalog_include = profile.include.clone();
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(
+            waiting(&workspace, cx),
+            0,
+            "a catalog read under it lacks it"
+        );
+        quit(workspace, cx);
+    });
+}
+
 fn generation_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) -> u64 {
     workspace.read_with(cx, |workspace, _| {
         workspace
