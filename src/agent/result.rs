@@ -194,10 +194,15 @@ fn write(table: &Table) -> Written<'_> {
             unlisted: true,
         };
     }
-    let rows: Vec<(String, bool)> = table
-        .rows
-        .iter()
-        .map(|row| {
+    // Serialized only while they can still fit: once this table's lines alone
+    // are past the budget, no header lets another row in.
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    let mut bytes = lead.len();
+    for row in &table.rows {
+        if bytes > RESULT_BUDGET {
+            break;
+        }
+        let line = {
             let mut clipped = false;
             let cells: Vec<Option<String>> = row
                 .iter()
@@ -212,8 +217,10 @@ fn write(table: &Table) -> Written<'_> {
                 })
                 .collect();
             (format!("{}\n", json_line(&cells)), clipped)
-        })
-        .collect();
+        };
+        bytes += line.0.len();
+        rows.push(line);
+    }
     Written {
         table,
         lead,
@@ -775,5 +782,23 @@ mod tests {
             assert!(out.len() <= budget, "{budget}: {}", out.len());
             assert!(out.ends_with("\n[clipped from 200 bytes]\n"), "{out}");
         }
+    }
+
+    #[test]
+    fn rows_past_the_budget_are_never_serialized() {
+        let many = Table {
+            label: "rows",
+            heads: vec![Head {
+                name: "v".to_string(),
+                data_type: None,
+            }],
+            rows: (0..100_000).map(|n| vec![Some(n.to_string())]).collect(),
+            total: Total::Exact(100_000),
+        };
+        let written = write(&many);
+        assert!(written.rows.len() < 10_000, "{}", written.rows.len());
+        let (out, shown) = text_shown(&[many], 0, None);
+        assert!(out.len() <= RESULT_BUDGET, "{}", out.len());
+        assert_eq!(out.lines().count(), shown + 2);
     }
 }
