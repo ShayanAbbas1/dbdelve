@@ -39,6 +39,11 @@ const CALL_CAP: usize = 8;
 // them; sixteen leaves room without letting a loop hold a thread each forever.
 const PRESENCE_CAP: usize = 16;
 
+// ponytail: a connection holds a thread from its accept to its first frame,
+// at most `FIRST_FRAME_TIMEOUT`, before either cap counts it; this bounds how
+// many do at once, with room for every call and presence to reconnect.
+const PENDING_CAP: usize = 2 * (CALL_CAP + PRESENCE_CAP);
+
 // ponytail: an answer is at most `wire::REPLY_LIMIT`, more than a socket
 // buffer holds on macOS, so a caller that stops reading would park the writer
 // and keep its call's place; a live shim reads it at once.
@@ -50,6 +55,8 @@ struct Shared {
     next_id: AtomicU64,
     calls: AtomicUsize,
     presences: AtomicUsize,
+    /// Connections accepted that have not yet sent their first frame.
+    pending: AtomicUsize,
     first_frame_timeout: Duration,
     /// A handle to every connection that is not a call and has not ended, so
     /// stopping can wake the readers parked on them. A call's stream is never
@@ -139,6 +146,7 @@ fn listen_with(
         next_id: AtomicU64::new(0),
         calls: AtomicUsize::new(0),
         presences: AtomicUsize::new(0),
+        pending: AtomicUsize::new(0),
         first_frame_timeout,
         open: Mutex::new(Vec::new()),
     });
@@ -191,17 +199,30 @@ fn accept(listener: UnixListener, shared: Arc<Shared>, inbound: UnboundedSender<
             thread::sleep(Duration::from_millis(50));
             continue;
         };
-        let shared = shared.clone();
+        // Over the cap the stream is dropped, which closes it; the place is
+        // taken here, before a thread exists, and handed to it.
+        let Some(place) = Counted::take(&shared.pending, PENDING_CAP) else {
+            continue;
+        };
+        std::mem::forget(place);
+        let serving = shared.clone();
         let inbound = inbound.clone();
         // A connection that cannot get a thread is dropped, which closes it.
-        let _ = thread::Builder::new()
+        if thread::Builder::new()
             .name("dbdelve-agent-connection".to_string())
-            .spawn(move || serve(stream, &shared, &inbound));
+            .spawn(move || serve(stream, &serving, &inbound))
+            .is_err()
+        {
+            shared.pending.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
 /// One connection, from its first frame to its end.
 fn serve(stream: UnixStream, shared: &Shared, inbound: &UnboundedSender<Inbound>) {
+    // The place `accept` took for this connection, given back once the first
+    // frame is in or the connection ends without one.
+    let pending = Counted(&shared.pending);
     if !ipc::admit(&stream, ipc::current_euid()) {
         return;
     }
@@ -222,6 +243,7 @@ fn serve(stream: UnixStream, shared: &Shared, inbound: &UnboundedSender<Inbound>
         return;
     };
     drop(reading);
+    drop(pending);
     let _ = stream.set_read_timeout(None);
     match wire::decode_hello(&line) {
         Ok(wire::Hello::Call {
@@ -708,6 +730,33 @@ mod tests {
             Duration::from_millis(200)
         ));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn connections_waiting_for_a_first_frame_are_capped() {
+        let rig = Rig::new(FIRST_FRAME_TIMEOUT);
+        let silent: Vec<_> = (0..PENDING_CAP).map(|_| rig.client()).collect();
+        // Accepted after every silent one, so it finds the places taken and
+        // is closed at once, long before the first-frame wait.
+        let started = Instant::now();
+        let mut over = rig.client();
+        assert!(Rig::closed_with(&mut over).is_empty());
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // A place comes back when a waiting connection ends.
+        drop(silent);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let presence_line = format!("{}\n", frame(r#""kind":"presence""#));
+        loop {
+            let mut client = rig.client();
+            let _ = client.write_all(presence_line.as_bytes());
+            if let Ok(Inbound::PresenceOpened { .. }) =
+                rig.inbound.recv_timeout(Duration::from_millis(200))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "a place was never given back");
+        }
     }
 
     #[test]
