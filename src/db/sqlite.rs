@@ -2563,10 +2563,23 @@ SELECT n FROM counting
     #[test]
     fn the_bundled_library_reads_and_writes_no_files() {
         let connection = memory("");
+        // Not registered at all, which a failing call alone would not show: a
+        // registered function can fail on a missing file too.
+        let registered = connection
+            .query(
+                "SELECT count(*) FROM pragma_function_list \
+                 WHERE name IN ('readfile', 'writefile')",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(registered.rows[0].get(0), Some("0"));
+        // And a call fails as SQLite prepares it, before anything runs.
         for sql in ["SELECT readfile('x')", "SELECT writefile('x', 'y')"] {
+            let error = connection.query(sql, Fetch::default()).unwrap_err();
             assert!(
-                connection.query(sql, Fetch::default()).is_err(),
-                "{sql} ran on the bundled library"
+                error.message.contains("no such function"),
+                "{sql}: {}",
+                error.message
             );
         }
     }
@@ -3865,6 +3878,13 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         assert_eq!(read(&empty), None);
         assert_eq!(read(&text), None);
         assert_eq!(read(&dir.join("missing.db")), None);
+        // A header with a version pair this reader does not know says nothing.
+        for pair in [[1u8, 2], [2, 1], [3, 3], [0, 0]] {
+            let mut header = std::fs::read(&wal).unwrap();
+            header[18..20].copy_from_slice(&pair);
+            std::fs::write(&text, &header).unwrap();
+            assert_eq!(read(&text), None, "{pair:?}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3878,13 +3898,6 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         rusqlite::Connection::open(&path)
             .unwrap()
             .execute_batch(
-        // A header with a version pair this reader does not know says nothing.
-        for pair in [[1u8, 2], [2, 1], [3, 3], [0, 0]] {
-            let mut header = std::fs::read(&wal).unwrap();
-            header[18..20].copy_from_slice(&pair);
-            std::fs::write(&text, &header).unwrap();
-            assert_eq!(read(&text), None, "{pair:?}");
-        }
                 "PRAGMA journal_mode = WAL; CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
             )
             .unwrap();
