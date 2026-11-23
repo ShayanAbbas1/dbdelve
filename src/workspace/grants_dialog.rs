@@ -6,7 +6,9 @@ use gpui_component::Icon;
 use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
 
-use crate::grants::{Mark, MatrixRow, Who, column_label, object_rows, role_columns, role_rows};
+use crate::grants::{
+    Mark, MatrixRow, Who, column_label, object_rows, role_columns, role_grants_empty, role_rows,
+};
 use crate::theme::ConnectionColor;
 use crate::users_view::Loaded;
 
@@ -194,12 +196,14 @@ impl Workspace {
                 .text_color(t.danger)
                 .child(message.clone())
                 .into_any_element(),
-            Loaded::Ready(_) if rows.is_empty() => div()
+            Loaded::Ready(grants) if rows.is_empty() => div()
                 .p(px(18.))
+                .debug_selector(|| "show-grants-empty".into())
                 .text_color(t.text_muted)
-                .child(match filter.trim().is_empty() {
-                    true => "It holds nothing on any relation of this database.",
-                    false => "Nothing matches the filter.",
+                .child(match (filter.trim().is_empty(), grants) {
+                    (false, _) => "Nothing matches the filter.".to_string(),
+                    (true, GrantsOf::Role(grants)) => role_grants_empty(grants),
+                    (true, GrantsOf::Object(_)) => "Nobody holds anything on it.".to_string(),
                 })
                 .into_any_element(),
             Loaded::Ready(_) => div()

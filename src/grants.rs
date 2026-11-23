@@ -317,6 +317,38 @@ fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> V
     rows
 }
 
+/// What Show Grants of a role says when it lists no relation: why it may
+/// still reach them, as a superuser, an owner or through a predefined role,
+/// before saying it holds nothing.
+pub(crate) fn role_grants_empty(grants: &RoleGrants) -> String {
+    let beyond = &grants.beyond;
+    if beyond.superuser {
+        return "Superuser: it bypasses every grant, so it reaches every relation.".into();
+    }
+    let mut said = Vec::new();
+    if beyond.owns > 0 {
+        said.push(format!(
+            "Owns {}, and holds everything on them.",
+            plural(beyond.owns as usize, "relation")
+        ));
+    }
+    if !beyond.predefined.is_empty() {
+        said.push(format!(
+            "Holds {}, which reaches further than any grant.",
+            beyond.predefined.join(", ")
+        ));
+    }
+    said.push(format!(
+        "It holds no grant on {} relation of {}.",
+        match said.is_empty() {
+            true => "any",
+            false => "any other",
+        },
+        grants.database
+    ));
+    said.join(" ")
+}
+
 /// The columns of a role's own grants: the privileges it holds anywhere, in
 /// the order a table's are listed, then any other.
 pub(crate) fn role_columns(grants: &RoleGrants) -> Vec<String> {
@@ -571,6 +603,7 @@ mod tests {
         };
         let grants = RoleGrants {
             database: "d".into(),
+            beyond: Default::default(),
             held: vec![held("a.b", "c"), held("a", "b.c")],
         };
         let rows = role_rows(&grants, &role_columns(&grants), "");
@@ -590,6 +623,7 @@ mod tests {
         for order in [[false, true], [true, false]] {
             let grants = RoleGrants {
                 database: "d".into(),
+                beyond: Default::default(),
                 held: order.into_iter().map(held).collect(),
             };
             let rows = role_rows(&grants, &role_columns(&grants), "");
@@ -612,6 +646,7 @@ mod tests {
         assert_eq!(names(object_rows(&orders(), false, "rptg")), ["reporting"]);
         let grants = RoleGrants {
             database: "d".into(),
+            beyond: Default::default(),
             held: vec![HeldGrant {
                 schema: "sales".into(),
                 relation: "orders".into(),
@@ -627,6 +662,36 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_list_of_a_roles_grants_says_what_reaches_past_them() {
+        use crate::db::roles::Beyond;
+        let grants = |beyond: Beyond| RoleGrants {
+            database: "shop".into(),
+            held: Vec::new(),
+            beyond,
+        };
+        assert_eq!(
+            role_grants_empty(&grants(Beyond::default())),
+            "It holds no grant on any relation of shop."
+        );
+        assert!(
+            role_grants_empty(&grants(Beyond {
+                superuser: true,
+                ..Beyond::default()
+            }))
+            .starts_with("Superuser")
+        );
+        assert_eq!(
+            role_grants_empty(&grants(Beyond {
+                owns: 3,
+                predefined: vec!["pg_read_all_data".into()],
+                ..Beyond::default()
+            })),
+            "Owns 3 relations, and holds everything on them. Holds pg_read_all_data, which \
+             reaches further than any grant. It holds no grant on any other relation of shop."
+        );
+    }
+
+    #[test]
     fn a_roles_own_grant_wins_over_one_held_through_a_role() {
         let held = |relation: &str, privilege: &str, through: Option<&str>| HeldGrant {
             schema: "public".into(),
@@ -637,6 +702,7 @@ mod tests {
         };
         let grants = RoleGrants {
             database: "d".into(),
+            beyond: Default::default(),
             held: vec![
                 held("orders", "SELECT", None),
                 held("orders", "SELECT", Some("reporting")),

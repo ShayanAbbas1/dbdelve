@@ -2058,9 +2058,11 @@ impl Connection {
     }
 
     pub fn role_grants(&self, name: &str) -> Result<super::roles::RoleGrants, DbError> {
-        use super::roles::{assemble_role_grants, role_grants_sql};
+        use super::roles::{assemble_role_grants, owns_sql, role_grants_sql};
         let (_, per_membership) = self.role_catalog()?;
-        assemble_role_grants(&self.internal_query(&role_grants_sql(name, per_membership))?)
+        let held = self.internal_query(&role_grants_sql(name, per_membership))?;
+        let owns = self.internal_query(&owns_sql(name, per_membership))?;
+        assemble_role_grants(&held, &owns)
     }
 
     pub fn role_reports(
@@ -3849,7 +3851,8 @@ mod tests {
                  CREATE ROLE dbdelve_probe_ana LOGIN CONNECTION LIMIT 5 \
                      VALID UNTIL '2000-01-01' IN ROLE dbdelve_probe_team; \
                  GRANT SELECT ON dbdelve_roles_probe.orders TO dbdelve_probe_team; \
-                 GRANT INSERT ON dbdelve_roles_probe.orders TO PUBLIC",
+                 GRANT INSERT ON dbdelve_roles_probe.orders TO PUBLIC; \
+                 GRANT USAGE ON SCHEMA dbdelve_roles_probe TO dbdelve_probe_team",
                 Fetch::default(),
             )
             .expect("the probe roles should be created");
@@ -4223,6 +4226,75 @@ mod tests {
             shown(&connection).as_deref(),
             Some(r#""Other","$user",public"#)
         );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_reach_counts_columns_and_sequences_in_the_schemas_a_role_may_use() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let reset = "DROP SCHEMA IF EXISTS dbdelve_reach_probe CASCADE; \
+                     DROP SCHEMA IF EXISTS dbdelve_reach_hidden CASCADE; \
+                     DROP ROLE IF EXISTS dbdelve_probe_reach; \
+                     DROP ROLE IF EXISTS dbdelve_probe_owner";
+        plain
+            .query(reset, Fetch::default())
+            .expect("an earlier run's probe should drop");
+        plain
+            .query(
+                "CREATE ROLE dbdelve_probe_reach NOLOGIN; \
+                 CREATE ROLE dbdelve_probe_owner NOLOGIN; \
+                 CREATE SCHEMA dbdelve_reach_probe; \
+                 CREATE SCHEMA dbdelve_reach_hidden; \
+                 CREATE TABLE dbdelve_reach_probe.users (id int, email text); \
+                 CREATE SEQUENCE dbdelve_reach_probe.ids; \
+                 CREATE TABLE dbdelve_reach_hidden.secrets (id int); \
+                 ALTER TABLE dbdelve_reach_hidden.secrets OWNER TO dbdelve_probe_owner; \
+                 GRANT USAGE ON SCHEMA dbdelve_reach_probe TO dbdelve_probe_reach; \
+                 GRANT SELECT (email) ON dbdelve_reach_probe.users TO dbdelve_probe_reach; \
+                 GRANT USAGE ON SEQUENCE dbdelve_reach_probe.ids TO dbdelve_probe_reach; \
+                 GRANT SELECT ON dbdelve_reach_hidden.secrets TO dbdelve_probe_reach",
+                Fetch::default(),
+            )
+            .expect("the probe should be created");
+
+        let reach = plain.role_reach("dbdelve_probe_reach");
+        let owner = plain.role_grants("dbdelve_probe_owner");
+        let me = live_config().user;
+        let mine = plain.role_grants(&me);
+        plain
+            .query(reset, Fetch::default())
+            .expect("the probe should drop");
+
+        let reach = reach.expect("reach should read");
+        let entries: Vec<_> = (reach.entries.iter())
+            .filter(|entry| entry.schema.starts_with("dbdelve_reach_"))
+            .map(|entry| {
+                (
+                    entry.schema.as_str(),
+                    entry.privilege.as_str(),
+                    entry.relations,
+                )
+            })
+            .collect();
+        // The grant in a schema it may not use reaches nothing.
+        assert_eq!(
+            entries,
+            [
+                ("dbdelve_reach_probe", "SELECT (columns)", 1),
+                ("dbdelve_reach_probe", "USAGE", 1),
+            ]
+        );
+        let owner = owner.expect("an owner's grants should read");
+        // Its own relation is left out of what it holds, and counted.
+        assert!(
+            !(owner.held.iter()).any(|held| held.schema.starts_with("dbdelve_reach_")),
+            "{:?}",
+            owner.held
+        );
+        assert_eq!(owner.beyond.owns, 1);
+        assert!(!owner.beyond.superuser);
+        // The compose login is the server's superuser.
+        assert!(mine.expect("grants should read").beyond.superuser);
     }
 
     #[test]

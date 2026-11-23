@@ -102,7 +102,10 @@ pub fn ordered(roles: &Roles) -> Vec<&Role> {
 }
 
 /// The panel's plain-language answer to what the role can reach in the
-/// connection's database.
+/// connection's database: its grants on relations, sequences and columns,
+/// in schemas it may use, what it owns, and the predefined roles it holds.
+/// It ends on what it read, relations, and claims nothing of the rest: a
+/// routine's `EXECUTE` or a schema's `CREATE` is not counted.
 pub fn reach_sentence(role: &Role, reach: &Reach) -> String {
     if role.superuser {
         return "Everything: a superuser bypasses every grant.".into();
@@ -156,9 +159,9 @@ pub fn reach_sentence(role: &Role, reach: &Reach) -> String {
         sentences.push(format!("Holds {}.", reach.predefined.join(", ")));
     }
     match sentences.is_empty() {
-        true => format!("Nothing in {}.", reach.database),
+        true => format!("No grant on a relation in {}.", reach.database),
         false => {
-            sentences.push("Nothing else.".into());
+            sentences.push("No other grant on a relation.".into());
             sentences.join(" ")
         }
     }
@@ -1039,7 +1042,7 @@ mod tests {
         assert_eq!(
             reach_sentence(&role("ana", true), &reach),
             "Select and Update on 14 relations in analytics.public, through reporting. \
-             Nothing else."
+             No other grant on a relation."
         );
         let reader = Reach {
             predefined: vec!["pg_read_all_data".into()],
@@ -1047,7 +1050,7 @@ mod tests {
         };
         assert!(
             reach_sentence(&role("ana", true), &reader)
-                .ends_with("Holds pg_read_all_data. Nothing else."),
+                .ends_with("Holds pg_read_all_data. No other grant on a relation."),
         );
         let nothing = Reach {
             database: "analytics".into(),
@@ -1055,7 +1058,7 @@ mod tests {
         };
         assert_eq!(
             reach_sentence(&role("bo", true), &nothing),
-            "Nothing in analytics."
+            "No grant on a relation in analytics."
         );
     }
 

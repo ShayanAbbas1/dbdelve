@@ -163,6 +163,20 @@ pub struct ObjectGrants {
 pub struct RoleGrants {
     pub database: String,
     pub held: Vec<HeldGrant>,
+    /// What reaches past the grants listed, for a list that is empty or
+    /// short: a superuser bypasses them, an owner holds everything on what
+    /// it owns, which is left out, and a predefined role reaches further.
+    pub beyond: Beyond,
+}
+
+/// What a role holds past its grants on relations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Beyond {
+    pub superuser: bool,
+    /// How many relations it owns, itself or through a role it inherits.
+    pub owns: u64,
+    /// The predefined roles it holds (`pg_read_all_data` and the like).
+    pub predefined: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -444,22 +458,47 @@ fn held(name: &str, per_membership: bool) -> String {
     )
 }
 
-/// ponytail: grants on single columns are not counted; `pg_attribute.attacl`
-/// is where they are.
+/// Every privilege `name` holds on a relation, a sequence or some of a
+/// relation's columns (`attacl`, said `SELECT (columns)`), itself or through
+/// a role, each counted once per relation. Only in schemas it may use: a
+/// grant on a relation in a schema it holds no `USAGE` on reaches nothing.
+/// Owned relations are counted apart ([`owns_sql`]).
 pub(super) fn reach_sql(name: &str, per_membership: bool) -> String {
+    let usable = format!(
+        "pg_catalog.has_schema_privilege({}, n.oid, 'USAGE')",
+        literal(name)
+    );
     format!(
-        "{}
-         SELECT n.nspname AS schema, a.privilege_type AS privilege,
-             pg_catalog.count(DISTINCT c.oid)::text AS relations,
-             pg_catalog.string_agg(DISTINCT holder.via::text, E'\\x1f') AS through
-         FROM pg_catalog.pg_class AS c
-         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
-         JOIN holder ON holder.oid = a.grantee
-         WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
-           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-           AND n.nspname !~ '^pg_toast'
-           AND c.relowner NOT IN (SELECT oid FROM held)
+        "{},
+         granted(schema, privilege, relation, via) AS (
+             SELECT n.nspname, a.privilege_type, c.oid, holder.via
+             FROM pg_catalog.pg_class AS c
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+             CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
+             JOIN holder ON holder.oid = a.grantee
+             WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND n.nspname !~ '^pg_toast'
+               AND c.relowner NOT IN (SELECT oid FROM held)
+               AND {usable}
+             UNION ALL
+             SELECT n.nspname, a.privilege_type || ' (columns)', c.oid, holder.via
+             FROM pg_catalog.pg_attribute AS att
+             JOIN pg_catalog.pg_class AS c ON c.oid = att.attrelid
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+             CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) AS a
+             JOIN holder ON holder.oid = a.grantee
+             WHERE att.attnum > 0 AND NOT att.attisdropped
+               AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND n.nspname !~ '^pg_toast'
+               AND c.relowner NOT IN (SELECT oid FROM held)
+               AND {usable}
+         )
+         SELECT schema, privilege,
+             pg_catalog.count(DISTINCT relation)::text AS relations,
+             pg_catalog.string_agg(DISTINCT via::text, E'\\x1f') AS through
+         FROM granted
          GROUP BY 1, 2
          ORDER BY 1, 2",
         held(name, per_membership)
@@ -485,10 +524,17 @@ pub(super) fn role_grants_sql(name: &str, per_membership: bool) -> String {
     )
 }
 
-pub(super) fn assemble_role_grants(result: &QueryResult) -> Result<RoleGrants, DbError> {
-    let mut grants = RoleGrants::default();
+pub(super) fn assemble_role_grants(
+    result: &QueryResult,
+    owns: &QueryResult,
+) -> Result<RoleGrants, DbError> {
+    let (database, beyond) = assemble_beyond(owns)?;
+    let mut grants = RoleGrants {
+        database,
+        held: Vec::new(),
+        beyond,
+    };
     for row in &result.rows {
-        grants.database = required_cell(result, row, "database")?.to_string();
         grants.held.push(HeldGrant {
             schema: required_cell(result, row, "schema")?.to_string(),
             relation: required_cell(result, row, "relation")?.to_string(),
@@ -506,14 +552,17 @@ pub(super) fn owns_sql(name: &str, per_membership: bool) -> String {
          SELECT (SELECT pg_catalog.count(*)
                  FROM pg_catalog.pg_class AS c
                  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-                 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
                    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
                    AND c.relowner IN (SELECT oid FROM held))::text AS owns,
+             (SELECT CASE WHEN pg_catalog.bool_or(r.rolsuper) THEN 'y' ELSE 'n' END
+              FROM pg_catalog.pg_roles AS r WHERE r.rolname = {}) AS superuser,
              (SELECT pg_catalog.string_agg(r.rolname::text, E'\\x1f' ORDER BY r.rolname)
               FROM held JOIN pg_catalog.pg_roles AS r ON r.oid = held.oid
               WHERE r.rolname ~ '^pg_') AS predefined,
              pg_catalog.current_database() AS database",
-        held(name, per_membership)
+        held(name, per_membership),
+        literal(name)
     )
 }
 
@@ -651,21 +700,34 @@ pub(super) fn assemble_reach(reach: &QueryResult, owns: &QueryResult) -> Result<
                 .unwrap_or_default(),
         });
     }
+    let (database, beyond) = assemble_beyond(owns)?;
+    Ok(Reach {
+        database,
+        entries,
+        owns: beyond.owns,
+        predefined: beyond.predefined,
+    })
+}
+
+/// What [`owns_sql`] read: the database it was read in, and the rest.
+fn assemble_beyond(owns: &QueryResult) -> Result<(String, Beyond), DbError> {
     let row = owns
         .rows
         .first()
         .ok_or_else(|| plain_error("Catalog query returned no owner count.".into()))?;
     let count = required_cell(owns, row, "owns")?;
-    Ok(Reach {
-        database: required_cell(owns, row, "database")?.to_string(),
-        entries,
-        owns: count
-            .parse()
-            .map_err(|_| super::unexpected_catalog_value("count", count))?,
-        predefined: optional_cell(owns, row, "predefined")
-            .map(|names| names.split(SEPARATOR).map(str::to_string).collect())
-            .unwrap_or_default(),
-    })
+    Ok((
+        required_cell(owns, row, "database")?.to_string(),
+        Beyond {
+            superuser: yes(owns, row, "superuser")?,
+            owns: count
+                .parse()
+                .map_err(|_| super::unexpected_catalog_value("count", count))?,
+            predefined: optional_cell(owns, row, "predefined")
+                .map(|names| names.split(SEPARATOR).map(str::to_string).collect())
+                .unwrap_or_default(),
+        },
+    ))
 }
 
 pub(super) fn names(result: &QueryResult, column: &str) -> Result<Vec<String>, DbError> {
