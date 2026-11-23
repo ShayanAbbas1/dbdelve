@@ -946,10 +946,22 @@ impl Connection {
     /// `COM_RESET_CONNECTION`, which runs the driver's `init` again and drops
     /// every other setting, and then the rest of what a session opened for
     /// the user starts with: the time zone, the hold and the script.
+    ///
+    /// A session that fails any of it is killed, not kept: it has lost the
+    /// profile's settings, the Read-only hold among them, and the next
+    /// statement would run without them. Killed, it finds the session lost
+    /// and the profile reconnects with all of them.
     fn reset_session(&self, connection: &mut Conn) -> Result<(), DbError> {
-        connection.reset().map_err(|error| query_error(&error))?;
-        set_time_zone(connection, &self.server, self.engine)?;
-        self.hold_and_replay(connection)
+        let reset = connection
+            .reset()
+            .map_err(|error| query_error(&error))
+            .and_then(|()| set_time_zone(connection, &self.server, self.engine))
+            .and_then(|()| self.hold_and_replay(connection));
+        if reset.is_err() {
+            let id = connection.connection_id();
+            let _ = connection.query_drop(format!("KILL CONNECTION {id}"));
+        }
+        reset
     }
 
     /// A second session, for a statement to run on beside this one's; see
