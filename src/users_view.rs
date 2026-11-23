@@ -409,7 +409,16 @@ impl UsersView {
                     .on_click(export),
                 )
             })
-            .child(accent_button("users-new-user", "New User…", t).on_click(new_user))
+            .child(
+                ui::button(
+                    "users-new-user",
+                    "New User…",
+                    Tone::Primary,
+                    Control::Compact,
+                    t,
+                )
+                .on_click(new_user),
+            )
             .child(outline_button("users-new-role", "New Role…", t, t.text).on_click(new_role))
     }
 
@@ -973,21 +982,6 @@ fn status_pill(status: Status, t: Theme) -> impl IntoElement {
             .font_weight(FontWeight::SEMIBOLD)
             .child(status.label()),
     )
-}
-
-/// The accent-filled button the header leads with.
-fn accent_button(id: &'static str, label: &'static str, t: Theme) -> Button {
-    ui::control(id, Tone::Quiet, Control::Compact)
-        .px(px(layout::SPACE_MD))
-        .bg(t.accent)
-        .rounded(px(layout::RADIUS_CONTROL))
-        .child(
-            div()
-                .text_size(px(layout::chrome(12.5)))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.on_accent)
-                .child(label),
-        )
 }
 
 /// A button drawn as a hairline outline, its label in `ink`.
