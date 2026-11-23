@@ -111,6 +111,21 @@ impl Written<'_> {
 // when no row follows it, so the budget holds for a few tables and not for
 // thousands.
 pub(crate) fn text(tables: &[Table], further: usize, note: Option<&str>) -> String {
+    text_shown(tables, further, note).0
+}
+
+/// [`text`], and how many rows of all `tables` it wrote: the rows the budget
+/// dropped are not counted, so what is audited as sent is what was sent.
+pub(crate) fn text_shown(tables: &[Table], further: usize, note: Option<&str>) -> (String, usize) {
+    let (text, written) = written_text(tables, further, note);
+    (text, written.iter().map(|w| w.kept).sum())
+}
+
+fn written_text<'a>(
+    tables: &'a [Table],
+    further: usize,
+    note: Option<&str>,
+) -> (String, Vec<Written<'a>>) {
     let mut written: Vec<Written> = tables.iter().map(write).collect();
     let note = note
         .map(|note| format!("note: {note}\n"))
@@ -124,11 +139,11 @@ pub(crate) fn text(tables: &[Table], further: usize, note: Option<&str>) -> Stri
         let head = header(&written, further);
         // `truncated: ` and the newline are the line's own.
         if "truncated: ".len() + head.len() + 1 + body <= RESULT_BUDGET {
-            return assemble(&written, &head, &note);
+            return (assemble(&written, &head, &note), written);
         }
         let Some(last) = written.iter_mut().rev().find(|w| w.kept > 0) else {
             // Nothing is left to drop: the leading lines are all there is.
-            return assemble(&written, &head, &note);
+            return (assemble(&written, &head, &note), written);
         };
         body -= last.drop_last();
     }
@@ -514,6 +529,16 @@ mod tests {
         );
         // Every row line that is there is a whole one.
         assert!(lines.all(|line| line.len() == 504 && line.ends_with("\"]")));
+    }
+
+    #[test]
+    fn only_the_rows_written_are_counted_as_shown() {
+        let table = wide(100, &"a".repeat(500), Total::Exact(100));
+        let (out, shown) = text_shown(std::slice::from_ref(&table), 0, None);
+        assert_eq!(out, text(&[table], 0, None));
+        let written = out.lines().filter(|line| line.starts_with("[\"")).count();
+        assert!((1..100).contains(&shown), "{shown}");
+        assert_eq!(shown, written);
     }
 
     #[test]

@@ -452,7 +452,18 @@ struct Shaped {
 /// A catalog reply and how many rows it lists.
 struct Listing {
     text: String,
-    rows: usize,
+    /// How many rows went back and how many there were.
+    rows: (usize, Total),
+}
+
+impl Listing {
+    /// A reply that lists every one of its `rows`.
+    fn all(text: String, rows: usize) -> Self {
+        Self {
+            text,
+            rows: (rows, Total::Exact(rows)),
+        }
+    }
 }
 
 /// One result set as the agent reads it. A Postgres spatial cell is rendered
@@ -505,10 +516,12 @@ pub(super) fn table_of(engine: Engine, result: &QueryResult) -> result::Table {
 /// A statement's rows as the agent reads them.
 fn shaped(engine: Engine, result: &QueryResult) -> Shaped {
     let table = table_of(engine, result);
-    let rows = (table.rows.len(), table.total);
+    let total = table.total;
+    // The rows the byte budget dropped were not sent, so they are not counted.
+    let (text, shown) = result::text_shown(&[table], result.rest.len(), None);
     Shaped {
-        text: result::text(&[table], result.rest.len(), None),
-        rows,
+        text,
+        rows: (shown, total),
     }
 }
 
@@ -845,7 +858,7 @@ impl Workspace {
                 }
                 match listed {
                     Some(Listing { text, rows }) => {
-                        ended.rows = Some((rows, Total::Exact(rows)));
+                        ended.rows = Some(rows);
                         (Status::Executed, text)
                     }
                     None => (Status::Failed, not_found.to_string()),
@@ -1194,7 +1207,7 @@ fn list(
     let Some(schema) = schema else {
         let rows = catalog.schemas.len();
         let text = schemas_text(&catalog, note);
-        return Ok(Some(Listing { text, rows }));
+        return Ok(Some(Listing::all(text, rows)));
     };
     let Some(rows) = catalog
         .schemas
@@ -1210,7 +1223,7 @@ fn list(
     if let Ok(sizes) = connection.sizes() {
         catalog.set_sizes(&sizes);
     }
-    Ok(tables_text(&catalog, schema, note).map(|text| Listing { text, rows }))
+    Ok(tables_text(&catalog, schema, note).map(|text| Listing::all(text, rows)))
 }
 
 /// The blocking half of `describe_table`: see [`describe`].
@@ -1256,10 +1269,7 @@ fn describe(
     }
     let structure = load(schema, table)?;
     let rows = structure.columns.len();
-    Ok(Some(Listing {
-        text: structure_text(&structure, note),
-        rows,
-    }))
+    Ok(Some(Listing::all(structure_text(&structure, note), rows)))
 }
 
 /// A name the catalog holds, as `search_schema` ranks it.
@@ -1332,9 +1342,12 @@ fn search(
         .collect();
     let mut table = table_of_names(&["schema", "name", "kind"], rows);
     table.total = Total::Exact(matched);
+    // Counted as written: past [`AGENT_ROWS`], or past the byte budget, a
+    // match was found and not sent.
+    let (text, shown) = result::text_shown(&[table], 0, note);
     Ok(Some(Listing {
-        text: result::text(&[table], 0, note),
-        rows: matched,
+        text,
+        rows: (shown, Total::Exact(matched)),
     }))
 }
 
@@ -1358,10 +1371,10 @@ fn relationships(
     // A plugin answers for itself whatever the target says, so the engine's
     // own target is enough to ask with.
     if !connection.draws_diagrams(crate::db::Target::built_in(engine)) {
-        return Ok(Some(Listing {
-            text: format!("DBDelve reads no foreign keys from {}.", engine.label()),
-            rows: 0,
-        }));
+        return Ok(Some(Listing::all(
+            format!("DBDelve reads no foreign keys from {}.", engine.label()),
+            0,
+        )));
     }
     let graph = connection.schema_graph(schema)?;
     let names = |table: u32, columns: &[u32]| -> Option<String> {
@@ -1417,10 +1430,7 @@ fn relationships(
         rows,
     );
     table.label = "foreign_keys";
-    Ok(Some(Listing {
-        text: result::text(&[table], 0, None),
-        rows: count,
-    }))
+    Ok(Some(Listing::all(result::text(&[table], 0, None), count)))
 }
 
 /// The reply for `list_routines`, or with `routine` for `describe_routine`.
@@ -1448,19 +1458,16 @@ fn routines(
     };
     let Some(name) = routine else {
         let rows = held.len();
-        return Ok(Some(Listing {
-            text: result::text(&[signatures(&held)], 0, None),
+        return Ok(Some(Listing::all(
+            result::text(&[signatures(&held)], 0, None),
             rows,
-        }));
+        )));
     };
     let named: Vec<_> = held.into_iter().filter(|held| held.name == name).collect();
     if named.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Listing {
-        text: definitions_text(&named),
-        rows: named.len(),
-    }))
+    Ok(Some(Listing::all(definitions_text(&named), named.len())))
 }
 
 fn signatures(routines: &[&Routine]) -> result::Table {
@@ -2550,7 +2557,7 @@ mod tests {
         let listing = search(&connection, "ordr", None)
             .expect("the catalog is read")
             .expect("a search always answers");
-        assert_eq!(listing.rows, 3, "{}", listing.text);
+        assert_eq!(listing.rows, (3, Total::Exact(3)), "{}", listing.text);
         let text = &listing.text;
         assert!(text.starts_with("truncated: none (3 rows)"), "{text}");
         assert!(text.contains(r#"["main","orders","table"]"#), "{text}");
@@ -2566,7 +2573,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(qualified.text.contains(r#"["main","customers","table"]"#));
-        assert_eq!(search(&connection, "zzz", None).unwrap().unwrap().rows, 0);
+        assert_eq!(
+            search(&connection, "zzz", None).unwrap().unwrap().rows,
+            (0, Total::Exact(0))
+        );
+        drop(connection);
+        std::fs::remove_dir_all(&dir).expect("the directory goes");
+    }
+
+    #[test]
+    fn a_search_counts_only_the_matches_it_sent() {
+        let tables: String = (0..AGENT_ROWS + 5)
+            .map(|at| format!("CREATE TABLE orders_{at} (id INTEGER);"))
+            .collect();
+        let (connection, dir) = agent_sqlite("search-capped", &tables);
+        let listing = search(&connection, "orders", None)
+            .expect("the catalog is read")
+            .expect("a search always answers");
+        assert_eq!(
+            listing.rows,
+            (AGENT_ROWS, Total::Exact(AGENT_ROWS + 5)),
+            "{}",
+            listing.text
+        );
         drop(connection);
         std::fs::remove_dir_all(&dir).expect("the directory goes");
     }
@@ -2577,7 +2606,7 @@ mod tests {
         let listing = relationships(&connection, "main", Engine::Sqlite)
             .expect("the graph is read")
             .expect("the schema is there");
-        assert_eq!(listing.rows, 1, "{}", listing.text);
+        assert_eq!(listing.rows, (1, Total::Exact(1)), "{}", listing.text);
         // SQLite names a key by its position in the table's key list.
         assert_eq!(
             listing.text,
@@ -2603,7 +2632,7 @@ mod tests {
         let listing = routines(&connection, "main", None)
             .expect("the routines are read")
             .expect("the schema is there");
-        assert_eq!(listing.rows, 0);
+        assert_eq!(listing.rows, (0, Total::Exact(0)));
         assert!(routines(&connection, "main", Some("f")).unwrap().is_none());
         assert!(routines(&connection, "nope", None).unwrap().is_none());
         drop(connection);
