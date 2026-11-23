@@ -1783,15 +1783,10 @@ pub(crate) fn runs_script(text: &str) -> bool {
 
 /// [`runs_script`] of a text already [`parse`]d.
 pub(crate) fn runs_script_parsed(parsed: &Result<Vec<Statement>, ParseError>) -> bool {
-    let holds = |args: &[Arg]| args.iter().any(|arg| holds_javascript(&arg.value));
     parsed.as_ref().is_ok_and(|statements| {
-        statements.iter().any(|statement| match &statement.target {
-            Target::Show(_) => false,
-            Target::Database { call, .. } => holds(&call.args),
-            Target::Collection { call, cursor, .. } => {
-                holds(&call.args) || cursor.iter().any(|chained| holds(&chained.args))
-            }
-        })
+        statements
+            .iter()
+            .any(|statement| scanned(&statement.target).iter().any(holds_javascript))
     })
 }
 
@@ -1967,31 +1962,75 @@ pub(crate) fn typed_explain(text: &str) -> Option<ExplainMode> {
 /// included, not only where a method takes a pipeline: one where the executor
 /// is expected to ignore it would be trusting the executor.
 fn statement_verdict(target: &Target) -> Option<Verdict> {
-    let (verdict, args): (Verdict, Vec<&Arg>) = match target {
-        Target::Show(Show::Databases | Show::Collections) => (Verdict::READ, Vec::new()),
+    let values = scanned(target);
+    let verdict = match target {
+        Target::Show(Show::Databases | Show::Collections) => Verdict::READ,
+        Target::Database { call, .. } => match call.method {
+            DbMethod::RunCommand | DbMethod::AdminCommand => command_verdict(values.first()?)?,
+            DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
+            DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
+            DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
+        },
+        Target::Collection { call, .. } => collection_verdict(call),
+    };
+    // A `$out` or `$merge` counts wherever it is, a comment included; a
+    // JavaScript operator counts everywhere but in a comment, which the server
+    // never evaluates.
+    let args: Vec<&Value> = match target {
+        Target::Show(_) => Vec::new(),
+        Target::Database { call, .. } => call.args.iter().map(|arg| &arg.value).collect(),
+        Target::Collection { call, cursor, .. } => call
+            .args
+            .iter()
+            .chain(cursor.iter().flat_map(|chained| &chained.args))
+            .map(|arg| &arg.value)
+            .collect(),
+    };
+    let stages = args.into_iter().fold(verdict, |verdict, value| {
+        verdict.max(out_verdict(value, false))
+    });
+    Some(values.iter().fold(stages, |verdict, value| {
+        verdict.max(out_verdict(value, true))
+    }))
+}
+
+/// Every argument of `target`'s call and of its chained calls, as the
+/// JavaScript checks read them, less what MongoDB defines as a comment: the
+/// top-level `comment` of a command document and the argument of a chained
+/// `.comment(…)`. A comment is metadata the server logs and never evaluates,
+/// so a `$where` in one is no script; the command's filter is still read.
+fn scanned(target: &Target) -> Vec<Value> {
+    match target {
+        Target::Show(_) => Vec::new(),
         Target::Database { call, .. } => {
-            let verdict = match call.method {
-                DbMethod::RunCommand | DbMethod::AdminCommand => {
-                    command_verdict(&call.args.first()?.value)?
-                }
-                DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
-                DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
-                DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
-            };
-            (verdict, call.args.iter().collect())
-        }
-        Target::Collection { call, cursor, .. } => (
-            collection_verdict(call),
+            let command = matches!(call.method, DbMethod::RunCommand | DbMethod::AdminCommand);
             call.args
                 .iter()
-                .chain(cursor.iter().flat_map(|chained| &chained.args))
-                .collect(),
-        ),
-    };
-    Some(
-        args.into_iter()
-            .fold(verdict, |verdict, arg| verdict.max(out_verdict(&arg.value))),
-    )
+                .enumerate()
+                .map(|(at, arg)| match (&arg.value, command && at == 0) {
+                    (Value::Document(fields), true) => Value::Document(
+                        fields
+                            .iter()
+                            .filter(|(key, _)| key != "comment")
+                            .cloned()
+                            .collect(),
+                    ),
+                    (value, _) => value.clone(),
+                })
+                .collect()
+        }
+        Target::Collection { call, cursor, .. } => call
+            .args
+            .iter()
+            .chain(
+                cursor
+                    .iter()
+                    .filter(|chained| chained.method != CursorMethod::Comment)
+                    .flat_map(|chained| &chained.args),
+            )
+            .map(|arg| arg.value.clone())
+            .collect(),
+    }
 }
 
 fn collection_verdict(call: &Call<Method>) -> Verdict {
@@ -2090,7 +2129,7 @@ fn command_verdict(command: &Value) -> Option<Verdict> {
             Some(_) => Verdict::destroys(Destructive::Drop),
         },
         "insert" | "update" | "findAndModify" | "createIndexes" | "create" => Verdict::WRITE,
-        "aggregate" => out_verdict(command),
+        "aggregate" => out_verdict(command, true),
         _ => return command_reads(command).then_some(Verdict::READ),
     };
     Some(verdict)
@@ -2155,10 +2194,11 @@ const JS_OPERATORS: &[&str] = &["$where", "$function", "$accumulator"];
 /// query operator, so a filter cannot use it to hide a `$where`.
 const LITERAL: &str = "$literal";
 
-/// What a `$out`, `$merge` or JavaScript operator anywhere in `value` does.
+/// What a `$out`, `$merge` or, with `javascript`, a JavaScript operator
+/// anywhere in `value` does.
 /// `$out` replaces its target collection whole, as `CREATE OR REPLACE TABLE …
 /// AS SELECT` does, so it is a drop; `$merge` writes into what is there.
-fn out_verdict(value: &Value) -> Verdict {
+fn out_verdict(value: &Value, javascript: bool) -> Verdict {
     match value {
         Value::Document(fields) => fields.iter().fold(Verdict::READ, |verdict, (key, value)| {
             let stage = match key.as_str() {
@@ -2167,13 +2207,13 @@ fn out_verdict(value: &Value) -> Verdict {
                 "$merge" => Verdict::WRITE,
                 // Not `browse::runs_code`, which also flags a string where
                 // `$or` wants documents -- the filter bar's rule, not this one.
-                operator if JS_OPERATORS.contains(&operator) => Verdict::FULL,
+                operator if javascript && JS_OPERATORS.contains(&operator) => Verdict::FULL,
                 _ => Verdict::READ,
             };
-            verdict.max(stage).max(out_verdict(value))
+            verdict.max(stage).max(out_verdict(value, javascript))
         }),
         Value::Array(values) => values.iter().fold(Verdict::READ, |verdict, value| {
-            verdict.max(out_verdict(value))
+            verdict.max(out_verdict(value, javascript))
         }),
         _ => Verdict::READ,
     }
@@ -5630,6 +5670,21 @@ mod tests {
         ] {
             assert!(!runs_script(text), "{text}");
         }
+    }
+
+    #[test]
+    fn a_comment_is_metadata_and_holds_no_script() {
+        for text in [
+            r#"db.runCommand({find: "c", filter: {a: 1}, comment: {$where: "1"}})"#,
+            r#"db.c.find({a: 1}).comment({$where: "1"})"#,
+        ] {
+            assert!(!runs_script(text), "{text}");
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+        // The command's own filter is still read.
+        let filtered = r#"db.runCommand({find: "c", filter: {$where: "1"}, comment: "why"})"#;
+        assert!(runs_script(filtered));
+        assert_eq!(classify(filtered), Verdict::FULL);
     }
 
     #[test]
