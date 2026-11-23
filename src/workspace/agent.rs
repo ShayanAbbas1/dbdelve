@@ -11,7 +11,7 @@
 //! foreground, reached only through [`Workspace::on_agent_message`].
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::mpsc::SyncSender,
     time::{Duration, Instant},
 };
@@ -1466,9 +1466,7 @@ impl Workspace {
             } => {
                 self.adopt_saved_visibility(cx);
                 let visible: Vec<Listed> = self
-                    .profiles
-                    .iter()
-                    .filter(|profile| self.agent_may_reach(profile))
+                    .agent_reachable_profiles()
                     .map(|profile| Listed {
                         name: &profile.name,
                         engine: profile.config.engine().as_str(),
@@ -1885,12 +1883,10 @@ impl Workspace {
     /// agent was told is the only spelling that works. A profile this build
     /// cannot open is never in `self.profiles`, so it is never a candidate,
     /// and neither is one whose id another profile shares (see
-    /// [`Self::agent_may_reach`]).
+    /// [`Self::agent_reachable_profiles`]).
     pub(crate) fn agent_profile(&self, name: &str) -> Result<&Profile, AgentLookup> {
         let mut matches = self
-            .profiles
-            .iter()
-            .filter(|profile| self.agent_may_reach(profile))
+            .agent_reachable_profiles()
             .filter(|profile| profile.name == name);
         match (matches.next(), matches.next()) {
             (Some(profile), None) => Ok(profile),
@@ -1899,12 +1895,19 @@ impl Workspace {
         }
     }
 
-    /// Whether an agent may reach `profile`: it is visible, and no other
-    /// profile has its id. Calls, lanes and the approval are all found by id,
-    /// and an id repeated in a hand-edited file would let a lookup land on the
-    /// other entry, hidden or pointed somewhere else, so neither is offered.
-    pub(crate) fn agent_may_reach(&self, profile: &Profile) -> bool {
-        profile.agent_visible && self.sole_profile(&profile.id).is_some()
+    /// The profiles an agent may reach: visible, and no other profile has
+    /// their id. Calls, lanes and the approval are all found by id, and an id
+    /// repeated in a hand-edited file would let a lookup land on the other
+    /// entry, hidden or pointed somewhere else, so neither is offered. The ids
+    /// are counted once per call, not once per profile.
+    pub(crate) fn agent_reachable_profiles(&self) -> impl Iterator<Item = &Profile> {
+        let mut ids: HashMap<&str, usize> = HashMap::new();
+        for profile in &self.profiles {
+            *ids.entry(profile.id.as_str()).or_default() += 1;
+        }
+        self.profiles
+            .iter()
+            .filter(move |profile| profile.agent_visible && ids[profile.id.as_str()] == 1)
     }
 
     /// The profile with this id, when exactly one has it.
