@@ -3878,14 +3878,31 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
             .unwrap();
         let path = path.to_string_lossy().into_owned();
         let user = crate::db::Connection::Sqlite(Connection::open(&path, 0).unwrap());
-        let refusal = crate::db::assert_agent_open_reads_and_refuses_a_write(
-            crate::db::ConnectionConfig::Sqlite {
-                path,
-                statement_timeout: 0,
-            },
-            &user,
-        );
+        let config = crate::db::ConnectionConfig::Sqlite {
+            path,
+            statement_timeout: 0,
+        };
+        let refusal = crate::db::assert_agent_open_reads_and_refuses_a_write(config.clone(), &user);
         assert!(refusal.contains("readonly"), "{refusal}");
+
+        // An agent connection left open sees a row the user commits after it
+        // opened.
+        let run = |connection: &crate::db::Connection, sql: &str| {
+            connection
+                .query(sql, &crate::db::CancelToken::default(), Fetch::default())
+                .expect("the statement runs")
+        };
+        let count = |connection: &crate::db::Connection| {
+            run(connection, "SELECT count(*) FROM t").rows[0]
+                .get(0)
+                .expect("a cell")
+                .to_string()
+        };
+        let agent = crate::db::Connection::open_for_agent(config).expect("the agent opens");
+        assert_eq!(count(&agent), "1");
+        run(&user, "INSERT INTO t VALUES (2)");
+        assert_eq!(count(&agent), "2");
+        drop(agent);
         drop(user);
         std::fs::remove_dir_all(&dir).unwrap();
     }
