@@ -3672,6 +3672,23 @@ impl Parsed {
         }
     }
 
+    /// The more restrictive of two readings of one text: the higher verdict,
+    /// the larger count, and every flag either sets.
+    fn merged(self, other: Self) -> Self {
+        Self {
+            verdict: self.verdict.max(other.verdict),
+            statements: self.statements.max(other.statements),
+            removes: self.removes || other.removes,
+            alters: self.alters || other.alters,
+            session: self.session || other.session,
+            scripts: self.scripts || other.scripts,
+            discloses: self.discloses || other.discloses,
+            unsent: self.unsent || other.unsent,
+            unlisted_call: self.unlisted_call || other.unlisted_call,
+            expiry: self.expiry.or(other.expiry),
+        }
+    }
+
     fn read(reading: Reading, statements: &[Statement], unlisted_call: bool) -> Self {
         Self {
             verdict: reading.verdict,
@@ -3789,7 +3806,112 @@ impl From<Verdict> for Reading {
 }
 
 /// [`classify`]'s reading of `sql`, with everything the parse knew.
+///
+/// A comment MySQL or MariaDB runs only from a server version on
+/// (`/*!50000 … */`, `/*M!100100 … */`) runs or not by a version DBDelve does
+/// not know here, so the submission is read once for every version range the
+/// comments split it into ([`versioned_comments`]): each comment run from its
+/// floor on, ignored below it. The submission needs what the most demanding
+/// reading needs, so `/*!99999 EXPLAIN */ DELETE FROM t`, a read to a server
+/// that runs the comment and a delete to one that does not, is the delete.
 fn parsed(engine: Engine, sql: &str) -> Parsed {
+    let Some(dialect) = dialect(engine) else {
+        return parsed_as_run(engine, sql);
+    };
+    if engine.spec().sql.parser_dialect != ParserDialect::MySql {
+        return parsed_as_run(engine, sql);
+    }
+    let comments = versioned_comments(dialect.as_ref(), sql);
+    if comments.is_empty() {
+        return parsed_as_run(engine, sql);
+    }
+    let mut floors: Vec<u64> = comments.iter().map(|comment| comment.floor).collect();
+    floors.sort_unstable();
+    floors.dedup();
+    let whole = parsed_as_run(engine, sql);
+    if floors.len() > MAX_VERSION_FLOORS {
+        return whole.merged(Parsed::counted(unreadable_verdict(engine), 0));
+    }
+    let mut merged = whole;
+    for floor in floors {
+        // A server just below `floor`: every comment from it on is a comment.
+        let mut below = sql.to_string();
+        for comment in comments.iter().filter(|comment| comment.floor >= floor) {
+            below.replace_range(comment.bang..comment.bang + 1, " ");
+        }
+        merged = merged.merged(parsed_as_run(engine, &below));
+    }
+    merged
+}
+
+/// How many distinct version floors [`parsed`] reads a submission under
+/// before it stops and calls it unreadable: one parse each, so a text built to
+/// carry thousands would cost thousands of parses.
+const MAX_VERSION_FLOORS: usize = 16;
+
+/// An executable comment the server runs only from a version on.
+struct VersionedComment {
+    /// The byte offset of its `!`, which a space in its place turns into a
+    /// comment every server ignores.
+    bang: usize,
+    /// The version it names, the digits as written.
+    floor: u64,
+}
+
+/// Every `/*!NNNNN … */` and `/*M!NNNNN … */` in `sql`, as `dialect`'s lexer
+/// finds them, so a marker inside a literal or a plain comment is not one.
+///
+/// sqlparser's MySQL tokenizer replaces a `/*! … */` with the tokens of its
+/// body, placed from where the comment opens, so a token that starts at a
+/// `/*!` in the text is the first of such a comment's body; one whose body is
+/// empty leaves none, and runs nothing either way. MariaDB's `/*M! … */` stays
+/// a comment token. Any digits after `/*!` are a floor; after `/*M!`, only five
+/// or more are ([`executable_body`]).
+fn versioned_comments(dialect: &dyn Dialect, sql: &str) -> Vec<VersionedComment> {
+    let digits_at = |at: usize| {
+        // Every byte counted is one ASCII digit, so the slice is on boundaries.
+        let digits = sql.get(at..).map_or("", |rest| {
+            &rest[..rest.bytes().take_while(u8::is_ascii_digit).count()]
+        });
+        (digits.len(), digits.parse::<u64>().unwrap_or(u64::MAX))
+    };
+    let mut comments: Vec<VersionedComment> = Vec::new();
+    for (token, range) in located_prefix(dialect, sql).0 {
+        let opening = &sql.as_bytes()[range.start..];
+        let comment = match token {
+            Token::Whitespace(Whitespace::MultiLineComment(text))
+                if text
+                    .get(..2)
+                    .is_some_and(|marker| marker.eq_ignore_ascii_case("M!")) =>
+            {
+                let (digits, floor) = digits_at(range.start + 4);
+                (digits >= 5).then_some(VersionedComment {
+                    bang: range.start + 3,
+                    floor,
+                })
+            }
+            Token::Whitespace(Whitespace::MultiLineComment(_)) => None,
+            _ if opening.starts_with(b"/*!") => {
+                let (digits, floor) = digits_at(range.start + 3);
+                (digits > 0).then_some(VersionedComment {
+                    bang: range.start + 2,
+                    floor,
+                })
+            }
+            _ => None,
+        };
+        if let Some(comment) = comment
+            && comments.last().is_none_or(|last| last.bang != comment.bang)
+        {
+            comments.push(comment);
+        }
+    }
+    comments
+}
+
+/// [`parsed`] for one reading of which executable comments run: every
+/// `/*! … */` and `/*M! … */` still in `sql` is run.
+fn parsed_as_run(engine: Engine, sql: &str) -> Parsed {
     if engine.syntax() == Syntax::Redis {
         return Parsed {
             session: crate::redis_cmd::leaves(sql) != Leaves::default(),
@@ -11635,6 +11757,59 @@ mod tests {
         ] {
             assert_eq!(classify(Engine::Generic, sql), Verdict::READ, "{sql:?}");
         }
+    }
+
+    /// A versioned comment runs on a server at or past its version and is a
+    /// comment below it, and which server is behind the profile is not known
+    /// here: a submission asks what either reading needs, so a write hidden by
+    /// a version is never a read.
+    #[test]
+    fn a_versioned_comment_is_read_both_run_and_ignored() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                // Run, an `EXPLAIN`; ignored, a delete.
+                "/*!99999 EXPLAIN */ DELETE FROM t",
+                "/*M!999999 EXPLAIN */ DELETE FROM t",
+                // Run, a filtered delete; ignored, every row.
+                "DELETE FROM t /*!99999 WHERE 1 = 0 */",
+                "DELETE FROM t /*M!999999 WHERE 1 = 0 */",
+                // Two floors: between them only the first runs.
+                "/*!50000 EXPLAIN */ /*!99999 SELECT 1; */ DELETE FROM t",
+            ] {
+                let verdict = classify(engine, sql);
+                assert!(
+                    verdict.destructive.contains(&Destructive::UnfilteredDelete),
+                    "{engine:?} {sql:?}: {verdict:?}"
+                );
+            }
+            // Where the readings agree, the comment changes nothing.
+            assert_eq!(
+                classify(engine, "SELECT 1 /*!40101 , 2 */ FROM t"),
+                Verdict::READ,
+                "{engine:?}"
+            );
+            assert_eq!(
+                classify(
+                    engine,
+                    "UPDATE t SET a = 1 /*!50000 , b = 2 */ WHERE id = 1"
+                ),
+                Verdict::WRITE,
+                "{engine:?}"
+            );
+            // A marker in a literal or a plain comment is not a comment.
+            for sql in ["SELECT '/*!99999' FROM t", "SELECT 1 /* !99999 x */"] {
+                assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql:?}");
+            }
+        }
+        // The agent never takes the run reading's word for it.
+        assert!(matches!(
+            agent_gate(
+                Engine::MySql,
+                "/*!99999 EXPLAIN */ DELETE FROM t",
+                Mode::Full
+            ),
+            AgentVerdict::Refuse(_)
+        ));
     }
 
     #[test]
