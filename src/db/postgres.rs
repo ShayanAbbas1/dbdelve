@@ -3881,6 +3881,14 @@ mod tests {
             password_expires: Some("2030-01-01".into()),
             member_of: vec!["dbdelve_probe_team".into()],
         });
+        // Each through the gate the tab passes it through, as it would run.
+        let gated = |sql: &str| {
+            assert!(
+                crate::sql::is_generated_role_change(Engine::Postgres, sql),
+                "the gate refuses {sql}"
+            );
+        };
+        gated(&created);
         plain
             .query(&created, Fetch::default())
             .expect("the role should be created");
@@ -3903,6 +3911,7 @@ mod tests {
             reset_password("dbdelve_probe_new", "second"),
             set_login("dbdelve_probe_new", false),
         ] {
+            gated(&statement);
             plain
                 .query(&statement, Fetch::default())
                 .expect("the change should run");
