@@ -13695,6 +13695,64 @@ fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut 
     });
 }
 
+/// A listed file opens in a file tab whatever its name, Save As having
+/// taken the one typed, and one gone since asks to leave the list.
+#[gpui::test]
+fn a_listed_file_opens_as_sql_whatever_its_extension(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.executor().allow_parking();
+        let listed = |name: &str, cx: &mut VisualTestContext| {
+            let path = user_sql_file(name, "SELECT 1;");
+            open_sql_file(&workspace, cx, &path);
+            let (id, _) = front_scratch(&workspace, cx);
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.close_now(Tab::Query(id), window, cx)
+                })
+            });
+            settle(cx);
+            path
+        };
+        let open_row = |path: &std::path::Path, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_listed_file(path.to_path_buf(), window, cx)
+                })
+            });
+        };
+        let notes = listed("notes.sql", cx);
+        let csv = notes.with_file_name("notes.csv");
+        std::fs::rename(&notes, &csv).unwrap();
+        workspace.update(cx, |workspace, cx| {
+            let profile_id = workspace.profile().unwrap().id.clone();
+            workspace.remember_file(&profile_id, &csv, cx);
+        });
+        open_row(&csv, cx);
+        for _ in 0..500 {
+            settle(cx);
+            if front_file(&workspace, cx).as_deref() == Some(csv.as_path()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_file(&workspace, cx), Some(csv));
+
+        let gone = listed("gone.sql", cx);
+        std::fs::remove_file(&gone).unwrap();
+        open_row(&gone, cx);
+        for _ in 0..500 {
+            settle(cx);
+            if front_dialog(&workspace, cx).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_dialog(&workspace, cx), Some("forget-file"));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_palette_offers_the_saved_queries_move_with_no_connection_in_front(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

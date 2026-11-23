@@ -310,8 +310,10 @@ impl Workspace {
         }
     }
 
-    /// A row of the Files group, opened as any SQL file is, so one open
-    /// already comes forward. One gone since asks to leave the list.
+    /// A row of the Files group: its tab brought up when one is open, else
+    /// the file read on the blocking pool, as any SQL file is, into a file
+    /// tab whatever its extension, since Save As binds whatever name was
+    /// typed. One gone since asks to leave the list.
     pub(crate) fn open_listed_file(
         &mut self,
         path: PathBuf,
@@ -321,17 +323,39 @@ impl Workspace {
         if self.import_covers() {
             return;
         }
-        if self.tab_on_file(&path).is_none() && matches!(path.try_exists(), Ok(false)) {
-            let Some(profile) = self.profile_mut() else {
-                return;
-            };
-            profile.missing_files.insert(path.clone());
-            profile.recent_files_changed();
-            profile.session.pending_forget = Some(path);
-            cx.notify();
+        if self.bring_up_file(&path, window, cx) {
+            self.remember_held_file(&path, cx);
             return;
         }
-        self.open_files(vec![path], window, cx);
+        let front = self.profile().map(|profile| profile.id.clone());
+        let read = spawn_blocking(cx.background_executor(), {
+            let path = path.clone();
+            move || sql_file::read(&path)
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let read = read.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                let read = match read {
+                    Ok(Some(read)) => Ok(read),
+                    Err(message) => Err(message),
+                    Ok(None) => {
+                        if let Some(profile) = workspace
+                            .profile_mut()
+                            .filter(|profile| Some(&profile.id) == front.as_ref())
+                        {
+                            profile.missing_files.insert(path.clone());
+                            profile.recent_files_changed();
+                            profile.session.pending_forget = Some(path);
+                            cx.notify();
+                        }
+                        return;
+                    }
+                };
+                let refused = workspace.open_sql_tabs(front, vec![(path, read)], window, cx);
+                workspace.note_refused(refused, cx);
+            });
+        })
+        .detach();
     }
 
     /// Remove from List: `path` leaves the front connection's recent files.
