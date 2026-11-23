@@ -2667,9 +2667,10 @@ impl Workspace {
             binding.is_none() && sql::rolls_back_to_savepoint(engine, &sql);
         // Where the transaction state stood once this went, on the profile's
         // own session: a server's word that the statement ended the
-        // transaction is about the one open then, not one opened since.
-        let own_sent_at = binding
-            .is_none()
+        // transaction is about the one open then, not one opened since. A role
+        // change runs on a session of its own, and its failure says nothing
+        // of the transaction on this one.
+        let own_sent_at = (binding.is_none() && !role_change)
             .then(|| self.issued_to(&id, generation))
             .flatten()
             .map(|profile| profile.transaction_sends());
