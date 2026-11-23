@@ -3840,7 +3840,8 @@ fn parsed(engine: Engine, sql: &str) -> Parsed {
 }
 
 /// Every reading of `sql` but the one that runs all of `comments`: one per
-/// floor, each comment from it on ignored, merged. Past
+/// floor, each comment from it on ignored, and each of those again with the
+/// comments a server family never runs ignored too, merged. Past
 /// [`MAX_VERSION_FLOORS`] it is unreadable instead.
 fn below_floors(engine: Engine, sql: &str, comments: &[VersionedComment]) -> Parsed {
     let mut floors: Vec<u64> = comments.iter().map(|comment| comment.floor).collect();
@@ -3850,13 +3851,26 @@ fn below_floors(engine: Engine, sql: &str, comments: &[VersionedComment]) -> Par
         return Parsed::counted(unreadable_verdict(engine), 0);
     }
     let mut merged = Parsed::counted(Verdict::READ, 0);
-    for floor in floors {
-        // A server just below `floor`: every comment from it on is a comment.
-        let mut below = sql.to_string();
-        for comment in comments.iter().filter(|comment| comment.floor >= floor) {
-            below.replace_range(comment.bang..comment.bang + 1, " ");
+    // What a server family never runs, whatever its version: MySQL no
+    // `/*M! */`, MariaDB no `/*!N */` with N from 50700 to 99999. Each is
+    // read skipped under every floor too, since it can leave a higher comment
+    // running past a lower one it skips, which no floor alone reproduces.
+    let never_run: [fn(&VersionedComment) -> bool; 3] = [
+        |_| false,
+        |comment| comment.mariadb,
+        |comment| !comment.mariadb && (50_700..=99_999).contains(&comment.floor),
+    ];
+    for skipped in never_run {
+        for floor in floors.iter().map(Some).chain([None]) {
+            // A server just below `floor`: every comment from it on is a comment.
+            let mut below = sql.to_string();
+            for comment in comments.iter().filter(|comment| {
+                skipped(comment) || floor.is_some_and(|floor| comment.floor >= *floor)
+            }) {
+                below.replace_range(comment.bang..comment.bang + 1, " ");
+            }
+            merged = merged.merged(parsed_as_run(engine, &below));
         }
-        merged = merged.merged(parsed_as_run(engine, &below));
     }
     merged
 }
@@ -3873,6 +3887,8 @@ struct VersionedComment {
     bang: usize,
     /// The version it names, the digits as written.
     floor: u64,
+    /// A `/*M! … */`, which only MariaDB runs.
+    mariadb: bool,
 }
 
 /// Every `/*!NNNNN … */` and `/*M!NNNNN … */` in `sql`, as `dialect`'s lexer
@@ -3905,6 +3921,7 @@ fn versioned_comments(dialect: &dyn Dialect, sql: &str) -> Vec<VersionedComment>
                 (digits >= 5).then_some(VersionedComment {
                     bang: range.start + 3,
                     floor,
+                    mariadb: true,
                 })
             }
             Token::Whitespace(Whitespace::MultiLineComment(_)) => None,
@@ -3913,6 +3930,7 @@ fn versioned_comments(dialect: &dyn Dialect, sql: &str) -> Vec<VersionedComment>
                 (digits > 0).then_some(VersionedComment {
                     bang: range.start + 2,
                     floor,
+                    mariadb: false,
                 })
             }
             _ => None,
@@ -11994,6 +12012,33 @@ mod tests {
             ),
             AgentVerdict::Refuse(_)
         ));
+    }
+
+    /// A version floor is not the only thing that decides which comments run.
+    /// MariaDB never runs a `/*!N */` with N from 50700 to 99999, whatever its
+    /// version, while it runs a `/*M!N */` from N on; MySQL never runs a
+    /// `/*M! */`. Either can run a higher comment and skip a lower one, which
+    /// no single floor reproduces, so a write hidden that way is still read.
+    #[test]
+    fn a_comment_one_server_family_never_runs_is_read_as_skipped() {
+        for (engine, sql) in [
+            // MariaDB 10.1+: the `/*!50700` is skipped, the `/*M!100100` runs.
+            (
+                Engine::MariaDb,
+                "/*!50700 EXPLAIN */ /*M!100100 DELETE FROM t WHERE id = 1; */ SELECT 1",
+            ),
+            // MySQL 8: the `/*M!50000` is skipped, the `/*!80000` runs.
+            (
+                Engine::MySql,
+                "/*M!50000 EXPLAIN */ /*!80000 DELETE FROM t WHERE id = 1; */ SELECT 1",
+            ),
+        ] {
+            let verdict = classify(engine, sql);
+            assert!(
+                verdict.mode >= Mode::ReadWrite,
+                "{engine:?} {sql:?}: {verdict:?}"
+            );
+        }
     }
 
     #[test]
