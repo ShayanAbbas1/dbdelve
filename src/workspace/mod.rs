@@ -2040,6 +2040,8 @@ impl Render for Workspace {
                     [
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
+                        // Closing the window asks from every surface.
+                        ("quit", self.render_quit(cx)),
                     ],
                     window,
                     cx,
@@ -2088,6 +2090,8 @@ impl Render for Workspace {
                     [
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
+                        // Closing the window asks from every surface.
+                        ("quit", self.render_quit(cx)),
                     ],
                     window,
                     cx,

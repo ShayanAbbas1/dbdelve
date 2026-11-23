@@ -27339,6 +27339,30 @@ fn quit_asks_first_while_a_transaction_is_open(cx: &mut TestAppContext) {
     });
 }
 
+/// The connection form is drawn in the surface's place, and closing the window
+/// over it still asks first; Escape backs out of the question, not the form.
+#[gpui::test]
+fn quit_asks_first_over_the_connection_form(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_command(&workspace, cx, Command::NewConnection);
+        settle(cx);
+        let asked = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(!asked, "the first close asks");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.form.is_some()));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        let asked = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(!asked, "a close after Cancel asks again");
+        quit(workspace, cx);
+    });
+}
+
 /// A save that reconnects would drop the session holding the transaction:
 /// it is refused, and the form stays open.
 #[gpui::test]

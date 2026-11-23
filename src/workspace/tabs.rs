@@ -1039,6 +1039,11 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // Drawn over the form too, and backed out of before the form is.
+        if self.form.is_some() && self.render_quit(cx).is_some() {
+            self.cancel_quit(cx);
+            return;
+        }
         // Backs out of naming a new project to the list, as its × does,
         // rather than out of everything typed into the form.
         if let Some(form) = &mut self.form
