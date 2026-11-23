@@ -14418,18 +14418,25 @@ fn an_approval_for_a_profile_hidden_in_another_window_is_not_run(cx: &mut TestAp
 fn an_approved_write_touches_no_tab_grid_buffer_or_history(cx: &mut TestAppContext) {
     use crate::{agent::Status, session::ProfileState};
 
-    // A `PG*` connection from the environment, as CI's live-test job sets,
-    // would be in front instead of `Secret`.
-    if ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
-        .iter()
-        .any(|name| std::env::var_os(name).is_some())
-    {
-        return;
-    }
     store::tests::with_home(|| {
-        // `Secret`, the first profile, is connected at launch: the user's own
-        // session on the file the agent writes.
+        // `Secret` is the user's own session on the file the agent writes. It
+        // is picked by id and brought in front: a `PG*` connection from the
+        // environment, as CI's live-test job sets, would be in front instead.
         let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
+        let secret = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "secret")
+                .expect("Secret is in the list")
+        });
+        workspace.update(cx, |workspace, cx| workspace.activate(secret, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("a profile is in front");
+            assert_eq!(profile.id, "secret");
+            assert!(profile.connection().is_some(), "Secret is connected");
+        });
         // The tab in front is backed by the user's own `.sql` file and holds
         // an unsaved edit: the write must neither save, reload nor clear it.
         let path = user_sql_file("mine.sql", "SELECT 1;");
