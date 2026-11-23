@@ -1472,8 +1472,9 @@ fn open_file(path: &std::path::Path, read_only: bool) -> Result<rusqlite::Connec
 /// Whether the file at `path` is in WAL journal mode, read from its header:
 /// after the `SQLite format 3\0` magic, bytes 18 and 19 are the file format
 /// write and read versions, 2 and 2 for WAL and 1 and 1 for a rollback journal.
-/// `None` for a file that is missing, shorter than the fields, or not a SQLite
-/// database, so a caller can tell "rollback" from "cannot say".
+/// `None` for a file that is missing, shorter than the fields, not a SQLite
+/// database, or carrying any other pair (a version this reader does not know),
+/// so a caller can tell "rollback" from "cannot say".
 pub(super) fn journal_is_wal(path: &str) -> Option<bool> {
     use std::io::Read;
 
@@ -1486,7 +1487,11 @@ pub(super) fn journal_is_wal(path: &str) -> Option<bool> {
     if header.len() < 20 || !header.starts_with(b"SQLite format 3\0") {
         return None;
     }
-    Some(header[18] == 2 && header[19] == 2)
+    match (header[18], header[19]) {
+        (1, 1) => Some(false),
+        (2, 2) => Some(true),
+        _ => None,
+    }
 }
 
 /// One submission run on a session already held: the statements, stepped as
@@ -3873,6 +3878,13 @@ CREATE TRIGGER accounts_touch AFTER INSERT ON Accounts BEGIN SELECT 1; END;"
         rusqlite::Connection::open(&path)
             .unwrap()
             .execute_batch(
+        // A header with a version pair this reader does not know says nothing.
+        for pair in [[1u8, 2], [2, 1], [3, 3], [0, 0]] {
+            let mut header = std::fs::read(&wal).unwrap();
+            header[18..20].copy_from_slice(&pair);
+            std::fs::write(&text, &header).unwrap();
+            assert_eq!(read(&text), None, "{pair:?}");
+        }
                 "PRAGMA journal_mode = WAL; CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
             )
             .unwrap();
