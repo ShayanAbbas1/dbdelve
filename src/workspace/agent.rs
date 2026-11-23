@@ -1256,20 +1256,25 @@ impl Workspace {
             if self.agent.visibility_choices.contains(&profile.id) {
                 continue;
             }
-            // The first of a repeated id, as everywhere else. A profile the
-            // file no longer holds was removed in another window: it stays in
-            // this one's list, but nothing granted it any more. A grant is for
-            // the target it was given on, so one saved for a target this
-            // window's copy does not reach is not taken on either.
-            let visible = saved
+            // Only an id the file holds once: a repeated one cannot say which
+            // entry granted what, so neither is taken on. A profile the file
+            // no longer holds was removed in another window: it stays in this
+            // one's list, but nothing granted it any more. A grant is for the
+            // target it was given on, so one saved for a target this window's
+            // copy does not reach is not taken on either.
+            let mut same = saved
                 .profiles
                 .iter()
-                .find(|stored| stored.id == profile.id)
-                .is_some_and(|stored| {
-                    stored.agent_visible
-                        && profiles::stored_target(stored, &self.plugins)
-                            .is_some_and(|target| !profile.config.retargets(&target))
-                });
+                .filter(|stored| stored.id == profile.id);
+            let sole = match (same.next(), same.next()) {
+                (Some(stored), None) => Some(stored),
+                _ => None,
+            };
+            let visible = sole.is_some_and(|stored| {
+                stored.agent_visible
+                    && profiles::stored_target(stored, &self.plugins)
+                        .is_some_and(|target| !profile.config.retargets(&target))
+            });
             if profile.agent_visible && !visible {
                 hidden.push(profile.id.clone());
             }

@@ -11280,6 +11280,27 @@ fn a_profile_removed_in_another_window_is_hidden_here_and_kept(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_grant_saved_under_a_repeated_id_is_not_taken_on(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("dev", "Dev", ""));
+        assert!(!agent_visible(&workspace, cx, "dev"));
+
+        // Another window's file holds the id twice, the first entry granted
+        // for this very target: which entry the grant was for cannot be said.
+        let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        let mut granted = list.profiles[0].clone();
+        granted.agent_visible = true;
+        let mut twin = granted.clone();
+        twin.name = "Twin".into();
+        list.profiles = vec![granted, twin];
+        store::save_profiles(&list).expect("the other window saves");
+        workspace.update(cx, |workspace, cx| workspace.adopt_saved_visibility(cx));
+        assert!(!agent_visible(&workspace, cx, "dev"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_grant_saved_for_another_target_is_not_taken_on(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) =
