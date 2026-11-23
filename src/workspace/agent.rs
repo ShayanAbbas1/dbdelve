@@ -188,8 +188,12 @@ pub(crate) struct CallFacts {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Decision {
     Approved,
+    /// The person's Deny.
     Rejected,
     Expired,
+    /// DBDelve took the question back before the person answered: its profile
+    /// was hidden from agents, or agent access was turned off.
+    Withdrawn,
 }
 
 /// One line of `agent-audit.jsonl`, the record of every call an agent made. It
@@ -845,9 +849,16 @@ impl Workspace {
         })
     }
 
-    /// The dialog's Deny, for a call named by id.
+    /// The dialog's Deny, for a call named by id: the one rejection that is
+    /// the person's own decision.
     pub(crate) fn deny_call(&mut self, id: CallId, cx: &mut Context<Self>) {
-        self.finish_call(id, Status::Rejected, DENIED.to_string(), cx);
+        self.end_call(
+            id,
+            Status::Rejected,
+            DENIED.to_string(),
+            Some(Decision::Rejected),
+            cx,
+        );
     }
 
     /// The call the dialog in front is about.
@@ -1727,6 +1738,27 @@ impl Workspace {
         text: String,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A hangup is no decision of anyone's: its caller left. A rejection
+        // that comes here is DBDelve's own; the person's Deny is
+        // [`Self::deny_call`].
+        let decision = match status {
+            Status::Rejected => Some(Decision::Withdrawn),
+            Status::Expired => Some(Decision::Expired),
+            _ => None,
+        };
+        self.end_call(id, status, text, decision, cx)
+    }
+
+    /// [`Self::finish_call`], with what is recorded as decided about a held
+    /// statement.
+    fn end_call(
+        &mut self,
+        id: CallId,
+        status: Status,
+        text: String,
+        decision: Option<Decision>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(index) = self.agent.calls.iter().position(|call| call.id == id) else {
             // A running write ends by its own result alone: a hangup is noted
             // for the audit and nothing else reaches it.
@@ -1753,12 +1785,6 @@ impl Workspace {
         // A held statement is audited with what it asked, so a denied, expired
         // or hung-up approval says which statement it was.
         let approval = call.approval;
-        // A hangup is no decision of the person's: its caller left.
-        let decision = match status {
-            Status::Rejected => Some(Decision::Rejected),
-            Status::Expired => Some(Decision::Expired),
-            _ => None,
-        };
         let engine = approval.config.engine();
         // Past the early return above, so a hangup that arrives after the call
         // ended adds nothing: one entry per call, written here.

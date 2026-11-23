@@ -14899,6 +14899,15 @@ fn a_closed_approval_hands_the_keyboard_back(cx: &mut TestAppContext) {
             })
         );
         assert!(editor_has_keyboard(&workspace, cx));
+        // The kill switch decided nothing for the person.
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace
+                .agent
+                .log
+                .front()
+                .and_then(|entry| entry.decision)),
+            Some(super::agent::Decision::Withdrawn)
+        );
 
         // Hidden from agents: the profile is the second, after `Secret`.
         let (_, answers) = inject_update(&workspace, cx, Some("Orders"));
