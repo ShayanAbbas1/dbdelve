@@ -30,6 +30,12 @@ mod welcome;
 
 use std::collections::{HashMap, HashSet};
 
+/// How often [`Workspace::reload_themes`] looks at the theme directory. Polled
+/// rather than watched: reading a few small files a second costs nothing measurable, and
+/// a watcher would add a dependency and per-platform event quirks (an atomic
+/// replace arrives as create, rename and remove) for no gain at this size.
+const THEME_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 use crate::export::ClipboardFormat;
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 
@@ -234,7 +240,15 @@ pub(crate) fn opacity_for(
     fallback: f32,
     theme: &Theme,
 ) -> f32 {
-    theme_opacity.get(theme.name).copied().unwrap_or_else(|| {
+    // Case-blind after the exact name, as `restored_theme` finds the theme:
+    // a file whose name changed only in case keeps the opacity saved for it.
+    let saved = theme_opacity.get(theme.name).or_else(|| {
+        theme_opacity
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(theme.name))
+            .map(|(_, opacity)| opacity)
+    });
+    saved.copied().unwrap_or_else(|| {
         if theme.is_glass && theme.appearance == theme::Appearance::Light {
             theme.default_opacity()
         } else {
@@ -457,6 +471,10 @@ pub(crate) struct Workspace {
     pub(crate) update: Option<update::Update>,
     /// The launch check and the ones after it; dropped, they stop.
     update_checks: Option<gpui::Task<()>>,
+    /// [`Self::reload_themes`]; dropped with the window, it stops.
+    theme_reloads: Option<gpui::Task<()>>,
+    /// The [`theme::user::revision`] this window last wore.
+    themes_revision: u64,
     /// Something `profiles.toml` holds changed and is waiting on
     /// [`Self::remember_profiles_soon`]'s timer, so quitting writes it.
     pub(crate) profiles_unsaved: bool,
@@ -629,6 +647,8 @@ impl Workspace {
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
+            theme_reloads: None,
+            themes_revision: 0,
             profiles_unsaved: false,
             profiles_save: None,
         };
@@ -821,6 +841,7 @@ impl Workspace {
         if workspace.settings.check_for_updates {
             workspace.update_checks = Some(Self::check_for_updates(cx));
         }
+        workspace.theme_reloads = Some(Self::reload_themes(window, cx));
 
         // A rebind capture takes the next keystroke whatever it is, and an
         // interceptor is the only place that can give it one: GPUI matches a
@@ -1210,6 +1231,35 @@ impl Workspace {
                 cx.background_executor().timer(update::RECHECK).await;
             }
         })
+    }
+
+    /// Every [`THEME_RECHECK`], so a theme file another app or the user writes
+    /// shows without a restart.
+    fn reload_themes(window: &mut Window, cx: &mut Context<Self>) -> gpui::Task<()> {
+        cx.spawn_in(window, async move |workspace, cx| {
+            loop {
+                cx.background_executor().timer(THEME_RECHECK).await;
+                spawn_blocking(cx.background_executor(), theme::user::reload).await;
+                if workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.wear_reloaded_themes(window, cx)
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Against the revision rather than the reload's own word, so a change
+    /// another reload -- an import's -- picked up first is still worn here.
+    pub(crate) fn wear_reloaded_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let revision = theme::user::revision();
+        if revision != self.themes_revision {
+            self.themes_revision = revision;
+            self.reinstall_user_theme(window, cx);
+        }
     }
 
     /// Update and restart: from [`update::State::Ready`], or again after a

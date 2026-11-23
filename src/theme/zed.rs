@@ -201,8 +201,7 @@ macro_rules! native_colors {
 /// `{ "name", "appearance", "glass", "colors": { <Theme field>: hex } }`,
 /// unglassed.
 fn native(value: &Value) -> Option<Theme> {
-    // ponytail: leaked, bounded by the files read at startup and on each import.
-    let name: &'static str = Box::leak(value.get("name")?.as_str()?.into());
+    let name = super::user::intern(value.get("name")?.as_str()?);
     let appearance = value.get("appearance").and_then(Value::as_str);
     let mut theme = Theme {
         name,
@@ -301,7 +300,7 @@ fn convert(entry: Entry) -> Theme {
         [solid("/created"), solid("/modified"), solid("/deleted")],
     );
     Theme {
-        name: Box::leak(entry.name.into_boxed_str()),
+        name: super::user::intern(&entry.name),
         is_glass: glass,
         bg: editor.unwrap_or(base.bg),
         panel: editor.unwrap_or(base.panel),

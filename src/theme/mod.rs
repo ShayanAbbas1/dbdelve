@@ -725,7 +725,7 @@ const PILL_ALPHA: f32 = 0.22;
 /// A new theme is one constructor returning this struct plus one entry in
 /// [`Theme::all`]. Nothing else in the app names a theme, so anything that fills
 /// every field in is already fully supported — including its contrast tests.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     pub name: &'static str,
     pub appearance: Appearance,

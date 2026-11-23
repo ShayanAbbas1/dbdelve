@@ -48,7 +48,7 @@ fn launch_with<'a>(
             .expect("bundled fonts must be loadable");
         gpui_component::init(cx);
         cx.set_global(Fonts::default());
-        theme::user::load();
+        theme::user::reload();
         let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
         theme.apply_to_components(cx);
         cx.set_global(theme);
@@ -381,6 +381,261 @@ fn startup_honors_a_saved_system_appearance_opt_in(cx: &mut TestAppContext) {
             theme::Appearance::Dark => "Dracula",
         },
     );
+}
+
+/// A theme file in the test home's theme directory, written whole.
+fn write_user_theme(file: &str, name: &str, appearance: &str, surface: &str) {
+    let path = store::dbdelve_directory()
+        .unwrap()
+        .join("themes")
+        .join(file);
+    let text = format!(
+        r##"{{ "name": "{name}", "appearance": "{appearance}", "colors": {{ "surface": "{surface}" }} }}"##
+    );
+    store::write_file(&path, &text).unwrap();
+}
+
+/// One tick of `Workspace::reload_themes` on the test clock, and what it left
+/// on screen.
+fn poll_themes(cx: &mut VisualTestContext) -> theme::Theme {
+    cx.executor().advance_clock(super::THEME_RECHECK);
+    settle(cx);
+    cx.update(|_, cx| *theme::theme(cx))
+}
+
+#[gpui::test]
+fn a_rewritten_user_theme_is_worn_again_without_a_restart(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        let file = directory.join("themes").join("mine.json");
+        write_user_theme("mine.json", "Rewritten", "dark", "#102030");
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\ntheme = \"Rewritten\"\nopacity = 0.8\n\n\
+             [settings.theme_opacity]\nRewritten = 0.6\n",
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        let profiles = || std::fs::read(directory.join("profiles.toml")).unwrap();
+        let saved = profiles();
+        let before = cx.update(|_, cx| *theme::theme(cx));
+        write_user_theme("mine.json", "Rewritten", "dark", "#405060");
+        let after = poll_themes(cx);
+        std::fs::write(&file, r#"{ "name": "Rewri"#).unwrap();
+        let broken = poll_themes(cx);
+        write_user_theme("mine.json", "REWRITTEN", "dark", "#708090");
+        let recased = poll_themes(cx);
+        // A list left without picking puts the theme back at the opacity
+        // saved under its old spelling.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_theme(&crate::actions::SelectTheme, window, cx)
+        });
+        settle(cx);
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        let restored = cx.update(|_, cx| *theme::theme(cx));
+        std::fs::remove_file(&file).unwrap();
+        let removed = poll_themes(cx);
+        let unsaved = workspace.read_with(cx, |workspace, _| workspace.profiles_unsaved);
+        let untouched = profiles() == saved;
+
+        // Closed, the window's loop goes with it: a write after reads nothing.
+        let released = workspace.downgrade();
+        quit(workspace, cx);
+        let revision = theme::user::revision();
+        write_user_theme("mine.json", "Rewritten", "dark", "#a0b0c0");
+        cx.executor().advance_clock(super::THEME_RECHECK * 3);
+        cx.run_until_parked();
+
+        assert_eq!(before.name, "Rewritten");
+        assert_eq!(before.surface.hex(), "#102030");
+        assert_eq!(after.surface.hex(), "#405060");
+        assert_eq!(
+            broken, after,
+            "a file part way through a write keeps its theme"
+        );
+        assert_eq!(
+            recased.name, "REWRITTEN",
+            "a case-only rename is the same theme"
+        );
+        assert_eq!(recased.surface.hex(), "#708090");
+        assert_eq!(removed, recased, "a removed file leaves its theme on");
+        assert_eq!(restored, recased);
+        for theme in [after, broken, recased, restored, removed] {
+            assert_eq!(theme.opacity, before.opacity);
+        }
+        assert!((before.opacity - 0.6).abs() < f32::EPSILON);
+        assert!(!unsaved && untouched, "a reload saves nothing");
+        assert!(released.upgrade().is_none());
+        assert_eq!(
+            theme::user::revision(),
+            revision,
+            "a closed window polls no more"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_theme_renamed_only_in_case_starts_at_its_saved_opacity(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        write_user_theme("mine.json", "REWRITTEN", "dark", "#102030");
+        std::fs::write(
+            store::dbdelve_directory().unwrap().join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\ntheme = \"Rewritten\"\nopacity = 0.8\n\n\
+             [settings.theme_opacity]\nRewritten = 0.6\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        let shown = cx.update(|_, cx| *theme::theme(cx));
+        quit(workspace, cx);
+
+        assert_eq!(shown.name, "REWRITTEN");
+        assert!((shown.opacity - 0.6).abs() < f32::EPSILON);
+    });
+}
+
+#[gpui::test]
+fn a_listed_theme_that_changes_side_is_neither_previewed_nor_filed_there(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        write_user_theme("mine.json", "Quokka", "dark", "#102030");
+        write_user_theme("other.json", "Zircon", "dark", "#111111");
+        std::fs::write(
+            store::dbdelve_directory().unwrap().join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\ntheme = \"Quokka\"\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        let shown = |cx: &mut VisualTestContext| cx.update(|_, cx| *theme::theme(cx));
+        let slots = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                [theme::Appearance::Dark, theme::Appearance::Light]
+                    .map(|side| workspace.settings.theme_for(side).to_string())
+            })
+        };
+        let before = shown(cx);
+        let saved = slots(cx);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_palette(
+                PaletteMode::Theme(Some(theme::Appearance::Dark)),
+                window,
+                cx,
+            )
+        });
+        settle(cx);
+        cx.simulate_input("zircon");
+        settle(cx);
+        let dark = shown(cx);
+        write_user_theme("other.json", "Zircon", "light", "#eeeeee");
+        let light = poll_themes(cx);
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        let after = shown(cx);
+        let kept = slots(cx);
+        quit(workspace, cx);
+
+        assert_eq!(dark.name, "Zircon");
+        assert_eq!(
+            light, before,
+            "a light theme is not previewed as a dark one"
+        );
+        assert_eq!(after, before);
+        assert_eq!(kept, saved);
+    });
+}
+
+#[gpui::test]
+fn an_import_and_an_open_theme_list_both_wear_the_theme_as_last_written(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        write_user_theme("mine.json", "Quokka", "dark", "#102030");
+        write_user_theme("other.json", "Zircon", "dark", "#111111");
+        std::fs::write(
+            directory.join("profiles.toml"),
+            "[settings]\ncheck_for_updates = false\ntheme = \"Quokka\"\n",
+        )
+        .unwrap();
+        let (workspace, cx) = launch(cx);
+        settle(cx);
+        let shown = |cx: &mut VisualTestContext| cx.update(|_, cx| *theme::theme(cx));
+
+        // An import rereads on its own, here for the side the system is not
+        // on, while the theme on screen is rewritten: the change that reread
+        // took first is worn all the same.
+        let system = cx.update(|window, _| theme::Appearance::of_system(window.appearance()));
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.match_system_appearance = true;
+            workspace.settings.set_theme_for(system, "Quokka");
+        });
+        let away = match system {
+            theme::Appearance::Light => theme::Appearance::Dark,
+            theme::Appearance::Dark => theme::Appearance::Light,
+        };
+        let spelled = match away {
+            theme::Appearance::Light => "light",
+            theme::Appearance::Dark => "dark",
+        };
+        write_user_theme("mine.json", "Quokka", "dark", "#405060");
+        write_user_theme("imported.json", "Imported", spelled, "#eeeeee");
+        theme::user::reload();
+        let imported = theme::Theme::all()
+            .into_iter()
+            .find(|theme| theme.name == "Imported")
+            .unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_theme(Some(away), imported, window, cx)
+        });
+        let worn = poll_themes(cx);
+
+        // Previewed from a list opened before its file changed, every side
+        // listed.
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.match_system_appearance = false
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_theme(&crate::actions::SelectTheme, window, cx)
+        });
+        settle(cx);
+        cx.simulate_input("zircon");
+        settle(cx);
+        write_user_theme("other.json", "Zircon", "dark", "#222222");
+        let previewed = poll_themes(cx);
+        // The theme behind the list changes too, and leaving puts it back.
+        write_user_theme("mine.json", "Quokka", "dark", "#506070");
+        poll_themes(cx);
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        let restored = shown(cx);
+
+        // Confirmed after a reread the list has not yet shown.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_theme(&crate::actions::SelectTheme, window, cx)
+        });
+        settle(cx);
+        cx.simulate_input("zircon");
+        settle(cx);
+        write_user_theme("other.json", "Zircon", "dark", "#333333");
+        theme::user::reload();
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        let confirmed = shown(cx);
+        let kept = poll_themes(cx);
+        quit(workspace, cx);
+
+        assert_eq!(worn.name, "Quokka");
+        assert_eq!(worn.surface.hex(), "#405060");
+        assert_eq!(previewed.name, "Zircon");
+        assert_eq!(previewed.surface.hex(), "#222222");
+        assert_eq!(restored.name, "Quokka");
+        assert_eq!(restored.surface.hex(), "#506070");
+        assert_eq!(confirmed.name, "Zircon");
+        assert_eq!(confirmed.surface.hex(), "#333333");
+        assert_eq!(kept, confirmed);
+    });
 }
 
 #[gpui::test]

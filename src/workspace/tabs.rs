@@ -890,6 +890,27 @@ impl Workspace {
         }
     }
 
+    /// The theme on screen, or the one a preview will put back, worn again as
+    /// [`theme::user::reload`] last read it. A theme whose file went away stays
+    /// on, and nothing is saved: the pick is still the same name. Behind an
+    /// open theme list the row being previewed is read again too, since it may
+    /// be the theme that changed.
+    pub(crate) fn reinstall_user_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self.theme_before_preview.unwrap_or(*theme::theme(cx));
+        let fresh = theme::user::current(shown).with_opacity(shown.opacity);
+        if let Some(before) = &mut self.theme_before_preview {
+            *before = fresh;
+            if let Some(palette) = self.palette.clone() {
+                palette.update(cx, |palette, cx| palette.set_unpreviewed(fresh, window, cx));
+            }
+        } else if fresh != shown {
+            // Installed rather than switched to, as a re-import is: switching
+            // would drop an opacity percent half-typed into Settings.
+            install_theme(fresh, window, cx);
+            cx.refresh_windows();
+        }
+    }
+
     /// The theme is written into dbdelve's own directory first, so picking it
     /// is the same pick a theme already listed would be.
     pub(crate) fn import_theme(
