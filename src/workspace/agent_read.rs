@@ -641,16 +641,18 @@ impl Workspace {
             }
             return;
         }
+        // The one profile with this id, as `agent_profile` resolved it: a
+        // repeated id is never resolved, so the lane cannot open another
+        // entry's config.
         let Some(config) = self
-            .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id)
+            .sole_profile(profile_id)
             .map(|profile| profile.config.clone())
         else {
             // Not expected to run: the only place a profile leaves the list is
             // `remove_profile`, which ends this lane in the same turn through
             // `reject_calls_for`. Kept so that if a profile ever did go with
-            // calls waiting, each is answered and none is stranded.
+            // calls waiting, or its id were ever shared, each is answered and
+            // none is stranded.
             self.end_lane(
                 profile_id,
                 Status::Rejected,

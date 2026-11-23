@@ -1332,7 +1332,7 @@ impl Workspace {
                 let visible: Vec<Listed> = self
                     .profiles
                     .iter()
-                    .filter(|profile| profile.agent_visible)
+                    .filter(|profile| self.agent_may_reach(profile))
                     .map(|profile| Listed {
                         name: &profile.name,
                         engine: profile.config.engine().as_str(),
@@ -1724,17 +1724,36 @@ impl Workspace {
     /// unique: the connection form accepts any non-empty one. The comparison is
     /// on bytes, with no case folding, trimming or normalisation, so what an
     /// agent was told is the only spelling that works. A profile this build
-    /// cannot open is never in `self.profiles`, so it is never a candidate.
+    /// cannot open is never in `self.profiles`, so it is never a candidate,
+    /// and neither is one whose id another profile shares (see
+    /// [`Self::agent_may_reach`]).
     pub(crate) fn agent_profile(&self, name: &str) -> Result<&Profile, AgentLookup> {
         let mut matches = self
             .profiles
             .iter()
-            .filter(|profile| profile.agent_visible)
+            .filter(|profile| self.agent_may_reach(profile))
             .filter(|profile| profile.name == name);
         match (matches.next(), matches.next()) {
             (Some(profile), None) => Ok(profile),
             (Some(_), Some(_)) => Err(AgentLookup::Ambiguous),
             (None, _) => Err(AgentLookup::NotAvailable),
+        }
+    }
+
+    /// Whether an agent may reach `profile`: it is visible, and no other
+    /// profile has its id. Calls, lanes and the approval are all found by id,
+    /// and an id repeated in a hand-edited file would let a lookup land on the
+    /// other entry, hidden or pointed somewhere else, so neither is offered.
+    pub(crate) fn agent_may_reach(&self, profile: &Profile) -> bool {
+        profile.agent_visible && self.sole_profile(&profile.id).is_some()
+    }
+
+    /// The profile with this id, when exactly one has it.
+    pub(crate) fn sole_profile(&self, id: &str) -> Option<&Profile> {
+        let mut same = self.profiles.iter().filter(|profile| profile.id == id);
+        match (same.next(), same.next()) {
+            (Some(profile), None) => Some(profile),
+            _ => None,
         }
     }
 }

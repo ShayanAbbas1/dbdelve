@@ -11438,6 +11438,47 @@ fn switching_the_database_hides_the_profile_from_agents(cx: &mut TestAppContext)
     });
 }
 
+#[gpui::test]
+fn a_repeated_id_is_never_offered_to_agents(cx: &mut TestAppContext) {
+    use super::agent::AgentLookup;
+
+    store::tests::with_home(|| {
+        let visible = "agent_visible = true";
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &[
+                sqlite_profile("twin", "Hidden", ""),
+                sqlite_profile("twin", "Shown", visible),
+                sqlite_profile("pair", "Left", visible),
+                sqlite_profile("pair", "Right", visible),
+                sqlite_profile("solo", "Solo", visible),
+            ]
+            .concat(),
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profiles.iter().filter(|p| p.id == "twin").count(),
+                2,
+                "both entries are restored"
+            );
+            for name in ["Shown", "Left", "Right"] {
+                assert!(
+                    matches!(
+                        workspace.agent_profile(name),
+                        Err(AgentLookup::NotAvailable)
+                    ),
+                    "{name} shares its id"
+                );
+            }
+            assert_eq!(
+                workspace.agent_profile("Solo").map(|p| p.id.as_str()),
+                Ok("solo")
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }
