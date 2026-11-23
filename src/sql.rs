@@ -5561,12 +5561,23 @@ fn touches_session(engine: Engine, sql: &str) -> bool {
 /// Names an engine can spell as a member with no call at all, which the period
 /// arm of [`calls_denied_function`] reads as the call it stands for. A call is
 /// always followed by a parenthesis, so the arm is needed only for such a
-/// spelling, and the project knows one: Snowflake's sequence pseudo-column,
-/// `seq.nextval`. Any other listed name after a period is an ordinary column
+/// spelling, and the project knows one: the sequence pseudo-column
+/// `seq.nextval`, which Snowflake reads and MariaDB reads in its Oracle mode
+/// (a session can turn that on). Only on those two ([`member_forms`]):
+/// Postgres and DuckDB have no such spelling, so there `t.nextval` is a
+/// column. Any other listed name after a period is an ordinary column
 /// reference and stays a read. The list is one long because that is how many
 /// such spellings are known; another goes here, with a corpus case beside the
 /// `member form` one in `hardening.rs`.
 const MEMBER_FORMS: &[&str] = &["nextval"];
+
+/// The [`MEMBER_FORMS`] `engine` reads as calls.
+fn member_forms(engine: Engine) -> &'static [&'static str] {
+    match engine {
+        Engine::Snowflake | Engine::MariaDb => MEMBER_FORMS,
+        _ => &[],
+    }
+}
 
 /// Whether a query calls one of the engine's `denied_functions`, wherever the
 /// call sits: the parser puts one in four different nodes (scalar, table,
@@ -5601,7 +5612,7 @@ fn calls_denied_function(engine: Engine, sql: &str) -> bool {
         engine,
         sql,
         engine.spec().sql.denied_functions,
-        MEMBER_FORMS,
+        member_forms(engine),
     )
 }
 
@@ -12243,15 +12254,27 @@ mod tests {
         ] {
             assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
         }
-        // Where the deny-list names `nextval`, its member form after a period
-        // is read as the advance, quoted or not ([`MEMBER_FORMS`]): stricter.
+        // Where the dialect spells a sequence advance as a member, its member
+        // form after a period is read as the advance, quoted or not
+        // ([`MEMBER_FORMS`]); where it does not, the same text is a column.
+        for (engine, sql) in [
+            (Engine::Snowflake, "SELECT seq1.nextval"),
+            (Engine::Snowflake, "SELECT t.\"NEXTVAL\" FROM t"),
+            (Engine::MariaDb, "SELECT s.nextval"),
+        ] {
+            assert_eq!(classify(engine, sql), Verdict::WRITE, "{engine:?} {sql}");
+        }
         for (engine, sql) in [
             (Engine::Postgres, "SELECT t.nextval FROM t"),
             (Engine::Postgres, "SELECT t.\"nextval\" FROM t"),
             (Engine::DuckDb, "SELECT t.nextval FROM t"),
-            (Engine::Snowflake, "SELECT t.\"NEXTVAL\" FROM t"),
         ] {
-            assert_eq!(classify(engine, sql), Verdict::WRITE, "{engine:?} {sql}");
+            assert_eq!(classify(engine, sql), Verdict::READ, "{engine:?} {sql}");
+            let call = "SELECT nextval('s')";
+            assert!(
+                classify(engine, call).mode >= Mode::ReadWrite,
+                "{engine:?} {call}"
+            );
         }
         for engine in [Engine::Postgres, Engine::Generic] {
             assert_eq!(

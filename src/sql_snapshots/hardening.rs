@@ -252,7 +252,7 @@ const SHAPES: &[(&str, &str)] = &[
         "SELECT seq1.nextval",
     ),
     (
-        "accepted false positive: column reference to a listed sequence name, stopped by the member form",
+        "column reference to a listed sequence name: a member form on snowflake and mariadb only",
         "SELECT t.nextval FROM t",
     ),
     (

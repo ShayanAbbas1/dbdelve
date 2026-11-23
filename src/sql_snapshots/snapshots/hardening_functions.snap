@@ -88,8 +88,8 @@ source: src/sql_snapshots.rs
 [postgres] openrowset in table position: SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'DELETE FROM t') => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] opendatasource in table position: SELECT * FROM OPENDATASOURCE('SQLNCLI', 'x') => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[postgres] sequence without parentheses: SELECT s.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[postgres] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[postgres] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[postgres] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [postgres] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [postgres] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
@@ -124,8 +124,8 @@ source: src/sql_snapshots.rs
 [postgres] duckdb text executor by name: SELECT * FROM query_table('s') => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[postgres] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[postgres] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[postgres] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[postgres] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -254,7 +254,7 @@ source: src/sql_snapshots.rs
 [mysql] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[mysql] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mysql] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -383,7 +383,7 @@ source: src/sql_snapshots.rs
 [mariadb] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mariadb] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[mariadb] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [mariadb] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -512,7 +512,7 @@ source: src/sql_snapshots.rs
 [sqlite] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[sqlite] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[sqlite] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -641,7 +641,7 @@ source: src/sql_snapshots.rs
 [turso] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[turso] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[turso] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -733,8 +733,8 @@ source: src/sql_snapshots.rs
 [duckdb] openrowset in table position: SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'DELETE FROM t') => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] opendatasource in table position: SELECT * FROM OPENDATASOURCE('SQLNCLI', 'x') => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[duckdb] sequence without parentheses: SELECT s.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[duckdb] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[duckdb] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[duckdb] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [duckdb] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [duckdb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
@@ -769,8 +769,8 @@ source: src/sql_snapshots.rs
 [duckdb] duckdb text executor by name: SELECT * FROM query_table('s') => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [duckdb] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[duckdb] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[duckdb] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[duckdb] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[duckdb] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
@@ -899,7 +899,7 @@ source: src/sql_snapshots.rs
 [snowflake] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [snowflake] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [snowflake] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[snowflake] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[snowflake] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [snowflake] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [snowflake] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [snowflake] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -1028,7 +1028,7 @@ source: src/sql_snapshots.rs
 [clickhouse] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[clickhouse] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[clickhouse] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -1157,7 +1157,7 @@ source: src/sql_snapshots.rs
 [mssql] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[mssql] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -1286,7 +1286,7 @@ source: src/sql_snapshots.rs
 [mongodb] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
-[mongodb] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[mongodb] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
@@ -1415,7 +1415,7 @@ source: src/sql_snapshots.rs
 [redis] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [redis] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[redis] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[redis] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
@@ -1544,7 +1544,7 @@ source: src/sql_snapshots.rs
 [generic] duckdb serialized-plan executor: SELECT * FROM json_execute_serialized_sql(json_serialize_sql('select nextval(''s'')')) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [generic] control column named like the duckdb text executor: SELECT t.query FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [generic] member form, snowflake sequence pseudo-column: SELECT seq1.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[generic] accepted false positive: column reference to a listed sequence name, stopped by the member form: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[generic] column reference to a listed sequence name: a member form on snowflake and mariadb only: SELECT t.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [generic] column reference to a listed name, not a member form: SELECT t.setval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [generic] column reference to a listed lock name, not a member form: SELECT x.get_lock FROM x => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [generic] accepted false positive: listed name as a cte name with a column list: WITH query(x) AS (SELECT 1) SELECT x FROM query => |classify=ReadOnly [] gate ro=None rw=None full=None|
