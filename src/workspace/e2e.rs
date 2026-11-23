@@ -735,6 +735,31 @@ fn hidden_results_come_back_from_the_keyboard_and_for_a_refused_run(cx: &mut Tes
 }
 
 #[gpui::test]
+fn a_refused_new_row_leaves_hidden_results_hidden(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        // A computed result: no table its rows are written back to.
+        cx.simulate_input("select 1 as a");
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-j");
+        cx.run_until_parked();
+        query_tab(&workspace, cx, |tab, _, _| assert!(tab.results_hidden));
+
+        cx.dispatch_action(crate::actions::NewRow);
+        settle(cx);
+        assert_eq!(
+            shown_notice(&workspace, cx).as_deref(),
+            Some("These rows take no new row.")
+        );
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(tab.results_hidden, "no form was opened to show")
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn going_to_a_column_or_a_result_brings_hidden_results_back(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
