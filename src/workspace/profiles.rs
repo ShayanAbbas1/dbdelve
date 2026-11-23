@@ -2680,7 +2680,8 @@ impl Workspace {
             return;
         };
         // A session a bound tab opened for a database the filter hides is the
-        // tab's, and the tree reads nothing it does not draw (D-08).
+        // tab's, and the tree reads nothing it does not draw: reading it would
+        // spend a catalog read on rows the filter keeps off the screen.
         let shown = profile.shown();
         let open: Vec<String> = profile
             .bound
@@ -2836,7 +2837,8 @@ impl Workspace {
             .insert(database.clone(), BoundSession::Open(session.clone()));
         // The connection's own database is read over its own session, and
         // another is not asked for again once a session is registered. One the
-        // filter hides keeps its session for the tab and is never read (D-08).
+        // filter hides keeps its session for the tab and is never read, since
+        // the tree draws nothing of it.
         if profile.active_database().as_deref() != Some(database.as_str())
             && profile.shown().shows_database(&database)
         {
