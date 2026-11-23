@@ -208,14 +208,24 @@ const TRANSACTION_BLOCKS_SWITCH: &str = "The database was not switched: a transa
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
+        if let Err(message) = self.remember_profiles_or_fail(cx) {
+            self.note(message, cx);
+        }
+    }
+
+    /// [`Self::remember_profiles`] for a caller that must know the file holds
+    /// what it saved before it goes on, and says the failure itself.
+    pub(crate) fn remember_profiles_or_fail(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         // One read of the file: the flags it holds are the ones written, and
         // the calls of every profile it hid are rejected, so no hide is
         // written without its sweep.
         self.adopt_saved_visibility(cx);
-        match self.write_profiles(cx) {
-            Ok(()) => self.profiles_unsaved = false,
-            Err(message) => self.note(message, cx),
-        }
+        self.write_profiles(cx)?;
+        self.profiles_unsaved = false;
+        Ok(())
     }
 
     /// [`Self::remember_profiles`] once things have been still for a moment,

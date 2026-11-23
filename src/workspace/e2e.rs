@@ -12441,6 +12441,60 @@ fn turning_agent_access_on_listens_and_turning_it_off_leaves_nothing_listening(
     });
 }
 
+#[cfg(unix)]
+#[gpui::test]
+fn a_kill_switch_that_cannot_save_keeps_the_lock_and_refuses_every_call(cx: &mut TestAppContext) {
+    use crate::agent::{Reply, Status};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_with_profiles(cx, &sqlite_profile("orders", "Orders", VISIBLE_RW));
+        cx.executor().allow_parking();
+        let path = crate::agent::socket_path().expect("the test home gives a socket path");
+        run_command(&workspace, cx, Command::TurnOnAgentAccess);
+        assert_eq!(saved_agent_access(), Some(true));
+
+        // A directory where the file goes: the save of `false` fails.
+        let file = store::dbdelve_directory().unwrap().join("profiles.toml");
+        let list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        std::fs::remove_file(&file).expect("the file is removable");
+        std::fs::create_dir(&file).expect("the directory is creatable");
+        run_command(&workspace, cx, Command::DisconnectAgents);
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.agent.bridge.is_some()),
+            "the serving lock is kept while the file may still say true"
+        );
+        assert!(
+            shown_notice(&workspace, cx).is_some_and(|notice| notice.starts_with(
+                "Agent access could not be saved as off, so DBDelve keeps the socket"
+            )),
+            "{:?}",
+            shown_notice(&workspace, cx)
+        );
+
+        // Nothing the kept socket hears is taken on.
+        let listed = raw_call(&path, &frame(r#""kind":"call","tool":"list_connections""#));
+        drive_until(cx, |_| listed.is_finished());
+        let reply: Reply = serde_json::from_str(
+            listed
+                .join()
+                .expect("the client thread finished")
+                .trim_end(),
+        )
+        .expect("one answer frame");
+        assert_eq!(reply.status, Status::Rejected);
+        assert_eq!(reply.text, "Agent access was turned off in DBDelve.");
+
+        // Pressed again once the file can be written, it saves and lets go.
+        std::fs::remove_dir(&file).expect("the directory is removable");
+        store::save_profiles(&list).expect("the file is writable again");
+        run_command(&workspace, cx, Command::DisconnectAgents);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.agent.bridge.is_none()));
+        assert_eq!(saved_agent_access(), Some(false));
+        quit(workspace, cx);
+    });
+}
+
 /// Another window of the same variant, as far as the socket can tell: a
 /// listener bound at the derived path, whose messages the test holds. Dropping
 /// it is that window closing.

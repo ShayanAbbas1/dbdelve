@@ -516,6 +516,10 @@ pub(crate) struct Approval {
 /// What a pending call is told when the kill switch ends it.
 const TURNED_OFF: &str = "Agent access was turned off in DBDelve.";
 
+/// Said when the kill switch could not save `agent_access = false`: calls are
+/// refused, but the socket stays bound, and so does the lock, until it can.
+const NOT_TURNED_OFF: &str = "Agent access could not be saved as off, so DBDelve keeps the socket and refuses every call; use the kill switch again to retry.";
+
 /// What the kill switch says in a window that is not serving while another
 /// window of the variant is. Its sentence is what stays true: that window's
 /// agents are not disconnected.
@@ -1364,10 +1368,21 @@ impl Workspace {
         let was_serving = self.agent.bridge.is_some();
         // Saved while the bridge still holds the serving lock: a launch that
         // takes the lock next reads `false` under it (see
-        // [`Self::listen_for_agents_at_launch`]).
+        // [`Self::listen_for_agents_at_launch`]). A save that fails keeps the
+        // lock, so no launch binds over a file still saying `true`; the
+        // pending `false` refuses every call meanwhile (see
+        // [`Self::on_agent_message`]), and pressing again retries the save.
         if was_serving || self.saved_agent_access() == Some(true) {
             self.agent.access_choice = Some(false);
-            self.remember_profiles(cx);
+            if let Err(error) = self.remember_profiles_or_fail(cx) {
+                if was_serving {
+                    self.note(format!("{NOT_TURNED_OFF} {error}"), cx);
+                } else {
+                    self.note(error, cx);
+                }
+                cx.notify();
+                return;
+            }
         }
         self.drop_bridge();
         if !was_serving && crate::agent::socket_is_live() {
@@ -1400,6 +1415,30 @@ impl Workspace {
     /// work: the answer is read from the profile list as it stands.
     pub(crate) fn on_agent_message(&mut self, message: Inbound, cx: &mut Context<Self>) {
         let arrived = Instant::now();
+        // The kill switch was used and its save has not landed: the socket is
+        // kept only so the lock is, and nothing it hears is taken on.
+        if self.agent.access_choice == Some(false)
+            && let Inbound::Call {
+                id, tool, reply, ..
+            } = &message
+        {
+            self.agent_answered(
+                *id,
+                *tool,
+                None,
+                None,
+                reply,
+                Reply {
+                    status: Status::Rejected,
+                    text: TURNED_OFF.to_string(),
+                },
+                CallFacts {
+                    elapsed_ms: elapsed_ms(arrived),
+                    ..CallFacts::default()
+                },
+            );
+            return;
+        }
         match message {
             Inbound::PresenceOpened { conn } => {
                 self.agent.presence.push(conn);
