@@ -4221,7 +4221,11 @@ fn a_connection_that_is_not_open_offers_no_filter_until_it_connects(cx: &mut Tes
             .expect("the database is created");
         run_command(&workspace, cx, Command::Reconnect);
         assert_eq!(profile_state(&workspace, cx, "e2e"), "connected");
-        assert_eq!(offered(cx), (true, true, true));
+        assert_eq!(
+            offered(cx),
+            (true, false, true),
+            "one way in, not the node's and the profile's both"
+        );
         quit(workspace, cx);
     });
 }

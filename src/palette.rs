@@ -4109,7 +4109,13 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.extend(
             node_actions(node.kind, &node.name, target)
                 .into_iter()
-                .filter(|action| filterable || *action != NodeAction::FilterDatabases)
+                // The profile's own `Filter databases…` runs the same
+                // command where the node is the profile in front: listed
+                // once, as that one, which carries the count.
+                .filter(|action| {
+                    *action != NodeAction::FilterDatabases
+                        || (filterable && node.profile != profile.id)
+                })
                 .map(|action| {
                     let icon = match action {
                         NodeAction::NewQueryHere => icon::PLUS,
