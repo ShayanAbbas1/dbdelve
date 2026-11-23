@@ -137,6 +137,51 @@ pub(crate) struct GrantsView {
     /// Roles with members list them underneath.
     pub(crate) with_members: bool,
     pub(crate) filter: Entity<InputState>,
+    /// The table drawn: built when the grants land, the filter's text
+    /// changes or members are turned on or off, never on a frame.
+    pub(crate) matrix: GrantsMatrix,
+}
+
+/// What the Show Grants dialog draws, with what it was built under.
+#[derive(Default)]
+pub(crate) struct GrantsMatrix {
+    pub(crate) columns: Vec<String>,
+    pub(crate) rows: Vec<crate::grants::MatrixRow>,
+    /// How many times it was built, for a test to count.
+    pub(crate) built: usize,
+    filter: String,
+    with_members: bool,
+}
+
+impl GrantsView {
+    /// Build the table again where what it is built from changed since:
+    /// the grants (`landed`), the filter's text, or the members switch.
+    fn rebuild(&mut self, landed: bool, cx: &App) {
+        let filter = self.filter.read(cx).value().to_string();
+        if !landed && filter == self.matrix.filter && self.with_members == self.matrix.with_members
+        {
+            return;
+        }
+        let (columns, rows) = match &self.data {
+            Loaded::Ready(GrantsOf::Object(grants)) => (
+                grants.privileges.clone(),
+                crate::grants::object_rows(grants, self.with_members, &filter),
+            ),
+            Loaded::Ready(GrantsOf::Role(grants)) => {
+                let columns = crate::grants::role_columns(grants);
+                let rows = crate::grants::role_rows(grants, &columns, &filter);
+                (columns, rows)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+        self.matrix = GrantsMatrix {
+            columns,
+            rows,
+            built: self.matrix.built + 1,
+            filter,
+            with_members: self.with_members,
+        };
+    }
 }
 
 /// The names in a comma-separated field, blanks dropped.
@@ -929,7 +974,13 @@ impl Workspace {
             "Filter objects…"
         };
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        cx.observe(&filter, |_, _, cx| cx.notify()).detach();
+        cx.observe(&filter, |workspace, _, cx| {
+            if let Some(view) = workspace.grants_view.as_mut() {
+                view.rebuild(false, cx);
+            }
+            cx.notify()
+        })
+        .detach();
         self.grants_view = Some(GrantsView {
             profile: profile.to_string(),
             request,
@@ -939,6 +990,7 @@ impl Workspace {
             of_object,
             with_members: of_object,
             filter,
+            matrix: GrantsMatrix::default(),
         });
         cx.notify();
         request
@@ -969,6 +1021,7 @@ impl Workspace {
             Ok(grants) => Loaded::Ready(grants),
             Err(error) => Loaded::Failed(format!("Could not read the grants: {}", error.message)),
         };
+        view.rebuild(true, cx);
         cx.notify();
     }
 
@@ -993,6 +1046,7 @@ impl Workspace {
     pub(crate) fn set_grants_members(&mut self, with_members: bool, cx: &mut Context<Self>) {
         if let Some(view) = self.grants_view.as_mut() {
             view.with_members = with_members;
+            view.rebuild(false, cx);
             cx.notify();
         }
     }

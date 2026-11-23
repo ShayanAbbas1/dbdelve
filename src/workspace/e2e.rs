@@ -6175,6 +6175,57 @@ fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut Te
             assert!(cx.debug_bounds(row).is_some(), "{row} is drawn");
         }
 
+        // Each cell's mark, as the matrix was built when the grants landed:
+        // keeper owns birds, so its SELECT can be passed on; ana holds it
+        // through watchers.
+        use crate::grants::Mark;
+        let marks = |workspace: &Workspace, name: &str| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            (view.matrix.rows.iter())
+                .find(|row| row.name == name)
+                .map(|row| row.marks.clone())
+        };
+        let built = workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                marks(workspace, "keeper"),
+                Some(vec![Mark::Grantable, Mark::None])
+            );
+            assert_eq!(
+                marks(workspace, "watchers"),
+                Some(vec![Mark::Granted, Mark::None])
+            );
+            assert_eq!(
+                marks(workspace, "ana"),
+                Some(vec![Mark::Through, Mark::None])
+            );
+            assert_eq!(
+                marks(workspace, "PUBLIC"),
+                Some(vec![Mark::None, Mark::None])
+            );
+            workspace.grants_view.as_ref().unwrap().matrix.built
+        });
+        // Frames alone build nothing.
+        settle(cx);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.grants_view.as_ref().unwrap().matrix.built, built);
+        });
+
+        // The filter narrows the rows, the member kept under its role.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let filter = workspace.grants_view.as_ref().unwrap().filter.clone();
+            filter.update(cx, |input, cx| input.set_value("ana", window, cx));
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-ana").is_some());
+        assert!(cx.debug_bounds("show-grants-row-watchers").is_some());
+        assert!(cx.debug_bounds("show-grants-row-keeper").is_none());
+        workspace.update_in(cx, |workspace, window, cx| {
+            let filter = workspace.grants_view.as_ref().unwrap().filter.clone();
+            filter.update(cx, |input, cx| input.set_value("", window, cx));
+        });
+        settle(cx);
+
         // Roles alone: the member listed under its role goes.
         workspace.update(cx, |workspace, cx| workspace.set_grants_members(false, cx));
         settle(cx);

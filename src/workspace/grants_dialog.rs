@@ -6,9 +6,7 @@ use gpui_component::Icon;
 use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
 
-use crate::grants::{
-    Mark, MatrixRow, Who, column_label, object_rows, role_columns, role_grants_empty, role_rows,
-};
+use crate::grants::{Mark, MatrixRow, Who, column_label, role_grants_empty};
 use crate::theme::ConnectionColor;
 use crate::users_view::Loaded;
 
@@ -24,18 +22,7 @@ impl Workspace {
         let t = popup_theme(cx);
         let mono = fonts(cx).editor.clone();
         let filter = view.filter.read(cx).value().to_string();
-        let (columns, rows): (Vec<String>, Vec<MatrixRow>) = match &view.data {
-            Loaded::Ready(GrantsOf::Object(grants)) => (
-                grants.privileges.clone(),
-                object_rows(grants, view.with_members, &filter),
-            ),
-            Loaded::Ready(GrantsOf::Role(grants)) => {
-                let columns = role_columns(grants);
-                let rows = role_rows(grants, &columns, &filter);
-                (columns, rows)
-            }
-            _ => (Vec::new(), Vec::new()),
-        };
+        let (columns, rows) = (&view.matrix.columns, &view.matrix.rows);
         let close_workspace = cx.entity().downgrade();
         let header_close = close_workspace.clone();
         let roles_workspace = close_workspace.clone();
@@ -214,7 +201,7 @@ impl Workspace {
                 .child(table_head)
                 .children(
                     rows.iter()
-                        .map(|row| grants_row(row, &columns, t, mono.clone())),
+                        .map(|row| grants_row(row, columns, t, mono.clone())),
                 )
                 .into_any_element(),
         };
