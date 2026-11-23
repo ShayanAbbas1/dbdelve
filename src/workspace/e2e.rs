@@ -13689,7 +13689,27 @@ fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
             front_conflict(&workspace, cx),
             Some(crate::session::Conflict::KeptMine)
         );
-        assert!(editor_has_keyboard(&workspace, cx));
+        let diag = cx.update(|window, cx| {
+            let ws = workspace.read(cx);
+            let profile = ws.profile().unwrap();
+            format!(
+                "focused={:?} active={} form={} palette={} dialog={:?} needs_focus={} state={} notice={:?} sidebar={} import={} queries={} active_tab={:?} edtab={:?}",
+                window.focused(cx).is_some(),
+                window.is_window_active(),
+                ws.form.is_some(),
+                ws.palette.is_some(),
+                ws.dialog_in_front.get(),
+                profile.session.editor_needs_focus,
+                profile_state_of(ws, "e2e"),
+                profile.session.notice,
+                ws.explorer_focus.contains_focused(window, cx),
+                profile.session.import_rows.is_some(),
+                profile.session.queries.len(),
+                profile.session.active,
+                profile.session.queries.iter().find(|t| t.editor.focus_handle(cx).is_focused(window)).map(|t| t.id),
+            )
+        });
+        assert!(editor_has_keyboard(&workspace, cx), "{diag}");
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
