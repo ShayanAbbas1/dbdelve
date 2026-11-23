@@ -445,8 +445,9 @@ impl Ran {
 /// into text is not work for the thread that draws the window.
 struct Shaped {
     text: String,
-    /// How many rows went back and how many there were.
-    rows: (usize, Total),
+    /// How many rows went back and how many there were; `None` for a plan,
+    /// whose input rows are not what is sent.
+    rows: Option<(usize, Total)>,
 }
 
 /// A catalog reply and how many rows it lists.
@@ -527,17 +528,16 @@ fn shaped(engine: Engine, result: &QueryResult) -> Shaped {
     let (text, shown) = result::text_shown(&[table], result.rest.len(), None);
     Shaped {
         text,
-        rows: (shown, total),
+        rows: Some((shown, total)),
     }
 }
 
 /// A plan as the agent reads it.
 fn shaped_plan(engine: Engine, result: &QueryResult) -> Shaped {
     let (_, text) = plan_reply(engine, result);
-    Shaped {
-        text,
-        rows: (result.rows.len(), Total::Exact(result.rows.len())),
-    }
+    // The plan's lines are rewritten into findings and a tree, so no count of
+    // the server's rows says what the agent was sent.
+    Shaped { text, rows: None }
 }
 
 impl Workspace {
@@ -850,7 +850,7 @@ impl Workspace {
                     lane.connection = Some(connection);
                     lane.hidden = hidden;
                 }
-                ended.rows = Some(rows);
+                ended.rows = rows;
                 (Status::Executed, text)
             }
             Ran::Listed {
@@ -2445,6 +2445,19 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_counts_no_rows_as_sent() {
+        let result = QueryResult {
+            columns: vec![db::Column {
+                name: "QUERY PLAN".to_string(),
+                data_type: None,
+            }],
+            rows: db::rows(vec![vec![Some("Seq Scan on t".to_string())]; 3]),
+            ..QueryResult::default()
+        };
+        assert_eq!(shaped_plan(Engine::Postgres, &result).rows, None);
+    }
+
+    #[test]
     fn a_name_is_scrubbed_only_where_it_stands_whole() {
         let hidden: Vec<String> = ["sa", "db.internal", "db.internal:5432"]
             .map(String::from)
@@ -2535,7 +2548,7 @@ mod tests {
             &shaped.text[..80]
         );
         assert!(shaped.text.contains("[clipped from 6000 characters]"));
-        assert_eq!(shaped.rows, (1, Total::Exact(1)));
+        assert_eq!(shaped.rows, Some((1, Total::Exact(1))));
         // Let go of the file first: Windows will not remove one held open.
         drop(connection);
         std::fs::remove_dir_all(&dir).expect("the directory goes");
