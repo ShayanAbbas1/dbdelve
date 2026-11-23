@@ -587,6 +587,9 @@ fn detail_lines(plan: &Plan, index: usize) -> Vec<String> {
         .map(|detail| {
             let mut line = format!("{}  | {}", indent(node.depth), one_line(detail));
             let removed = detail
+    } else if node.shares_cte {
+        // Timed, but its time and its sibling scans' share the CTE's unsplit.
+        line.push_str(" self=unsplit-cte");
                 .split_once(": ")
                 .filter(|(key, _)| key.starts_with("Rows Removed by "))
                 .and_then(|(_, value)| value.trim().parse::<f64>().ok());
@@ -1089,7 +1092,7 @@ mod tests {
         let out = whole(&one_column(LARGE));
         // Plan 02-06's `02-TOKEN-BUDGET.md` measures this text. A change to this
         // number means that measured token count is stale.
-        assert_eq!(out.len(), 15302);
+        assert_eq!(out.len(), 15297);
         assert_eq!(
             out,
             include_str!("../testdata/plan-postgres-large.compact.txt")
@@ -1198,7 +1201,7 @@ mod tests {
         let out = compact(&plan, &Analysis::new(&plan, Engine::Postgres), NODE_CAP);
         // Plan 05-10 measures the tokens of this text and sets `NODE_CAP` from it;
         // a change to this number means that measurement is stale.
-        assert_eq!(out.len(), 6375);
+        assert_eq!(out.len(), 6373);
         assert_eq!(
             out,
             include_str!("../testdata/plan-postgres-large.capped.compact.txt")

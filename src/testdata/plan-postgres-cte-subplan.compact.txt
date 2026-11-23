@@ -25,7 +25,7 @@ tree:
         n4 Hash Join self=105.531ms 3.6% est=28556 act=949990 loops=1
           | Hash Cond: (b.account_id = events.account_id)
           | Buffers: shared hit=554 read=499446, temp written=4870
-          n5 CTE Scan on big b self=167.17ms 5.8% est=951878 act=949990 loops=1
+          n5 CTE Scan on big b self=unsplit-cte est=951878 act=949990 loops=1
             | Buffers: shared hit=293 read=249707, temp written=4870
           n6 Hash self=0.19ms 0.0% est=6 act=6 loops=1
             | Buckets: 1024  Batches: 1  Memory Usage: 9kB
@@ -50,7 +50,7 @@ tree:
                       | Buffers: shared hit=261 read=249739
       n12 [SubPlan 2] Aggregate self=0.738ms 0.0% est=6 act=6 (x 6 loops) loops=6
         | Buffers: temp read=29226 written=1
-        n13 CTE Scan on big x self=283.494ms 9.8% est=144 act=9792 (x 6 loops) loops=6
+        n13 CTE Scan on big x self=unsplit-cte est=144 act=9792 (x 6 loops) loops=6
           | Filter: ((account_id = b.account_id) AND ((id % '97'::bigint) = 0))
           | Rows Removed by Filter: 948358  [total 5690148 over 6 loops]  [fact: removed >= 1000 and more than kept, per loop]
           | Buffers: temp read=29226 written=1

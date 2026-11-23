@@ -49,8 +49,13 @@ pub struct PlanNode {
     /// `actual time=0.01..0.02 rows=10 loops=1`, when it was an ANALYZE.
     pub actual: Option<Actual>,
     /// Time in this node alone — its own total less its children's — in
-    /// milliseconds, and what the bar is drawn from. `None` without timings.
+    /// milliseconds, and what the bar is drawn from. `None` without timings,
+    /// and on a node that [`shares_cte`](Self::shares_cte).
     pub self_ms: Option<f64>,
+    /// One of several `CTE Scan`s of the same CTE. Each one's time holds an
+    /// unknown part of the CTE's own, which the plan does not split between
+    /// them, so its own time is left unknown rather than guessed.
+    pub shares_cte: bool,
 }
 
 /// What the planner guessed. MySQL prints one cost and no width, so
@@ -515,7 +520,7 @@ pub(crate) fn gathers(node: &PlanNode) -> bool {
 // ponytail: the divisor is an average over the workers, so a skewed split
 // reads a little off. The upgrade is the per-worker lines `VERBOSE` prints.
 // ponytail: each Gather scans down for its first child and each CTE scans the
-// whole plan for its consumer; plans are tens of nodes, and a name-to-consumer
+// whole plan for its consumers; plans are tens of nodes, and a name-to-consumer
 // map built in one pass is the upgrade if one ever is not.
 fn fill_self_ms(nodes: &mut [PlanNode]) {
     // The depth of each Gather on the path down to the node, and its divisor.
@@ -559,38 +564,48 @@ fn fill_self_ms(nodes: &mut [PlanNode]) {
         path.push(index);
     }
 
-    // What each node's children cost. A CTE is read when its first consumer
-    // asks for a row, so the producer's time is inside that consumer's own and
-    // is taken out of it, not out of the node the CTE is printed under. With
-    // no consumer to be found it stays where it is printed.
-    // Assumed, not read from the server: the first consumer in document order
-    // is the one that started it (RESEARCH A2). It held on every captured
-    // plan, where it was checked by self times adding up to the root's time.
+    // What each node's children cost. A CTE is read when a consumer asks for
+    // a row, so the producer's time is inside its consumers' own, not inside
+    // the node it is printed under. With one consumer, the producer is taken
+    // out of that consumer. With several, each holds an unknown part of it, so
+    // none is charged and their own times are left unknown (`shares_cte`).
+    // With no consumer to be found it stays where it is printed.
     let mut children = vec![0.0; nodes.len()];
     for (index, node) in nodes.iter().enumerate() {
         let Some(owner) = parent[index] else {
             continue;
         };
-        let consumer = node
+        let consumers: Vec<usize> = node
             .heading
             .as_deref()
             .and_then(|heading| heading.strip_prefix("CTE "))
-            .and_then(|name| {
+            .map(|name| {
                 let scan = format!("CTE Scan on {}", name.trim());
-                nodes.iter().position(|other| {
-                    other
-                        .label
-                        .strip_prefix(&scan)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-                })
-            });
-        children[consumer.unwrap_or(owner)] += wall[index].unwrap_or_default();
+    let mut shared = vec![false; nodes.len()];
+                (0..nodes.len())
+                    .filter(|other| {
+                        nodes[*other]
+                            .label
+                            .strip_prefix(&scan)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        match consumers.as_slice() {
+            [] => children[owner] += wall[index].unwrap_or_default(),
+            [consumer] => children[*consumer] += wall[index].unwrap_or_default(),
+            several => several.iter().for_each(|consumer| shared[*consumer] = true),
+        }
     }
 
     for (index, node) in nodes.iter_mut().enumerate() {
         // Estimates and loop averaging make small negatives normal, and a
         // negative bar is nonsense.
-        node.self_ms = wall[index].map(|own| (own - children[index]).max(0.0));
+        node.shares_cte = shared[index];
+        node.self_ms = wall[index]
+            .filter(|_| !shared[index])
+            .map(|own| (own - children[index]).max(0.0));
     }
 }
 
@@ -1222,7 +1237,7 @@ Planning Time: broken"#,
         assert!(
             plan.nodes
                 .iter()
-                .all(|node| node.actual.is_none() || node.self_ms.is_some()),
+                .all(|node| node.actual.is_none() || node.self_ms.is_some() || node.shares_cte),
             "a timed node has no self time"
         );
         let wall: f64 = plan
@@ -1231,7 +1246,38 @@ Planning Time: broken"#,
             .filter(|node| node.depth == 0)
             .filter_map(|node| Some(node.actual?.inclusive_ms()))
             .sum();
-        let own: f64 = plan.nodes.iter().filter_map(|node| node.self_ms).sum();
+        // Scans sharing a CTE have no own time each, but together they hold
+        // their own time and the CTE's, which no one else was charged.
+        let inclusive = |node: &PlanNode| node.actual.map_or(0.0, |actual| actual.inclusive_ms());
+        let unsplit: f64 = plan
+            .nodes
+            .iter()
+            .filter(|node| node.shares_cte)
+            .map(inclusive)
+            .sum::<f64>()
+            - plan
+                .nodes
+                .iter()
+                .filter(|producer| {
+                    producer
+                        .heading
+                        .as_deref()
+                        .and_then(|heading| heading.strip_prefix("CTE "))
+                        .is_some_and(|name| {
+                            let scan = format!("CTE Scan on {} ", name.trim());
+                            plan.nodes.iter().any(|node| {
+                                node.shares_cte && format!("{} ", node.label).starts_with(&scan)
+                            })
+                        })
+                })
+                .map(inclusive)
+                .sum::<f64>();
+        let own: f64 = plan
+            .nodes
+            .iter()
+            .filter_map(|node| node.self_ms)
+            .sum::<f64>()
+            + unsplit;
         let slack = (wall * 0.01).max(0.5);
         assert!(
             (own - wall).abs() <= slack,
@@ -1351,7 +1397,7 @@ Planning Time: broken"#,
     }
 
     #[test]
-    fn a_cte_is_read_as_a_child_of_its_owner_and_timed_inside_its_first_consumer() {
+    fn a_cte_is_read_as_a_child_of_its_owner() {
         let plan = one_column(include_str!("testdata/plan-postgres-cte-subplan.txt"));
         let producer = plan
             .nodes
@@ -1365,17 +1411,18 @@ Planning Time: broken"#,
         assert_eq!(parent_of(&plan, producer), Some(0));
         assert_eq!(plan.nodes[producer].depth, 1);
 
-        let consumer = plan
+        // The fixture reads `big` twice, so neither scan is given its own time.
+        let consumers: Vec<&PlanNode> = plan
             .nodes
             .iter()
-            .position(|node| node.label.starts_with("CTE Scan on big"))
-            .unwrap();
-        let producer_ms = plan.nodes[producer].actual.unwrap().inclusive_ms();
-        close(
-            plan.nodes[consumer].self_ms,
-            plan.nodes[consumer].actual.unwrap().inclusive_ms() - producer_ms,
+            .filter(|node| node.label.starts_with("CTE Scan on big"))
+            .collect();
+        assert_eq!(consumers.len(), 2);
+        assert!(
+            consumers
+                .iter()
+                .all(|node| node.shares_cte && node.self_ms.is_none())
         );
-        assert!(plan.nodes[consumer].self_ms.unwrap() < producer_ms);
 
         for node in &plan.nodes {
             assert!(
@@ -1390,39 +1437,47 @@ Planning Time: broken"#,
     }
 
     #[test]
-    fn a_cte_read_twice_is_credited_to_the_first_consumer_in_document_order() {
-        let text = |first: &str, between: &str| {
-            format!(
-                r#"Append  (actual time=0.000..30.000 rows=1 loops=1)
-{between}  ->  CTE Scan on big {first}  (actual time=0.000..8.000 rows=1 loops=1)
-  ->  CTE Scan on big other  (actual time=0.000..6.000 rows=1 loops=1)
+    fn a_cte_read_once_is_timed_inside_its_consumer() {
+        let plan = one_column(
+            r#"Append  (actual time=0.000..30.000 rows=1 loops=1)
+  ->  Seq Scan on u  (actual time=0.000..1.000 rows=1 loops=1)
+  ->  CTE Scan on big a  (actual time=0.000..8.000 rows=1 loops=1)
+  ->  CTE Scan on bigger  (actual time=0.000..6.000 rows=1 loops=1)
   CTE big
-    ->  Seq Scan on t  (actual time=0.000..5.000 rows=1 loops=1)"#
-            )
-        };
-        let plan = one_column(&text("a", ""));
+    ->  Seq Scan on t  (actual time=0.000..5.000 rows=1 loops=1)"#,
+        );
         let credited: Vec<(&str, Option<f64>)> = plan
             .nodes
             .iter()
             .map(|node| (node.label.as_str(), node.self_ms))
             .collect();
-        assert_eq!(credited[1], ("CTE Scan on big a", Some(3.0)));
-        assert_eq!(credited[2], ("CTE Scan on big other", Some(6.0)));
-        close(plan.nodes[0].self_ms, 30.0 - 8.0 - 6.0);
+        // `CTE Scan on bigger` reads another CTE, not a second reader of `big`.
+        assert_eq!(credited[2], ("CTE Scan on big a", Some(3.0)));
+        assert_eq!(credited[3], ("CTE Scan on bigger", Some(6.0)));
+        assert!(plan.nodes.iter().all(|node| !node.shares_cte));
+        close(plan.nodes[0].self_ms, 30.0 - 1.0 - 8.0 - 6.0);
         assert_self_sums_to_root(&plan);
 
-        // An unrelated sibling before it moves nothing: the first `CTE Scan on
-        // big` in the text is still the one credited.
-        let plan = one_column(&text(
-            "a",
-            "  ->  Seq Scan on u  (actual time=0.000..1.000 rows=1 loops=1)\n",
-        ));
-        let credited = plan
+    #[test]
+    fn a_cte_read_twice_is_not_split_between_its_consumers() {
+        let plan = one_column(
+            r#"Append  (actual time=0.000..30.000 rows=1 loops=1)
+  ->  CTE Scan on big a  (actual time=0.000..8.000 rows=1 loops=1)
+  ->  CTE Scan on big other  (actual time=0.000..6.000 rows=1 loops=1)
+  CTE big
+    ->  Seq Scan on t  (actual time=0.000..5.000 rows=1 loops=1)"#,
+        );
+        let credited: Vec<(&str, Option<f64>, bool)> = plan
             .nodes
             .iter()
-            .find(|node| node.label == "CTE Scan on big a")
-            .unwrap();
-        close(credited.self_ms, 3.0);
+            .map(|node| (node.label.as_str(), node.self_ms, node.shares_cte))
+            .collect();
+        assert_eq!(credited[1], ("CTE Scan on big a", None, true));
+        assert_eq!(credited[2], ("CTE Scan on big other", None, true));
+        // The producer keeps its own time, and the owner is charged its
+        // consumers, which hold the producer, and not the producer again.
+        assert_eq!(credited[3], ("Seq Scan on t", Some(5.0), false));
+        close(plan.nodes[0].self_ms, 30.0 - 8.0 - 6.0);
         assert_self_sums_to_root(&plan);
     }
 
@@ -1434,6 +1489,7 @@ Planning Time: broken"#,
                 .iter()
                 .find(|(name, _)| name == label)
                 .map(|(_, value)| value.as_str())
+    }
                 .unwrap()
         };
         let planning = entry("Planning");

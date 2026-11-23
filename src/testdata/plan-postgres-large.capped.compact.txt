@@ -56,7 +56,7 @@ tree:
       | Group Key: x.account_id
       | Batches: 1  Memory Usage: 40kB
       | Buffers: temp read=4871 written=1
-      n19 CTE Scan on big x self=68.129ms 0.7% est=4759 act=158330 loops=1
+      n19 CTE Scan on big x self=unsplit-cte est=4759 act=158330 loops=1
         | Filter: (kind = 'click'::text)
         | Rows Removed by Filter: 791660  [total 791660 over 1 loops]  [fact: removed >= 1000 and more than kept, per loop]
         | Buffers: temp read=4871 written=1

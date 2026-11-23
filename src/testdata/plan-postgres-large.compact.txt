@@ -51,7 +51,7 @@ tree:
         n10 Hash Join self=101.179ms 1.1% est=28556 act=949990 loops=1
           | Hash Cond: (b.account_id = events_1.account_id)
           | Buffers: shared hit=1068 read=498932, temp written=4870
-          n11 CTE Scan on big b self=169.903ms 1.8% est=951878 act=949990 loops=1
+          n11 CTE Scan on big b self=unsplit-cte est=951878 act=949990 loops=1
             | Buffers: shared hit=550 read=249450, temp written=4870
           n12 Hash self=0.192ms 0.0% est=6 act=6 loops=1
             | Buckets: 1024  Batches: 1  Memory Usage: 9kB
@@ -78,7 +78,7 @@ tree:
       | Group Key: x.account_id
       | Batches: 1  Memory Usage: 40kB
       | Buffers: temp read=4871 written=1
-      n19 CTE Scan on big x self=68.129ms 0.7% est=4759 act=158330 loops=1
+      n19 CTE Scan on big x self=unsplit-cte est=4759 act=158330 loops=1
         | Filter: (kind = 'click'::text)
         | Rows Removed by Filter: 791660  [total 791660 over 1 loops]  [fact: removed >= 1000 and more than kept, per loop]
         | Buffers: temp read=4871 written=1
