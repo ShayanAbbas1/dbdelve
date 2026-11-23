@@ -11,7 +11,7 @@
 //! Every figure is scoped to the plan it was built from. Nothing here is shared
 //! between plans, so no share is ever a fraction of another plan's total.
 
-use super::{Plan, PlanNode, gathers};
+use super::{Plan, PlanNode, gathers, subtree_end, worker_input};
 use crate::db::Engine;
 
 /// A plan's reading: what its numbers are, how heavy each node is, and what is
@@ -308,7 +308,10 @@ fn stopped_early(nodes: &[PlanNode], index: usize, engine: Engine) -> bool {
         }
         let inner = branch != above + 1;
         if label.starts_with("limit")
-            || (inner && (label.contains("semi join") || label.contains("anti join")))
+            || (inner
+                && ["semi join", "anti join", "semijoin", "antijoin"]
+                    .iter()
+                    .any(|join| label.contains(join)))
         {
             return true;
         }
@@ -335,25 +338,35 @@ fn reads_all_input(label: &str, engine: Engine) -> bool {
         || (label.contains("aggregate") && !label.starts_with("group"))
 }
 
-/// A `Gather` and everything beneath it ran in workers. The count is what the
+/// A `Gather` and its worker input ([`worker_input`]) ran in workers; an
+/// `InitPlan` beside that input ran in the leader and is not marked. The count is what the
 /// `Gather` says it launched, and failing that the participants its child ran
 /// in, less the leader.
 fn parallel_nodes(nodes: &[PlanNode]) -> Vec<Option<Parallel>> {
-    // The depth of each `Gather` on the path down to the node, and its workers.
-    let mut open: Vec<(usize, u32)> = Vec::new();
+    // The depth of each `Gather` on the path down to the node, its workers
+    // and the span of its worker input.
+    let mut open: Vec<(usize, u32, std::ops::Range<usize>)> = Vec::new();
     let mut marks = Vec::with_capacity(nodes.len());
     for (index, node) in nodes.iter().enumerate() {
-        while open.last().is_some_and(|(depth, _)| *depth >= node.depth) {
+        while open
+            .last()
+            .is_some_and(|(depth, _, _)| *depth >= node.depth)
+        {
             open.pop();
         }
-        let inside = open.last().map(|(_, workers)| Parallel {
-            workers: *workers,
-            gathers: false,
-        });
+        let inside = open
+            .last()
+            .filter(|(_, _, input)| input.contains(&index))
+            .map(|(_, workers, _)| Parallel {
+                workers: *workers,
+                gathers: false,
+            });
         marks.push(
             match gathers(node).then(|| workers_of(nodes, index)).flatten() {
                 Some(workers) => {
-                    open.push((node.depth, workers));
+                    let input = worker_input(nodes, index)
+                        .map_or(0..0, |input| input..subtree_end(nodes, input));
+                    open.push((node.depth, workers, input));
                     Some(Parallel {
                         workers,
                         gathers: true,
@@ -375,12 +388,7 @@ fn workers_of(nodes: &[PlanNode], gather: usize) -> Option<u32> {
             .ok()
     });
     launched.or_else(|| {
-        let loops = nodes[gather + 1..]
-            .iter()
-            .take_while(|below| below.depth > node.depth)
-            .find(|below| below.depth == node.depth + 1)?
-            .actual?
-            .loops;
+        let loops = nodes[worker_input(nodes, gather)?].actual?.loops;
         // The leader is one of the participants, and is not a worker.
         (loops.is_finite() && loops >= 1.0).then_some((loops - 1.0) as u32)
     })
@@ -953,6 +961,14 @@ mod tests {
             node("Index Scan on b", 2, 100_000.0, 1.0),
         ];
         assert_eq!(miss(semi, 3), None);
+        // MySQL spells it as one word, and its outer side is still read whole.
+        let mysql_semi = vec![
+            node("Nested loop semijoin", 0, 5.0, 5.0),
+            node("Table scan on a", 1, 1_000_000.0, 5.0),
+            node("Index lookup on b", 1, 100_000.0, 1.0),
+        ];
+        assert_eq!(miss(mysql_semi.clone(), 1), Some(200_000.0));
+        assert_eq!(miss(mysql_semi, 2), None);
         // Stopping early explains too few rows, never too many.
         let overshoot = vec![
             node("Limit", 0, 10.0, 10.0),

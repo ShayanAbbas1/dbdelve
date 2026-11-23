@@ -522,9 +522,28 @@ pub(crate) fn gathers(node: &PlanNode) -> bool {
     node.label.starts_with("Gather")
 }
 
+/// The `Gather`'s worker input: its first direct child that no `InitPlan` or
+/// `SubPlan` heading introduces. An `InitPlan` printed under a `Gather` runs in
+/// the leader, before the workers start, and is not their input.
+pub(crate) fn worker_input(nodes: &[PlanNode], gather: usize) -> Option<usize> {
+    let depth = nodes[gather].depth;
+    (gather + 1..nodes.len())
+        .take_while(|below| nodes[*below].depth > depth)
+        .find(|below| nodes[*below].depth == depth + 1 && nodes[*below].heading.is_none())
+}
+
+/// The end of the subtree `root` starts: the first index after it that is not
+/// beneath it.
+pub(crate) fn subtree_end(nodes: &[PlanNode], root: usize) -> usize {
+    (root + 1..nodes.len())
+        .find(|below| nodes[*below].depth <= nodes[root].depth)
+        .unwrap_or(nodes.len())
+}
+
 /// What a node cost by the clock: its own time less what its children cost.
-/// Below a `Gather` every time is divided by the number of participants, the
-/// `loops` of the Gather's direct child, because the workers ran at once.
+/// In a `Gather`'s worker input ([`worker_input`]) every time is divided by the
+/// number of participants, that input's `loops`, because the workers ran at
+/// once; an `InitPlan` beside it is the leader's alone and is not divided.
 /// The Gather itself ran once, in the leader, so it keeps its own time whole
 /// and is what its children's divided times are taken out of.
 // ponytail: the divisor is an average over the workers, so a skewed split
@@ -533,30 +552,30 @@ pub(crate) fn gathers(node: &PlanNode) -> bool {
 // whole plan for its consumers; plans are tens of nodes, and a name-to-consumer
 // map built in one pass is the upgrade if one ever is not.
 fn fill_self_ms(nodes: &mut [PlanNode]) {
-    // The depth of each Gather on the path down to the node, and its divisor.
-    let mut gathered: Vec<(usize, f64)> = Vec::new();
+    // The depth of each Gather on the path down to the node, its divisor and
+    // the span of its worker input.
+    let mut gathered: Vec<(usize, f64, std::ops::Range<usize>)> = Vec::new();
     let mut wall: Vec<Option<f64>> = Vec::with_capacity(nodes.len());
     for (index, node) in nodes.iter().enumerate() {
         while gathered
             .last()
-            .is_some_and(|(depth, _)| *depth >= node.depth)
+            .is_some_and(|(depth, _, _)| *depth >= node.depth)
         {
             gathered.pop();
         }
-        let divisor = gathered.last().map_or(1.0, |(_, workers)| *workers);
+        let divisor = gathered
+            .last()
+            .filter(|(_, _, input)| input.contains(&index))
+            .map_or(1.0, |(_, workers, _)| *workers);
         wall.push(node.actual.map(|actual| actual.inclusive_ms() / divisor));
-        if gathers(node) {
-            let child = nodes[index + 1..]
-                .iter()
-                .take_while(|below| below.depth > node.depth)
-                .find(|below| below.depth == node.depth + 1)
-                .and_then(|below| below.actual);
-            if let Some(workers) = child
+        if gathers(node)
+            && let Some(input) = worker_input(nodes, index)
+            && let Some(workers) = nodes[input]
+                .actual
                 .map(|actual| actual.loops)
                 .filter(|loops| *loops >= 1.0)
-            {
-                gathered.push((node.depth, workers));
-            }
+        {
+            gathered.push((node.depth, workers, input..subtree_end(nodes, input)));
         }
     }
 
@@ -1465,6 +1484,29 @@ Planning Time: broken"#,
     }
 
     #[test]
+    fn an_init_plan_under_a_gather_is_the_leaders_and_is_not_divided() {
+        let plan = one_column(
+            r#"Gather  (actual time=0.000..20.000 rows=1 loops=1)
+  Workers Planned: 2
+  Workers Launched: 2
+  InitPlan 1 (returns $0)
+    ->  Result  (actual time=0.000..3.000 rows=1 loops=1)
+  ->  Parallel Seq Scan on t  (actual time=0.000..12.000 rows=1 loops=3)"#,
+        );
+        let labels: Vec<&str> = plan.nodes.iter().map(|node| node.label.as_str()).collect();
+        assert_eq!(labels, ["Gather", "Result", "Parallel Seq Scan on t"]);
+        // The worker input is divided by its three participants, the InitPlan
+        // is not, and the Gather keeps what neither accounts for.
+        close(plan.nodes[1].self_ms, 3.0);
+        close(plan.nodes[2].self_ms, 12.0);
+        close(plan.nodes[0].self_ms, 20.0 - 3.0 - 12.0);
+        let analysis = Analysis::new(&plan, Engine::Postgres);
+        assert!(analysis.nodes[0].parallel.is_some());
+        assert_eq!(analysis.nodes[1].parallel, None);
+        assert!(analysis.nodes[2].parallel.is_some());
+    }
+
+    #[test]
     fn a_cte_read_once_is_timed_inside_its_consumer() {
         let plan = one_column(
             r#"Append  (actual time=0.000..30.000 rows=1 loops=1)
@@ -1484,6 +1526,27 @@ Planning Time: broken"#,
         assert_eq!(credited[3], ("CTE Scan on bigger", Some(6.0)));
         assert!(plan.nodes.iter().all(|node| !node.shares_cte));
         close(plan.nodes[0].self_ms, 30.0 - 1.0 - 8.0 - 6.0);
+        assert_self_sums_to_root(&plan);
+    }
+
+    #[test]
+    fn a_quoted_cte_name_is_matched_as_postgres_quotes_it_in_both_places() {
+        // Postgres quotes a CTE's name the same way in its heading and in each
+        // scan of it, so a name with a space, or one that only differs from
+        // another by quoting, is told apart by the text as printed.
+        let plan = one_column(
+            r#"Append  (actual time=0.000..30.000 rows=1 loops=1)
+  ->  CTE Scan on "big one" b  (actual time=0.000..8.000 rows=1 loops=1)
+  ->  CTE Scan on big  (actual time=0.000..6.000 rows=1 loops=1)
+  CTE "big one"
+    ->  Seq Scan on t  (actual time=0.000..5.000 rows=1 loops=1)
+  CTE big
+    ->  Seq Scan on u  (actual time=0.000..2.000 rows=1 loops=1)"#,
+        );
+        assert_eq!(plan.nodes[1].label, r#"CTE Scan on "big one" b"#);
+        close(plan.nodes[1].self_ms, 8.0 - 5.0);
+        close(plan.nodes[2].self_ms, 6.0 - 2.0);
+        assert!(plan.nodes.iter().all(|node| !node.shares_cte));
         assert_self_sums_to_root(&plan);
     }
 
