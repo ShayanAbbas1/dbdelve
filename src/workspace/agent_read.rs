@@ -1082,7 +1082,7 @@ fn open_agent(
 /// What the audit keeps of an error opening the agent's connection. A
 /// password command's error can echo the secret it printed, so none of it is
 /// kept, as none of it is logged; the rest is scrubbed of `hidden`.
-fn audited_open_error(message: &str, hidden: &[String]) -> String {
+pub(super) fn audited_open_error(message: &str, hidden: &[String]) -> String {
     audited_error(&scrubbed(crate::db::loggable_error(message), hidden))
 }
 

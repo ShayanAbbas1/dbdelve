@@ -14679,8 +14679,29 @@ fn agent_audit_keeps_no_row_value_or_host_from_a_failed_write(cx: &mut TestAppCo
         let outcome = audit_of(id).pop().expect("the outcome was written");
         assert_eq!(outcome["error"], kept);
 
+        // A password command's error may echo what it printed: none of it is
+        // kept, as on the read path.
+        let (id, answer, logged) = fail_with(&workspace, cx, |_, _, _, _, _| {
+            gpui::Task::ready(Wrote::NotOpened {
+                hidden: Vec::new(),
+                error: DbError {
+                    message: "The password command failed: hunter2-leaked".to_string(),
+                    position: None,
+                },
+            })
+        });
+        assert_eq!(answer, super::agent_read::OPEN_FAILED);
+        let kept = super::agent_read::audited_open_error(
+            "The password command failed: hunter2-leaked",
+            &[],
+        );
+        assert!(!kept.contains("hunter2"), "{kept}");
+        assert_eq!(logged.as_deref(), Some(kept.as_str()));
+        let outcome = audit_of(id).pop().expect("the outcome was written");
+        assert_eq!(outcome["error"], kept);
+
         let file = serde_json::to_string(&audit_lines()).expect("the lines encode");
-        for value in ["a@x", "db.internal", "alice"] {
+        for value in ["a@x", "db.internal", "alice", "hunter2-leaked"] {
             assert!(!file.contains(value), "{value} reached the file: {file}");
         }
         quit(workspace, cx);

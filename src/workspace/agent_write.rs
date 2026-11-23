@@ -17,7 +17,7 @@ use std::{
 };
 
 use super::agent::{AuditVerdict, CallFacts, Decision, INVALID_INDEX, audited_error, elapsed_ms};
-use super::agent_read::{AGENT_ROWS, OPEN_FAILED, scrubbed, table_of};
+use super::agent_read::{AGENT_ROWS, OPEN_FAILED, audited_open_error, scrubbed, table_of};
 use super::*;
 use crate::{
     agent::{CallId, Reply, Status, result, tools::Tool},
@@ -280,7 +280,7 @@ impl Workspace {
             Wrote::NotOpened { hidden, error } => (
                 Status::Failed,
                 OPEN_FAILED.to_string(),
-                Some(audited_error(&scrubbed(&error.message, &hidden))),
+                Some(audited_open_error(&error.message, &hidden)),
             ),
             Wrote::Done {
                 result: Ok(text), ..
