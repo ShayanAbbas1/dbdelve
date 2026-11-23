@@ -2029,6 +2029,20 @@ ORDER BY database, name"#;
         "timeseriestags",
     ];
 
+    /// A name on both lists would pass either pin as local while the gate asks
+    /// for it as egress, so the two never share one, compared the way the
+    /// gate compares names: lower-cased.
+    #[test]
+    fn no_local_table_function_is_on_the_egress_list() {
+        let egress = Engine::ClickHouse.spec().sql.egress_functions;
+        for name in LOCAL {
+            assert!(
+                !egress.contains(&name.to_lowercase().as_str()),
+                "{name} is local and on egress_functions"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_CLICKHOUSE_URL"]
     fn live_every_table_function_is_egress_or_local() {
@@ -2124,6 +2138,7 @@ ORDER BY database, name"#;
             "the catalog answered {} functions",
             known.len()
         );
+        let egress = Engine::ClickHouse.spec().sql.egress_functions;
         for name in Engine::ClickHouse
             .spec()
             .sql
@@ -2132,6 +2147,11 @@ ORDER BY database, name"#;
             .filter(|line| !line.starts_with('#'))
         {
             let lower = name.to_lowercase();
+            // Matched as the gate matches a call: lower-cased.
+            assert!(
+                !egress.contains(&lower.as_str()),
+                "{name} is on the built-in list and on egress_functions"
+            );
             if known.contains(name) || tables.contains(&lower) {
                 assert!(
                     allowed.contains(name)
