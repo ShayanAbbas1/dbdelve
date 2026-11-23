@@ -862,8 +862,8 @@ pub struct Connection {
     startup: Arc<[String]>,
     /// Whether the profile holds this connection to reads
     /// ([`super::Connection::set_read_only`]): every session opened for the
-    /// user takes the hold before the startup script runs, so the script
-    /// never runs unheld.
+    /// user, and one reset, takes the hold before the startup script runs,
+    /// so the script never runs unheld.
     held: Arc<AtomicBool>,
 }
 
@@ -926,7 +926,7 @@ impl Connection {
     }
 
     /// What [`super::Connection::set_read_only`] just set on this session,
-    /// for the sessions opened from here on to take too.
+    /// for the sessions opened or reset from here on to take too.
     pub(super) fn remember_hold(&self, read_only: bool) {
         self.held.store(read_only, Ordering::SeqCst);
     }
@@ -941,6 +941,15 @@ impl Connection {
             replay(connection, &[hold.to_string()])?;
         }
         replay(connection, &self.startup)
+    }
+
+    /// `COM_RESET_CONNECTION`, which runs the driver's `init` again and drops
+    /// every other setting, and then the rest of what a session opened for
+    /// the user starts with: the time zone, the hold and the script.
+    fn reset_session(&self, connection: &mut Conn) -> Result<(), DbError> {
+        connection.reset().map_err(|error| query_error(&error))?;
+        set_time_zone(connection, &self.server, self.engine)?;
+        self.hold_and_replay(connection)
     }
 
     /// A second session, for a statement to run on beside this one's; see
@@ -1108,7 +1117,7 @@ impl Connection {
         let gone = std::cell::Cell::new(false);
         let mut send = |sql: &str, sending: Sending| {
             if sending == Sending::Open {
-                return open_verified(&mut connection, sql, steps, self.engine);
+                return open_verified(self, &mut connection, sql, steps);
             }
             // A Cancel's `KILL QUERY` that lands on the `COMMIT` answers 1317
             // on a live session, while InnoDB may have committed already: as
@@ -1119,10 +1128,9 @@ impl Connection {
                 if connection.ping().is_err() || connection.query_drop(sql).is_ok() {
                     return Ok(QueryResult::default());
                 }
-                return connection
-                    .reset()
-                    .map(|()| QueryResult::default())
-                    .map_err(|error| query_error(&error));
+                return self
+                    .reset_session(&mut connection)
+                    .map(|()| QueryResult::default());
             }
             if sending == Sending::Bracket && sql == "COMMIT" {
                 return match connection.query_drop(sql) {
@@ -1135,7 +1143,7 @@ impl Connection {
                         // it landed stays unknown; what it left open does not
                         // stay.
                         if interrupted && connection.query_drop("ROLLBACK").is_err() {
-                            let _ = connection.reset();
+                            let _ = self.reset_session(&mut connection);
                         }
                         gone.set(interrupted || connection.ping().is_err());
                         Err(query_error(&error))
@@ -2201,11 +2209,12 @@ fn wants_cleartext(error: &::mysql::Error) -> bool {
 /// `COMMIT`, so no other session changes a row between its re-read and its
 /// write: a writer waits, or one side fails with a deadlock and rolls back.
 fn open_verified(
+    owner: &Connection,
     connection: &mut Conn,
     opening: &str,
     steps: &[VerifiedStep],
-    engine: Engine,
 ) -> Result<QueryResult, DbError> {
+    let engine = owner.engine;
     let autocommit: Option<i64> = connection
         .query_first("SELECT @@autocommit")
         .map_err(|error| query_error(&error))?;
@@ -2234,7 +2243,7 @@ fn open_verified(
     // The transaction is the apply's own now, so a refusal ends it.
     if let Err(error) = transactional_targets(connection, &tables, engine) {
         if connection.query_drop("ROLLBACK").is_err() {
-            let _ = connection.reset();
+            let _ = owner.reset_session(connection);
         }
         return Err(error);
     }
