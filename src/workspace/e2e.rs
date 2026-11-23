@@ -6211,6 +6211,7 @@ fn users_tab_on(
             view,
             query: QueryState::Idle,
             results,
+            side: Default::default(),
         },
     });
     id

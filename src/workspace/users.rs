@@ -2,7 +2,8 @@
 //! them, the role changes it puts up for review, and the Show Grants dialog.
 //!
 //! Every read runs on a side connection ([`crate::db::Connection::apart`]),
-//! so a failed catalog read never lands in a transaction the user has open.
+//! so a failed catalog read never lands in a transaction the user has open:
+//! the Users and roles tab's own, kept while it is open ([`RolesSide`]).
 //! Every change is a statement `db::roles` writes, passed through
 //! [`sql::is_generated_role_change`], shown whole in the apply review, and
 //! run by `execute_and_then`, so the connection's mode decides whether it
@@ -11,6 +12,7 @@
 //! connection, Manual's included, never holds it.
 
 use std::io::Write as _;
+use std::sync::{Mutex, PoisonError};
 
 use super::*;
 
@@ -23,6 +25,65 @@ use super::exports::{choose_path, could_not_write, write_replacing};
 /// Refuses a second role change while one is running on the tab.
 pub(super) const ROLE_CHANGE_RUNNING: &str =
     "A role change is still running. Wait for it, or cancel it, first.";
+
+/// The side session a Users and roles tab reads on: opened by its first read
+/// and kept, so a click on a role is a query and not a connect -- TCP, TLS,
+/// authentication and any SSH route, and one more of a login's `CONNECTION
+/// LIMIT` each time. Dropped with the tab, which closes it. A session of an
+/// earlier connect of the profile is not used: the profile may have moved
+/// to another database since, and reach is read in the database it is on.
+#[derive(Default)]
+pub(crate) struct RolesSide(Mutex<Option<(u64, Connection)>>);
+
+impl RolesSide {
+    /// `read` on the kept session, opened from `connection` first where
+    /// there is none of `generation`. A read on one that was lost lets it go,
+    /// so the next opens another. One read at a time, as a session runs them.
+    pub(crate) fn read<T>(
+        &self,
+        connection: &Connection,
+        generation: u64,
+        read: impl FnOnce(&Connection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let session = match &*kept {
+            Some((opened, session)) if *opened == generation => session.clone(),
+            _ => {
+                let session = connection.apart()?;
+                *kept = Some((generation, session.clone()));
+                session
+            }
+        };
+        let result = read(&session);
+        if result.is_err() && session.is_lost() {
+            *kept = None;
+        }
+        result
+    }
+
+    /// Whether it holds a session, of any connect.
+    #[cfg(test)]
+    pub(crate) fn is_open(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+}
+
+/// `read` on `side` where the profile has a Users and roles tab, else on a
+/// session of its own.
+fn on_side<T>(
+    side: Option<Arc<RolesSide>>,
+    connection: &Connection,
+    generation: u64,
+    read: impl FnOnce(&Connection) -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    match side {
+        Some(side) => side.read(connection, generation, read),
+        None => read(&connection.apart()?),
+    }
+}
 
 /// What the role form is for.
 #[derive(Clone)]
@@ -154,8 +215,9 @@ impl Workspace {
         let request = profile.roles_request;
         let generation = profile.generation;
         let id = id.to_string();
+        let side = self.roles_side(&id);
         let read = spawn_blocking(cx.background_executor(), move || {
-            connection.apart()?.roles()
+            on_side(side, &connection, generation, |side| side.roles())
         });
         if let Some(view) = self.users_view_of(&id) {
             view.update(cx, |view, cx| view.set_roles(Loaded::Loading, cx));
@@ -189,6 +251,15 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// The kept session of `id`'s Users and roles tab, if it has one open.
+    fn roles_side(&self, id: &str) -> Option<Arc<RolesSide>> {
+        let profile = self.profiles.iter().find(|profile| profile.id == id)?;
+        (profile.session.objects.iter()).find_map(|tab| match &tab.body {
+            ObjectBody::Users { side, .. } => Some(side.clone()),
+            _ => None,
+        })
     }
 
     /// `id`'s Users and roles tab, if it has one open.
@@ -257,6 +328,7 @@ impl Workspace {
                         view,
                         query: QueryState::Idle,
                         results,
+                        side: Arc::default(),
                     },
                 });
                 profile.session.place_last(session::TabKey::Object(tab));
@@ -342,8 +414,9 @@ impl Workspace {
             return;
         };
         let (id, generation) = (id.to_string(), profile.generation);
+        let side = self.roles_side(&id);
         let read = spawn_blocking(cx.background_executor(), move || {
-            connection.apart()?.role_reach(&name)
+            on_side(side, &connection, generation, |side| side.role_reach(&name))
         });
         cx.spawn(async move |workspace, cx| {
             let result = read.await;
@@ -384,8 +457,11 @@ impl Workspace {
             return;
         };
         let (id, generation) = (id.to_string(), profile.generation);
+        let side = self.roles_side(&id);
         let read = spawn_blocking(cx.background_executor(), move || {
-            connection.apart()?.role_reports(&roles)
+            on_side(side, &connection, generation, |side| {
+                side.role_reports(&roles)
+            })
         });
         cx.spawn(async move |workspace, cx| {
             let result = read.await;
@@ -807,8 +883,11 @@ impl Workspace {
             .active_database()
             .unwrap_or_else(|| profile.name.clone());
         let asked = name.clone();
+        let side = self.roles_side(id);
         let read = spawn_blocking(cx.background_executor(), move || {
-            connection.apart()?.role_grants(&asked)
+            on_side(side, &connection, generation, |side| {
+                side.role_grants(&asked)
+            })
         });
         let kind = match self.role_of(id, &name) {
             Some(role) if crate::users_view::is_login(&role) => "login",
@@ -922,6 +1001,47 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tabs_reads_share_one_side_session_until_the_profile_connects_again() {
+        use crate::db::{CancelToken, ConnectionConfig, Fetch};
+        let path =
+            std::env::temp_dir().join(format!("dbdelve-roles-side-{}.db", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        let connection = Connection::open(ConnectionConfig::Sqlite {
+            path: path.display().to_string(),
+            statement_timeout: 0,
+        })
+        .unwrap();
+        let run = |session: &Connection, sql: &str| {
+            session
+                .query(sql, &CancelToken::default(), Fetch::default())
+                .map(|_| ())
+        };
+        let side = RolesSide::default();
+        assert!(!side.is_open());
+        // A temporary table is the session's own: seen again only on it.
+        side.read(&connection, 1, |session| {
+            run(session, "CREATE TEMP TABLE mark (x)")
+        })
+        .unwrap();
+        assert!(side.is_open());
+        side.read(&connection, 1, |session| {
+            run(session, "SELECT * FROM temp.mark")
+        })
+        .expect("the second read is on the session the first opened");
+        assert!(
+            side.read(&connection, 2, |session| run(
+                session,
+                "SELECT * FROM temp.mark"
+            ))
+            .is_err(),
+            "a later connect's read opens a session of its own"
+        );
+        assert!(run(&connection, "SELECT * FROM temp.mark").is_err());
+        drop((side, connection));
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn form_fields_read_as_the_server_would_or_say_why_not() {

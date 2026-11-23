@@ -4425,6 +4425,9 @@ pub(crate) enum ObjectBody {
         view: Entity<crate::users_view::UsersView>,
         query: QueryState,
         results: Entity<TableState<ResultGrid>>,
+        /// The side session its reads run on, opened by the first and kept
+        /// while the tab is ([`crate::workspace::RolesSide`]).
+        side: std::sync::Arc<crate::workspace::RolesSide>,
     },
 }
 
