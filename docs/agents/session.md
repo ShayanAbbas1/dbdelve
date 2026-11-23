@@ -330,13 +330,21 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`AgentState::visibility_choices`): a grant made in one window's dialog, or a
   hide, is neither undone by another window's save nor missed by the window
   serving agents.
-- **An agent's call reaches the window only through the pump, and ends only
-  through `finish_call`.** The socket's threads send `Inbound` messages on a
-  channel and a foreground task hands each to `Workspace::on_agent_message`;
-  a call is addressed by its `CallId`, never by its place in a list.
-  `finish_call` removes the call by id before it replies, so a call ended by
-  two things at once answers at most once, and it writes the call's one log
-  line, so a hangup that arrives after the answer adds nothing. A statement
+- **An agent's call reaches the window only through the pump, and ends
+  through one of three doors.** The socket's threads send `Inbound` messages
+  on a channel and a foreground task hands each to
+  `Workspace::on_agent_message`; a call is addressed by its `CallId`, never by
+  its place in a list. A read that ran ends with its own result, through
+  `land_agent_read` into `finish_read`; an approved write ends with its own
+  result alone, through `finish_write`, which finds it by its bridge session
+  as well as its id, since a write outlives its bridge; and everything from
+  outside the call (a denial, an expiry, a hangup, a deadline, the kill
+  switch) ends it through `finish_call`, which reaches a lane's read through
+  `finish_read` too and only notes a hangup on a running write. Each removes
+  the call by id before it replies, so a call ended by two things at once
+  answers at most once, and each writes the call's one log line, so a hangup
+  that arrives after the answer adds nothing; a change to what a call's end
+  replies or audits has to be made on all three. A statement
   that waits for a person is drawn in the approval dialog
   (`agent-approval`): the first entry of every `dialog_layer` list, so it is
   drawn behind every dialog the user is already answering, and below the
