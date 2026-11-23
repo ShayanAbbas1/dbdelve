@@ -3736,6 +3736,17 @@ fn changes_session(statement: &Statement) -> bool {
         }
         Statement::CreateView(view) if view.temporary => true,
         Statement::Query(query) if selects_into_session(&query.body) => true,
+        // An `EXPLAIN` that runs its statement leaves what the statement
+        // leaves, read as `statement_verdict` reads ANALYZE; a plain one runs
+        // nothing.
+        Statement::Explain {
+            analyze,
+            options,
+            statement,
+            ..
+        } if *analyze || options.iter().flatten().any(analyze_option_is_on) => {
+            changes_session(statement)
+        }
         _ => {
             let mut leaves = Leaves::default();
             leaves.add(statement);

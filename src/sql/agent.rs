@@ -2045,6 +2045,28 @@ mod tests {
     fn the_savepoint_family_is_refused_as_a_session_statement() {
         for sql in [
             "SAVEPOINT a",
+    #[test]
+    fn an_explain_that_runs_a_session_change_is_refused_as_one() {
+        for sql in [
+            "EXPLAIN ANALYZE CREATE TEMPORARY TABLE u AS SELECT 1",
+            "EXPLAIN (ANALYZE TRUE) CREATE TEMPORARY TABLE u AS SELECT 1",
+        ] {
+            for mode in Mode::ALL {
+                assert_eq!(
+                    agent_gate(Engine::Postgres, sql, mode),
+                    refused(Refusal::Session),
+                    "{mode:?}: {sql}"
+                );
+            }
+        }
+        // A plain EXPLAIN runs nothing, so it changes nothing.
+        let plain = "EXPLAIN CREATE TEMPORARY TABLE u AS SELECT 1";
+        assert_ne!(
+            agent_gate(Engine::Postgres, plain, Mode::ReadOnly),
+            refused(Refusal::Session)
+        );
+    }
+
             "RELEASE SAVEPOINT a",
             "ROLLBACK TO SAVEPOINT a",
         ] {
