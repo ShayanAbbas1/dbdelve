@@ -832,7 +832,8 @@ impl Workspace {
             Ran::NotOpened(error) => {
                 lane.connection = None;
                 // What the open's error must not name, as the config the lane
-                // opened from says; the keychain's password is never in it.
+                // opened from says; the keychain's password is not in that
+                // config, and was scrubbed where it was put in (`open_error`).
                 ended.error = Some(audited_open_error(
                     &error.message,
                     &lane.opened_from.identifying_text(),
@@ -1077,9 +1078,21 @@ fn open_agent(
         // Opened through `open_for_agent`: the hold is what makes a read the gate
         // misjudged harmless, so a connection that cannot take it is not one the
         // agent may use.
-        let connection = Connection::open_for_agent(config)?;
+        let connection =
+            Connection::open_for_agent(config).map_err(|error| open_error(error, &hidden))?;
         Ok((connection, hidden))
     })
+}
+
+/// An open's error scrubbed of `hidden`, taken after the keychain's password
+/// was put in: the lane's own config, which the audit scrubs against later,
+/// never holds that password. A password command's error is left out first,
+/// as the audit leaves it out.
+fn open_error(error: DbError, hidden: &[String]) -> DbError {
+    DbError {
+        message: scrubbed(crate::db::loggable_error(&error.message), hidden),
+        ..error
+    }
 }
 
 /// What the audit keeps of an error opening the agent's connection. A
@@ -2455,6 +2468,17 @@ mod tests {
             ..QueryResult::default()
         };
         assert_eq!(shaped_plan(Engine::Postgres, &result).rows, None);
+    }
+
+    #[test]
+    fn an_open_error_is_scrubbed_of_the_keychains_password() {
+        let error = DbError {
+            message: "password authentication failed: got s3cr3t-from-keychain".to_string(),
+            position: None,
+        };
+        let opened = open_error(error, &["s3cr3t-from-keychain".to_string()]);
+        assert!(!opened.message.contains("s3cr3t"), "{}", opened.message);
+        assert!(opened.message.contains("[hidden]"), "{}", opened.message);
     }
 
     #[test]
