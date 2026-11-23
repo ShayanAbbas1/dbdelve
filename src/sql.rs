@@ -5359,15 +5359,18 @@ impl Leaves {
                 }
             }
             // MySQL and MariaDB commit the open transaction before these
-            // run, and `LOCK TABLES` and `UNLOCK TABLES` do as well.
-            Statement::LockTables { .. } | Statement::UnlockTables
-                if implicitly_commits(engine) =>
-            {
+            // run, and `LOCK TABLES` does as well.
+            Statement::LockTables { .. } if implicitly_commits(engine) => {
                 self.settings = true;
                 self.transaction = Some(false);
             }
+            // `UNLOCK TABLES` commits only where `LOCK TABLES` took a lock,
+            // which nothing here can see: read as ending nothing, so a
+            // transaction it may have ended is still read as open, the side
+            // an idle close cannot lose work on.
             Statement::Use(_)
             | Statement::LockTables { .. }
+            | Statement::UnlockTables
             | Statement::Pragma { is_eq: true, .. } => self.settings = true,
             Statement::CreateTable(table) => {
                 self.settings |= table.temporary || table.name.to_string().starts_with('#');
@@ -6321,7 +6324,7 @@ mod tests {
                 "CREATE INDEX i ON t (a)",
                 "RENAME TABLE t TO u",
                 "LOCK TABLES t WRITE",
-                "UNLOCK TABLES",
+                "LOCK TABLES t WRITE; UNLOCK TABLES",
                 "GRANT SELECT ON d.* TO 'ana'@'%'",
                 "INSERT INTO t VALUES (1); CREATE TABLE u (id INT)",
             ] {
@@ -6332,6 +6335,9 @@ mod tests {
                 );
             }
             for sql in [
+                // It commits only where `LOCK TABLES` took a lock, which an
+                // open transaction may never have.
+                "UNLOCK TABLES",
                 "CREATE TEMPORARY TABLE u (id INT)",
                 "DROP TEMPORARY TABLE u",
                 "INSERT INTO t VALUES (1)",
