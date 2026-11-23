@@ -523,14 +523,16 @@ fn read_names_for_picker(
     databases: bool,
     schemas: bool,
 ) -> PickerNames {
-    let databases = databases.then(|| connection.catalog_databases(engine));
+    // A failed read inside the user's transaction fails the transaction on
+    // Postgres, so both are read on another session, and one that cannot be
+    // had fails them rather than fall back to the user's.
+    let reader = match in_transaction {
+        true => connection.apart(),
+        false => Ok(connection),
+    };
+    let databases = databases.then(|| reader.clone()?.catalog_databases(engine));
     let schemas = schemas.then(|| {
-        // A failed read inside the user's transaction fails the
-        // transaction on Postgres, so it is read on another session.
-        let reader = match in_transaction {
-            true => connection.apart()?,
-            false => connection.clone(),
-        };
+        let reader = reader?;
         let mut catalog = reader.catalog(&Shown::everything())?;
         // A schema holding only a routine or a sequence is drawn by the tree
         // after its merge; a list without it would offer no row to tick and a
@@ -1363,6 +1365,31 @@ mod tests {
         assert!(listed.contains(&"main".to_string()));
         assert!(listed.contains(&"only_seq".to_string()));
         assert_eq!(listed, drawn);
+    }
+
+    /// Inside the user's transaction neither listing goes on its session: a
+    /// failed read there would fail the transaction, so one already failed
+    /// stands in for it here and both still list.
+    #[test]
+    fn the_picker_lists_beside_the_users_transaction() {
+        use crate::db::{
+            CancelToken, Connection, ConnectionConfig, DUCKDB_IN_MEMORY, Engine, Fetch,
+        };
+
+        let connection =
+            Connection::open(ConnectionConfig::duckdb(DUCKDB_IN_MEMORY.to_string(), 0)).unwrap();
+        let run = |sql| connection.query(sql, &CancelToken::default(), Fetch::default());
+        run("CREATE TABLE t (id INTEGER)").unwrap();
+        run("BEGIN").unwrap();
+        run("SELECT * FROM missing").unwrap_err();
+        assert!(run("SELECT 1").is_err(), "the transaction failed");
+
+        let (databases, schemas) =
+            read_names_for_picker(connection.clone(), Engine::DuckDb, true, true, true);
+
+        databases.expect("asked for").expect("should list");
+        let schemas = schemas.expect("asked for").expect("should list");
+        assert!(schemas.contains(&"main".to_string()));
     }
 
     /// The picker's tick and the filter's hide are one comparison: Greek
