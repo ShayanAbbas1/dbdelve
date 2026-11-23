@@ -547,6 +547,32 @@ struct Listed<'a> {
     engine: &'static str,
 }
 
+/// The `list_connections` answer: the JSON array of `visible`, held to the
+/// reply budget as every other answer is, since a name has no length limit.
+/// When they do not all fit it is an object instead, the connections that fit
+/// and how many were left out, so the agent is told rather than handed a list
+/// it would take for the whole.
+fn listed_text(visible: &[Listed]) -> String {
+    let encoded = |listed: &[Listed]| serde_json::to_string(listed).unwrap_or_default();
+    let whole = encoded(visible);
+    if whole.len() <= crate::agent::result::RESULT_BUDGET {
+        return whole;
+    }
+    let mut fit = visible.len();
+    loop {
+        let text = serde_json::json!({
+            "connections": visible[..fit],
+            "omitted": visible.len() - fit,
+            "note": "Not every connection fits in one answer: their names are too long.",
+        })
+        .to_string();
+        if text.len() <= crate::agent::result::RESULT_BUDGET || fit == 0 {
+            return text;
+        }
+        fit -= 1;
+    }
+}
+
 /// Why a profile name did not resolve for an agent. Two answers only, and
 /// neither echoes the name asked for: the text goes back to the agent as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1378,9 +1404,7 @@ impl Workspace {
                         engine: profile.config.engine().as_str(),
                     })
                     .collect();
-                // Names and engine spellings always serialize; an empty list
-                // is what the impossible case would say.
-                let text = serde_json::to_string(&visible).unwrap_or_else(|_| "[]".to_string());
+                let text = listed_text(&visible);
                 // The caller may have hung up, and then nobody reads this.
                 let _ = reply.send(Reply {
                     status: Status::Executed,
@@ -1810,6 +1834,38 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_connection_list_past_the_budget_says_what_it_left_out() {
+        use crate::agent::result::RESULT_BUDGET;
+
+        let short = super::Listed {
+            name: "Orders",
+            engine: "sqlite",
+        };
+        assert_eq!(
+            super::listed_text(&[short]),
+            r#"[{"name":"Orders","engine":"sqlite"}]"#
+        );
+        let long = "n".repeat(RESULT_BUDGET / 3);
+        let many: Vec<_> = (0..5)
+            .map(|_| super::Listed {
+                name: &long,
+                engine: "postgres",
+            })
+            .collect();
+        let text = super::listed_text(&many);
+        assert!(text.len() <= RESULT_BUDGET, "{}", text.len());
+        let read: serde_json::Value = serde_json::from_str(&text).expect("the answer is JSON");
+        assert_eq!(read["connections"].as_array().map(Vec::len), Some(2));
+        assert_eq!(read["omitted"], 3);
+        let huge = "n".repeat(RESULT_BUDGET * 2);
+        let text = super::listed_text(&[super::Listed {
+            name: &huge,
+            engine: "postgres",
+        }]);
+        assert!(text.len() <= RESULT_BUDGET, "{}", text.len());
+    }
+
     use super::*;
 
     fn corpus() -> [&'static str; 6] {
