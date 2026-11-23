@@ -600,8 +600,12 @@ MySQL, MariaDB, SQL Server and Snowflake have no pin. A stale list costs one
 approval, and a wrongly listed name is the breach.
 
 At Read-only an unlisted call runs. Where the engine has a hold the server stops
-what the call writes. Where it has none (SQLite, Turso, DuckDB, Snowflake, SQL
-Server) that rests on the premise that a function there cannot write.
+what the call writes. SQLite, Turso and DuckDB have no server hold, but an
+agent's read is held all the same by how its connection is opened: SQLite and
+DuckDB open the file read-only and Turso sets `PRAGMA query_only`, so a write
+the call attempts fails on the file. Snowflake and SQL Server have no hold of
+either kind: there the classification alone stands between a call and a write,
+on the premise that a function there cannot write.
 
 What the text cannot show is accepted:
 
