@@ -564,7 +564,6 @@ trim
 trim_array
 trim_scale
 trunc
-try_cast
 ts_debug
 ts_delete
 ts_filter
