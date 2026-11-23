@@ -637,10 +637,21 @@ const CHARSETS: &[&str] = &[
 ];
 
 /// The statement that assigns a setting, spelled the way the engine's own
-/// dialect assigns one.
+/// dialect assigns one. SQL Server's switches take `ON`; the ones that take a
+/// number, a name or a level are given one the server accepts.
 pub(crate) fn set_statement(engine: Engine, name: &str) -> String {
     match engine {
-        Engine::SqlServer => format!("SET {name} ON"),
+        Engine::SqlServer => {
+            let value = match name {
+                "rowcount" | "textsize" | "lock_timeout" => "10",
+                "datefirst" => "1",
+                "language" => "us_english",
+                "dateformat" => "mdy",
+                "deadlock_priority" => "LOW",
+                _ => "ON",
+            };
+            format!("SET {name} {value}")
+        }
         _ => format!("SET {name} = 1"),
     }
 }

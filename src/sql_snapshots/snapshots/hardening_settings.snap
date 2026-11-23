@@ -1005,19 +1005,19 @@ source: src/sql_snapshots.rs
 [mssql] charset: SET NAMES utf16 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [mssql] allow-listed: SET nocount ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL nocount = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET rowcount ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET rowcount 10 => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL rowcount = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET textsize ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET textsize 10 => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL textsize = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET language ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET language us_english => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL language = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET dateformat ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET dateformat mdy => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL dateformat = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET datefirst ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET datefirst 1 => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL datefirst = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET deadlock_priority ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET deadlock_priority LOW => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL deadlock_priority = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] allow-listed: SET lock_timeout ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[mssql] allow-listed: SET lock_timeout 10 => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL lock_timeout = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [mssql] allow-listed: SET arithabort ON => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] allow-listed, server-wide: SET GLOBAL arithabort = 1 => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
