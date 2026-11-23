@@ -7469,23 +7469,29 @@ mod tests {
                 Fetch::default(),
             )
             .unwrap_or_else(|error| panic!("{at}: `{create}` failed: {error}"));
-        Scratch(
-            maintenance,
-            format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
-        )
+        Scratch(maintenance, name.to_string())
     }
 
-    /// Drops the scratch database when the test ends, panicking or not.
-    /// The result is ignored: the test's own failure is the one worth
-    /// reading.
+    /// Drops the scratch database when the test ends, panicking or not, after
+    /// ending every other session on it. Spelled for PostgreSQL 12, which the
+    /// version-selected probes still run on: `DROP DATABASE ... WITH (FORCE)`
+    /// is 13 and later. The results are ignored: the test's own failure is
+    /// the one worth reading.
     struct Scratch<'a>(&'a crate::db::Connection, String);
     impl Drop for Scratch<'_> {
         fn drop(&mut self) {
-            let _ = self.0.query(
-                &self.1,
-                &crate::db::CancelToken::default(),
-                Fetch::default(),
-            );
+            let name = &self.1;
+            for sql in [
+                format!(
+                    "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity \
+                     WHERE datname = '{name}' AND pid <> pg_catalog.pg_backend_pid()"
+                ),
+                format!("DROP DATABASE IF EXISTS {name}"),
+            ] {
+                let _ = self
+                    .0
+                    .query(&sql, &crate::db::CancelToken::default(), Fetch::default());
+            }
         }
     }
 
@@ -7509,7 +7515,7 @@ mod tests {
 
         let maintenance = live_profile();
         // Declared after `maintenance` and before the scratch connection, so
-        // it drops between them: the drop's FORCE ends the scratch session.
+        // it drops between them, after the scratch connection has closed.
         let _scratch = create_scratch(&maintenance, &scratch_db, at);
         let scratch = Any::Postgres(
             Connection::open(&ServerConfig {
@@ -7873,7 +7879,7 @@ mod tests {
         }
 
         // Declared after `maintenance` and before the scratch connection, so
-        // it drops between them: the drop's FORCE ends the scratch session.
+        // it drops between them, after the scratch connection has closed.
         let _scratch = create_scratch(&maintenance, &scratch_db, at);
         let scratch = Any::Postgres(
             Connection::open(&ServerConfig {
