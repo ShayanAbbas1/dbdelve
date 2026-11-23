@@ -12209,9 +12209,21 @@ fn an_approval_after_its_caller_hung_up_starts_nothing(cx: &mut TestAppContext) 
         );
 
         // The caller leaves and the window, not being run, does not hear it:
-        // the person's click lands in the moment between the two.
+        // the person's click lands in the moment between the two. The socket's
+        // watcher marks the call's flag on its own thread; it is polled
+        // without driving the window, so the click comes only once it is set.
+        let gone = workspace.read_with(cx, |workspace, _| {
+            workspace.agent.calls[0].approval.gone.clone()
+        });
         drop(client);
-        std::thread::sleep(Duration::from_millis(100));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !gone.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher never marked the caller gone"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(
             pending_calls(&workspace, cx),
             [id],
