@@ -1706,7 +1706,15 @@ impl Workspace {
         let Some(index) = self.agent.calls.iter().position(|call| call.id == id) else {
             // A running write ends by its own result alone: a hangup is noted
             // for the audit and nothing else reaches it.
-            if let Some(write) = self.agent.writes.iter_mut().find(|write| write.id == id) {
+            // Only a write of this bridge: one that outlived an earlier one
+            // may carry the same id.
+            let session = self.agent.session;
+            if let Some(write) = self
+                .agent
+                .writes
+                .iter_mut()
+                .find(|write| write.id == id && write.session == session)
+            {
                 write.requester_gone |= status == Status::Cancelled;
                 return true;
             }

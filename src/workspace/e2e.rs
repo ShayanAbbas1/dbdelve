@@ -39456,6 +39456,115 @@ fn a_hangup_the_window_has_not_heard_still_marks_a_running_write_as_gone(cx: &mu
     });
 }
 
+/// A write that answers `ran <sql>` after as many seconds of the test clock as
+/// the statement's last word says.
+#[cfg(unix)]
+fn held_by_its_last_word(
+    executor: &gpui::BackgroundExecutor,
+    _: ConnectionConfig,
+    _: String,
+    sql: String,
+    _: Engine,
+) -> gpui::Task<super::agent_write::Wrote> {
+    let seconds = sql
+        .rsplit(' ')
+        .next()
+        .and_then(|word| word.parse().ok())
+        .unwrap_or(0);
+    let executor = executor.clone();
+    executor.clone().spawn(async move {
+        executor
+            .timer(std::time::Duration::from_secs(seconds))
+            .await;
+        super::agent_write::Wrote::Done {
+            hidden: Vec::new(),
+            result: Ok(format!("ran {sql}")),
+        }
+    })
+}
+
+/// An update approved in bridge `session` as call `id`, held for `hold` seconds.
+#[cfg(unix)]
+fn approved_in_session(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    session: u64,
+    id: crate::agent::CallId,
+    hold: u64,
+) -> std::sync::mpsc::Receiver<crate::agent::Reply> {
+    workspace.update(cx, |workspace, _| workspace.agent.session = session);
+    let (reply, answers) = std::sync::mpsc::sync_channel(1);
+    let call = crate::agent::Inbound::Call {
+        id,
+        tool: crate::agent::tools::Tool::ExecuteSql,
+        connection: Some("Orders".to_string()),
+        args: crate::agent::CallArgs {
+            sql: Some(format!("{UPDATE_ONE} -- {hold}")),
+            ..Default::default()
+        },
+        reply,
+        gone: Default::default(),
+    };
+    workspace.update(cx, |workspace, cx| workspace.on_agent_message(call, cx));
+    approve_front(cx);
+    answers
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn writes_of_two_bridges_with_one_id_each_end_as_their_own(cx: &mut TestAppContext) {
+    use crate::agent::{CallId, Inbound};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
+        workspace.update(cx, |workspace, _| {
+            workspace.agent.write_runner = Some(held_by_its_last_word)
+        });
+        // The earlier bridge's write lands last, then first.
+        for (id, earlier, later) in [(CallId(9001), 20, 10), (CallId(9002), 10, 20)] {
+            let (old, new) = (id.0 * 10, id.0 * 10 + 1);
+            let old_answers = approved_in_session(&workspace, cx, old, id, earlier);
+            let new_answers = approved_in_session(&workspace, cx, new, id, later);
+
+            // The later bridge's caller hangs up: only its own write hears it.
+            workspace.update(cx, |workspace, cx| {
+                workspace.on_agent_message(Inbound::Hangup { id }, cx)
+            });
+            let gone: Vec<(u64, bool)> = workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .agent
+                    .writes
+                    .iter()
+                    .map(|write| (write.session, write.requester_gone))
+                    .collect()
+            });
+            assert_eq!(gone, [(old, false), (new, true)]);
+
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(30));
+            settle(cx);
+            assert!(writes_running(&workspace, cx).is_empty());
+            for (answers, hold) in [(old_answers, earlier), (new_answers, later)] {
+                assert_eq!(
+                    answers.try_recv().expect("each write answered").text,
+                    format!("ran {UPDATE_ONE} -- {hold}")
+                );
+            }
+            let mut outcomes: Vec<_> = audit_of(id)
+                .into_iter()
+                .filter(|line| line["phase"] == "outcome")
+                .map(|line| (line["session"].as_u64(), line["requester_gone"].as_bool()))
+                .collect();
+            outcomes.sort();
+            assert_eq!(
+                outcomes,
+                [(Some(old), Some(false)), (Some(new), Some(true))]
+            );
+        }
+        quit(workspace, cx);
+    });
+}
+
 #[cfg(unix)]
 #[gpui::test]
 fn the_kill_switch_rejects_waiting_approvals_and_lets_a_running_write_finish(

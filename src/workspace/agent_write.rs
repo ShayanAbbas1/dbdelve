@@ -73,7 +73,7 @@ pub(crate) struct Writing {
     /// The bridge session its `started` line was written in. The write
     /// outlives a disconnect, and a bridge started meanwhile numbers its calls
     /// from zero again, so its `outcome` line must name the same session.
-    session: u64,
+    pub(super) session: u64,
     verdict: Option<AuditVerdict>,
     /// The caller hung up while the window already knew, as a `Hangup` that
     /// found this write running said. It is not cancelled for that.
@@ -243,13 +243,16 @@ impl Workspace {
     ) {
         let engine = config.engine();
         let run = self.agent.write_runner.unwrap_or(open_for_write);
+        let session = self.agent.session;
         let work = cx.spawn({
             let sql = sql.clone();
             async move |workspace, cx| {
                 let wrote = run(cx.background_executor(), config, profile_id, sql, engine).await;
                 // The window may have closed meanwhile, and then nobody is
                 // left to answer.
-                let _ = workspace.update(cx, |workspace, cx| workspace.finish_write(id, wrote, cx));
+                let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.finish_write(id, session, wrote, cx)
+                });
             }
         });
         self.agent.writes.push(Writing {
@@ -259,7 +262,7 @@ impl Workspace {
             reply,
             arrived,
             sql,
-            session: self.agent.session,
+            session,
             verdict,
             requester_gone: false,
             gone,
@@ -268,9 +271,16 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The one door an approved write ends through: its own result.
-    fn finish_write(&mut self, id: CallId, wrote: Wrote, cx: &mut Context<Self>) {
-        let Some(index) = self.agent.writes.iter().position(|write| write.id == id) else {
+    /// The one door an approved write ends through: its own result. Found by
+    /// its session as well as its id, since a write outlives its bridge and a
+    /// later bridge numbers its calls from zero again.
+    fn finish_write(&mut self, id: CallId, session: u64, wrote: Wrote, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .agent
+            .writes
+            .iter()
+            .position(|write| write.id == id && write.session == session)
+        else {
             return;
         };
         let write = self.agent.writes.remove(index);
