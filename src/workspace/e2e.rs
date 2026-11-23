@@ -7119,6 +7119,34 @@ fn the_palette_opens_the_schema_export_through_the_schema_picker(cx: &mut TestAp
     });
 }
 
+/// A switch made in the session (DuckDB) drops every landing of the old
+/// generation, so a transaction statement still marked in flight would keep
+/// every other tab's Commit waiting on it until a reconnect.
+#[gpui::test]
+fn a_database_switch_in_the_session_forgets_the_transaction_statement_in_flight(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.transaction_in_flight = Some(profile.session.active);
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(workspace.set_database("other".into(), window, cx));
+            })
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_eq!(profile.config.database(), Some("other"));
+            assert_eq!(profile.transaction_in_flight, None);
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
     cx: &mut TestAppContext,

@@ -1978,6 +1978,10 @@ impl Workspace {
         profile.drop_sessions();
         profile.catalog = CatalogState::Loading;
         profile.session.structure_requests.clear();
+        // A transaction statement still out lands on the old generation and
+        // is dropped, so nothing would ever clear what it marked, and every
+        // other tab's transaction control would wait on it until a reconnect.
+        profile.transaction_in_flight = None;
         let id = profile.id.clone();
         connection.set_database(profile.config.database_name().as_deref());
         let applying = connection.clone();
