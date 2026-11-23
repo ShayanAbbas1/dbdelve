@@ -1581,6 +1581,7 @@ impl Workspace {
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
         let shown = profile.shown();
+        let asked = shown.clone();
         let Some(listing) = self.profile_mut().map(Profile::start_listing) else {
             return;
         };
@@ -1593,9 +1594,15 @@ impl Workspace {
                 let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
-                // Overtaken by a listing started since, perhaps under another
-                // filter: that one's answer is the one to show.
-                if !profile.latest_listing(listing) {
+                // Overtaken by a listing started since, which a catalog or a
+                // refresh landing starts as readily as a second press. Under
+                // the same filter this answer is as good as that one's, and
+                // the press still wants its palette; under another, it is
+                // asked again, so the keypress is never lost.
+                if !profile.latest_listing(listing) && profile.shown() != asked {
+                    if workspace.profile().is_some_and(|profile| profile.id == id) {
+                        workspace.select_database(&SelectDatabase, window, cx);
+                    }
                     return;
                 }
                 match result {

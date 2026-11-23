@@ -2232,6 +2232,43 @@ fn a_database_listing_overtaken_by_a_later_one_is_dropped(cx: &mut TestAppContex
     });
 }
 
+/// Select Database shares the listing counter with the tree's listing,
+/// which a catalog or refresh landing starts while its fetch is out: the
+/// press still opens the palette, over the filter as it is when it opens.
+#[gpui::test]
+fn select_database_overtaken_by_another_listing_still_opens_the_palette(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_database(&crate::actions::SelectDatabase, window, cx);
+            workspace.profile_mut().unwrap().start_listing();
+        });
+        settle(cx);
+        let databases = palette_labels(&workspace, cx);
+        assert!(
+            databases.iter().any(|label| label == "other"),
+            "the same filter's answer opens the palette: {databases:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_database(&crate::actions::SelectDatabase, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.include.databases = vec!["e2e".to_string()];
+            profile.start_listing();
+        });
+        settle(cx);
+        let databases = palette_labels(&workspace, cx);
+        assert!(
+            databases.iter().any(|label| label == "e2e")
+                && !databases.iter().any(|label| label == "other"),
+            "asked again under the filter saved since: {databases:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn select_database_lists_a_new_database_in_the_connections_tree(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

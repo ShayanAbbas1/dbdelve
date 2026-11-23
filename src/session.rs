@@ -153,7 +153,9 @@ pub(crate) struct Profile {
     /// How many listings of [`Self::databases`] have been started. One lands
     /// only if none started after it ([`Self::start_listing`]): a later one
     /// was asked under the filter as it is now, and an earlier one may have
-    /// been asked under one since changed.
+    /// been asked under one since changed. Select Database's lands under an
+    /// unchanged filter all the same, and asks again under a changed one, so
+    /// its keypress always ends in the palette.
     pub(crate) listings: u64,
     /// The server's logins and roles, read for the connections tree's Users
     /// and roles row and its tab.
