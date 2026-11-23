@@ -5838,16 +5838,33 @@ mod tests {
     #[test]
     #[ignore = "requires the compose databases"]
     fn live_the_side_session_sizes_opens_is_read_only() {
+        /// Drops the probe table when the test ends, panicking or not; armed
+        /// only once the table exists, so it never drops one it did not make.
+        struct Probe<'a>(&'a Connection, String);
+        impl Drop for Probe<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.query(
+                    &format!("DROP TABLE IF EXISTS {}", self.1),
+                    Fetch::default(),
+                );
+            }
+        }
+
+        // Named for this run, so two runs at once never replace or drop each
+        // other's table.
+        let table = scratch_name("dbdelve_side_probe");
         let plain = Connection::open(&live_config()).expect("connection should open");
         plain
             .query(
-                "DROP TABLE IF EXISTS dbdelve_side_probe; \
-                 CREATE TABLE dbdelve_side_probe (x integer); \
-                 INSERT INTO dbdelve_side_probe SELECT generate_series(1, 5); \
-                 ANALYZE dbdelve_side_probe",
+                &format!(
+                    "CREATE TABLE {table} (x integer); \
+                     INSERT INTO {table} SELECT generate_series(1, 5); \
+                     ANALYZE {table}"
+                ),
                 Fetch::default(),
             )
             .expect("the probe table should be created");
+        let _probe = Probe(&plain, table.clone());
 
         let held = Connection::open(&ServerConfig {
             read_only: true,
@@ -5860,10 +5877,7 @@ mod tests {
             .expect("the setting should read");
         assert_eq!(setting.rows, vec![vec![Some("on".to_string())]]);
         let refusal = side
-            .query(
-                "INSERT INTO dbdelve_side_probe VALUES (1)",
-                Fetch::default(),
-            )
+            .query(&format!("INSERT INTO {table} VALUES (1)"), Fetch::default())
             .expect_err("a held side session must refuse a write");
         assert!(
             refusal.message.contains("read-only"),
@@ -5874,18 +5888,15 @@ mod tests {
             .sizes()
             .expect("sizes should load on a held connection");
         assert!(
-            sizes["public"].contains_key("dbdelve_side_probe"),
+            sizes["public"].contains_key(&table),
             "the hold must not empty the estimates"
         );
 
         // The seeded rows are all there is: the refused write did not land.
         let count = plain
-            .query("SELECT count(*) FROM dbdelve_side_probe", Fetch::default())
+            .query(&format!("SELECT count(*) FROM {table}"), Fetch::default())
             .expect("the plain connection should read");
         assert_eq!(count.rows, vec![vec![Some("5".to_string())]]);
-        plain
-            .query("DROP TABLE dbdelve_side_probe", Fetch::default())
-            .expect("the probe table should drop");
     }
 
     #[test]
