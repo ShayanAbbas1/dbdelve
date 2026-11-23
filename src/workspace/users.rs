@@ -20,6 +20,10 @@ use crate::users_view::{Loaded, UsersEvent, UsersView, reports_csv};
 
 use super::exports::{choose_path, could_not_write, write_replacing};
 
+/// Refuses a second role change while one is running on the tab.
+pub(super) const ROLE_CHANGE_RUNNING: &str =
+    "A role change is still running. Wait for it, or cancel it, first.";
+
 /// What the role form is for.
 #[derive(Clone)]
 pub(crate) enum RoleFormKind {
@@ -315,7 +319,7 @@ impl Workspace {
                 } else {
                     "Deactivate login"
                 };
-                self.review_role_change(id, title, roles::set_login(name, *login), window, cx);
+                self.review_from_tab(id, title, roles::set_login(name, *login), window, cx);
             }
             UsersEvent::Export => self.export_reports(id, cx),
         }
@@ -591,55 +595,64 @@ impl Workspace {
         }
     }
 
-    /// The form's Review: its statement goes up for review, the form closes.
+    /// The form's Review: its statement goes up for review, and the form
+    /// closes once it has. A change refused on the way keeps the form, what
+    /// was typed in it included, and says why on it.
     pub(crate) fn submit_role_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.role_form.as_ref() else {
             return;
         };
-        match self.role_form_statement(form, cx) {
-            Ok((sql, title)) => {
-                let id = form.profile.clone();
-                self.role_form = None;
-                self.review_role_change(&id, title, sql, window, cx);
-            }
+        let id = form.profile.clone();
+        let reviewed = match self.role_form_statement(form, cx) {
+            Ok((sql, title)) => self.review_role_change(&id, title, sql, window, cx),
+            Err(message) => Err(message),
+        };
+        match reviewed {
+            Ok(()) => self.role_form = None,
             Err(message) => {
                 if let Some(form) = self.role_form.as_mut() {
                     form.error = Some(message);
                 }
-                cx.notify();
             }
         }
+        cx.notify();
     }
 
     /// Put a role change up for review over `id`'s Users and roles tab, once
-    /// the gate has read it as one.
-    fn review_role_change(
+    /// the gate has read it as one; or why it was not.
+    pub(super) fn review_role_change(
         &mut self,
         id: &str,
         title: &'static str,
         sql: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), String> {
         let Some(tab) = self.users_tab_of(id) else {
-            return;
+            return Err("The Users and roles tab is closed.".into());
         };
+        // One change at a time: the slot holds the running one's Cancel and
+        // its landing, which a second would overwrite.
+        let running = (self.profiles.iter())
+            .find(|profile| profile.id == id)
+            .is_some_and(|profile| profile.session.running(Tab::Object(tab)));
+        if running {
+            return Err(ROLE_CHANGE_RUNNING.into());
+        }
         if !self.make_front(id, cx) {
-            return;
+            return Err("The connection is not open.".into());
         }
         // The gate every statement this tab writes passes (`AGENTS.md` rule
         // 2): failing it is a bug in dbdelve, not something the user typed.
         if !sql::is_generated_role_change(self.engine(), &sql) {
-            self.note(
+            return Err(
                 "dbdelve refused to run a statement it wrote itself: it is not a role change."
                     .into(),
-                cx,
             );
-            return;
         }
         self.activate_tab(Tab::Object(tab), window, cx);
         if !self.review_slot_free(Tab::Object(tab), true, window, cx) {
-            return;
+            return Err("Run or close the statement up for review first.".into());
         }
         if let Some(profile) = self.profile_mut() {
             // What an earlier change left in the slot is not this one's.
@@ -661,6 +674,22 @@ impl Workspace {
                 ran_on: None,
             });
             cx.notify();
+        }
+        Ok(())
+    }
+
+    /// A change asked for from the tab rather than the form, said in the
+    /// status bar when it is refused.
+    fn review_from_tab(
+        &mut self,
+        id: &str,
+        title: &'static str,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(message) = self.review_role_change(id, title, sql, window, cx) {
+            self.note(message, cx);
         }
     }
 

@@ -6250,6 +6250,89 @@ fn a_role_change_whose_users_tab_closed_under_it_leaves_the_roles_to_be_read_aga
 }
 
 #[gpui::test]
+fn a_second_role_change_is_refused_while_one_runs_and_the_first_keeps_its_slot(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            let id = profile.id.clone();
+            let cancel = CancelToken::alongside();
+            let (state, _) = profile.session.slot(Tab::Object(tab)).unwrap();
+            *state = QueryState::Running {
+                started: std::time::Instant::now(),
+                cancelling: None,
+                cancel: cancel.clone(),
+            };
+            let refused = workspace.review_role_change(
+                &id,
+                "Deactivate login",
+                crate::db::roles::set_login("ana", false),
+                window,
+                cx,
+            );
+            assert_eq!(refused, Err(super::users::ROLE_CHANGE_RUNNING.into()));
+            let profile = workspace.profile_mut().unwrap();
+            assert!(profile.session.apply_review.is_none());
+            let (state, _) = profile.session.slot(Tab::Object(tab)).unwrap();
+            assert!(
+                matches!(state, QueryState::Running { cancel: kept, .. } if kept.is(&cancel)),
+                "the running change keeps its Cancel"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_refused_role_form_stays_up_with_what_was_typed_and_says_why(cx: &mut TestAppContext) {
+    use crate::db::roles::{Role, Roles};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            users_tab_on(workspace, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles = crate::session::RolesState::Loaded(std::sync::Arc::new(Roles {
+                roles: vec![Role {
+                    name: "root".into(),
+                    login: true,
+                    superuser: true,
+                    password_expires: None,
+                    expired: false,
+                    connection_limit: None,
+                    has_password: None,
+                    last_login: None,
+                }],
+                ..Roles::default()
+            }));
+            let id = profile.id.clone();
+            workspace.open_role_form(&id, super::RoleFormKind::New { login: true }, window, cx);
+            let form = workspace.role_form.as_ref().unwrap();
+            let (name, member_of) = (form.name.clone(), form.member_of.clone());
+            name.update(cx, |input, cx| input.set_value("ana", window, cx));
+            member_of.update(cx, |input, cx| input.set_value("root", window, cx));
+            workspace.submit_role_form(window, cx);
+            let form = workspace.role_form.as_ref().expect("the form stays up");
+            let error = form.error.clone().unwrap_or_default();
+            assert!(error.contains("superuser"), "{error}");
+            assert_eq!(form.name.read(cx).value().to_string(), "ana");
+
+            // Refused further on, by the gate, which reads no role change on
+            // SQLite: still up, still holding what was typed.
+            member_of.update(cx, |input, cx| input.set_value("", window, cx));
+            workspace.submit_role_form(window, cx);
+            let form = workspace.role_form.as_ref().expect("the form stays up");
+            let error = form.error.clone().unwrap_or_default();
+            assert!(error.contains("not a role change"), "{error}");
+            assert_eq!(form.name.read(cx).value().to_string(), "ana");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
