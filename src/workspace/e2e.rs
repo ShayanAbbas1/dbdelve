@@ -29769,6 +29769,40 @@ fn a_relation_export_from_a_row_of_a_database_the_connection_left_is_refused(
     });
 }
 
+/// A MongoDB row's collection is read from whichever database the session
+/// is on, so its rows name their database as a Postgres row's do, and an
+/// export a switch overtook is refused; MySQL's rows name theirs in the
+/// schema, and carry none.
+#[gpui::test]
+fn the_rows_of_a_database_holding_its_objects_name_their_database(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let server = |id: &str, engine: &str| {
+            format!(
+                "[[profiles]]\nid = \"{id}\"\nname = \"{id}\"\nhost = \"db.internal\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"{engine}\"\n"
+            )
+        };
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &["mongodb", "postgres", "mysql"]
+                .map(|engine| server(engine, engine))
+                .concat(),
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let listed = |id: &str| {
+                (workspace.profiles.iter())
+                    .find(|profile| profile.id == id)
+                    .unwrap()
+                    .listed_database()
+            };
+            assert_eq!(listed("mongodb").as_deref(), Some("d"));
+            assert_eq!(listed("postgres").as_deref(), Some("d"));
+            assert_eq!(listed("mysql"), None);
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_schema_export_from_a_database_the_connection_left_is_refused(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

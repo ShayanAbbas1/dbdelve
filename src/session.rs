@@ -554,12 +554,15 @@ impl Profile {
     }
 
     /// The database the rows of the profile's own catalog are listed under,
-    /// as the connections tree names it: the session's, where the target
-    /// keeps schemas inside a database, and none where the catalog spans the
-    /// databases or is the one it holds. An action handed it asks again when
-    /// it runs, so one a database switch overtook is refused.
+    /// as the connections tree names it: the session's, wherever the tree
+    /// lists the server's other databases beside it, and none where the
+    /// catalog spans the databases or there is no other. An action handed it
+    /// asks again when it runs, so one a database switch overtook is refused.
     pub(crate) fn listed_database(&self) -> Option<String> {
-        (self.config.target().levels() == Levels::DatabaseThenSchema)
+        self.config
+            .target()
+            .levels()
+            .lists_other_databases()
             .then(|| self.active_database())
             .flatten()
     }
