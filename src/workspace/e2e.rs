@@ -6269,6 +6269,24 @@ fn users_tab_on(
 }
 
 #[gpui::test]
+fn a_users_and_roles_tab_is_never_saved_with_the_session(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            workspace.activate_tab(Tab::Object(tab), window, cx);
+            let stored = workspace.profile().unwrap().stored(cx);
+            assert!(
+                !(stored.open_objects.iter())
+                    .any(|object| object.name == crate::sidebar::USERS_AND_ROLES),
+                "it is read again from the server, never restored"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_role_change_whose_users_tab_closed_under_it_leaves_the_roles_to_be_read_again(
     cx: &mut TestAppContext,
 ) {
