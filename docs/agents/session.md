@@ -384,7 +384,14 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   its `started` line is the trace it leaves. Hiding or removing a profile
   rejects the calls waiting on it, and the kill switch answers every pending
   call before it drops the bridge, so a waiting client reads a whole answer and
-  not a bare end. The wire speaks version 3; a shim already running from an
+  not a bare end. The bridge, and the serving lock with it, goes only once
+  `agent_access = false` is saved; a save that fails keeps both, refuses every
+  call that arrives, and says so, and the kill switch retries the save. A read
+  waiting its turn on a lane is checked again when it is about to start
+  (`start_next`): one whose profile was hidden, here or in another window's
+  saved file, one admitted for a target the profile no longer reaches, and one
+  whose gate verdict changed with the mode are answered and never sent; a
+  running read is left to finish. The wire speaks version 3; a shim already running from an
   older build keeps speaking version 2 until its agent restarts it, and is
   refused. The titlebar mark has three states and is the same in all three
   titlebars: nothing while no bridge runs, the MCP logo dim while one listens
