@@ -2804,6 +2804,27 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
+    /// `pg_sleep` stays on the built-in list, so an agent's call to it runs
+    /// unasked: DuckDB defines it as a macro over `sleep_ms`, which checks for
+    /// an interrupt every 100 ms (`ThreadUtil::SleepMs`), so the statement
+    /// timeout ends it as it ends any other runaway. It writes nothing and
+    /// holds the agent's connection no longer than the timeout allows.
+    #[test]
+    fn a_statement_timeout_stops_pg_sleep() {
+        assert!(
+            include_str!("functions/duckdb.txt")
+                .lines()
+                .any(|name| name == "pg_sleep")
+        );
+        let connection = Connection::open(IN_MEMORY, 1).unwrap();
+        let started = Instant::now();
+        let error = connection
+            .query("SELECT pg_sleep(60)", Fetch::default())
+            .unwrap_err();
+        assert_eq!(error.message, INTERRUPTED);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
     /// An apply whose limit ran out while another statement held the
     /// connection sends nothing, and its interrupt stops nothing of the
     /// statement it waited behind.
