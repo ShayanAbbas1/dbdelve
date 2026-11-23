@@ -11310,6 +11310,47 @@ fn a_grant_saved_for_another_target_is_not_taken_on(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+fn a_failed_save_keeps_the_hide_and_the_kill_switch_for_the_next(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_with_profiles(cx, &sqlite_profile("dev", "Dev", "agent_visible = true"));
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        list.settings
+            .as_mut()
+            .expect("the launch save wrote settings")
+            .agent_access = Some(true);
+        // A directory where the file goes: every write to it fails.
+        std::fs::remove_file(&path).expect("the file is removable");
+        std::fs::create_dir(&path).expect("the directory is creatable");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.agent.access_choice = Some(false);
+            workspace.set_agent_visible("dev", false, cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.agent.visibility_choices.contains("dev"));
+            assert_eq!(workspace.agent.access_choice, Some(false));
+        });
+
+        // The file comes back still granting both; the next save writes the
+        // two choices over it rather than taking its grant back on.
+        std::fs::remove_dir(&path).expect("the directory is removable");
+        store::save_profiles(&list).expect("the file is writable again");
+        workspace.update(cx, |workspace, cx| workspace.remember_profiles(cx));
+        assert!(!agent_visible(&workspace, cx, "dev"));
+        assert!(!saved_visible("dev"));
+        let saved = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        assert_eq!(saved.settings.and_then(|s| s.agent_access), Some(false));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.agent.visibility_choices.is_empty());
+            assert_eq!(workspace.agent.access_choice, None);
+        });
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }

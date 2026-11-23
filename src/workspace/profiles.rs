@@ -208,8 +208,11 @@ const TRANSACTION_BLOCKS_SWITCH: &str = "The database was not switched: a transa
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
+        // One read of the file: the flags it holds are the ones written, and
+        // the calls of every profile it hid are rejected, so no hide is
+        // written without its sweep.
         self.adopt_saved_visibility(cx);
-        match self.save_profiles(cx) {
+        match self.write_profiles(cx) {
             Ok(()) => self.profiles_unsaved = false,
             Err(message) => self.note(message, cx),
         }
@@ -236,18 +239,24 @@ impl Workspace {
     /// [`Self::remember_profiles`] does, for a caller with nowhere to say
     /// that it failed.
     pub(crate) fn save_profiles(&mut self, cx: &App) -> Result<(), String> {
+        // A quit has no call left to reject, since the bridge goes with the
+        // window, but it must still not write a stale flag over another
+        // window's choice.
+        self.read_saved_visibility();
+        self.write_profiles(cx)
+    }
+
+    /// The write both saves end in, with the visibility flags as the caller
+    /// last read them. This window's own pending choices, of visibility and of
+    /// access, are let go only once the file holds them: a failed write
+    /// leaves them for the next save to retry, so a hide is never lost to it.
+    fn write_profiles(&mut self, cx: &App) -> Result<(), String> {
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
         if self.store_unreadable {
             return Ok(());
         }
-        // [`Self::remember_profiles`] has already adopted these and rejected
-        // the calls of a profile hidden elsewhere. A quit has nothing left to
-        // reject, since the bridge goes with the window, but it must still not
-        // write a stale flag over another window's choice.
-        self.read_saved_visibility();
-        self.agent.visibility_choices.clear();
         let profiles = self
             .profiles
             .iter()
@@ -307,7 +316,10 @@ impl Workspace {
             settings: Some(settings),
             projects: self.projects.clone(),
             unavailable: self.unavailable.clone(),
-        })
+        })?;
+        self.agent.visibility_choices.clear();
+        self.agent.access_choice = None;
+        Ok(())
     }
 
     pub(crate) fn restore_profile(

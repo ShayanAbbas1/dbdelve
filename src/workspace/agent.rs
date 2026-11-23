@@ -41,11 +41,12 @@ pub(crate) struct AgentState {
     pub(crate) calls: Vec<PendingCall>,
     /// What this window's own access action decided and no save has written
     /// yet: `true` from turning access on, `false` from the kill switch. Set
-    /// by those two actions only, and taken by the next save, so it is the one
-    /// way this window changes `agent_access`.
+    /// by those two actions only, and cleared by the next save that writes
+    /// the file, so it is the one way this window changes `agent_access`.
     pub(crate) access_choice: Option<bool>,
     /// The profiles, by id, whose `agent_visible` this window changed and no
-    /// save has written yet. Every other profile's flag is the file's: see
+    /// save has written yet; a failed write keeps them. Every other profile's
+    /// flag is the file's: see
     /// [`Workspace::adopt_saved_visibility`].
     pub(crate) visibility_choices: HashSet<String>,
     /// The calls that have ended, newest first, at most [`AUDIT_CAP`].
@@ -1115,14 +1116,17 @@ impl Workspace {
     /// one of its two access actions made one, else whatever the file holds at
     /// this moment. Settings are written whole by whichever window saves, so a
     /// value remembered from launch would put back `true` over another
-    /// window's kill switch, or `false` over its turn-on.
+    /// window's kill switch, or `false` over its turn-on. The choice is read,
+    /// not taken: the save clears it only once the file holds it, so a failed
+    /// write leaves it for the next save.
     ///
     /// ponytail: the read and the write that follows are not one step across
     /// processes, so two windows saving within the same instant can still
     /// lose one of the two. The upgrade is a lock around the settings write.
-    pub(crate) fn agent_access_to_save(&mut self) -> Option<bool> {
-        let own = self.agent.access_choice.take();
-        own.or_else(|| self.saved_agent_access())
+    pub(crate) fn agent_access_to_save(&self) -> Option<bool> {
+        self.agent
+            .access_choice
+            .or_else(|| self.saved_agent_access())
     }
 
     /// Take on each profile's `agent_visible` as the file holds it now, except
