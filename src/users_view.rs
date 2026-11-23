@@ -291,7 +291,7 @@ impl UsersView {
             .py(px(14.))
             .border_b_1()
             .border_color(t.border)
-            .bg(t.surface)
+            // Chrome: no fill of its own, so a glass theme's frost shows.
             .child(
                 Icon::default()
                     .path(icon::USERS)
@@ -486,7 +486,7 @@ impl UsersView {
             .py(px(layout::SPACE_LG))
             .border_l_1()
             .border_color(t.border)
-            .bg(t.surface)
+            .bg(t.panel_glass())
             .debug_selector(|| "users-detail".into());
         let Some(role) = self.selected.as_deref().and_then(|name| roles.role(name)) else {
             return panel
@@ -726,7 +726,7 @@ impl UsersView {
                 .rounded(px(8.))
                 .border_1()
                 .border_color(t.border)
-                .bg(t.panel)
+                .bg(t.panel_glass())
                 .debug_selector({
                     let title = card.title;
                     move || format!("users-report-{title}")
@@ -987,11 +987,19 @@ impl Render for UsersView {
                     .into_any_element()
             }
         };
+        // The planes are glass tints, the list and the Reports the content
+        // plane's and the detail panel the editor's, as the other views'.
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(t.data_glass())
+            .child(body);
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(t.bg)
             .text_color(t.text)
             .text_size(px(layout::chrome(layout::TEXT_MD)))
             .debug_selector(|| "users-view".into())

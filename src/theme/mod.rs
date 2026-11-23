@@ -2456,20 +2456,38 @@ mod tests {
     #[test]
     fn an_inked_word_reads_on_its_own_pill_in_every_theme() {
         // Users and roles' status pills and report counts: the hue as text,
-        // on its own tint over the content plane and over chrome. Glass is
-        // left out: its planes are tints whose ground is the desktop.
-        for t in Theme::all().into_iter().filter(|t| !t.is_glass) {
-            for color in [
-                ConnectionColor::Green,
-                ConnectionColor::Gray,
-                ConnectionColor::Orange,
-                ConnectionColor::Blue,
-                ConnectionColor::Red,
-                ConnectionColor::Purple,
-            ] {
+        // on its own tint over the planes the tab draws: chrome, the content
+        // plane and the editor's. Glass is graded against its raw tints, as
+        // the other raw-tint checks are, and light glass again over a black
+        // desktop at its default, one tier below, as
+        // `light_glass_text_holds_over_a_black_desktop_at_its_default` asks
+        // of its text.
+        let hues = [
+            ConnectionColor::Green,
+            ConnectionColor::Gray,
+            ConnectionColor::Orange,
+            ConnectionColor::Blue,
+            ConnectionColor::Red,
+            ConnectionColor::Purple,
+        ];
+        for t in Theme::all() {
+            for color in hues {
                 for plane in [t.bg, t.surface, t.panel] {
                     let pill = color.fill().flatten(plane);
                     check(t, "an inked word", color.ink(t), pill, AA_TEXT);
+                }
+            }
+        }
+        for t in light_glass().map(|t| t.with_opacity(t.default_opacity())) {
+            let chrome = t.frost().flatten(BLACK);
+            for color in hues {
+                for plane in [
+                    chrome,
+                    t.data_glass().flatten(chrome),
+                    t.panel_glass().flatten(chrome),
+                ] {
+                    let pill = color.fill().flatten(plane);
+                    check(t, "an inked word over black", color.ink(t), pill, AA_LARGE);
                 }
             }
         }
