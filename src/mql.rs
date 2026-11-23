@@ -371,7 +371,21 @@ pub(crate) fn statements(text: &str) -> Vec<Range<usize>> {
 /// Every statement in `text`, or the first error in any of them. Spans are
 /// offsets into `text`.
 pub(crate) fn parse(text: &str) -> Result<Vec<Statement>, ParseError> {
-    read(text)
+    parsed_readings(read(text))
+}
+
+/// [`statements`] and [`parse`] from one read of `text`, for a caller that
+/// asks [`classify_parsed`] and the `_parsed` readers below about one text.
+pub(crate) fn statements_and_parse(
+    text: &str,
+) -> (Vec<Range<usize>>, Result<Vec<Statement>, ParseError>) {
+    let readings = read(text);
+    let spans = readings.iter().map(|(span, _)| span.clone()).collect();
+    (spans, parsed_readings(readings))
+}
+
+fn parsed_readings(readings: Vec<Reading>) -> Result<Vec<Statement>, ParseError> {
+    readings
         .into_iter()
         .map(|(span, target)| {
             Ok(Statement {
@@ -1652,13 +1666,18 @@ fn binary_wrapper(data: &str, subtype: &str) -> Option<Value> {
 /// All or nothing, as there: one statement it cannot read makes the whole
 /// submission one it cannot vouch for, and that verdict is returned alone.
 pub(crate) fn classify(text: &str) -> Verdict {
+    classify_parsed(&parse(text))
+}
+
+/// [`classify`] of a text already [`parse`]d.
+pub(crate) fn classify_parsed(parsed: &Result<Vec<Statement>, ParseError>) -> Verdict {
     // Mongo has no session-level Read-only hold, so as on SQLite an unreadable
     // statement may not run even once in Read-only.
     let unreadable = Verdict {
         mode: Mode::ReadWrite,
         destructive: vec![Destructive::Unreadable],
     };
-    let Ok(statements) = parse(text) else {
+    let Ok(statements) = parsed else {
         return unreadable;
     };
     statements
@@ -1676,7 +1695,12 @@ pub(crate) fn classify(text: &str) -> Verdict {
 /// the text parses. The agent path refuses all of them, whatever the mode
 /// (GATE-07); [`classify`] and the human path are not changed by it.
 pub(crate) fn removes(text: &str) -> bool {
-    parse(text).is_ok_and(|statements| {
+    removes_parsed(text, &parse(text))
+}
+
+/// [`removes`] of `text` already [`parse`]d as `parsed`.
+pub(crate) fn removes_parsed(text: &str, parsed: &Result<Vec<Statement>, ParseError>) -> bool {
+    parsed.as_ref().is_ok_and(|statements| {
         statements
             .iter()
             .any(|statement| removes_documents(&statement.target))
@@ -1754,8 +1778,13 @@ fn calls_method(text: &str, name: &str) -> bool {
 /// would run. Refused for an agent whatever the mode (D-12); [`classify`] rates
 /// the same operators Full, which is the human's answer.
 pub(crate) fn runs_script(text: &str) -> bool {
+    runs_script_parsed(&parse(text))
+}
+
+/// [`runs_script`] of a text already [`parse`]d.
+pub(crate) fn runs_script_parsed(parsed: &Result<Vec<Statement>, ParseError>) -> bool {
     let holds = |args: &[Arg]| args.iter().any(|arg| holds_javascript(&arg.value));
-    parse(text).is_ok_and(|statements| {
+    parsed.as_ref().is_ok_and(|statements| {
         statements.iter().any(|statement| match &statement.target {
             Target::Show(_) => false,
             Target::Database { call, .. } => holds(&call.args),
@@ -1787,9 +1816,14 @@ fn holds_javascript(value: &Value) -> bool {
 /// helper is no method DBDelve reads, so it is found in the tree like a legacy
 /// `remove`.
 pub(crate) fn discloses(text: &str) -> bool {
+    discloses_parsed(text, &parse(text))
+}
+
+/// [`discloses`] of `text` already [`parse`]d as `parsed`.
+pub(crate) fn discloses_parsed(text: &str, parsed: &Result<Vec<Statement>, ParseError>) -> bool {
     let holds = |args: &[Arg]| args.iter().any(|arg| holds_current_op(&arg.value));
     calls_method(text, "currentOp")
-        || parse(text).is_ok_and(|statements| {
+        || parsed.as_ref().is_ok_and(|statements| {
             statements.iter().any(|statement| match &statement.target {
                 Target::Show(_) => false,
                 Target::Database { call, .. } => {

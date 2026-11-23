@@ -290,25 +290,30 @@ enum Kind {
     Drop,
 }
 
-/// The lowest mode that may run `text`, and what makes it dangerous if
+/// [`classify_lines`] of `text`, for the tests.
+#[cfg(test)]
+pub(crate) fn classify(text: &str) -> Verdict {
+    classify_lines(&Lines::of(text))
+}
+
+/// The lowest mode that may run `lines`, and what makes it dangerous if
 /// anything does. A command the table does not know, or a line that cannot be
 /// split, is unreadable, and with no server-side hold behind Read-only it may
 /// not run there even once. A refused command is sent nowhere, so it reads.
-pub(crate) fn classify(text: &str) -> Verdict {
+pub(crate) fn classify_lines(lines: &Lines) -> Verdict {
     let unreadable = Verdict {
         mode: Mode::ReadWrite,
         destructive: vec![Destructive::Unreadable],
     };
+    if !lines.all_split() {
+        return unreadable;
+    }
     let mut verdict = Verdict::READ;
-    for span in statements(text) {
-        let Ok(words) = split(&text[span.clone()]) else {
-            return unreadable;
-        };
-        let command = Command { span, words };
-        if refusal(&command).is_some() {
+    for command in &lines.commands {
+        if refusal(command).is_some() {
             continue;
         }
-        verdict = verdict.max(match kind(&command) {
+        verdict = verdict.max(match kind(command) {
             Some(Kind::Read) => Verdict::READ,
             Some(Kind::Write) => Verdict::WRITE,
             Some(Kind::Script) => Verdict::FULL,
@@ -322,8 +327,17 @@ pub(crate) fn classify(text: &str) -> Verdict {
 /// What `text` leaves on its session that a fresh connection would not have:
 /// a `MULTI` still open, or a session setting.
 pub(crate) fn leaves(text: &str) -> Leaves {
+    leaves_of(&Lines::of(text))
+}
+
+/// [`leaves`] of lines already split: nothing, as for a text [`parse`]
+/// refuses, unless every line splits and none is refused.
+pub(crate) fn leaves_of(lines: &Lines) -> Leaves {
     let mut leaves = Leaves::default();
-    for command in parse(text).unwrap_or_default() {
+    if !lines.sendable() {
+        return leaves;
+    }
+    for command in &lines.commands {
         match command.name().as_str() {
             "MULTI" => leaves.transaction = Some(true),
             "EXEC" | "DISCARD" => leaves.transaction = Some(false),
@@ -352,54 +366,101 @@ pub(crate) fn leaves(text: &str) -> Leaves {
     leaves
 }
 
-/// Every command of `text` that splits into words, in order. A line that does
-/// not split is left out: the callers below answer for what they can read, and
-/// [`classify`] already calls the text unreadable.
-fn commands(text: &str) -> impl Iterator<Item = Command> + '_ {
-    statements(text).into_iter().filter_map(|span| {
-        let words = split(&text[span.clone()]).ok()?;
-        Some(Command { span, words })
-    })
+/// Every line of `text` split once, so a caller that asks [`classify_lines`],
+/// [`leaves_of`] and the `_in` readers below about one text splits it once.
+pub(crate) struct Lines {
+    /// Every command that splits into words, refused or not, in order. A line
+    /// that does not split is left out: the `_in` readers answer for what they
+    /// can read, and [`classify_lines`] already calls the text unreadable.
+    pub(crate) commands: Vec<Command>,
+    /// How many lines hold a command: [`statements`]'s count.
+    pub(crate) lines: usize,
 }
 
-/// Whether any command of `text` takes data out of the database: a name in
+impl Lines {
+    pub(crate) fn of(text: &str) -> Self {
+        let spans = statements(text);
+        let lines = spans.len();
+        let commands = spans
+            .into_iter()
+            .filter_map(|span| {
+                let words = split(&text[span.clone()]).ok()?;
+                Some(Command { span, words })
+            })
+            .collect();
+        Self { commands, lines }
+    }
+
+    /// Whether every line split.
+    fn all_split(&self) -> bool {
+        self.commands.len() == self.lines
+    }
+
+    /// Whether [`parse`] reads the text: every line splits and none is a
+    /// command the editor never sends.
+    pub(crate) fn sendable(&self) -> bool {
+        self.all_split()
+            && self
+                .commands
+                .iter()
+                .all(|command| refusal(command).is_none())
+    }
+}
+
+/// [`removes_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn removes(text: &str) -> bool {
+    removes_in(&Lines::of(text).commands)
+}
+
+/// Whether any of `commands` takes data out of the database: a name in
 /// [`REMOVES`], `MIGRATE`, `XGROUP DESTROY` or `DELCONSUMER`, an `XADD` that
 /// trims (`MAXLEN` or `MINID`), an expiry whose timeout is not a positive
 /// integer written plainly (`EXPIRE k 0` deletes the key at once, as does
 /// `EX 0` on `HSETEX` or `HGETEX`). The agent path refuses all of them,
 /// whatever the mode (GATE-07); the human path never asks. A command that
 /// schedules a removal (a positive timeout, an absolute time) is not one: it
-/// is an expiry, which [`expiry`] names and the agent path approves.
-pub(crate) fn removes(text: &str) -> bool {
-    commands(text).any(|command| removes_data(&command))
+/// is an expiry, which [`expiry_in`] names and the agent path approves.
+pub(crate) fn removes_in(commands: &[Command]) -> bool {
+    commands.iter().any(removes_data)
 }
 
-/// What the first command of `text` that schedules a removal schedules it
+/// [`expiry_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn expiry(text: &str) -> Option<Expiry> {
+    expiry_in(&Lines::of(text).commands)
+}
+
+/// What the first of `commands` that schedules a removal schedules it
 /// for: the key (`EXPIRE`, `SETEX` or `SET` with a positive timeout, an
 /// `*EXPIREAT` or an `EXAT` or `PXAT` at any time), or the named fields of a
 /// hash (the `H` forms of the same). The agent path approves such a command and
 /// names the effect; the human path never asks. A timeout that is not a
 /// positive integer written plainly schedules nothing here: the server rejects
 /// it on `SET`, `GETEX` and `SETEX`, and `EXPIRE` and the hash commands remove
-/// on it, which [`removes`] answers.
+/// on it, which [`removes_in`] answers.
 ///
 /// ponytail: the option words are matched anywhere after the name, so a key,
 /// field or value spelled like one is named an expiry too. That is the safe
 /// direction: the human sees one sentence too many, never one too few. The
 /// ceiling is that this reads words and not each command's option grammar; the
 /// upgrade path is reading the grammar.
-pub(crate) fn expiry(text: &str) -> Option<Expiry> {
-    commands(text).find_map(|command| match command.name().as_str() {
-        "EXPIRE" | "PEXPIRE" | "SETEX" | "PSETEX" => {
-            keeps_the_key(&word(&command.words, 2)).then_some(Expiry::Key)
-        }
-        "EXPIREAT" | "PEXPIREAT" => Some(Expiry::Key),
-        "HEXPIRE" | "HPEXPIRE" => keeps_the_key(&word(&command.words, 2)).then_some(Expiry::Field),
-        "HEXPIREAT" | "HPEXPIREAT" => Some(Expiry::Field),
-        "SET" | "GETEX" => times_out(&command).then_some(Expiry::Key),
-        "HSETEX" | "HGETEX" => times_out(&command).then_some(Expiry::Field),
-        _ => None,
-    })
+pub(crate) fn expiry_in(commands: &[Command]) -> Option<Expiry> {
+    commands
+        .iter()
+        .find_map(|command| match command.name().as_str() {
+            "EXPIRE" | "PEXPIRE" | "SETEX" | "PSETEX" => {
+                keeps_the_key(&word(&command.words, 2)).then_some(Expiry::Key)
+            }
+            "EXPIREAT" | "PEXPIREAT" => Some(Expiry::Key),
+            "HEXPIRE" | "HPEXPIRE" => {
+                keeps_the_key(&word(&command.words, 2)).then_some(Expiry::Field)
+            }
+            "HEXPIREAT" | "HPEXPIREAT" => Some(Expiry::Field),
+            "SET" | "GETEX" => times_out(command).then_some(Expiry::Key),
+            "HSETEX" | "HGETEX" => times_out(command).then_some(Expiry::Field),
+            _ => None,
+        })
 }
 
 /// Whether `command` carries an absolute time, or a relative one the server
@@ -450,12 +511,18 @@ fn has_option(command: &Command, options: &[&str]) -> bool {
     })
 }
 
-/// Whether any command of `text` runs a script the server holds, or loads one:
+/// [`runs_script_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn runs_script(text: &str) -> bool {
+    runs_script_in(&Lines::of(text).commands)
+}
+
+/// Whether any of `commands` runs a script the server holds, or loads one:
 /// `EVAL`, `EVALSHA`, `FCALL`, their `_RO` forms (the server holds those to
 /// reads, but what the script does is still code DBDelve cannot read),
 /// `SCRIPT LOAD` and `FUNCTION LOAD`.
-pub(crate) fn runs_script(text: &str) -> bool {
-    commands(text).any(|command| {
+pub(crate) fn runs_script_in(commands: &[Command]) -> bool {
+    commands.iter().any(|command| {
         let name = command.name();
         match name.as_str() {
             "EVAL_RO" | "EVALSHA_RO" | "FCALL_RO" => true,
@@ -465,13 +532,19 @@ pub(crate) fn runs_script(text: &str) -> bool {
     })
 }
 
-/// Whether any command of `text` is `CONFIG GET` or `CLIENT LIST`, which can
+/// [`discloses_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn discloses(text: &str) -> bool {
+    discloses_in(&Lines::of(text).commands)
+}
+
+/// Whether any of `commands` is `CONFIG GET` or `CLIENT LIST`, which can
 /// answer with `requirepass`, `masterauth` or another client's address and name
 /// (D-27), or `ACL LIST` or `ACL GETUSER`, which answer with every user's
 /// password hashes. Matched by name and subcommand and nothing wider; [`kind`]
 /// records why the line is drawn there.
-pub(crate) fn discloses(text: &str) -> bool {
-    commands(text).any(|command| {
+pub(crate) fn discloses_in(commands: &[Command]) -> bool {
+    commands.iter().any(|command| {
         matches!(
             (command.name().as_str(), command.subcommand().as_str()),
             ("CONFIG", "GET") | ("CLIENT", "LIST") | ("ACL", "LIST" | "GETUSER")
@@ -511,7 +584,7 @@ fn kind(command: &Command) -> Option<Kind> {
         // stay reads -- `CONFIG HELP`, and on `CLIENT` `INFO`, `ID`, `GETNAME`,
         // `GETREDIR`, `TRACKINGINFO` and `HELP` -- and so do `ACL LIST` and
         // `ACL GETUSER`, because the human is reading their own server. The
-        // agent path refuses all four through [`discloses`]. The client fields
+        // agent path refuses all four through [`discloses_in`]. The client fields
         // in `ACL LOG` and `SLOWLOG GET` stay reads on both paths.
         ("CONFIG", "GET") => Write,
         ("CONFIG", "SET" | "REWRITE" | "RESETSTAT") => Drop,
@@ -980,7 +1053,7 @@ const WRITES: &[&str] = &[
 /// reads this list. Names that decide by an argument or a subcommand
 /// (`MIGRATE`, `XGROUP DESTROY`, an `XADD` that trims, the `EXPIRE` family,
 /// and a non-positive `EX` or `PX` on `HSETEX` and `HGETEX`) are in
-/// [`removes`].
+/// [`removes_in`].
 ///
 /// ponytail: these overwrite or move data without a removal flag and stay
 /// approvable (D-23): `RENAME`, `COPY ... REPLACE`, `RESTORE ... REPLACE` and
@@ -991,7 +1064,7 @@ const WRITES: &[&str] = &[
 /// approving it. An expiry is told from a removal by the statement alone: a
 /// pure function has no clock, so an absolute time already past, which removes
 /// at once, is approved as an expiry, and the approval's text tells the human
-/// so ([`expiry`]). The upgrade path is a removal flag on those words, once the
+/// so ([`expiry_in`]). The upgrade path is a removal flag on those words, once the
 /// approval surface can show the destination's state.
 const REMOVES: &[&str] = &[
     "DEL",

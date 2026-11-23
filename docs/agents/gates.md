@@ -331,7 +331,7 @@ written again from its parts and compared with the text.
 `SCAN 0 [MATCH p] [TYPE t] COUNT 1000`, with `TYPE` before `MATCH` too,
 and `DBSIZE`. A key opened as a grid
 runs through `classify` and `gate` like any typed read. A user's own
-command is never one of these: `redis_cmd::classify` reads it by name and
+command is never one of these: `redis_cmd::classify_lines` reads it by name and
 subcommand from the `READS`, `WRITES` and `DROPS` tables, and a name in none
 is `Unreadable`. The server has no read-only hold (`holds_read_only` is
 false), so the tables are the Read-only boundary and must stay closed to
@@ -547,7 +547,7 @@ logged entries), MongoDB `getParameter` and the `$listSessions` and
 `Refuse(Delete)` is a command that removes now: a name in `REMOVES`, `MIGRATE`,
 `XGROUP DESTROY`, an `XADD` that trims, `EXPIRE` or `HEXPIRE` with a timeout
 that is not a plain positive number, and `HSETEX` or `HGETEX` with such an `EX`
-or `PX`. An expiry (`redis_cmd::expiry`) is a command that schedules a removal:
+or `PX`. An expiry (`redis_cmd::expiry_in`) is a command that schedules a removal:
 `EXPIRE`, `PEXPIRE`, `SETEX` and `PSETEX` with a positive timeout, `EXPIREAT`
 and `PEXPIREAT` at any time, `SET` and `GETEX` with a positive `EX` or `PX` or
 any `EXAT` or `PXAT`, and the `H` forms of the same for the fields of a hash.

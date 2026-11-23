@@ -3650,7 +3650,7 @@ struct Parsed {
     /// through Generic's raise in [`parsed`].
     unlisted_call: bool,
     /// What a Redis command schedules beyond itself, read by
-    /// [`crate::redis_cmd::expiry`]. Other engines leave it `None`. Only the
+    /// [`crate::redis_cmd::expiry_in`]. Other engines leave it `None`. Only the
     /// agent path reads it.
     expiry: Option<Expiry>,
 }
@@ -3912,28 +3912,30 @@ fn versioned_comments(dialect: &dyn Dialect, sql: &str) -> Vec<VersionedComment>
 /// [`parsed`] for one reading of which executable comments run: every
 /// `/*! … */` and `/*M! … */` still in `sql` is run.
 fn parsed_as_run(engine: Engine, sql: &str) -> Parsed {
+    // Redis and MongoDB text is split or parsed once, and every flag read off
+    // that one reading.
     if engine.syntax() == Syntax::Redis {
+        let lines = crate::redis_cmd::Lines::of(sql);
+        let commands = &lines.commands;
         return Parsed {
-            session: crate::redis_cmd::leaves(sql) != Leaves::default(),
-            removes: crate::redis_cmd::removes(sql),
-            scripts: crate::redis_cmd::runs_script(sql),
-            discloses: crate::redis_cmd::discloses(sql),
+            session: crate::redis_cmd::leaves_of(&lines) != Leaves::default(),
+            removes: crate::redis_cmd::removes_in(commands),
+            scripts: crate::redis_cmd::runs_script_in(commands),
+            discloses: crate::redis_cmd::discloses_in(commands),
             // Where a line does not split, `classify` has already said
             // `Unreadable`, which the agent path asks first.
-            unsent: crate::redis_cmd::parse(sql).is_err(),
-            expiry: crate::redis_cmd::expiry(sql),
-            ..Parsed::counted(
-                crate::redis_cmd::classify(sql),
-                crate::redis_cmd::statements(sql).len(),
-            )
+            unsent: !lines.sendable(),
+            expiry: crate::redis_cmd::expiry_in(commands),
+            ..Parsed::counted(crate::redis_cmd::classify_lines(&lines), lines.lines)
         };
     }
     let Some(dialect) = dialect(engine) else {
+        let (spans, statements) = crate::mql::statements_and_parse(sql);
         return Parsed {
-            removes: crate::mql::removes(sql),
-            scripts: crate::mql::runs_script(sql),
-            discloses: crate::mql::discloses(sql),
-            ..Parsed::counted(crate::mql::classify(sql), crate::mql::statements(sql).len())
+            removes: crate::mql::removes_parsed(sql, &statements),
+            scripts: crate::mql::runs_script_parsed(&statements),
+            discloses: crate::mql::discloses_parsed(sql, &statements),
+            ..Parsed::counted(crate::mql::classify_parsed(&statements), spans.len())
         };
     };
 
@@ -11398,6 +11400,56 @@ mod tests {
             classify(Engine::MySql, "ANALYZE SELECT * FROM t").destructive,
             vec![Destructive::Unreadable],
         );
+    }
+
+    /// Redis and MongoDB text is read once for every flag, and each flag still
+    /// says what that engine's reader of the text alone says.
+    #[test]
+    fn parsed_reads_redis_and_mongo_flags_as_their_text_readers_do() {
+        use crate::{mql, redis_cmd};
+        for text in [
+            "",
+            "# note\n\nGET k",
+            "DEL k\nEXPIRE k 10",
+            "SET k v EX 5",
+            "EXPIRE k 0",
+            "MULTI\nSET k v",
+            "EVAL \"return 1\" 0",
+            "CONFIG GET *",
+            "MONITOR",
+            "GET k\nSELECT 1",
+            "SET k \"open",
+            "NOPE x",
+        ] {
+            let parsed = parsed_as_run(Engine::Redis, text);
+            assert_eq!(parsed.verdict, redis_cmd::classify(text), "{text}");
+            assert_eq!(parsed.statements, redis_cmd::statements(text).len());
+            let session = redis_cmd::leaves(text) != Leaves::default();
+            assert_eq!(parsed.session, session, "{text}");
+            assert_eq!(parsed.removes, redis_cmd::removes(text), "{text}");
+            assert_eq!(parsed.scripts, redis_cmd::runs_script(text), "{text}");
+            assert_eq!(parsed.discloses, redis_cmd::discloses(text), "{text}");
+            assert_eq!(parsed.unsent, redis_cmd::parse(text).is_err(), "{text}");
+            assert_eq!(parsed.expiry, redis_cmd::expiry(text), "{text}");
+        }
+        for text in [
+            "",
+            "db.c.find({})",
+            "db.c.deleteOne({ _id: 1 }); db.c.find({})",
+            "db.c.remove({})",
+            "db.c.find({ $where: \"true\" })",
+            "db.runCommand({ currentOp: 1 })",
+            "db.currentOp()",
+            "db.c.find({",
+            "db.c.nope()",
+        ] {
+            let parsed = parsed_as_run(Engine::MongoDb, text);
+            assert_eq!(parsed.verdict, mql::classify(text), "{text}");
+            assert_eq!(parsed.statements, mql::statements(text).len(), "{text}");
+            assert_eq!(parsed.removes, mql::removes(text), "{text}");
+            assert_eq!(parsed.scripts, mql::runs_script(text), "{text}");
+            assert_eq!(parsed.discloses, mql::discloses(text), "{text}");
+        }
     }
 
     #[test]

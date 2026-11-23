@@ -1004,7 +1004,7 @@ Decided, and not to be re-litigated:
   saves it as it was.
 
 - **Redis is a command language of its own, classified by table.** As with
-  MongoDB, `holds_read_only` is false and `redis_cmd::classify` is the only
+  MongoDB, `holds_read_only` is false and `redis_cmd::classify_lines` is the only
   Read-only boundary; it fails closed on any name it does not list. There is
   no `EXPLAIN`, no transaction to bracket a batch with (`transaction_start` is
   `None`: a batch applies in order and a failure says which command failed and
