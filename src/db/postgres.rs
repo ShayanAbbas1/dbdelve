@@ -3333,6 +3333,13 @@ fn connect_error(error: &tokio_postgres::Error, server: &ServerConfig) -> DbErro
 }
 
 fn query_error(error: &tokio_postgres::Error, sql: &str) -> DbError {
+    // No answer from the server, only a broken connection: the statement may
+    // have run.
+    let transport = error.is_closed()
+        || std::error::Error::source(error).is_some_and(|source| source.is::<std::io::Error>());
+    if error.as_db_error().is_none() && transport {
+        return super::lost_reply(&describe(error));
+    }
     let position = error.as_db_error().and_then(|db| match db.position() {
         // Postgres reports a 1-based character position into the statement.
         Some(tokio_postgres::error::ErrorPosition::Original(p)) => {

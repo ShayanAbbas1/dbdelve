@@ -2502,6 +2502,14 @@ fn metadata_lock_sql(engine: Engine, schema: &str, relation: &str) -> String {
     )
 }
 
+/// Whether `error` is the connection breaking rather than the server's
+/// answer: a socket error mid-statement (a reset, a broken pipe, an end of
+/// stream). The statement may have run. A refused connect never reaches here:
+/// [`connect_error`] reads it.
+fn lost_connection(error: &::mysql::Error) -> bool {
+    matches!(error, ::mysql::Error::IoError(_))
+}
+
 /// `KILL QUERY`'s doing: "Query execution was interrupted", on both servers.
 fn interrupted(error: &::mysql::Error) -> bool {
     matches!(error, ::mysql::Error::MySqlError(error) if error.code == 1317)
@@ -2541,6 +2549,9 @@ fn bounded<S: std::os::fd::AsRawFd, T>(
 }
 
 fn query_error(error: &::mysql::Error) -> DbError {
+    if lost_connection(error) {
+        return super::lost_reply(&describe(error));
+    }
     DbError {
         message: describe(error),
         // MySQL reports no offset into the statement, so there is nothing to
@@ -2766,6 +2777,19 @@ mod tests {
 
         let sizes = connection.sizes_of(std::slice::from_ref(&own)).unwrap();
         assert_eq!(sizes.keys().collect::<Vec<_>>(), [&own]);
+    }
+
+    #[test]
+    fn a_broken_socket_is_a_lost_reply_and_a_server_error_is_not() {
+        let reset =
+            ::mysql::Error::IoError(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(query_error(&reset).lost_reply());
+        let refused = ::mysql::Error::MySqlError(::mysql::MySqlError {
+            state: "23000".into(),
+            code: 1062,
+            message: "Duplicate entry '1' for key 'PRIMARY'".into(),
+        });
+        assert!(!query_error(&refused).lost_reply());
     }
 
     #[test]

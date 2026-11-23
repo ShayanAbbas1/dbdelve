@@ -657,6 +657,13 @@ impl Connection {
             *session = None;
         }
         let timeout = self.server.statement_timeout;
+        // The connection broke with no answer: the command may have run.
+        if !asked && lost && !error.is_timeout() {
+            return Err(super::lost_reply(&format!(
+                "{} The session closed with it, and anything it held, a MULTI or a WATCH, is gone.",
+                message(&error)
+            )));
+        }
         Err(plain_error(match (asked, lost) {
             (true, _) => CANCELLED.into(),
             (false, true) if error.is_timeout() => format!(
@@ -664,11 +671,7 @@ impl Connection {
                  gone.",
                 super::stopped_waiting(timeout)
             ),
-            (false, true) => format!(
-                "{} The session closed with it, and anything it held, a MULTI or a WATCH, is gone.",
-                message(&error)
-            ),
-            (false, false) => message(&error),
+            (false, _) => message(&error),
         }))
     }
 

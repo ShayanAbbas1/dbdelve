@@ -2939,6 +2939,10 @@ fn connect_error(error: &tiberius::error::Error, server: &ServerConfig) -> DbErr
 }
 
 fn query_error(error: &tiberius::error::Error, sql: &str) -> DbError {
+    // The socket broke before the server answered: the batch may have run.
+    if matches!(error, tiberius::error::Error::Io { .. }) {
+        return super::lost_reply(&describe(error));
+    }
     DbError {
         message: describe(error),
         // SQL Server names a line rather than a character, so the offset is
@@ -3541,6 +3545,17 @@ mod tests {
     /// A default-schema lookup that loses its session, as one that times out
     /// does, hands back a new login rather than the lost session, which
     /// would fail its first statement without sending it.
+    #[test]
+    fn a_broken_socket_is_a_lost_reply_and_a_server_error_is_not() {
+        let reset = tiberius::error::Error::Io {
+            kind: std::io::ErrorKind::ConnectionReset,
+            message: "connection reset by peer".into(),
+        };
+        assert!(query_error(&reset, "UPDATE t SET a = 1").lost_reply());
+        let conversion = tiberius::error::Error::Conversion("bad value".into());
+        assert!(!query_error(&conversion, "UPDATE t SET a = 1").lost_reply());
+    }
+
     #[test]
     #[ignore = "needs a live SQL Server: set dbdelve_MSSQL_URL"]
     fn live_a_session_the_schema_lookup_lost_is_replaced() {

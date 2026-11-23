@@ -190,22 +190,68 @@ pub(super) fn written_text(engine: Engine, sql: &str, result: &QueryResult) -> S
 const UNKNOWN_OUTCOME: &str =
     "DBDelve stopped waiting at its timeout; whether the server applied the write is not known.";
 
+/// Said after the text of a write whose connection broke before the reply.
+const LOST_OUTCOME: &str = "Whether the server applied the write is not known.";
+
+/// Why a failed write's outcome may not be known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unknown {
+    /// The error is the server's answer, or the write was never sent.
+    No,
+    /// DBDelve's own timer stopped waiting ([`DbError::stopped_waiting`]).
+    StoppedWaiting,
+    /// The connection broke before the reply came ([`DbError::lost_reply`]).
+    LostReply,
+}
+
+impl Unknown {
+    fn of(error: &DbError) -> Self {
+        if error.lost_reply() {
+            Self::LostReply
+        } else if error.stopped_waiting() {
+            Self::StoppedWaiting
+        } else {
+            Self::No
+        }
+    }
+}
+
+/// `true` is DBDelve's timer, as the tests spell it.
+impl From<bool> for Unknown {
+    fn from(stopped_waiting: bool) -> Self {
+        match stopped_waiting {
+            true => Self::StoppedWaiting,
+            false => Self::No,
+        }
+    }
+}
+
 /// What an approved write that ended `failed` answers and records: the
 /// server's (scrubbed) text, then
 ///
 /// - that the outcome is not known, when the engine's timeout is DBDelve's own
 ///   timer and the error is that timer's ([`DbError::stopped_waiting`]): the
-///   write was sent and no reply came, so the server may still apply it. Any
-///   other error is the server's answer, however late it came, and one that
-///   failed to open was never sent; or
+///   write was sent and no reply came, so the server may still apply it;
+/// - the same, on any engine, when the connection broke before the reply
+///   ([`DbError::lost_reply`]): the write may have run. Any other error is the
+///   server's answer, however late it came, and one that failed to open was
+///   never sent; or
 /// - that an invalid index of that name may remain, when `sql` is a Postgres
 ///   `CREATE INDEX CONCURRENTLY`: a stopped concurrent build leaves one, no
 ///   other statement does, so no other failure says it.
 ///
 /// The whole is held to [`result::RESULT_BUDGET`], as rows are, so the answer
 /// always fits its frame: the server's text is what gives way, never the note.
-fn failed_text(engine: Engine, sql: &str, server_text: &str, stopped_waiting: bool) -> String {
-    let note = if stopped_waiting && engine.times_out_on_the_client() {
+fn failed_text(
+    engine: Engine,
+    sql: &str,
+    server_text: &str,
+    unknown: impl Into<Unknown>,
+) -> String {
+    let unknown = unknown.into();
+    let note = if unknown == Unknown::LostReply {
+        Some(LOST_OUTCOME)
+    } else if unknown == Unknown::StoppedWaiting && engine.times_out_on_the_client() {
         Some(UNKNOWN_OUTCOME)
     } else if creates_index_concurrently(engine, sql) {
         Some(INVALID_INDEX)
@@ -300,7 +346,7 @@ impl Workspace {
                 result: Err(error),
             } => {
                 let server = scrubbed(&error.message, &hidden);
-                let unknown = error.stopped_waiting();
+                let unknown = Unknown::of(&error);
                 (
                     Status::Failed,
                     failed_text(write.engine, &write.sql, &server, unknown),
@@ -418,6 +464,42 @@ mod tests {
             assert!(text.len() <= result::RESULT_BUDGET, "{}", text.len());
             assert!(text.ends_with(note), "{text}");
         }
+    }
+
+    #[test]
+    fn a_write_whose_connection_broke_says_its_outcome_is_not_known_and_a_refusal_does_not() {
+        let lost = crate::db::lost_reply("connection reset by peer");
+        assert_eq!(Unknown::of(&lost), Unknown::LostReply);
+        let text = failed_text(
+            Engine::Postgres,
+            "UPDATE t SET a = 1",
+            &lost.message,
+            Unknown::of(&lost),
+        );
+        assert!(
+            text.starts_with(&lost.message) && text.ends_with(LOST_OUTCOME),
+            "{text}"
+        );
+        // A lost reply is unknown on an engine whose timeout is the server's too.
+        assert_eq!(
+            failed_text(Engine::MySql, "DELETE FROM t", "boom", Unknown::LostReply),
+            format!("boom {LOST_OUTCOME}")
+        );
+        // The server's own refusal is its answer.
+        let refused = DbError {
+            message: "duplicate key value violates unique constraint".into(),
+            position: None,
+        };
+        assert_eq!(Unknown::of(&refused), Unknown::No);
+        assert_eq!(
+            failed_text(
+                Engine::Postgres,
+                "UPDATE t SET a = 1",
+                &refused.message,
+                Unknown::of(&refused)
+            ),
+            refused.message
+        );
     }
 
     #[test]

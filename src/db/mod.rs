@@ -5771,11 +5771,29 @@ pub(super) fn stopped_waiting(seconds: u32) -> String {
     format!("{STOPPED_WAITING} {seconds} seconds.")
 }
 
+/// How a driver reports a statement whose connection broke before its reply
+/// came: a reset, a broken pipe, a closed socket or a server that went away,
+/// rather than an answer from the server. The statement may have run.
+const LOST_REPLY: &str = "The connection was lost before the server answered";
+
+/// The error of a statement whose connection broke before its reply came, the
+/// driver's own words after DBDelve's. Set only where the driver's error is a
+/// transport failure, never where the server answered.
+pub(crate) fn lost_reply(detail: &str) -> DbError {
+    plain_error(format!("{LOST_REPLY}: {detail}"))
+}
+
 impl DbError {
     /// Whether this is [`stopped_waiting`]'s: the statement was sent and
     /// DBDelve's timer gave up on its reply, so the server may still apply it.
     pub(crate) fn stopped_waiting(&self) -> bool {
         self.message.starts_with(STOPPED_WAITING)
+    }
+
+    /// Whether this is [`lost_reply`]'s: the connection broke before the
+    /// server answered, so whether the statement ran is not known.
+    pub(crate) fn lost_reply(&self) -> bool {
+        self.message.starts_with(LOST_REPLY)
     }
 }
 
@@ -6228,6 +6246,19 @@ mod tests {
             );
         }
         assert!(check_time_zone("").is_err() && check_time_zone("   ").is_err());
+    }
+
+    #[test]
+    fn only_a_lost_connection_reads_as_a_lost_reply() {
+        let lost = lost_reply("connection reset by peer");
+        assert!(lost.lost_reply());
+        assert!(!lost.stopped_waiting());
+        for server in [
+            "duplicate key value violates unique constraint",
+            "connection refused",
+        ] {
+            assert!(!plain_error(server.to_string()).lost_reply(), "{server}");
+        }
     }
 
     #[test]

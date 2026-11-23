@@ -1292,7 +1292,15 @@ carries, engine by engine:
   Redis, answers that the outcome is not known: it is told by its error
   (`DbError::stopped_waiting`), not by how long it ran, so a server's own
   refusal that came late stays a plain failure, and a write that never opened
-  was never sent; a failed
+  was never sent. So does a write, on any engine, whose connection broke
+  before the server answered (`DbError::lost_reply`): a socket reset, broken
+  pipe or end of stream on Postgres, MySQL, MariaDB and SQL Server, an I/O
+  failure or cleared pool on MongoDB, a dropped Redis session, a ClickHouse
+  request lost after it went out, a Snowflake submit or poll with no answer
+  (Snowflake cannot tell that from a submit that never arrived), and a plugin
+  that stopped mid-statement or reported its connection lost (SQLSTATE class
+  `08`). Only those points set it; an error the server sent is its answer. A
+  failed
   Postgres `CREATE INDEX CONCURRENTLY` answers that an invalid index may remain.
   A DuckDB write is refused.
 - **DuckDB is opened per call and dropped when the call ends.** A second DuckDB

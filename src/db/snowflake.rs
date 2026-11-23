@@ -899,7 +899,11 @@ impl Connection {
             Cancellable::Yes(_) => self.url("?async=true"),
             Cancellable::No => self.url(""),
         };
-        let (status, accepted) = self.exchange(&url, Some(&body))?;
+        // A submit with no answer may still have reached the server, which
+        // cannot be told from one that did not: the outcome is not known.
+        let (status, accepted) = self
+            .exchange(&url, Some(&body))
+            .map_err(|error| super::lost_reply(&error.message))?;
         let mut answer = reply(&host, status, &accepted)?;
         let handle = accepted["statementHandle"].as_str().unwrap_or_default();
         // Nothing to cancel once the statement is over, and a synchronous
@@ -941,10 +945,13 @@ impl Connection {
         let mut pause = Duration::from_millis(100);
         while answer == Reply::Running {
             let (status, body) = match self.fetch(&self.url(&format!("/{handle}"))) {
+                // The statement is the server's by now and the poll lost track
+                // of it, so whether it ran is not known.
                 Ok((status, body)) if transient(status) => {
-                    return Err(self.abandon(&handle, refusal(&host, status, &body)));
+                    let lost = super::lost_reply(&refusal(&host, status, &body).message);
+                    return Err(self.abandon(&handle, lost));
                 }
-                Err(error) => return Err(self.abandon(&handle, error)),
+                Err(error) => return Err(self.abandon(&handle, super::lost_reply(&error.message))),
                 Ok(polled) => polled,
             };
             answer = reply(&host, status, &body)?;

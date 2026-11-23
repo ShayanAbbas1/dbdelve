@@ -1172,7 +1172,8 @@ impl Connection {
             // connect or handshake that failed sent nothing, and `prefer`
             // reads its error whole.
             Failed::Unreached(error) if watch.sent() => {
-                let error = plain_error(format!("{} did not answer: {error}.", self.endpoint()));
+                let error =
+                    super::lost_reply(&format!("{} did not answer: {error}.", self.endpoint()));
                 Failed::Broken(self.abandoned(error, query_id, false))
             }
             failed => failed,
@@ -3993,7 +3994,9 @@ ORDER BY database, name"#;
             .generated("SELECT n", &CancelToken::default(), Fetch::default())
             .unwrap_err();
         let endpoint = format!("127.0.0.1:{} did not answer: ", mock.server().port.unwrap());
-        assert!(error.message.starts_with(&endpoint), "{error}");
+        assert!(error.message.contains(&endpoint), "{error}");
+        // No answer came, so whether it ran is not known.
+        assert!(error.lost_reply(), "{error}");
         let id = sent(&mock, "SELECT n")[0].query_id().unwrap().to_string();
         assert_eq!(mock.killed(), [id]);
 
@@ -4009,6 +4012,7 @@ ORDER BY database, name"#;
             ),
             "{error}"
         );
+        assert!(error.lost_reply(), "{error}");
     }
 
     #[test]

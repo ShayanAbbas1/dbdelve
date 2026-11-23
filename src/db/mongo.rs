@@ -1949,17 +1949,26 @@ fn connect_error(error: &Error, config: &MongoConfig, tls: bool) -> DbError {
 /// profile field holds, so those kinds are said without it. The server's own
 /// words for anything it answered stay.
 fn statement_error(kind: &ErrorKind) -> DbError {
-    plain_error(match kind {
-        ErrorKind::ServerSelection { .. } => "No server was available to run the statement.".into(),
-        ErrorKind::DnsResolve { .. } => "A server's address could not be resolved.".into(),
-        ErrorKind::Io(io) => format!("The connection to the server failed: {}.", io.kind()),
+    match kind {
+        // The connection broke with no answer from the server, so the
+        // statement may have run.
+        ErrorKind::Io(io) => super::lost_reply(&format!(
+            "The connection to the server failed: {}.",
+            io.kind()
+        )),
         // The driver's message names the server whose pool was cleared, which
         // may be a member the profile never named. Said as the `Io` it follows.
-        ErrorKind::ConnectionPoolCleared { .. } => {
-            "The connection to the server failed and its connections were closed.".into()
-        }
-        kind => kind.to_string(),
-    })
+        ErrorKind::ConnectionPoolCleared { .. } => super::lost_reply(
+            "The connection to the server failed and its connections were closed.",
+        ),
+        kind => plain_error(match kind {
+            ErrorKind::ServerSelection { .. } => {
+                "No server was available to run the statement.".into()
+            }
+            ErrorKind::DnsResolve { .. } => "A server's address could not be resolved.".into(),
+            kind => kind.to_string(),
+        }),
+    }
 }
 
 /// A panic inside the driver would take the background thread with it, and
@@ -3378,14 +3387,19 @@ mod tests {
             std::io::ErrorKind::ConnectionReset,
             "reset by 10.0.0.5:27017 (replica-2.internal)",
         );
-        let said = statement_error(&Error::from(reset).kind).message;
-        assert_eq!(
-            said,
-            "The connection to the server failed: connection reset."
+        let said = statement_error(&Error::from(reset).kind);
+        assert!(
+            said.message
+                .ends_with(": The connection to the server failed: connection reset."),
+            "{}",
+            said.message
         );
-        // What a server answered is its own to say.
+        // A broken socket leaves the outcome unknown.
+        assert!(said.lost_reply());
+        // What a server answered is its own to say, and is its answer.
         let custom = Error::custom("a message the server wrote").kind;
         assert!(!statement_error(&custom).message.is_empty());
+        assert!(!statement_error(&custom).lost_reply());
     }
 
     #[test]
