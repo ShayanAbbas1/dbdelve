@@ -11434,6 +11434,18 @@ fn switching_the_database_hides_the_profile_from_agents(cx: &mut TestAppContext)
         });
         assert!(!agent_visible(&workspace, cx, "warehouse"));
         std::fs::remove_dir(&path).expect("the directory is removable");
+
+        // A prompt open for the profile when it is withdrawn goes with it, so
+        // answering it cannot grant the new target.
+        workspace.update(cx, |workspace, _| {
+            workspace.agent_visibility_prompt = Some("warehouse".into());
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.set_database("FINANCE".into(), window, cx));
+        });
+        assert_eq!(visibility_prompt(&workspace, cx), None);
+        workspace.update(cx, |workspace, cx| workspace.confirm_agent_visibility(cx));
+        assert!(!agent_visible(&workspace, cx, "warehouse"));
         quit(workspace, cx);
     });
 }

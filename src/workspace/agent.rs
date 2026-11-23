@@ -808,11 +808,16 @@ impl Workspace {
     /// The hide of [`Self::set_agent_visible`] without its save, for a caller
     /// that saves next: the flag goes down, the hide is this window's pending
     /// choice, so the save writes it whatever the file holds, and the
-    /// profile's calls are rejected. False when no profile has the id.
+    /// profile's calls are rejected. A visibility prompt open for the profile
+    /// goes with it: it was raised for what the profile was, and answering it
+    /// would grant what it is now. False when no profile has the id.
     pub(crate) fn withdraw_agent_visibility(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return false;
         };
+        if self.agent_visibility_prompt.as_deref() == Some(id) {
+            self.agent_visibility_prompt = None;
+        }
         profile.agent_visible = false;
         self.agent.visibility_choices.insert(id.to_string());
         self.reject_calls_for(id, cx);
