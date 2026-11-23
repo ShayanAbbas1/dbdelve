@@ -692,7 +692,9 @@ pub fn is_expression(key: &str) -> bool {
 pub(crate) const WASTEFUL_MIN_REMOVED: f64 = 1000.0;
 
 /// Whether a `Rows Removed by …` qualifier says the node threw away far more
-/// than it kept. Both counts are per loop, as Postgres prints them.
+/// than it kept. Both counts are per loop, as Postgres prints them. Without the
+/// node's own row count (`TIMING OFF` leaves it unread) nothing is compared,
+/// so no count is taken for zero.
 // ponytail: more removed than kept, and at least a thousand; a per-operator
 // selectivity threshold is the upgrade if this flags healthy plans.
 pub fn wasteful(line: &str, actual: Option<Actual>) -> bool {
@@ -704,7 +706,7 @@ pub fn wasteful(line: &str, actual: Option<Actual>) -> bool {
     };
     key.starts_with("Rows Removed by ")
         && removed >= WASTEFUL_MIN_REMOVED
-        && removed > actual.map_or(0.0, |actual| actual.rows)
+        && actual.is_some_and(|actual| removed > actual.rows)
 }
 
 /// Where the numbers are in a qualifier's value: `hit=12 read=3`, `9kB`. A
@@ -1238,7 +1240,9 @@ Planning Time: broken"#,
             })
         };
         assert!(wasteful("Rows Removed by Filter: 98213", kept(10.0)));
-        assert!(wasteful("Rows Removed by Index Recheck: 5000", None));
+        // With no count of what was kept, there is nothing to compare.
+        assert!(!wasteful("Rows Removed by Index Recheck: 5000", None));
+        assert!(wasteful("Rows Removed by Index Recheck: 5000", kept(0.0)));
         assert!(!wasteful("Rows Removed by Filter: 98213", kept(100_000.0)));
         assert!(!wasteful("Rows Removed by Filter: 999", kept(0.0)));
         assert!(!wasteful("Filter: (balance > 100000)", kept(0.0)));
