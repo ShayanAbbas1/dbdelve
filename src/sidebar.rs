@@ -931,7 +931,11 @@ fn connection_item(
     // loaded, and a role's name keeps the connection even where none of its
     // objects match.
     let users = match (&connection.content, connection.roles) {
-        (Content::Loaded(_), Some(roles)) => users_item(tree, connection.id, roles, folds, search),
+        // A filter matching the connection's name keeps it whole, this row
+        // with every role under it.
+        (Content::Loaded(_), Some(roles)) => {
+            users_item(tree, connection.id, roles, folds, search, named)
+        }
         _ => None,
     };
     if search.filtering && !named && !has_rows && !database_named && users.is_none() {
@@ -1124,9 +1128,10 @@ fn users_item(
     roles: RolesListing,
     folds: &HashMap<String, bool>,
     search: &mut Search,
+    whole: bool,
 ) -> Option<TreeItem> {
     let id = users_row(profile);
-    let named = search.builder.name_matches(&id, USERS_AND_ROLES);
+    let named = search.builder.name_matches(&id, USERS_AND_ROLES) || whole;
     let followed = folds.get(&id).copied().unwrap_or(false);
     let notice_row = |tree: &mut SidebarTree, text: &str| {
         let row = format!("{id}/notice");
@@ -3321,6 +3326,21 @@ mod tests {
         );
         let tree = filtered(&[], vec![no_objects(read())], "zzz");
         assert!(tree.items.is_empty(), "nothing matching keeps nothing");
+
+        // What the connection's name matches takes its rows with it, the
+        // Users and roles row and every role under it included.
+        let named = |roles| Listed {
+            roles: Some(roles),
+            ..listed("a", "Pond", Content::Loaded(birds()))
+        };
+        let ids = all_ids(&filtered(&[], vec![named(read())], "pond").items);
+        for row in [
+            users_row("a"),
+            role_row("a", true, "ana"),
+            role_row("a", false, "reporting"),
+        ] {
+            assert!(ids.contains(&row), "{row} is kept with its connection");
+        }
     }
 
     #[test]
