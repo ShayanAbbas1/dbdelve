@@ -3825,14 +3825,20 @@ fn parsed(engine: Engine, sql: &str) -> Parsed {
     if comments.is_empty() {
         return parsed_as_run(engine, sql);
     }
+    parsed_as_run(engine, sql).merged(below_floors(engine, sql, &comments))
+}
+
+/// Every reading of `sql` but the one that runs all of `comments`: one per
+/// floor, each comment from it on ignored, merged. Past
+/// [`MAX_VERSION_FLOORS`] it is unreadable instead.
+fn below_floors(engine: Engine, sql: &str, comments: &[VersionedComment]) -> Parsed {
     let mut floors: Vec<u64> = comments.iter().map(|comment| comment.floor).collect();
     floors.sort_unstable();
     floors.dedup();
-    let whole = parsed_as_run(engine, sql);
     if floors.len() > MAX_VERSION_FLOORS {
-        return whole.merged(Parsed::counted(unreadable_verdict(engine), 0));
+        return Parsed::counted(unreadable_verdict(engine), 0);
     }
-    let mut merged = whole;
+    let mut merged = Parsed::counted(Verdict::READ, 0);
     for floor in floors {
         // A server just below `floor`: every comment from it on is a comment.
         let mut below = sql.to_string();
@@ -3909,6 +3915,27 @@ fn versioned_comments(dialect: &dyn Dialect, sql: &str) -> Vec<VersionedComment>
     comments
 }
 
+/// One reading respelled by its own leading keyword (an `ANALYZE` as the
+/// `EXPLAIN ANALYZE` it runs, `ANALYSE` as `ANALYZE`), read as it runs: the
+/// other version readings are [`parsed`]'s, each respelled or not by its own
+/// keyword.
+///
+/// A versioned comment still in the respelling is also read ignored, under the
+/// respelling's prefix ([`below_floors`]). No server runs that text, but it
+/// keeps the gate as strict as it was: `ANALYZE /*!50000 SELECT 1 */` is
+/// unreadable, not the bare `ANALYZE` its reading below the floor is.
+fn respelled_as_run(engine: Engine, dialect: &dyn Dialect, respelled: &str) -> Parsed {
+    let run = parsed_as_run(engine, respelled);
+    if engine.spec().sql.parser_dialect != ParserDialect::MySql {
+        return run;
+    }
+    let comments = versioned_comments(dialect, respelled);
+    match comments.is_empty() {
+        true => run,
+        false => run.merged(below_floors(engine, respelled, &comments)),
+    }
+}
+
 /// [`parsed`] for one reading of which executable comments run: every
 /// `/*! … */` and `/*M! … */` still in `sql` is run.
 fn parsed_as_run(engine: Engine, sql: &str) -> Parsed {
@@ -3942,11 +3969,11 @@ fn parsed_as_run(engine: Engine, sql: &str) -> Parsed {
     if engine.spec().sql.explain_analyze == Some(ExplainPrefix::Analyze)
         && let Some(explain) = mariadb_analyze_as_explain(dialect.as_ref(), sql)
     {
-        return parsed(engine, &explain);
+        return respelled_as_run(engine, dialect.as_ref(), &explain);
     }
 
     if let Some(american) = analyse_as_analyze(dialect.as_ref(), sql) {
-        return parsed(engine, &american);
+        return respelled_as_run(engine, dialect.as_ref(), &american);
     }
 
     let spec = engine.spec();
@@ -11400,6 +11427,70 @@ mod tests {
             classify(Engine::MySql, "ANALYZE SELECT * FROM t").destructive,
             vec![Destructive::Unreadable],
         );
+    }
+
+    /// A MariaDB `ANALYZE` in or around a versioned comment is respelled per
+    /// version reading, each by the keyword that reading opens with, and the
+    /// submission needs what the most demanding reading needs.
+    #[test]
+    fn mariadb_analyze_is_read_per_version_reading() {
+        let reads = [
+            "/*!50000 ANALYZE */ SELECT * FROM t",
+            "/*!99999 ANALYZE */ SELECT * FROM t",
+        ];
+        for sql in reads {
+            assert_eq!(classify(Engine::MariaDb, sql), Verdict::READ, "{sql}");
+        }
+        // The respelling read below the comment's floor, `EXPLAIN ANALYZE`
+        // alone, keeps it unreadable rather than the bare `ANALYZE` a server
+        // below the floor runs.
+        assert_eq!(
+            classify(Engine::MariaDb, "ANALYZE /*!50000 SELECT 1 */").destructive,
+            vec![Destructive::Unreadable],
+        );
+        assert_eq!(
+            classify(Engine::MariaDb, "/*!99999 ANALYZE */ DELETE FROM t"),
+            Verdict::destroys(Destructive::UnfilteredDelete),
+        );
+        assert_eq!(
+            classify(Engine::MariaDb, "/*!99999 EXPLAIN */ ANALYZE DELETE FROM t"),
+            Verdict::destroys(Destructive::UnfilteredDelete),
+        );
+        assert_eq!(
+            classify(
+                Engine::MariaDb,
+                "ANALYZE /*!99999 SELECT 1; */ UPDATE t SET a = 1 WHERE id = 2"
+            ),
+            Verdict::WRITE,
+        );
+
+        // What the gate said before each reading was respelled on its own
+        // (CodeRabbit G49), when the respelling re-entered `parsed`: the same
+        // verdict, never a looser one.
+        let unreadable = Verdict {
+            mode: Mode::ReadWrite,
+            destructive: vec![Destructive::Unreadable],
+        };
+        let before = [
+            ("/*!50000 ANALYZE */ SELECT * FROM t", Verdict::READ),
+            ("/*!99999 ANALYZE */ SELECT * FROM t", Verdict::READ),
+            ("ANALYZE /*!50000 SELECT 1 */", unreadable),
+            (
+                "/*!99999 ANALYZE */ DELETE FROM t",
+                Verdict::destroys(Destructive::UnfilteredDelete),
+            ),
+            (
+                "/*!99999 EXPLAIN */ ANALYZE DELETE FROM t",
+                Verdict::destroys(Destructive::UnfilteredDelete),
+            ),
+            (
+                "ANALYZE /*!99999 SELECT 1; */ UPDATE t SET a = 1 WHERE id = 2",
+                Verdict::WRITE,
+            ),
+        ];
+        for (sql, verdict) in before {
+            assert_eq!(classify(Engine::MariaDb, sql), verdict, "{sql}");
+        }
     }
 
     /// Redis and MongoDB text is read once for every flag, and each flag still
