@@ -1765,7 +1765,16 @@ impl Workspace {
         }
         let id = profile.id.clone();
         let from = profile.session.saved_query_path(&previous);
-        let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries);
+        // A tab can stay bound to a query deleted on disk, which the list no
+        // longer names: moving another onto its path would put two tabs on
+        // one file. The tab on the query itself may keep it, for a rename
+        // that only changes case.
+        let held = self.tab_on_file(&profile.session.saved_query_path(&typed));
+        let refused = query_name_refusal(&typed, Some(&previous), &profile.session.saved_queries)
+            .or_else(|| {
+                (held.is_some() && held != self.tab_on_file(&from))
+                    .then(|| format!("{typed} is open in another tab."))
+            });
         let renamed = match refused {
             Some(message) => Err(message),
             None => store::rename_saved_query(&id, &previous, &typed),

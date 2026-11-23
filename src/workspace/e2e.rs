@@ -12822,23 +12822,7 @@ fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
         workspace.update(cx, |workspace, cx| workspace.activate(1, cx));
         settle(cx);
 
-        cx.update(|window, cx| {
-            workspace.update(cx, |workspace, cx| {
-                workspace.start_query_rename("nightly".into(), "nightly".into(), window, cx);
-                let input = workspace
-                    .profile()
-                    .unwrap()
-                    .session
-                    .query_rename
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .clone();
-                input.update(cx, |input, cx| input.set_value("weekly", window, cx));
-                workspace.commit_query_rename(cx);
-            });
-        });
-        settle(cx);
+        rename_query(&workspace, cx, "nightly", "weekly");
         assert_eq!(on_a(&workspace, cx), [queries.join("weekly.sql")]);
 
         cx.update(|window, cx| {
@@ -12849,6 +12833,51 @@ fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
         settle(cx);
         assert_eq!(on_a(&workspace, cx), Vec::<std::path::PathBuf>::new());
         assert!(!queries.join("weekly.sql").exists());
+        quit(workspace, cx);
+    });
+}
+
+/// The sidebar's rename of the front connection's saved query `from`.
+fn rename_query(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, from: &str, to: &str) {
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.start_query_rename(from.into(), from.into(), window, cx);
+            let input = workspace
+                .profile()
+                .unwrap()
+                .session
+                .query_rename
+                .as_ref()
+                .unwrap()
+                .input
+                .clone();
+            input.update(cx, |input, cx| input.set_value(to, window, cx));
+            workspace.commit_query_rename(cx);
+        });
+    });
+    settle(cx);
+}
+
+#[gpui::test]
+fn a_rename_onto_a_deleted_querys_open_tab_is_refused(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "daily", "select 1").expect("the query saves");
+        store::write_query("e2e", "weekly", "select 2").expect("the query saves");
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let queries = crate::sql_file::canonical(&store::query_directory("e2e").unwrap());
+        open_sql_file(&workspace, cx, &queries.join("daily.sql"));
+        open_sql_file(&workspace, cx, &queries.join("weekly.sql"));
+        std::fs::remove_file(queries.join("daily.sql")).unwrap();
+        workspace.update(cx, |workspace, cx| workspace.reload_saved_queries(cx));
+
+        rename_query(&workspace, cx, "weekly", "daily");
+        assert!(queries.join("weekly.sql").exists(), "nothing moved");
+        assert!(is_open(&workspace, cx, &queries.join("weekly.sql")));
+        let error = workspace.read_with(cx, |workspace, _| {
+            let rename = workspace.profile().unwrap().session.query_rename.as_ref();
+            rename.and_then(|rename| rename.error.clone())
+        });
+        assert_eq!(error.as_deref(), Some("daily is open in another tab."));
         quit(workspace, cx);
     });
 }
