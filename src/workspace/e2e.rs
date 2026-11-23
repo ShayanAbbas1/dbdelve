@@ -13131,6 +13131,38 @@ fn close_all_tabs_asks_once_about_every_dirty_file_tab(cx: &mut TestAppContext) 
     });
 }
 
+#[gpui::test]
+fn close_all_says_why_a_file_it_could_not_save_stayed_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let folder = store::home().unwrap().join("removed");
+        std::fs::create_dir(&folder).unwrap();
+        let stranded = open_dirty_file(&workspace, cx, "removed/stranded.sql");
+        let saved = open_dirty_file(&workspace, cx, "saved.sql");
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "-- SELECT 1;");
+        assert!(!is_open(&workspace, cx, &saved));
+        assert!(is_open(&workspace, cx, &stranded));
+        let notice = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.notice.clone()
+        });
+        assert!(
+            notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Could not save stranded.sql")),
+            "{notice:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
 /// Close All Tabs over a file tab holding cell edits asks about the edits
 /// first, holding the other dirty file tab with them, and Discard leaves one
 /// Save question over both files.
@@ -13241,7 +13273,10 @@ fn an_outside_write_under_unsaved_text_raises_the_bar(cx: &mut TestAppContext) {
             });
         });
         settle(cx);
-        assert!(cx.debug_bounds("file-banner: Changed on disk").is_none(), "kept");
+        assert!(
+            cx.debug_bounds("file-banner: Changed on disk").is_none(),
+            "kept"
+        );
         assert!(front_dirty(&workspace, cx));
         cx.simulate_keystrokes("secondary-s");
         settle(cx);

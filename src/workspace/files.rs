@@ -477,11 +477,7 @@ impl Workspace {
                 false => writing.push((id, file.path.clone())),
             }
         }
-        for (id, path) in writing {
-            if self.save_tab(&profile_id, id, path, cx) && close {
-                self.close_now(Tab::Query(id), window, cx);
-            }
-        }
+        self.save_each(&profile_id, writing, close, window, cx);
         if asking.is_empty() {
             return;
         }
@@ -503,18 +499,15 @@ impl Workspace {
         }) else {
             return;
         };
-        for id in pending.tabs {
-            let Some(path) = self
-                .profile()
-                .and_then(|profile| profile.session.query_tab(id))
-                .and_then(|tab| Some(tab.file.as_ref()?.path.clone()))
-            else {
-                continue;
-            };
-            if self.save_tab(&profile_id, id, path, cx) && pending.close {
-                self.close_now(Tab::Query(id), window, cx);
-            }
-        }
+        let tabs = pending
+            .tabs
+            .into_iter()
+            .filter_map(|id| {
+                let tab = self.profile()?.session.query_tab(id)?;
+                Some((id, tab.file.as_ref()?.path.clone()))
+            })
+            .collect();
+        self.save_each(&profile_id, tabs, pending.close, window, cx);
         self.refocus_front();
         cx.notify();
     }
@@ -687,7 +680,9 @@ impl Workspace {
                         workspace.note(format!("{} already exists.", file_name(&path)), cx);
                         return;
                     }
-                    workspace.save_tab(&profile_id, id, path, cx);
+                    if let Err(message) = workspace.save_tab(&profile_id, id, path, cx) {
+                        workspace.note(message, cx);
+                    }
                 }
                 Ok(Err(error)) => workspace.note(error.to_string(), cx),
                 Ok(Ok(None)) | Err(_) => {}
@@ -696,9 +691,33 @@ impl Workspace {
         .detach();
     }
 
+    /// Save each of `tabs`, by id and path, closing each one written when
+    /// `close`. The first failure is said last, or the notices of the saves
+    /// after it would hide why its tab is still open.
+    fn save_each(
+        &mut self,
+        profile_id: &str,
+        tabs: Vec<(u64, PathBuf)>,
+        close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut failed = None;
+        for (id, path) in tabs {
+            match self.save_tab(profile_id, id, path, cx) {
+                Ok(()) if close => self.close_now(Tab::Query(id), window, cx),
+                Ok(()) => {}
+                Err(message) => _ = failed.get_or_insert(message),
+            }
+        }
+        if let Some(message) = failed {
+            self.note(message, cx);
+        }
+    }
+
     /// Write tab `id` of `profile_id` to `path` exactly as it holds it, and
-    /// bind the tab there; whether it was written. Its scratch file goes once
-    /// the file is written: nothing is unsaved any more.
+    /// bind the tab there, or why it was not written. Its scratch file goes
+    /// once the file is written: nothing is unsaved any more.
     ///
     /// ponytail: written on the window's thread, so a file on a stalled mount
     /// holds the window until the write gives up; the blocking pool is the
@@ -709,23 +728,23 @@ impl Workspace {
         id: u64,
         path: PathBuf,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Result<(), String> {
         if self
             .tab_on_file(&path)
             .is_some_and(|(index, other)| other != id || self.profiles[index].id != profile_id)
         {
-            self.note(format!("{} is open in another tab.", file_name(&path)), cx);
-            return false;
+            return Err(format!("{} is open in another tab.", file_name(&path)));
         }
+        let gone = || format!("{} is not open any more.", file_name(&path));
         let Some(profile) = self
             .profiles
             .iter_mut()
             .find(|profile| profile.id == profile_id)
         else {
-            return false;
+            return Err(gone());
         };
         let Some(tab) = profile.session.query_tab(id) else {
-            return false;
+            return Err(gone());
         };
         let text = tab.editor.read(cx).value().to_string();
         let bom = tab.file.as_ref().is_some_and(|file| file.bom);
@@ -734,13 +753,7 @@ impl Workspace {
             Some(file) => TabKey::File(file.path.clone()),
             None => TabKey::Unsaved(id),
         };
-        let stamp = match sql_file::write(&path, &text, bom) {
-            Ok(stamp) => stamp,
-            Err(message) => {
-                self.note(message, cx);
-                return false;
-            }
-        };
+        let stamp = sql_file::write(&path, &text, bom)?;
         // Save As into the saved queries' folder adds one the sidebar lists.
         let new_saved_query = from != TabKey::File(path.clone())
             && path.parent() == Some(profile.session.query_directory.as_path());
@@ -770,7 +783,7 @@ impl Workspace {
         self.remember_file(profile_id, &path, cx);
         self.note(note, cx);
         self.remember_profiles(cx);
-        true
+        Ok(())
     }
 
     /// Mark tab `id` of `profile_id` dirty or clean as its editor now reads.
