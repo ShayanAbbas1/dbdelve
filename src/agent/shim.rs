@@ -109,7 +109,7 @@ impl Shim {
         if *open {
             return;
         }
-        let Ok(mut stream) = UnixStream::connect(path).await else {
+        let Ok(mut stream) = connect_own(path).await else {
             return;
         };
         let hello = wire::encode(&wire::Hello::Presence {
@@ -167,7 +167,7 @@ impl Shim {
             Ok(path) => path,
             Err(text) => return Ok(answer(Status::AppNotRunning, text)),
         };
-        let mut stream = match UnixStream::connect(path).await {
+        let mut stream = match connect_own(path).await {
             Ok(stream) => stream,
             Err(error) => {
                 return Ok(answer(Status::AppNotRunning, &failed_connect_text(&error)));
@@ -479,6 +479,30 @@ fn answer(status: Status, text: &str) -> CallToolResult {
     } else {
         CallToolResult::error(content)
     }
+}
+
+/// Connect to the app's socket, and keep the connection only when the process
+/// listening on it runs as this user. The directory is the user's own, but a
+/// call carries the agent's statement, so nothing is written to a listener
+/// whose owner is not checked: one whose credentials cannot be read is refused
+/// as permission denied.
+#[cfg(unix)]
+async fn connect_own(path: &Path) -> std::io::Result<UnixStream> {
+    let stream = UnixStream::connect(path).await?;
+    if served_by(&stream, super::ipc::current_euid()) {
+        Ok(stream)
+    } else {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+}
+
+/// Whether the peer of `stream` runs as `expected`. A parameter so a test can
+/// give the wrong uid.
+#[cfg(unix)]
+fn served_by(stream: &UnixStream, expected: u32) -> bool {
+    stream
+        .peer_cred()
+        .is_ok_and(|credentials| credentials.uid() == expected)
 }
 
 /// The connection ended with no answer on it, which is all the shim saw.
@@ -1711,6 +1735,16 @@ mod tests {
             assert_eq!(frame["analyze"], true, "{frame}");
         });
         let _ = std::fs::remove_dir_all(path.parent().expect("the path has a directory"));
+    }
+
+    #[test]
+    fn the_shim_writes_only_to_a_listener_of_its_own_user() {
+        block_on(async {
+            let (ours, _peer) = UnixStream::pair().expect("a pair of sockets");
+            let me = crate::agent::ipc::current_euid();
+            assert!(served_by(&ours, me));
+            assert!(!served_by(&ours, me.wrapping_add(1)));
+        });
     }
 
     #[test]
