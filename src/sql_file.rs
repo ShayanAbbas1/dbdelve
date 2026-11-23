@@ -166,13 +166,15 @@ pub(crate) fn write(path: &Path, text: &str, bom: bool) -> Result<Stamp, String>
         .open(&temporary)
         .map_err(|error| format!("Could not save {name}: {error}"))?;
     let written = (|| -> io::Result<Stamp> {
+        // Before the text goes in: a private file's SQL must never sit in a
+        // copy the umask left readable to everyone.
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
         if bom {
             file.write_all(BOM.as_bytes())?;
         }
         file.write_all(text.as_bytes())?;
-        if let Some(permissions) = permissions {
-            file.set_permissions(permissions)?;
-        }
         file.sync_all()?;
         // Off the staged copy, which the rename moves without touching.
         let stamp = Stamp::of(&file.metadata()?);
