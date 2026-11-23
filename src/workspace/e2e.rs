@@ -14276,23 +14276,22 @@ fn agent_audit_never_records_a_row_value(cx: &mut TestAppContext) {
     });
 }
 
-/// A write that opens for `opening` of the test clock and then fails at once,
-/// or after `running`, as Redis answers.
+/// A write that runs for `running` of the test clock and then fails with
+/// `message`, as Redis answers.
 #[cfg(unix)]
-fn slow_open_then(
-    opening: std::time::Duration,
+fn runs_then_fails(
     running: std::time::Duration,
+    message: &str,
     executor: &gpui::BackgroundExecutor,
 ) -> gpui::Task<super::agent_write::Wrote> {
     let executor = executor.clone();
+    let message = message.to_string();
     executor.clone().spawn(async move {
-        executor.timer(opening).await;
+        executor.timer(running).await;
         super::agent_write::Wrote::Done {
             hidden: Vec::new(),
-            ran_for: running,
             result: Err(crate::db::DbError {
-                message: "WRONGTYPE Operation against a key holding the wrong kind of value"
-                    .to_string(),
+                message,
                 position: None,
             }),
         }
@@ -14301,9 +14300,7 @@ fn slow_open_then(
 
 #[cfg(unix)]
 #[gpui::test]
-fn only_a_write_that_ran_its_whole_bound_after_it_was_sent_says_its_outcome_is_not_known(
-    cx: &mut TestAppContext,
-) {
+fn only_a_write_dbdelve_stopped_waiting_for_says_its_outcome_is_not_known(cx: &mut TestAppContext) {
     use std::time::Duration;
 
     use crate::agent::Status;
@@ -14344,14 +14341,24 @@ fn only_a_write_that_ran_its_whole_bound_after_it_was_sent_says_its_outcome_is_n
             answer.text
         };
 
-        // Most of the bound went on opening; the server then refused it.
+        // The server's own refusal, however late it came, is its answer.
         let refused = answer_after(&workspace, cx, |executor, _, _, _, _| {
-            slow_open_then(Duration::from_secs(3), Duration::from_millis(5), executor)
+            runs_then_fails(
+                Duration::from_secs(3),
+                "WRONGTYPE Operation against a key holding the wrong kind of value",
+                executor,
+            )
         });
         assert!(!refused.contains("is not known"), "{refused}");
 
+        // DBDelve's own timer gave up on a reply, however soon.
         let stopped = answer_after(&workspace, cx, |executor, _, _, _, _| {
-            slow_open_then(Duration::ZERO, Duration::from_secs(1), executor)
+            runs_then_fails(
+                Duration::ZERO,
+                "Stopped after the statement timeout of 1 seconds. The session closed with \
+                 it, and anything it held, a MULTI or a WATCH, is gone.",
+                executor,
+            )
         });
         assert!(stopped.contains("is not known"), "{stopped}");
         quit(workspace, cx);
@@ -14390,7 +14397,6 @@ fn agent_audit_keeps_no_row_value_or_host_from_a_failed_write(cx: &mut TestAppCo
         let (id, answer, logged) = fail_with(&workspace, cx, |_, _, _, _, _| {
             gpui::Task::ready(Wrote::Done {
                 hidden: Vec::new(),
-                ran_for: std::time::Duration::ZERO,
                 result: Err(DbError {
                     message: "duplicate key value violates unique constraint \"t_email_key\"\n\
                               Key (email)=(a@x) already exists."

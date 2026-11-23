@@ -570,11 +570,7 @@ impl Connection {
                         operation.into_future(),
                     )
                     .await
-                    .map_err(|_| {
-                        plain_error(format!(
-                            "Stopped after the statement timeout of {seconds} seconds."
-                        ))
-                    })?,
+                    .map_err(|_| plain_error(super::stopped_waiting(seconds)))?,
                 };
                 outcome.map_err(|error| statement_error(&error.kind))
             })
@@ -2060,9 +2056,7 @@ impl<'a> Run<'a> {
             // What the server's own bound did not stop, or a command that
             // carries none, is stopped the way Cancel stops it.
             let _ = connection.kill(handle);
-            Err(plain_error(format!(
-                "Stopped after the statement timeout of {timeout} seconds."
-            )))
+            Err(plain_error(super::stopped_waiting(timeout)))
         })
     }
 }

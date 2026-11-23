@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::SyncSender,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use super::agent::{AuditVerdict, CallFacts, Decision, INVALID_INDEX, audited_error, elapsed_ms};
@@ -68,10 +68,6 @@ pub(crate) struct Writing {
     /// Kept after a hangup: the answer is still sent and nobody reads it.
     reply: SyncSender<Reply>,
     arrived: Instant,
-    /// The statement timeout its connection carries, which is how long the
-    /// write may run, once sent, before an engine that times out on the
-    /// client stops waiting.
-    bound: Duration,
     /// The statement exactly as it was approved, for the audit.
     sql: String,
     /// The bridge session its `started` line was written in. The write
@@ -102,11 +98,8 @@ pub(crate) enum Wrote {
         hidden: Vec<String>,
         error: DbError,
     },
-    /// `ran_for` is from the statement being sent to its answer: the
-    /// keychain, a tunnel and the open before it are not the write running.
     Done {
         hidden: Vec<String>,
-        ran_for: Duration,
         result: Result<String, DbError>,
     },
 }
@@ -161,7 +154,6 @@ pub(super) fn run_write(
         Ok(connection) => connection,
         Err(error) => return Wrote::NotOpened { hidden, error },
     };
-    let sent = Instant::now();
     // Not `reads_only`: a write's rows are drained, never stopped early.
     let result = connection
         .query(
@@ -173,13 +165,8 @@ pub(super) fn run_write(
             },
         )
         .map(|result| written_text(engine, sql, &result));
-    let ran_for = sent.elapsed();
     drop(connection);
-    Wrote::Done {
-        hidden,
-        ran_for,
-        result,
-    }
+    Wrote::Done { hidden, result }
 }
 
 /// What an approved write answers: its rows when it returned any, the server's
@@ -207,14 +194,15 @@ const UNKNOWN_OUTCOME: &str =
 /// server's (scrubbed) text, then
 ///
 /// - that the outcome is not known, when the engine's timeout is DBDelve's own
-///   timer and the write had run for the whole bound since it was sent -- the
-///   server may still apply it, and no other failure says so: one that failed
-///   to open was never sent; or
+///   timer and the error is that timer's ([`DbError::stopped_waiting`]): the
+///   write was sent and no reply came, so the server may still apply it. Any
+///   other error is the server's answer, however late it came, and one that
+///   failed to open was never sent; or
 /// - that an invalid index of that name may remain, when `sql` is a Postgres
 ///   `CREATE INDEX CONCURRENTLY`: a stopped concurrent build leaves one, no
 ///   other statement does, so no other failure says it.
-fn failed_text(engine: Engine, sql: &str, server_text: &str, reached_bound: bool) -> String {
-    if reached_bound && engine.times_out_on_the_client() {
+fn failed_text(engine: Engine, sql: &str, server_text: &str, stopped_waiting: bool) -> String {
+    if stopped_waiting && engine.times_out_on_the_client() {
         format!("{server_text} {UNKNOWN_OUTCOME}")
     } else if creates_index_concurrently(engine, sql) {
         format!("{server_text} {INVALID_INDEX}")
@@ -244,7 +232,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let engine = config.engine();
-        let bound = Duration::from_secs(u64::from(write_timeout(config.statement_timeout())));
         let run = self.agent.write_runner.unwrap_or(open_for_write);
         let work = cx.spawn({
             let sql = sql.clone();
@@ -261,7 +248,6 @@ impl Workspace {
             engine,
             reply,
             arrived,
-            bound,
             sql,
             session: self.agent.session,
             verdict,
@@ -291,11 +277,10 @@ impl Workspace {
             } => (Status::Executed, text, None),
             Wrote::Done {
                 hidden,
-                ran_for,
                 result: Err(error),
             } => {
                 let server = scrubbed(&error.message, &hidden);
-                let unknown = ran_for >= write.bound;
+                let unknown = error.stopped_waiting();
                 (
                     Status::Failed,
                     failed_text(write.engine, &write.sql, &server, unknown),
@@ -659,9 +644,8 @@ mod tests {
         assert!(audited.starts_with("duplicate key value"), "{audited}");
     }
 
-    /// Redis's read timeout starts once the command is written, after the
-    /// instant `ran_for` counts from, so a write its timer stopped always
-    /// reads as having run its whole bound.
+    /// A write Redis's read timeout stopped is known by its error, so it says
+    /// its outcome is not known.
     #[test]
     #[ignore = "requires the compose databases"]
     fn live_a_redis_write_its_timer_stopped_says_its_outcome_is_not_known() {
@@ -684,22 +668,20 @@ mod tests {
             schema: None,
             read_only: false,
         });
-        let bound = Duration::from_secs(u64::from(write_timeout(1)));
         const SQL: &str = "BLPOP dbdelve:never 0";
         let Wrote::Done {
             hidden,
-            ran_for,
             result: Err(error),
         } = approved(&config, SQL)
         else {
             panic!("the blocked command did not time out");
         };
-        assert!(ran_for >= bound, "{ran_for:?} < {bound:?}");
+        assert!(error.stopped_waiting(), "{}", error.message);
         let text = failed_text(
             Engine::Redis,
             SQL,
             &scrubbed(&error.message, &hidden),
-            ran_for >= bound,
+            error.stopped_waiting(),
         );
         assert!(text.ends_with(UNKNOWN_OUTCOME), "{text}");
     }

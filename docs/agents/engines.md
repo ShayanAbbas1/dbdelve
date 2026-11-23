@@ -1281,9 +1281,10 @@ carries, engine by engine:
   read lane's sessions do not carry that wait. On MySQL nothing bounds a
   running DDL: `max_execution_time` bounds only a `SELECT`. Nothing cancels a
   running approved write. A write stopped by a client-side timer, on MongoDB or
-  Redis once it has run its whole bound since it was sent, answers that the
-  outcome is not known (time spent on the keychain, a tunnel or the open is not
-  counted, and a write that never opened was never sent); a failed
+  Redis, answers that the outcome is not known: it is told by its error
+  (`DbError::stopped_waiting`), not by how long it ran, so a server's own
+  refusal that came late stays a plain failure, and a write that never opened
+  was never sent; a failed
   Postgres `CREATE INDEX CONCURRENTLY` answers that an invalid index may remain.
   A DuckDB write is refused.
 - **DuckDB is opened per call and dropped when the call ends.** A second DuckDB

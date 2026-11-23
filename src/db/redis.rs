@@ -660,8 +660,9 @@ impl Connection {
         Err(plain_error(match (asked, lost) {
             (true, _) => CANCELLED.into(),
             (false, true) if error.is_timeout() => format!(
-                "Stopped after the statement timeout of {timeout} seconds. The session closed \
-                 with it, and anything it held, a MULTI or a WATCH, is gone."
+                "{} The session closed with it, and anything it held, a MULTI or a WATCH, is \
+                 gone.",
+                super::stopped_waiting(timeout)
             ),
             (false, true) => format!(
                 "{} The session closed with it, and anything it held, a MULTI or a WATCH, is gone.",

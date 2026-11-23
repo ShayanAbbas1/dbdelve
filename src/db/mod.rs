@@ -5739,6 +5739,24 @@ pub(super) fn in_a_transaction() -> DbError {
     plain_error(IN_A_TRANSACTION.into())
 }
 
+/// How DBDelve's own timer reports a statement it stopped waiting for, on the
+/// engines that [time out on the client](Engine::times_out_on_the_client): it
+/// was sent and no reply came, which no error from the server reads as.
+const STOPPED_WAITING: &str = "Stopped after the statement timeout of";
+
+/// The error of a statement DBDelve's own timer stopped waiting for.
+pub(super) fn stopped_waiting(seconds: u32) -> String {
+    format!("{STOPPED_WAITING} {seconds} seconds.")
+}
+
+impl DbError {
+    /// Whether this is [`stopped_waiting`]'s: the statement was sent and
+    /// DBDelve's timer gave up on its reply, so the server may still apply it.
+    pub(crate) fn stopped_waiting(&self) -> bool {
+        self.message.starts_with(STOPPED_WAITING)
+    }
+}
+
 pub(super) fn plain_error(message: String) -> DbError {
     DbError {
         message,
@@ -6188,6 +6206,21 @@ mod tests {
             );
         }
         assert!(check_time_zone("").is_err() && check_time_zone("   ").is_err());
+    }
+
+    #[test]
+    fn only_dbdelves_own_timer_reads_as_stopped_waiting() {
+        assert!(plain_error(stopped_waiting(3)).stopped_waiting());
+        // A server's own words about a time limit are its answer.
+        for server in [
+            "operation exceeded time limit",
+            "canceling statement due to statement timeout",
+        ] {
+            assert!(
+                !plain_error(server.to_string()).stopped_waiting(),
+                "{server}"
+            );
+        }
     }
 
     #[test]
