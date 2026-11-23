@@ -787,7 +787,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   tab, its Save saving each; with cell edits too, the edits question holds
   the dirty file tabs as well and the Save question follows it. Don't Save
   closes, which deletes the scratch file. Save writes each file and closes
-  only the ones written: a refused write keeps its tab and says why, and a
+  only the ones written: a refused write keeps its tab and says why, last,
+  so the notices of the saves after it do not hide it
+  (`Workspace::save_each`), and a
   file changed on disk goes to the Overwrite question first, whose
   Overwrite then closes it. An untitled tab never asks, being kept anyway.
   A clean file tab is stat'ed before a close decides
@@ -796,7 +798,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   with the only copy of its text. A file changed rather than gone leaves
   nothing of the user's in a clean buffer, so that closes unasked. Quit
   never asks: that is hot exit, below. Deleting a saved query closes its tab
-  without this question, the Delete having been asked.
+  without this question, the Delete having been asked, and its dialog says
+  so wherever the tab is.
 - **A file changed on disk is noticed on focus, not watched.** The front
   tab's file is stat'ed when the window becomes active
   (`observe_window_activation`) and when a tab reaches the front, which
@@ -823,15 +826,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 - **A conflict outlives a relaunch.** A dirty file tab stores the hash of
   the text its edits were written against (`StoredQueryTab::saved_hash`,
   `sql_file::text_hash`, FNV-1a because std's hasher may change between
-  releases) and whether Keep Mine was chosen (`kept_mine`). A file that
-  reads differently at relaunch raises the bar; Keep Mine comes back as it
-  was, so Save still asks (`restored_conflict`). Either flips with the
+  releases), whether Keep Mine was chosen (`kept_mine`) and whether the bar
+  was up unanswered (`asking`), its own flag because a tab that came back
+  asking holds the file's new text as its saved text. A file that reads
+  differently at relaunch raises the bar, as does one left asking; Keep
+  Mine comes back as it was, so Save still asks (`restored_conflict`). Either flips with the
   dirty mark or an answer to the bar, which marks the profiles unsaved so a
   quit writes them.
 - **A file deleted on disk keeps its tab bound and dirty**, its saved
   text `None`, and the tab says "Deleted on disk" in the same bar. Save
   writes the file again. A file missing at relaunch comes back the same
-  way, so the label needs nothing of its own there.
+  way, so the label needs nothing of its own there. One written again
+  while its tab holds unsaved text says "Changed on disk" with Reload and
+  Keep Mine, as any change does.
 - **Saved queries are files where they already are.** A profile's saved
   queries stay under `queries/<profile id>/` until moved, and are listed in the
   sidebar's Files group and the palette (`Session::saved_queries`), which a Save As
@@ -845,12 +852,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   closes a tab bound to it on whichever connection holds it, brought to the
   front first; a tab holding cell edits nobody applied asks first,
   as any close does (`AfterEdits::Close { deleting }`), and the file stays until it
-  is told. A file already removed outside the app counts as deleted, so its
+  is told. A query that is a link goes alone, leaving the file it led to
+  and any tab on that (`Session::deleted_with`). A file already removed outside the app counts as deleted, so its
   stale library row and open tab can still be removed. Rename… on a sidebar row
   turns the row into a field (`Session::query_rename`) that moves the file
   (`store::rename_saved_query`), its bytes and permissions untouched, and
   repoints a tab bound to it on any connection, whose unsaved text stays
-  unsaved. A rename is one native atomic
+  unsaved, and redraws that connection's Files group. A name another tab
+  holds, one left on a query deleted on disk, is refused, or two tabs would
+  share a file. A rename is one native atomic
   no-overwrite move, never a write under the new name and a delete of the old
   one: on a case-insensitive filesystem `daily` and `Daily` are one file. A
   name taken in any case is refused. Staging files are private to each writer.
@@ -868,10 +878,12 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   changes what a connection lists redraws its group, a tab closing on a
   file it alone kept listed included. A row is named by its file,
   with its folder beside it where two listed share a name, and shows the
-  full path on hover; its id is `file:` and the path, matched against the
-  listed paths rather than parsed back, since a path need not be UTF-8.
-  Open goes through the open-file path, so a file already open comes
-  forward. Reveal is named as each platform names it: Reveal in Finder,
+  full path on hover; its id is `file:` and the path's `Debug` spelling,
+  which keeps bytes that are not UTF-8 apart where `display` would merge
+  them, matched against the listed paths rather than parsed back.
+  Open brings a file already open forward; otherwise the file is read off
+  the window's thread and opens in a file tab whatever its extension, since
+  Save As binds any name typed. Reveal is named as each platform names it: Reveal in Finder,
   Reveal in File Explorer, and Open Containing Folder elsewhere. Remove from List takes the path off the list and never touches
   the file; deleting stays the file manager's. Which listed files are gone
   is looked at off the window's thread at launch and whenever the window
@@ -903,7 +915,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   the path to its copy could still vanish in a crash. Each query is copied,
   never renamed, since a rename fails across volumes (`sql_file::copy_new`):
   the copy is made with create-new semantics, so a name taken there is
-  skipped and reported and its query stays; the bytes are copied as they
+  skipped and reported and its query stays, as is a name a tab on a file
+  deleted on disk still holds; the bytes are copied as they
   are and synced with their directory entry. Only once every copy has
   landed is any original removed (`sql_file::remove_moved`), and only those
   whose copy did. A copy that fails is removed and the original kept, as is
