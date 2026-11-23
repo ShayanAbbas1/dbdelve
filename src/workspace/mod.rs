@@ -178,6 +178,10 @@ impl Settings {
 
     pub(crate) fn set_opacity_for(&mut self, theme: &Theme, opacity: f32) {
         let opacity = opacity.clamp(theme::OPACITY_MIN, theme::OPACITY_MAX);
+        // One entry per theme as `opacity_for` finds it: an older spelling
+        // left behind would answer again once the name changes back.
+        self.theme_opacity
+            .retain(|name, _| !name.eq_ignore_ascii_case(theme.name));
         self.theme_opacity.insert(theme.name.to_string(), opacity);
     }
 
@@ -3411,6 +3415,23 @@ mod tests {
         settings.set_opacity_for(&second, 0.6);
         assert_eq!(settings.opacity_for(&first), 0.9);
         assert_eq!(settings.opacity_for(&second), 0.6);
+    }
+
+    #[test]
+    fn an_opacity_saved_under_one_spelling_replaces_the_others() {
+        let spelled = |name| {
+            let mut theme = Theme::black();
+            theme.name = name;
+            theme
+        };
+        let other = Theme::dark();
+        let mut settings = Settings::default();
+        settings.set_opacity_for(&other, 0.9);
+        settings.set_opacity_for(&spelled("Rewritten"), 0.6);
+        settings.set_opacity_for(&spelled("REWRITTEN"), 0.8);
+        assert_eq!(settings.opacity_for(&spelled("Rewritten")), 0.8);
+        assert_eq!(settings.opacity_for(&other), 0.9);
+        assert_eq!(settings.theme_opacity.len(), 2);
     }
 
     #[test]
