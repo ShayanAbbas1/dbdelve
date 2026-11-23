@@ -831,6 +831,10 @@ mod tests {
             "SELECT toDate(a) FROM t",
             "SELECT lower(a) FROM t",
             "SELECT LOWER(a) FROM t",
+            // A case-insensitive built-in, listed lower and UPPER, in any casing.
+            "SELECT Lower(a) FROM t",
+            "SELECT count(*) FROM t",
+            "SELECT Count(*) FROM t",
             "SELECT * FROM numbers(10)",
         ] {
             always(Engine::ClickHouse, text, AgentVerdict::Run);
@@ -2042,10 +2046,6 @@ mod tests {
     }
 
     #[test]
-    fn the_savepoint_family_is_refused_as_a_session_statement() {
-        for sql in [
-            "SAVEPOINT a",
-    #[test]
     fn an_explain_that_runs_a_session_change_is_refused_as_one() {
         for sql in [
             "EXPLAIN ANALYZE CREATE TEMPORARY TABLE u AS SELECT 1",
@@ -2067,6 +2067,10 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_savepoint_family_is_refused_as_a_session_statement() {
+        for sql in [
+            "SAVEPOINT a",
             "RELEASE SAVEPOINT a",
             "ROLLBACK TO SAVEPOINT a",
         ] {

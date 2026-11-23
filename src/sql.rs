@@ -4308,7 +4308,10 @@ fn calls_unlisted_function(engine: Engine, statement: &Statement) -> bool {
 }
 
 /// Whether `name` is one bare, unquoted word on `engine`'s built-in list.
-/// Case is folded unless the server tells names apart by it.
+/// Case is folded unless the server tells names apart by it. Where it does,
+/// a case-insensitive built-in is listed as its lower and its UPPER spelling,
+/// so a name whose two spellings are both listed matches in any casing, and
+/// any other only as spelled.
 fn listed(engine: Engine, name: &ObjectName) -> bool {
     let sql = &engine.spec().sql;
     let [ObjectNamePart::Identifier(ident)] = name.0.as_slice() else {
@@ -4317,13 +4320,19 @@ fn listed(engine: Engine, name: &ObjectName) -> bool {
     if ident.quote_style.is_some() {
         return false;
     }
-    let folded = match sql.case_sensitive_functions {
-        true => ident.value.clone(),
-        false => ident.value.to_ascii_lowercase(),
+    let on_list = |spelling: &str| {
+        sql.builtin_functions
+            .lines()
+            .any(|line| !line.starts_with('#') && line == spelling)
     };
-    sql.builtin_functions
-        .lines()
-        .any(|line| !line.starts_with('#') && line == folded)
+    match sql.case_sensitive_functions {
+        true => {
+            on_list(&ident.value)
+                || (on_list(&ident.value.to_ascii_lowercase())
+                    && on_list(&ident.value.to_ascii_uppercase()))
+        }
+        false => on_list(&ident.value.to_ascii_lowercase()),
+    }
 }
 
 /// What a submission's calls do that its tree does not show, read off its
@@ -13205,6 +13214,23 @@ mod tests {
             ),
             Some(Stop::Confirm(Destructive::Drop))
         );
+        // A known kind beside the unreadable one still asks, unless silenced.
+        let both = Verdict {
+            mode: Mode::Full,
+            destructive: vec![Destructive::Unreadable, Destructive::Drop],
+        };
+        assert_eq!(
+            gate_own_run(&both, Mode::Full, &[], true),
+            Some(Stop::Confirm(Destructive::Drop))
+        );
+        assert_eq!(
+            gate_own_run(&both, Mode::Full, &[Destructive::Drop], true),
+            None
+        );
+        assert_eq!(
+            gate_own_run(&both, Mode::Full, &[], false),
+            Some(Stop::RunOnce)
+        );
     }
 
     /// With no server-side hold behind Read-only, a statement the gate cannot
@@ -13225,23 +13251,6 @@ mod tests {
                 "{sql}"
             );
             for mode in [Mode::ReadWrite, Mode::Full] {
-        // A known kind beside the unreadable one still asks, unless silenced.
-        let both = Verdict {
-            mode: Mode::Full,
-            destructive: vec![Destructive::Unreadable, Destructive::Drop],
-        };
-        assert_eq!(
-            gate_own_run(&both, Mode::Full, &[], true),
-            Some(Stop::Confirm(Destructive::Drop))
-        );
-        assert_eq!(
-            gate_own_run(&both, Mode::Full, &[Destructive::Drop], true),
-            None
-        );
-        assert_eq!(
-            gate_own_run(&both, Mode::Full, &[], false),
-            Some(Stop::RunOnce)
-        );
                 assert_eq!(gate(&verdict, mode, &[]), Some(Stop::RunOnce), "{sql}");
             }
             assert!(!rerunnable(*engine, sql), "{sql}");
