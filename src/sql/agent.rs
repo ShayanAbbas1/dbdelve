@@ -2002,6 +2002,46 @@ mod tests {
     }
 
     #[test]
+    fn no_agent_read_lifts_the_statement_timeout_of_the_connection_it_reuses() {
+        // A read runs on the agent's own connection, opened capped at
+        // `AGENT_TIMEOUT` and kept for later calls, so nothing that runs there
+        // may change the cap: a `SET` is refused, and a call that sets it is a
+        // write, approved by the human and run on a connection of its own.
+        for (engine, sql) in [
+            (Engine::Postgres, "SET statement_timeout = 0"),
+            (Engine::Postgres, "SET SESSION statement_timeout TO 0"),
+            (Engine::Postgres, "RESET statement_timeout"),
+            (
+                Engine::Postgres,
+                "SELECT set_config('statement_timeout', '0', false)",
+            ),
+            (Engine::MySql, "SET SESSION max_execution_time = 0"),
+            (Engine::MySql, "SET @@max_execution_time = 0"),
+            (Engine::MariaDb, "SET max_statement_time = 0"),
+            (Engine::SqlServer, "SET LOCK_TIMEOUT -1"),
+            (Engine::ClickHouse, "SET max_execution_time = 0"),
+            (
+                Engine::Snowflake,
+                "ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 0",
+            ),
+        ] {
+            for mode in Mode::ALL {
+                let answer = agent_gate(engine, sql, mode);
+                assert!(
+                    !matches!(answer, AgentVerdict::Run),
+                    "{engine:?} {mode:?}: {sql}: {answer:?}"
+                );
+                if let AgentVerdict::Approve(verdict, _) = &answer {
+                    assert!(
+                        verdict.mode >= Mode::ReadWrite,
+                        "{engine:?} {mode:?}: {sql}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_savepoint_family_is_refused_as_a_session_statement() {
         for sql in [
             "SAVEPOINT a",
