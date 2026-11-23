@@ -987,7 +987,20 @@ impl Engine {
     /// closes the connection, which rolls the statement back; the file engines
     /// interrupt the statement in the driver; a plugin's driver owns its own.
     pub fn times_out_on_the_client(self) -> bool {
-        matches!(self, Self::MongoDb | Self::Redis)
+        // Every engine named, so a new one is a decision rather than a default.
+        match self {
+            Self::MongoDb | Self::Redis => true,
+            Self::Postgres
+            | Self::MySql
+            | Self::MariaDb
+            | Self::Sqlite
+            | Self::Turso
+            | Self::DuckDb
+            | Self::Snowflake
+            | Self::ClickHouse
+            | Self::SqlServer
+            | Self::Generic => false,
+        }
     }
 
     /// Whether the server holds a Read-only session to reads -- the backstop
