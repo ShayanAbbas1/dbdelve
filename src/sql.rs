@@ -5133,9 +5133,42 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
         return leaves;
     };
     match SqlParser::parse_sql(dialect.as_ref(), sql) {
-        Ok(statements) => statements
-            .iter()
-            .for_each(|statement| leaves.add(engine, statement)),
+        Ok(statements) => {
+            // The savepoints this submission opened outside a transaction it
+            // began itself, and what the transaction read before the first:
+            // releasing that one ends what it opened, and leaves the
+            // transaction as the submission found it, open or not.
+            let mut savepoints: Vec<&str> = Vec::new();
+            let mut before = None;
+            for statement in &statements {
+                match statement {
+                    Statement::Savepoint { name } if savepoint_opens_transaction(engine) => {
+                        if savepoints.is_empty() {
+                            before = leaves.transaction;
+                        }
+                        savepoints.push(&name.value);
+                    }
+                    Statement::ReleaseSavepoint { name } => {
+                        if let Some(at) = savepoints
+                            .iter()
+                            .rposition(|open| open.eq_ignore_ascii_case(&name.value))
+                        {
+                            savepoints.truncate(at);
+                            if savepoints.is_empty() {
+                                leaves.transaction = before;
+                            }
+                        }
+                    }
+                    Statement::StartTransaction { .. }
+                    | Statement::Commit { .. }
+                    | Statement::Rollback {
+                        savepoint: None, ..
+                    } => savepoints.clear(),
+                    _ => {}
+                }
+                leaves.add(engine, statement);
+            }
+        }
         Err(_) => {
             let tokens = Tokenizer::new(dialect.as_ref(), sql)
                 .tokenize()
@@ -5285,6 +5318,11 @@ pub(crate) fn after_last_end(engine: Engine, sql: &str) -> &str {
     }
 }
 
+/// Whether a `SAVEPOINT` outside a transaction opens one, as SQLite's does.
+fn savepoint_opens_transaction(engine: Engine) -> bool {
+    matches!(engine, Engine::Sqlite | Engine::Turso)
+}
+
 impl Leaves {
     fn add(&mut self, engine: Engine, statement: &Statement) {
         match statement {
@@ -5298,10 +5336,12 @@ impl Leaves {
                 .for_each(|statement| self.add(engine, statement)),
             Statement::StartTransaction { .. } => self.transaction = Some(true),
             // SQLite opens a transaction at a `SAVEPOINT` outside one, which
-            // stays open until its `RELEASE` -- read as nothing here, so a
-            // transaction it may have ended is still read as open, the side
-            // an idle close cannot lose work on.
-            Statement::Savepoint { .. } if matches!(engine, Engine::Sqlite | Engine::Turso) => {
+            // stays open until its `RELEASE`. One released in the submission
+            // that opened it is settled in [`leaves`]; one opened by an
+            // earlier submission is read as nothing here, so a transaction
+            // it may have ended is still read as open, the side an idle close
+            // cannot lose work on.
+            Statement::Savepoint { .. } if savepoint_opens_transaction(engine) => {
                 self.transaction = Some(true)
             }
             // `AND CHAIN` opens the next one as it ends this one.
@@ -6335,6 +6375,30 @@ mod tests {
         // Postgres refuses one outside a transaction; inside one it ends
         // nothing.
         assert_eq!(leaves(Engine::Postgres, "SAVEPOINT s").transaction, None);
+    }
+
+    #[test]
+    fn a_savepoint_released_where_it_was_opened_leaves_the_transaction_as_it_was() {
+        use crate::db::Engine;
+
+        for engine in [Engine::Sqlite, Engine::Turso] {
+            let left = |sql| leaves(engine, sql).transaction;
+            // Outside a transaction it opened one, and the release ended it;
+            // inside one it left the enclosing one open. Either way, as the
+            // submission found it.
+            assert_eq!(left("SAVEPOINT s; UPDATE t SET a = 1; RELEASE s"), None);
+            assert_eq!(left("SAVEPOINT s; RELEASE SAVEPOINT S"), None);
+            assert_eq!(left("SAVEPOINT a; SAVEPOINT b; RELEASE a"), None);
+            // A release of an inner one keeps the outer one open.
+            assert_eq!(left("SAVEPOINT a; SAVEPOINT b; RELEASE b"), Some(true));
+            // One the submission's own `BEGIN` encloses.
+            assert_eq!(left("BEGIN; SAVEPOINT s; RELEASE s"), Some(true));
+            assert_eq!(left("COMMIT; SAVEPOINT s; RELEASE s"), Some(false));
+            // Opened by an earlier submission: whether its release ends the
+            // transaction cannot be told, so it is still read as open.
+            assert_eq!(left("RELEASE s"), None);
+            assert_eq!(left("SAVEPOINT a; RELEASE s"), Some(true));
+        }
     }
 
     #[test]
