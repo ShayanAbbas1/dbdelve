@@ -3348,6 +3348,46 @@ fn resaving_an_unchanged_filter_leaves_the_file_byte_identical(cx: &mut TestAppC
     });
 }
 
+/// A listing asked under the old filter can land after Save, and a failed
+/// refresh never replaces it: Save overtakes it and narrows the list held.
+#[gpui::test]
+fn save_filter_overtakes_a_listing_under_way_and_narrows_the_list_held(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        let names = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let databases = &workspace.profile().unwrap().databases;
+                (databases.names.clone(), databases.left_out)
+            })
+        };
+        assert_eq!(names(&workspace, cx).0, ["e2e", "other", "scratch"]);
+        let old = workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            workspace.list_databases(&id, generation, cx);
+            let old = workspace.profile().unwrap().listings;
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.patterns = vec!["scr*".to_string()];
+            workspace.save_filter(cx);
+            old
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.profile().unwrap().latest_listing(old));
+        });
+        assert_eq!(
+            names(&workspace, cx),
+            (vec!["e2e".to_string(), "scratch".to_string()], 1),
+            "narrowed at Save, before any listing lands"
+        );
+        settle(cx);
+        assert_eq!(
+            names(&workspace, cx),
+            (vec!["e2e".to_string(), "scratch".to_string()], 1)
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_save_past_the_cap_keeps_the_first_500_entries_in_the_profile_and_the_file(
     cx: &mut TestAppContext,

@@ -842,6 +842,17 @@ impl Workspace {
         profile
             .database_catalogs
             .retain(|database, _| shown.shows_database(database));
+        // A listing asked under the old filter may still land and put back a
+        // database this one hides; it is overtaken here. Until the next one
+        // lands -- or for good, if it fails -- the list held is narrowed by
+        // the new filter, its hidden count raised by what that takes out.
+        profile.start_listing();
+        let held = profile.databases.names.len();
+        profile
+            .databases
+            .names
+            .retain(|database| shown.shows_database(database));
+        profile.databases.left_out += held - profile.databases.names.len();
         self.remember_profiles(cx);
         self.close_filter_picker(cx);
         if !under_way {
