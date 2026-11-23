@@ -2739,11 +2739,16 @@ impl Bound {
     /// transaction open, and nothing in the error tells that from one the
     /// server refused, so a failed one keeps edits refused until a ROLLBACK or
     /// COMMIT goes through.
+    ///
+    /// An end that succeeded is still not the end of the transaction when
+    /// `still_open` says so of what it returned
+    /// ([`crate::db::transaction_still_open`]).
     pub(crate) fn leave<T>(
         &self,
         transaction: Option<bool>,
         settings: bool,
         run: impl FnOnce() -> Result<T, DbError>,
+        still_open: impl FnOnce(&T) -> bool,
     ) -> Result<T, DbError> {
         if settings {
             self.settings.store(true, Ordering::SeqCst);
@@ -2756,7 +2761,7 @@ impl Bound {
             self.transaction.store(true, Ordering::SeqCst);
         }
         let ran = run();
-        if !open && ran.is_ok() {
+        if !open && ran.as_ref().is_ok_and(|ran| !still_open(ran)) {
             self.transaction.store(false, Ordering::SeqCst);
         }
         ran

@@ -187,7 +187,11 @@ Decided, and not to be re-litigated:
   dbdelve's -- was rolled back, unless the batch may have committed it first
   (`COMMIT; SELECT 1/0`, `sql::may_commit`), which leaves the count at zero
   just the same: then it says the transaction ended without saying how
-  (`TRANSACTION_ENDED`).
+  (`TRANSACTION_ENDED`). After a successful user batch that
+  `sql::leaves` reads as ending the transaction, `still_open` reads it once
+  more: a `COMMIT` inside a nested `BEGIN TRANSACTION` takes one level off and
+  commits nothing, and the notice says a transaction is still open
+  (`TRANSACTION_STILL_OPEN`), which keeps it open in the workspace.
 - **`sql_variant` and every CLR type (`geography`, `geometry`, `hierarchyid`,
   system type id 240) panic tiberius part way through a result it cannot
   decode**, which would otherwise close the session and the transaction in it.

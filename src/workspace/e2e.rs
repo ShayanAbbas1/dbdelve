@@ -13706,7 +13706,12 @@ fn an_edit_issued_before_a_transaction_opened_on_its_session_is_refused_when_its
             else {
                 panic!("the read opened a session for `other`");
             };
-            _ = session.leave(Some(true), false, || Ok::<_, crate::db::DbError>(()));
+            _ = session.leave(
+                Some(true),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            );
         });
         settle(cx);
         // Refused as an edit send is: the tab keeps what it showed and the
@@ -14299,7 +14304,12 @@ fn an_export_of_another_databases_table_minds_only_that_databases_transaction(
             else {
                 panic!("the rows were read over a session of `other`'s own");
             };
-            _ = session.leave(Some(true), false, || Ok::<_, crate::db::DbError>(()));
+            _ = session.leave(
+                Some(true),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            );
         });
         assert!(
             workspace.read_with(cx, |workspace, _| workspace.refetch().is_err()),
@@ -14313,14 +14323,32 @@ fn an_export_of_another_databases_table_minds_only_that_databases_transaction(
             else {
                 panic!("the session of `other` is still open");
             };
-            _ = session.leave(Some(false), false, || {
-                Err::<(), _>(crate::db::DbError {
-                    message: "Cancelled before it was sent.".into(),
-                    position: None,
-                })
-            });
+            _ = session.leave(
+                Some(false),
+                false,
+                || {
+                    Err::<(), _>(crate::db::DbError {
+                        message: "Cancelled before it was sent.".into(),
+                        position: None,
+                    })
+                },
+                |_| false,
+            );
             assert!(session.in_transaction());
-            _ = session.leave(Some(false), false, || Ok::<_, crate::db::DbError>(()));
+            // One the driver says ended only a nested level.
+            _ = session.leave(
+                Some(false),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| true,
+            );
+            assert!(session.in_transaction());
+            _ = session.leave(
+                Some(false),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            );
             assert!(!session.in_transaction());
         });
         quit(workspace, cx);
@@ -28587,7 +28615,12 @@ fn a_keep_alive_round_asks_again_under_the_session_whether_a_begin_went_out(
         assert!(!sessions[0].1(), "the profile's own session took a BEGIN");
         assert!(sessions[1].1(), "the other session did not");
         bound
-            .leave(Some(true), false, || Ok::<_, crate::db::DbError>(()))
+            .leave(
+                Some(true),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            )
             .expect("nothing is sent");
         assert!(!sessions[1].1(), "until it did");
         run_in_front(&workspace, cx, "ROLLBACK");
@@ -28616,7 +28649,12 @@ fn a_keep_alive_round_is_skipped_inside_a_transaction(cx: &mut TestAppContext) {
                         profile.connection().expect("the profile is connected"),
                     );
                     session
-                        .leave(Some(true), false, || Ok::<_, crate::db::DbError>(()))
+                        .leave(
+                            Some(true),
+                            false,
+                            || Ok::<_, crate::db::DbError>(()),
+                            |_| false,
+                        )
                         .expect("nothing is sent");
                     profile.bound.insert(
                         "other".to_string(),
@@ -29334,7 +29372,12 @@ fn idle_disconnect_waits_for_unfinished_work(cx: &mut TestAppContext) {
                     profile.connection().expect("the profile is connected"),
                 );
                 session
-                    .leave(Some(true), false, || Ok::<_, crate::db::DbError>(()))
+                    .leave(
+                        Some(true),
+                        false,
+                        || Ok::<_, crate::db::DbError>(()),
+                        |_| false,
+                    )
                     .expect("nothing is sent");
                 profile.bound.insert(
                     "other".to_string(),

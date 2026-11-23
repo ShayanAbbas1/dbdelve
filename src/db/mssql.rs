@@ -1556,6 +1556,12 @@ impl Connection {
                 .and_then(Result::ok)
                 .and_then(|count| count.result.rows.first()?.get(0)?.parse().ok());
         }
+        if let Ok(collected) = &mut result
+            && origin == Origin::User
+            && before.is_some()
+        {
+            still_open(session, sql, &mut collected.result);
+        }
         // After a failure too: a batch that moved the session and then failed
         // leaves it moved all the same.
         if mentions_use(sql)
@@ -3143,6 +3149,25 @@ fn kept_transaction(sql: &str, result: QueryResult) -> Result<QueryResult, DbErr
     }
 }
 
+/// Says so in `result`'s notice when `sql`, which ran whole and ends the
+/// transaction, left one open: a `COMMIT` takes one level off
+/// `@@TRANCOUNT`, so inside a nested `BEGIN TRANSACTION` it commits nothing.
+fn still_open(session: &mut Session, sql: &str, result: &mut QueryResult) {
+    if crate::sql::leaves(Engine::SqlServer, sql).transaction != Some(false) {
+        return;
+    }
+    let depth = session
+        .trip("SELECT @@TRANCOUNT")
+        .and_then(Result::ok)
+        .and_then(|collected| collected.result.rows.first()?.get(0)?.parse::<u64>().ok());
+    if depth.is_some_and(|depth| depth > 0) {
+        result.notice = Some(match result.notice.take() {
+            Some(notice) => format!("{notice}\n\n{}", super::TRANSACTION_STILL_OPEN),
+            None => super::TRANSACTION_STILL_OPEN.to_string(),
+        });
+    }
+}
+
 fn transaction_outcome(
     session: &mut Session,
     sql: &str,
@@ -3364,6 +3389,22 @@ mod tests {
                 .is_none(),
             "and the ping did not log it in"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_commit_inside_a_nested_transaction_says_one_is_still_open() {
+        let connection = live();
+        let run = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message))
+        };
+        run("BEGIN TRANSACTION");
+        run("BEGIN TRANSACTION");
+        assert!(crate::db::transaction_still_open(&run("COMMIT")));
+        assert!(!crate::db::transaction_still_open(&run("COMMIT")));
+        assert!(!crate::db::transaction_still_open(&run("SELECT 1")));
     }
 
     #[test]

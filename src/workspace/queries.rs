@@ -2897,7 +2897,9 @@ impl Workspace {
                 (Some(bound), Some(binding), _) if refusal_applies => {
                     bound.edit(&binding.database, run)
                 }
-                (Some(bound), _, Some((open, settings))) => bound.leave(open, settings, run),
+                (Some(bound), _, Some((open, settings))) => {
+                    bound.leave(open, settings, run, crate::db::transaction_still_open)
+                }
                 _ => run(),
             };
             // A Row send's row, read inside the transaction that wrote it: the
@@ -3217,6 +3219,15 @@ impl Workspace {
                                 && sql::last_end_commits(engine, sent);
                             left_manual = match reopens {
                                 true => profile.reopen_landed(sent, *since, lost, error),
+                                // An end that left the transaction open ran
+                                // inside it, and the next end still ends it.
+                                false if result
+                                    .as_ref()
+                                    .is_ok_and(crate::db::transaction_still_open) =>
+                                {
+                                    profile.record_sent(sent, None);
+                                    false
+                                }
                                 false => profile.end_landed(sent, *lone, lost, error),
                             };
                         } else if bound_db.is_none()

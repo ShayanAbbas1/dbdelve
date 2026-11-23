@@ -243,6 +243,22 @@ pub(crate) fn transaction_ended(error: &DbError) -> bool {
     transaction_rolled_back(error) || error.message.ends_with(TRANSACTION_ENDED)
 }
 
+/// What a driver adds to a statement's notice when it ended a transaction and
+/// one is still open: SQL Server's `COMMIT` inside a nested `BEGIN
+/// TRANSACTION`, which takes one level off and commits nothing.
+pub(crate) const TRANSACTION_STILL_OPEN: &str = "A transaction is still open: this ended \
+     only the innermost level of the transactions nested in it, and nothing is committed \
+     until the outermost one ends.";
+
+/// Whether the driver says the transaction outlived a statement that ended
+/// one ([`TRANSACTION_STILL_OPEN`]).
+pub(crate) fn transaction_still_open(result: &QueryResult) -> bool {
+    result
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.ends_with(TRANSACTION_STILL_OPEN))
+}
+
 /// Whether the driver says the open transaction outlived `error`
 /// ([`TRANSACTION_KEPT_OPEN`]).
 pub(crate) fn transaction_kept_open(error: &DbError) -> bool {
