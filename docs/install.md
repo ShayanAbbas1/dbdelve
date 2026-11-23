@@ -316,11 +316,13 @@ these tools:
 | `list_relationships` | Every foreign key of a schema |
 | `list_routines` | A schema's functions and procedures, by signature |
 | `describe_routine` | A function's or procedure's definition |
-| `execute_sql` | One statement: a read at once, anything else once you approve it in DBDelve |
+| `execute_sql` | One statement: a read runs at once; a write the connection's access level allows waits for your approval in DBDelve; anything refused (such as `DROP`, `TRUNCATE` or `DELETE`) never runs, approval or not |
 | `explain_query` | The plan of one statement |
 
 Reads run on a read-only connection of the agent's own, never on yours. A
-statement that changes data waits in DBDelve until you approve or deny it.
+statement that changes data, and that the gate admits, waits in DBDelve until
+you approve or deny it; one the gate refuses is answered as refused and is
+never shown for approval.
 
 With agent access off, or DBDelve closed, every tool answers that DBDelve is
 not running or its agent access is off.
