@@ -93,7 +93,7 @@ impl Tool {
                 "Gives the definition of a function or procedure of a named connection, by schema and name: every overload of that name, each with its arguments, result type, language and body."
             }
             Tool::ExecuteSql => {
-                "Runs one statement on a named connection exactly as written; one statement per call. A read answers at once with the first rows, header first. A statement that changes data, reads a file or URL, or calls a function DBDelve does not list waits until the user approves or denies it in the DBDelve window, and the call returns when they answer. The status is one of executed, rejected, expired, refused_by_gate or failed. DELETE, DROP, TRUNCATE, most ALTER and more than one statement per call are refused."
+                "Runs one statement on a named connection exactly as written; one statement per call. A read answers at once with the first rows, header first. A statement that changes data, reads a file or URL, or calls a function DBDelve does not list waits until the user approves or denies it in the DBDelve window, and the call returns when they answer. The status is one of executed, rejected, expired, refused_by_gate, failed or app_not_running; app_not_running means DBDelve is closed or its agent access is off, and the user has to open it or turn access back on before a retry can succeed. DELETE, DROP, TRUNCATE, most ALTER and more than one statement per call are refused."
             }
             Tool::ExplainQuery => {
                 "Returns the plan the database would use for one statement of a named connection, findings first and then the plan tree. With `analyze` true it runs the statement to measure it, which only a read may do; without it nothing is run. A statement that needs the user's approval is not run by this tool."
@@ -185,6 +185,7 @@ mod tests {
             "rejected",
             "expired",
             "refused_by_gate",
+            "app_not_running",
         ] {
             assert!(text.contains(word), "{word}: {text}");
         }
