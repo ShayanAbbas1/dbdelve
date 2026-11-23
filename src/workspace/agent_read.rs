@@ -459,9 +459,15 @@ struct Listing {
 impl Listing {
     /// A reply that lists every one of its `rows`.
     fn all(text: String, rows: usize) -> Self {
+        Self::shown(text, rows, rows)
+    }
+
+    /// A reply that wrote `shown` of `total` rows, the rest dropped for the
+    /// byte budget.
+    fn shown(text: String, shown: usize, total: usize) -> Self {
         Self {
             text,
-            rows: (rows, Total::Exact(rows)),
+            rows: (shown, Total::Exact(total)),
         }
     }
 }
@@ -1208,8 +1214,8 @@ fn list(
     let mut catalog = connection.catalog()?;
     let Some(schema) = schema else {
         let rows = catalog.schemas.len();
-        let text = schemas_text(&catalog, note);
-        return Ok(Some(Listing::all(text, rows)));
+        let (text, shown) = schemas_text(&catalog, note);
+        return Ok(Some(Listing::shown(text, shown, rows)));
     };
     let Some(rows) = catalog
         .schemas
@@ -1225,7 +1231,7 @@ fn list(
     if let Ok(sizes) = connection.sizes() {
         catalog.set_sizes(&sizes);
     }
-    Ok(tables_text(&catalog, schema, note).map(|text| Listing::all(text, rows)))
+    Ok(tables_text(&catalog, schema, note).map(|(text, shown)| Listing::shown(text, shown, rows)))
 }
 
 /// The blocking half of `describe_table`: see [`describe`].
@@ -1270,8 +1276,9 @@ fn describe(
         return Ok(None);
     }
     let structure = load(schema, table)?;
-    let rows = structure.columns.len();
-    Ok(Some(Listing::all(structure_text(&structure, note), rows)))
+    // The columns are what is counted: the other sections are about them.
+    let (text, columns) = structure_text(&structure, note);
+    Ok(Some(Listing::shown(text, columns, structure.columns.len())))
 }
 
 /// A name the catalog holds, as `search_schema` ranks it.
@@ -1432,7 +1439,8 @@ fn relationships(
         rows,
     );
     table.label = "foreign_keys";
-    Ok(Some(Listing::all(result::text(&[table], 0, None), count)))
+    let (text, shown) = result::text_shown(&[table], 0, None);
+    Ok(Some(Listing::shown(text, shown, count)))
 }
 
 /// The reply for `list_routines`, or with `routine` for `describe_routine`.
@@ -1459,17 +1467,15 @@ fn routines(
         None => return Ok(None),
     };
     let Some(name) = routine else {
-        let rows = held.len();
-        return Ok(Some(Listing::all(
-            result::text(&[signatures(&held)], 0, None),
-            rows,
-        )));
+        let (text, shown) = result::text_shown(&[signatures(&held)], 0, None);
+        return Ok(Some(Listing::shown(text, shown, held.len())));
     };
     let named: Vec<_> = held.into_iter().filter(|held| held.name == name).collect();
     if named.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Listing::all(definitions_text(&named), named.len())))
+    let (text, shown) = definitions_text(&named);
+    Ok(Some(Listing::shown(text, shown, named.len())))
 }
 
 fn signatures(routines: &[&Routine]) -> result::Table {
@@ -1497,8 +1503,12 @@ fn signatures(routines: &[&Routine]) -> result::Table {
 /// under a line naming its overload. A body is not a table cell, because a
 /// cell is clipped at [`result::CELL_CAP`] and a body is what was asked for;
 /// the whole text is held to [`result::RESULT_BUDGET`] instead.
-fn definitions_text(routines: &[&Routine]) -> String {
-    let mut text = result::text(&[signatures(routines)], 0, None);
+///
+/// Also how many routines went back whole: a signature dropped for the budget,
+/// or a definition the clip cut, is one that did not.
+fn definitions_text(routines: &[&Routine]) -> (String, usize) {
+    let (mut text, signed) = result::text_shown(&[signatures(routines)], 0, None);
+    let mut ends = Vec::with_capacity(routines.len());
     for routine in routines {
         text.push_str(&format!(
             "definition of {}({}):\n{}",
@@ -1507,17 +1517,11 @@ fn definitions_text(routines: &[&Routine]) -> String {
         if !text.ends_with('\n') {
             text.push('\n');
         }
+        ends.push(text.len());
     }
-    if text.len() > result::RESULT_BUDGET {
-        let mut at = result::RESULT_BUDGET;
-        while !text.is_char_boundary(at) {
-            at -= 1;
-        }
-        let whole = text.len();
-        text.truncate(at);
-        text.push_str(&format!("\n[clipped from {whole} bytes]\n"));
-    }
-    text
+    let (text, kept) = result::clipped_kept(&text, result::RESULT_BUDGET);
+    let whole = ends.iter().filter(|&&end| end <= kept).count();
+    (text, whole.min(signed))
 }
 
 fn routine_kind_name(kind: RoutineKind) -> &'static str {
@@ -1665,19 +1669,22 @@ fn table_of_names(heads: &[&str], rows: Vec<Vec<Option<String>>>) -> result::Tab
 
 /// The reply for `list_schemas`: one row per schema, in name order. The names
 /// are the database's own and go out as they are; `note` is DBDelve's.
-fn schemas_text(catalog: &Catalog, note: Option<&str>) -> String {
+///
+/// Also how many schemas it wrote, the budget having dropped the rest.
+fn schemas_text(catalog: &Catalog, note: Option<&str>) -> (String, usize) {
     let rows = catalog
         .by_name()
         .into_iter()
         .map(|(_, schema)| vec![Some(schema.name.clone())])
         .collect();
-    result::text(&[table_of_names(&["name"], rows)], 0, note)
+    result::text_shown(&[table_of_names(&["name"], rows)], 0, note)
 }
 
 /// The reply for `list_tables`: one row per relation of `schema`, with its
 /// kind, the relation it is a partition of and the row estimate, `null` where
-/// there is none. `None` is a schema the catalog does not hold.
-fn tables_text(catalog: &Catalog, schema: &str, note: Option<&str>) -> Option<String> {
+/// there is none. `None` is a schema the catalog does not hold. Also how many
+/// relations it wrote, the budget having dropped the rest.
+fn tables_text(catalog: &Catalog, schema: &str, note: Option<&str>) -> Option<(String, usize)> {
     let schema = catalog.schemas.iter().find(|held| held.name == schema)?;
     let rows = schema
         .relations
@@ -1693,13 +1700,14 @@ fn tables_text(catalog: &Catalog, schema: &str, note: Option<&str>) -> Option<St
         })
         .collect();
     let heads = ["name", "kind", "partition_of", "rows", "bytes"];
-    Some(result::text(&[table_of_names(&heads, rows)], 0, note))
+    Some(result::text_shown(&[table_of_names(&heads, rows)], 0, note))
 }
 
 /// The reply for `describe_table`: four tables, in the order the agent reads a
 /// table's shape. An index's key entries are one JSON array in one cell,
 /// because an entry can itself hold a comma. The names are the database's own.
-fn structure_text(structure: &Structure, note: Option<&str>) -> String {
+/// Also how many column rows it wrote, the budget having dropped the rest.
+fn structure_text(structure: &Structure, note: Option<&str>) -> (String, usize) {
     let labelled = |label: &'static str, heads: &[&str], rows: Vec<Vec<Option<String>>>| {
         let mut table = table_of_names(heads, rows);
         table.label = label;
@@ -1748,7 +1756,7 @@ fn structure_text(structure: &Structure, note: Option<&str>) -> String {
             ]
         })
         .collect();
-    result::text(
+    let (text, kept) = result::text_kept(
         &[
             labelled("columns", &["name", "type", "nullable", "default"], columns),
             labelled("primary_key", &["column"], primary_key),
@@ -1770,7 +1778,8 @@ fn structure_text(structure: &Structure, note: Option<&str>) -> String {
         ],
         0,
         note,
-    )
+    );
+    (text, kept[0])
 }
 
 fn index_kind_name(kind: IndexKind) -> &'static str {
@@ -2097,7 +2106,7 @@ mod tests {
             )],
             database: None,
         };
-        let text = tables_text(&catalog, "public", None).expect("the schema is there");
+        let (text, _) = tables_text(&catalog, "public", None).expect("the schema is there");
         assert_eq!(
             text,
             "truncated: none (3 rows)\n\
@@ -2171,7 +2180,7 @@ mod tests {
             }],
             referenced_by: Vec::new(),
         };
-        let text = structure_text(&structure, None);
+        let (text, _) = structure_text(&structure, None);
         let labels: Vec<&str> = text
             .lines()
             .filter_map(|line| line.split_once(": ").map(|(label, _)| label))
@@ -2211,7 +2220,7 @@ mod tests {
             ],
             ..Structure::default()
         };
-        let text = structure_text(&structure, None);
+        let (text, _) = structure_text(&structure, None);
         assert_eq!(section(&text, "columns").len(), 3, "{text}");
         for label in ["primary_key", "foreign_keys", "indexes"] {
             assert_eq!(section(&text, label).len(), 1, "{label}: {text}");
@@ -2256,7 +2265,7 @@ mod tests {
             schemas: vec![schema("empty", Vec::new())],
             database: None,
         };
-        let text = tables_text(&catalog, "empty", None).expect("the schema is there");
+        let (text, _) = tables_text(&catalog, "empty", None).expect("the schema is there");
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some("truncated: none (0 rows)"));
         assert!(
@@ -2278,12 +2287,12 @@ mod tests {
         };
         let note = Engine::Redis.agent_catalog_note();
         let note_line = format!("note: {}\n", note.expect("Redis has a note"));
-        let schemas = schemas_text(&catalog, note);
+        let (schemas, _) = schemas_text(&catalog, note);
         assert!(
             schemas.starts_with(&format!("truncated: none (1 row)\n{note_line}columns: ")),
             "{schemas}"
         );
-        let tables = tables_text(&catalog, "db0", note).expect("the schema is there");
+        let (tables, _) = tables_text(&catalog, "db0", note).expect("the schema is there");
         assert!(
             tables.starts_with(&format!("truncated: none (1 row)\n{note_line}columns: ")),
             "{tables}"
@@ -2293,7 +2302,11 @@ mod tests {
             "{tables}"
         );
         // Another engine's reply has no such line.
-        assert!(!schemas_text(&catalog, Engine::Sqlite.agent_catalog_note()).contains("note: "));
+        assert!(
+            !schemas_text(&catalog, Engine::Sqlite.agent_catalog_note())
+                .0
+                .contains("note: ")
+        );
     }
 
     #[test]
@@ -2303,7 +2316,7 @@ mod tests {
             database: None,
         };
         assert_eq!(
-            schemas_text(&catalog, None),
+            schemas_text(&catalog, None).0,
             "truncated: none (2 rows)\n\
              columns: [{\"name\":\"name\",\"type\":null}]\n\
              [\"a\"]\n\
@@ -2641,6 +2654,32 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("the directory goes");
     }
 
+    #[test]
+    fn a_listing_cut_by_the_budget_counts_only_the_rows_it_wrote() {
+        let mut catalog = Catalog::default();
+        let name = "s".repeat(1000);
+        catalog.schemas = (0..100)
+            .map(|at| schema(&format!("{name}{at}"), Vec::new()))
+            .collect();
+        let (text, shown) = schemas_text(&catalog, None);
+        assert!(0 < shown && shown < 100, "{shown}");
+        assert_eq!(text.lines().count(), shown + 2, "{text}");
+
+        let structure = Structure {
+            columns: (0..100)
+                .map(|at| ColumnDefinition {
+                    name: format!("{name}{at}"),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                })
+                .collect(),
+            ..Structure::default()
+        };
+        let (_, columns) = structure_text(&structure, None);
+        assert!(0 < columns && columns < 100, "{columns}");
+    }
+
     fn routine(name: &str, arguments: &str, definition: &str) -> Routine {
         Routine {
             name: name.to_string(),
@@ -2657,7 +2696,8 @@ mod tests {
         let long = "x".repeat(result::CELL_CAP * 2);
         let one = routine("f", "a integer", &long);
         let two = routine("f", "a text", "SELECT 1");
-        let text = definitions_text(&[&one, &two]);
+        let (text, whole) = definitions_text(&[&one, &two]);
+        assert_eq!(whole, 2);
         assert!(text.contains(&format!("definition of f(a integer):\n{long}\n")));
         assert!(
             text.ends_with("definition of f(a text):\nSELECT 1\n"),
@@ -2666,8 +2706,9 @@ mod tests {
         assert!(text.contains(r#"["f","function","a text","integer","sql"]"#));
 
         let huge = routine("g", "", &"y".repeat(result::RESULT_BUDGET * 2));
-        let text = definitions_text(&[&huge]);
-        assert!(text.len() < result::RESULT_BUDGET + 64, "{}", text.len());
+        let (text, whole) = definitions_text(&[&huge]);
+        assert_eq!(whole, 0, "the one definition was cut");
+        assert!(text.len() <= result::RESULT_BUDGET, "{}", text.len());
         assert!(
             text.trim_end().ends_with("bytes]"),
             "{}",

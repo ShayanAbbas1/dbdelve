@@ -117,8 +117,18 @@ pub(crate) fn text(tables: &[Table], further: usize, note: Option<&str>) -> Stri
 /// [`text`], and how many rows of all `tables` it wrote: the rows the budget
 /// dropped are not counted, so what is audited as sent is what was sent.
 pub(crate) fn text_shown(tables: &[Table], further: usize, note: Option<&str>) -> (String, usize) {
+    let (text, kept) = text_kept(tables, further, note);
+    (text, kept.iter().sum())
+}
+
+/// [`text`], and how many rows of each of `tables` it wrote, in their order.
+pub(crate) fn text_kept(
+    tables: &[Table],
+    further: usize,
+    note: Option<&str>,
+) -> (String, Vec<usize>) {
     let (text, written) = written_text(tables, further, note);
-    (text, written.iter().map(|w| w.kept).sum())
+    (text, written.iter().map(|w| w.kept).collect())
 }
 
 fn written_text<'a>(
@@ -223,6 +233,26 @@ fn clip(cell: &str) -> Option<String> {
         &cell[..at],
         cell.chars().count()
     ))
+}
+
+/// `text` whole when it is at most `budget` bytes; otherwise cut at a
+/// character boundary, with a line saying how long it was, the line inside the
+/// budget too.
+pub(crate) fn clipped_to(text: &str, budget: usize) -> String {
+    clipped_kept(text, budget).0
+}
+
+/// [`clipped_to`], and how many bytes of `text` it kept.
+pub(crate) fn clipped_kept(text: &str, budget: usize) -> (String, usize) {
+    if text.len() <= budget {
+        return (text.to_string(), text.len());
+    }
+    let marker = format!("\n[clipped from {} bytes]\n", text.len());
+    let mut at = budget.saturating_sub(marker.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    (format!("{}{marker}", &text[..at]), at)
 }
 
 /// What the first line says after `truncated: `. One table reads `none (N
@@ -733,6 +763,17 @@ mod tests {
             assert!(shown < rows, "{name}: the text was not cut");
             std::fs::write(format!("{dir}/{name}.txt"), &out).expect("the output writes");
             println!("{name}: bytes={} rows_shown={shown}", out.len());
+        }
+    }
+
+    #[test]
+    fn a_clipped_text_keeps_its_marker_inside_the_budget() {
+        assert_eq!(clipped_to("abc", 3), "abc");
+        let long = "é".repeat(100);
+        for budget in [40, 41, 42, 43] {
+            let out = clipped_to(&long, budget);
+            assert!(out.len() <= budget, "{budget}: {}", out.len());
+            assert!(out.ends_with("\n[clipped from 200 bytes]\n"), "{out}");
         }
     }
 }
