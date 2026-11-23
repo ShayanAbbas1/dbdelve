@@ -11576,7 +11576,7 @@ fn making_a_profile_visible_goes_through_the_dialog_that_opens_on_cancel(cx: &mu
 }
 
 #[gpui::test]
-fn the_visibility_dialog_names_the_commit_wait_only_for_a_rollback_journal_file(
+fn the_visibility_dialog_names_the_commit_wait_and_only_conditionally_in_wal(
     cx: &mut TestAppContext,
 ) {
     store::tests::with_home(|| {
@@ -11595,12 +11595,14 @@ fn the_visibility_dialog_names_the_commit_wait_only_for_a_rollback_journal_file(
         rusqlite::Connection::open(&database)
             .and_then(|connection| connection.execute_batch("CREATE TABLE t (id INTEGER);"))
             .expect("the schema must apply");
-        assert!(blocks(&workspace, cx));
+        assert_eq!(blocks(&workspace, cx), Some(true));
 
+        // In WAL the wait is said conditionally, not left out: the journal
+        // can be switched back after the dialog read it.
         rusqlite::Connection::open(&database)
             .and_then(|connection| connection.execute_batch("PRAGMA journal_mode = WAL;"))
             .expect("the journal mode must change");
-        assert!(!blocks(&workspace, cx));
+        assert_eq!(blocks(&workspace, cx), Some(false));
         quit(workspace, cx);
     });
 }

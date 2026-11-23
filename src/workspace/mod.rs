@@ -491,9 +491,11 @@ pub(crate) struct Workspace {
     /// profile it names.
     pub(crate) agent_visibility_prompt: Option<String>,
     /// Whether an agent's read of the profile in [`Self::agent_visibility_prompt`]
-    /// can make the owner's commit wait. Read from the file once, when the
-    /// dialog opens, so drawing it never touches the disk.
-    pub(crate) agent_visibility_blocks_commits: bool,
+    /// can make the owner's commit wait, for a SQLite file
+    /// ([`db::ConnectionConfig::commit_wait_on_file`]). Read from the file once,
+    /// when the dialog opens, so drawing it never touches the disk; a file in
+    /// WAL is still told what a rollback journal would bring.
+    pub(crate) agent_visibility_blocks_commits: Option<bool>,
     /// The agent bridge: the socket, and the calls waiting on this window.
     pub(crate) agent: agent::AgentState,
     /// Whether the `Agent activity` dialog is up. Only the popover's item
@@ -707,7 +709,7 @@ impl Workspace {
             grants_view: None,
             last_grants_request: 0,
             agent_visibility_prompt: None,
-            agent_visibility_blocks_commits: false,
+            agent_visibility_blocks_commits: None,
             agent_audit_open: false,
             agent: agent::AgentState::default(),
             opacity_input,

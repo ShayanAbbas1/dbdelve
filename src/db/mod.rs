@@ -1667,6 +1667,15 @@ impl ConnectionConfig {
         matches!(self, Self::Sqlite { path, .. } if sqlite::journal_is_wal(path) != Some(true))
     }
 
+    /// For a SQLite file, whether an agent's read can make the owner's commit
+    /// wait as its journal reads now ([`Self::agent_read_can_block_commits`]);
+    /// `None` for every other connection, where it never can. The journal can
+    /// change after it is read, which is why a file reading WAL is still
+    /// told apart from a connection where the wait cannot happen at all.
+    pub fn commit_wait_on_file(&self) -> Option<bool> {
+        matches!(self, Self::Sqlite { .. }).then(|| self.agent_read_can_block_commits())
+    }
+
     pub fn engine(&self) -> Engine {
         match self {
             Self::Postgres(_) => Engine::Postgres,
