@@ -1236,17 +1236,16 @@ pub fn is_generated_role_change(engine: Engine, sql: &str) -> bool {
     !statements.is_empty() && statements.iter().all(role_change)
 }
 
-/// Whether `text` is a SCRAM-SHA-256 verifier in full,
-/// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`. The server
-/// takes a string of any other shape, a prefix-alike included, as the password
-/// itself.
+/// Whether `text` is a SCRAM-SHA-256 verifier the server takes as one,
+/// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`: an
+/// iteration count above 0, a salt that is base64, and two keys that are
+/// base64 of 32 bytes each, as Postgres's `parse_scram_secret` reads it.
+/// The server takes a string of any other shape, a prefix-alike or one
+/// that only looks like base64 included, as the password itself.
 fn is_scram_verifier(text: &str) -> bool {
-    let base64 = |part: &str| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-    };
+    use base64::Engine as _;
+    const KEY_LEN: usize = 32;
+    let decoded = |part: &str| base64::engine::general_purpose::STANDARD.decode(part).ok();
     let Some(rest) = text.strip_prefix("SCRAM-SHA-256$") else {
         return false;
     };
@@ -1258,11 +1257,11 @@ fn is_scram_verifier(text: &str) -> bool {
     else {
         return false;
     };
-    !iterations.is_empty()
-        && iterations.bytes().all(|b| b.is_ascii_digit())
-        && base64(salt)
-        && base64(stored)
-        && base64(server)
+    iterations.bytes().all(|b| b.is_ascii_digit())
+        && iterations.parse::<u32>().is_ok_and(|count| count > 0)
+        && decoded(salt).is_some_and(|salt| !salt.is_empty())
+        && decoded(stored).is_some_and(|key| key.len() == KEY_LEN)
+        && decoded(server).is_some_and(|key| key.len() == KEY_LEN)
 }
 
 fn role_change(statement: &Statement) -> bool {
@@ -6047,6 +6046,9 @@ mod tests {
             // store it as the password.
             "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$hunter2';",
             "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5 :c2VydmVy';",
+            // Well formed, but the keys are not 32 bytes: the server would
+            // store the whole string as the password.
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5:c2VydmVy';",
             "CREATE ROLE ana LOGIN SUPERUSER;",
             "CREATE ROLE ana;",
             "ALTER ROLE ana SUPERUSER;",
@@ -6070,6 +6072,32 @@ mod tests {
             Engine::MySql,
             "CREATE ROLE app_rw NOLOGIN;"
         ));
+    }
+
+    #[test]
+    fn a_verifier_is_one_only_once_its_parts_decode_as_the_server_reads_them() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let key = b64(&[7; 32]);
+        let short = b64(&[7; 31]);
+        let salt = b64(b"saltsaltsaltsalt");
+        let real = postgres_protocol::password::scram_sha_256(b"pw");
+        assert!(is_scram_verifier(&real), "{real}");
+        assert!(is_scram_verifier(&format!(
+            "SCRAM-SHA-256$4096:{salt}${key}:{key}"
+        )));
+        for bad in [
+            format!("SCRAM-SHA-256$0:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$99999999999:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$4096:c2Fsd===${key}:{key}"),
+            format!("SCRAM-SHA-256$4096:${key}:{key}"),
+            format!("SCRAM-SHA-256$4096:{salt}${short}:{key}"),
+            format!("SCRAM-SHA-256$4096:{salt}${key}:{short}"),
+            format!("SCRAM-SHA-256$4096:{salt}${key}A:{key}"),
+        ] {
+            assert!(!is_scram_verifier(&bad), "{bad}");
+        }
     }
 
     #[test]

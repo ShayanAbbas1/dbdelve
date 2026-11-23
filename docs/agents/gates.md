@@ -384,8 +384,11 @@ names the row in its place.
 reads the sqlparser tree, Postgres only, and admits exactly what `db::roles`
 writes: one new role, `LOGIN` or `NOLOGIN` said, `CONNECTION LIMIT` a bare
 non-negative number, `VALID UNTIL` a string, `IN ROLE`, and a password only
-as a SCRAM-SHA-256 verifier (`'SCRAM-SHA-256$…'`), so no statement carrying
-a password in the clear gets through whoever wrote it; or `ALTER ROLE … WITH`
+as a SCRAM-SHA-256 verifier the server takes as one (`'SCRAM-SHA-256$…'`,
+decoded: an iteration count above 0, a base64 salt, and two keys of 32
+bytes each; anything else Postgres would store as the password), so no
+statement carrying a password in the clear gets through whoever wrote it;
+or `ALTER ROLE … WITH`
 those same options. Never `SUPERUSER`, `CREATEDB`, `CREATEROLE`,
 `REPLICATION`, `BYPASSRLS`, a rename, a `SET`, a `DROP` or a grant on an
 object. The run is `execute_and_then` like any edit, so `sql::classify` reads
