@@ -282,7 +282,7 @@ impl Workspace {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(gpui::black().opacity(0.5))
+                .bg(t.scrim())
                 .flex()
                 .items_center()
                 .justify_center()
