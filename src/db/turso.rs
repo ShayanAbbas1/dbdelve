@@ -26,6 +26,9 @@ pub struct Connection {
     /// every session opened beside this one. The `connect` closure above is
     /// built before any script exists and holds none.
     startup: Arc<[String]>,
+    /// Opened by [`Self::open_query_only`]: every handle [`Self::alongside`]
+    /// derives sets the pragma again, since it is per connection.
+    query_only: bool,
 }
 
 impl Connection {
@@ -45,7 +48,10 @@ impl Connection {
     /// engines' session hold, no stronger. It is set here and not through
     /// `read_only_statement`, so the user's own Read-only mode is unchanged.
     pub fn open_query_only(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
-        let connection = Self::open_inner(path, statement_timeout)?;
+        let connection = Self {
+            query_only: true,
+            ..Self::open_inner(path, statement_timeout)?
+        };
         connection.query("PRAGMA query_only = 1", Fetch::default())?;
         Ok(connection)
     }
@@ -108,6 +114,7 @@ impl Connection {
             connect,
             running: Arc::new(Mutex::new(())),
             startup: Arc::default(),
+            query_only: false,
         })
     }
 
@@ -118,6 +125,9 @@ impl Connection {
             running: Arc::new(Mutex::new(())),
             ..self.clone()
         };
+        if beside.query_only {
+            beside.query("PRAGMA query_only = 1", Fetch::default())?;
+        }
         beside.replay()?;
         Ok(beside)
     }
@@ -858,6 +868,33 @@ mod tests {
             .expect_err("the agent's connection refuses the write");
         assert!(refusal.message.contains("query_only"), "{refusal}");
         drop((agent, user));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_handle_derived_from_an_agent_open_refuses_a_write_too() {
+        let dir =
+            std::env::temp_dir().join(format!("dbdelve-turso-alongside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db").to_string_lossy().into_owned();
+        let user = Connection::open_at(&path, None, 0).unwrap();
+        user.query("CREATE TABLE t (id INTEGER)", Fetch::default())
+            .unwrap();
+
+        let derived = Connection::open_query_only(&path, 0)
+            .unwrap()
+            .alongside()
+            .unwrap();
+        let refusal = derived
+            .query("INSERT INTO t VALUES (1)", Fetch::default())
+            .expect_err("a handle derived from the agent's refuses the write");
+        assert!(refusal.message.contains("query_only"), "{refusal}");
+        // One derived from an ordinary open stays writable.
+        user.alongside()
+            .unwrap()
+            .query("INSERT INTO t VALUES (2)", Fetch::default())
+            .expect("a handle derived from the user's stays writable");
+        drop((derived, user));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
