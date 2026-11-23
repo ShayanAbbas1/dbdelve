@@ -1406,6 +1406,10 @@ impl Connection {
     /// count them, and its document count, from `$collStats`. A view has
     /// neither, and a time-series collection no count.
     ///
+    /// The statement timeout bounds every `$collStats` together, not each
+    /// one: they are one call, so a database of many collections cannot keep
+    /// reading long after whoever asked has stopped waiting.
+    ///
     /// ponytail: one `$collStats` per collection, one after another. Fine for
     /// hundreds; run them concurrently if a database of thousands is slow.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
@@ -1413,38 +1417,41 @@ impl Connection {
             return Ok(Sizes::new());
         }
         let database = self.database();
-        let mut sizes = std::collections::HashMap::new();
-        for listed in self.collections()? {
-            let Some(relation) =
-                relation(&listed).filter(|relation| relation.kind == RelationKind::Table)
-            else {
-                continue;
-            };
-            let collection = database.collection::<Document>(&relation.name);
-            let reports: Vec<Document> = self.call(async {
+        let tables: Vec<String> = self
+            .collections()?
+            .iter()
+            .filter_map(relation)
+            .filter(|relation| relation.kind == RelationKind::Table)
+            .map(|relation| relation.name)
+            .collect();
+        let sizes = self.call(async {
+            let mut sizes = std::collections::HashMap::new();
+            for name in tables {
+                let collection = database.collection::<Document>(&name);
                 let stats = async {
                     collection
                         .aggregate([doc! { "$collStats": { "storageStats": {} } }])
                         .await?
-                        .try_collect()
+                        .try_collect::<Vec<Document>>()
                         .await
                 };
-                match stats.await {
+                let reports = match stats.await {
                     // Dropped since it was listed: it has no size to show, and
                     // the rest still do.
                     Err(error)
                         if matches!(&*error.kind, ErrorKind::Command(failed) if failed.code == NAMESPACE_NOT_FOUND) =>
                     {
-                        Ok(Vec::new())
+                        Vec::new()
                     }
-                    other => other,
+                    other => other?,
+                };
+                let statistics = statistics(&reports);
+                if statistics != Statistics::default() {
+                    sizes.insert(name, statistics);
                 }
-            })?;
-            let statistics = statistics(&reports);
-            if statistics != Statistics::default() {
-                sizes.insert(relation.name, statistics);
             }
-        }
+            Ok(sizes)
+        })?;
         Ok(Sizes::from([(self.database.clone(), sizes)]))
     }
 
