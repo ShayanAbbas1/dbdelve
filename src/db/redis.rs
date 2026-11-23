@@ -2539,28 +2539,26 @@ mod tests {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
                 std::thread::spawn(move || {
+                    // Bytes kept until they make whole requests, however
+                    // TCP splits them.
+                    let mut pending = Vec::new();
                     let mut buffer = [0; 4096];
-                    while let Ok(read) = stream.read(&mut buffer) {
-                        let sent = &buffer[..read];
-                        if sent.starts_with(b"PING\r\n") {
-                            let _ = stream.write_all(b"+PONG\r\n");
-                            continue;
+                    loop {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => pending.extend_from_slice(&buffer[..read]),
                         }
-                        if read == 0 {
-                            return;
-                        }
-                        if sent.ends_with(b"$4\r\nPING\r\n") {
-                            std::thread::sleep(Duration::from_secs(10));
-                            return;
-                        }
-                        // One refusal per command of a pipeline.
-                        let commands = std::iter::once(&b'\n')
-                            .chain(sent)
-                            .zip(sent)
-                            .filter(|&(before, at)| *before == b'\n' && *at == b'*')
-                            .count();
-                        for _ in 0..commands {
-                            let _ = stream.write_all(b"-ERR unknown command\r\n");
+                        while let Some((used, name, inline)) = whole_request(&pending) {
+                            pending.drain(..used);
+                            let reply: &[u8] = match (name.eq_ignore_ascii_case(b"PING"), inline) {
+                                (true, true) => b"+PONG\r\n",
+                                (true, false) => {
+                                    std::thread::sleep(Duration::from_secs(10));
+                                    return;
+                                }
+                                (false, _) => b"-ERR unknown command\r\n",
+                            };
+                            let _ = stream.write_all(reply);
                         }
                     }
                 });
@@ -2582,6 +2580,42 @@ mod tests {
             lock(&connection.session).is_none(),
             "and the session it went out on is not kept"
         );
+    }
+
+    /// The first whole request in `sent`, for the test servers: how many
+    /// bytes it takes, its command name, and whether it came inline rather
+    /// than as a RESP array. `None` until its last byte has arrived.
+    fn whole_request(sent: &[u8]) -> Option<(usize, Vec<u8>, bool)> {
+        let line = |from: usize| {
+            let end = from
+                + sent
+                    .get(from..)?
+                    .windows(2)
+                    .position(|pair| pair == b"\r\n")?;
+            Some((&sent[from..end], end + 2))
+        };
+        let number = |text: &[u8]| {
+            std::str::from_utf8(text.get(1..)?)
+                .ok()?
+                .parse::<usize>()
+                .ok()
+        };
+        if sent.first()? != &b'*' {
+            let (text, used) = line(0)?;
+            let name = text.split(|byte| *byte == b' ').next().unwrap_or_default();
+            return Some((used, name.to_vec(), true));
+        }
+        let (count, mut at) = line(0)?;
+        let mut name = None;
+        for _ in 0..number(count)? {
+            let (length, start) = line(at)?;
+            let end = start + number(length)?;
+            let argument = sent.get(start..end)?;
+            sent.get(end..end + 2).filter(|ending| *ending == b"\r\n")?;
+            name.get_or_insert_with(|| argument.to_vec());
+            at = end + 2;
+        }
+        Some((at, name.unwrap_or_default(), false))
     }
 
     fn live_config() -> ServerConfig {
