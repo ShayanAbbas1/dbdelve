@@ -5254,7 +5254,8 @@ pub(crate) fn ends_transaction(engine: Engine, sql: &str) -> bool {
     })
 }
 
-/// Whether `sql` may commit somewhere in it: a `COMMIT` it parses to, or,
+/// Whether `sql` may commit somewhere in it: a `COMMIT` it parses to, at
+/// any depth (a `BEGIN … END` block, an `IF` branch), or,
 /// where the text cannot be read whole, the word anywhere in it, the side
 /// that never says a transaction was rolled back when it may have
 /// committed.
@@ -5263,9 +5264,11 @@ pub(crate) fn may_commit(engine: Engine, sql: &str) -> bool {
         return false;
     };
     match SqlParser::parse_sql(dialect.as_ref(), sql) {
-        Ok(statements) => statements
-            .iter()
-            .any(|statement| matches!(statement, Statement::Commit { .. })),
+        Ok(statements) => visit_statements(&statements, |statement| match statement {
+            Statement::Commit { .. } => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break(),
         Err(_) => Tokenizer::new(dialect.as_ref(), sql)
             .tokenize()
             .unwrap_or_default()

@@ -3274,6 +3274,9 @@ mod tests {
             "UPDATE t SET a = 1; COMMIT; EXEC dbo.p",
             // Text the grammar cannot read, which may still commit.
             "COMMIT TRAN; SELECT TOP 1 x FROM t ORDER BY x OFFSET",
+            // A `COMMIT` inside a block or a branch.
+            "BEGIN COMMIT; THROW 50000, 'stop', 1; END;",
+            "IF 1 = 1 BEGIN COMMIT END; SELECT 1/0",
         ] {
             assert_eq!(
                 ended_outcome(sql, false),
