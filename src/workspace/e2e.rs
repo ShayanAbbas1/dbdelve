@@ -28881,6 +28881,41 @@ fn a_savepoint_keeps_the_idle_close_from_dropping_what_it_holds(cx: &mut TestApp
     });
 }
 
+/// A submission sqlparser cannot read that names a `BEGIN` may have left a
+/// transaction open on the session: read as open, as a bound session's
+/// would be, so an idle close does not roll it back.
+#[gpui::test]
+fn a_submission_that_may_have_opened_a_transaction_is_read_as_opening_one(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let tab = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.active
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.execute_and_then(
+                "BEGIN; INSERT INTO t VALUES (1); SELEC nonsense".into(),
+                tab,
+                None,
+                false,
+                None,
+                cx,
+            );
+        });
+        settle(cx);
+        if workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.pending_run.is_some()
+        }) {
+            workspace.update(cx, |workspace, cx| workspace.approve_pending_run(cx));
+            settle(cx);
+        }
+        // SQLite refuses the whole of it, but whether a server ran the
+        // `BEGIN` cannot be told from the text: the open side is the one an
+        // idle close cannot lose work on.
+        assert!(in_transaction(&workspace, cx), "read as open");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_relation_visited_on_an_idle_profile_reconnects_first(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

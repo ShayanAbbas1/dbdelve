@@ -2618,7 +2618,13 @@ impl Workspace {
             && let Some(profile) = self.issued_to(&id, generation)
         {
             let text = explained.as_deref().unwrap_or(&sql);
-            let leaves = sql::leaves(engine, text);
+            let mut leaves = sql::leaves(engine, text);
+            // Read as a bound session's statement is: one that may have
+            // opened a transaction `leaves` cannot see counts as opening one,
+            // so an idle close or a role change does not run over it.
+            leaves.transaction = leaves
+                .transaction
+                .or_else(|| sql::transaction_uncertain(engine, text).then_some(true));
             // An end that opens the next transaction behind it, as Manual's
             // Commit sends it, keeps the record until it lands too: if its
             // end fails, the transaction the record lists can still be open.
