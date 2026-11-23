@@ -14344,8 +14344,14 @@ fn a_statement_past_the_frame_limit_is_refused_before_any_dialog(cx: &mut TestAp
         // the write may meet a closed socket.
         let _ = client.write_all(long.as_bytes());
         let mut heard = Vec::new();
-        // A reset is how some systems report a close with bytes unread.
-        let _ = client.read_to_end(&mut heard);
+        // The connection must close: an end of file, or a reset, which is how
+        // some systems report a close with bytes unread. A timeout is a
+        // connection left open.
+        match client.read_to_end(&mut heard) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            Err(error) => panic!("the oversized frame's connection did not close: {error}"),
+        }
         assert!(heard.is_empty(), "the app answered an oversized frame");
         nothing_happened(cx);
 
