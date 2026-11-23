@@ -202,6 +202,15 @@ pub(crate) fn sent_nothing(error: &DbError) -> bool {
         || error.message.starts_with(UNPLACED)
 }
 
+/// How long a keep-alive ping waits for its answer before the session it
+/// went out on is taken for lost: a peer that stops answering without
+/// closing the socket would otherwise hold the session from every later
+/// statement, waiting behind the ping.
+pub(crate) const PING_WITHIN: Duration = match cfg!(test) {
+    true => Duration::from_secs(1),
+    false => Duration::from_secs(30),
+};
+
 /// What a driver adds to an error when the server rolled back the
 /// transaction open before the statement on its own (SQL Server under
 /// `XACT_ABORT`): the session is autocommitting again.

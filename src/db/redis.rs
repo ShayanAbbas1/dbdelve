@@ -271,10 +271,8 @@ impl Connection {
             .arg("NO-TOUCH")
             .arg("ON")
             .query::<()>(&mut client);
-        let timeout = (server.statement_timeout > 0)
-            .then(|| Duration::from_secs(u64::from(server.statement_timeout)));
         client
-            .set_read_timeout(timeout)
+            .set_read_timeout(session_timeout(server))
             .map_err(|error| plain_error(message(&error)))?;
         Ok(Session {
             client,
@@ -289,7 +287,8 @@ impl Connection {
     /// is left alone, and so is one with a `MULTI` open, where the `PING`
     /// would be queued into the user's transaction instead of answered. A
     /// ping that does not come back whole takes the session with it, as any
-    /// command does (`send`).
+    /// command does (`send`), and so does one with no answer within
+    /// [`super::PING_WITHIN`], whose socket no later command could trust.
     pub fn ping(&self) -> Result<(), DbError> {
         let mut held = match self.session.try_lock() {
             Ok(held) => held,
@@ -304,10 +303,29 @@ impl Connection {
         if live.multi {
             return Ok(());
         }
-        let Err(error) = ::redis::cmd("PING").query::<String>(&mut live.client) else {
-            return Ok(());
+        let bound = session_timeout(&self.server).map_or(super::PING_WITHIN, |timeout| {
+            timeout.min(super::PING_WITHIN)
+        });
+        let pinged = live
+            .client
+            .set_read_timeout(Some(bound))
+            .and_then(|()| ::redis::cmd("PING").query::<String>(&mut live.client));
+        // The session's own bound back, or no session: one left with the
+        // ping's would cut a long command short.
+        let restored = live.client.set_read_timeout(session_timeout(&self.server));
+        let error = match (pinged, restored) {
+            (Ok(_), Ok(())) => return Ok(()),
+            (_, Err(error)) => {
+                *held = None;
+                return Err(plain_error(message(&error)));
+            }
+            (Err(error), Ok(())) => error,
         };
-        if error.is_io_error() || error.is_unrecoverable_error() || !live.client.is_open() {
+        if error.is_io_error()
+            || error.is_unrecoverable_error()
+            || error.is_timeout()
+            || !live.client.is_open()
+        {
             *held = None;
         }
         Err(plain_error(message(&error)))
@@ -914,6 +932,12 @@ fn connect_error(error: &RedisError, server: &ServerConfig) -> DbError {
     } else {
         format!("{endpoint}: {}", message(error))
     })
+}
+
+/// The read bound a session's commands run under: the statement timeout,
+/// or none.
+fn session_timeout(server: &ServerConfig) -> Option<Duration> {
+    (server.statement_timeout > 0).then(|| Duration::from_secs(u64::from(server.statement_timeout)))
 }
 
 /// The server's own words for its errors (`WRONGTYPE Operation against a key
@@ -2503,6 +2527,61 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_keep_alive_ping_with_no_answer_gives_up_and_drops_the_session() {
+        // Refuses every command but a client's `PING`, which it never
+        // answers. The inline one `prefer` probes with is answered.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut buffer = [0; 4096];
+                    while let Ok(read) = stream.read(&mut buffer) {
+                        let sent = &buffer[..read];
+                        if sent.starts_with(b"PING\r\n") {
+                            let _ = stream.write_all(b"+PONG\r\n");
+                            continue;
+                        }
+                        if read == 0 {
+                            return;
+                        }
+                        if sent.ends_with(b"$4\r\nPING\r\n") {
+                            std::thread::sleep(Duration::from_secs(10));
+                            return;
+                        }
+                        // One refusal per command of a pipeline.
+                        let commands = std::iter::once(&b'\n')
+                            .chain(sent)
+                            .zip(sent)
+                            .filter(|&(before, at)| *before == b'\n' && *at == b'*')
+                            .count();
+                        for _ in 0..commands {
+                            let _ = stream.write_all(b"-ERR unknown command\r\n");
+                        }
+                    }
+                });
+            }
+        });
+        let connection = Connection::open(
+            &config_from_url(&format!("redis://127.0.0.1:{port}?sslmode=disable")).unwrap(),
+        )
+        .expect("the session opens");
+
+        let started = Instant::now();
+        assert!(connection.ping().is_err(), "the unanswered ping fails");
+        assert!(
+            started.elapsed() < super::super::PING_WITHIN * 5,
+            "within its bound: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            lock(&connection.session).is_none(),
+            "and the session it went out on is not kept"
+        );
     }
 
     fn live_config() -> ServerConfig {
