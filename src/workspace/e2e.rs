@@ -2607,6 +2607,53 @@ fn the_active_schema_is_kept_only_in_the_connections_own_database(cx: &mut TestA
     });
 }
 
+/// Another database's catalog read under a filter saved over before it
+/// lands is read again under the new one, so it never puts back a schema
+/// that one hides.
+#[gpui::test]
+fn another_databases_catalog_asked_under_an_old_filter_is_read_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            "CREATE TABLE t (id INTEGER);",
+            "CREATE TABLE u (id INTEGER); CREATE SCHEMA extra; CREATE TABLE extra.x (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let at =
+            connections_row(&workspace, cx, &database_row("e2e", "other")).expect("`other` shows");
+        click_connections_row(cx, at);
+        let other = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                match workspace.profile().unwrap().database_catalogs.get("other") {
+                    Some(CatalogState::Loaded(catalog, _)) => {
+                        let mut names: Vec<_> =
+                            catalog.schemas.iter().map(|s| s.name.clone()).collect();
+                        names.sort();
+                        names
+                    }
+                    _ => panic!("the catalog of `other` has not loaded"),
+                }
+            })
+        };
+        assert_eq!(other(cx), ["extra", "main"]);
+
+        workspace.update(cx, |workspace, cx| {
+            let id = workspace.profile().unwrap().id.clone();
+            workspace.reload_database(&id, "other".to_string(), cx);
+            // Saved while that read is out.
+            workspace.profile_mut().unwrap().include.schemas = vec!["main".to_string()];
+        });
+        settle(cx);
+        assert_eq!(other(cx), ["main"], "read again under the filter saved");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_tab_bound_to_a_hidden_database_runs_and_its_catalog_is_never_read(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

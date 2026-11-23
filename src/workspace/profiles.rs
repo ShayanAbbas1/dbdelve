@@ -2864,6 +2864,7 @@ impl Workspace {
         else {
             return;
         };
+        let asked = shown.clone();
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || {
@@ -2880,6 +2881,16 @@ impl Workspace {
                     return;
                 };
                 if !profile.is_registered(&database, &session) {
+                    return;
+                }
+                // Asked under a filter saved over since: it would put back
+                // what that one hides. Read again under this one, if it
+                // still shows the database at all.
+                let current = profile.shown().in_another_database();
+                if current != asked {
+                    if current.shows_database(&database) {
+                        workspace.load_database_catalog(&id, database, generation, cx);
+                    }
                     return;
                 }
                 match result {
@@ -2963,6 +2974,7 @@ impl Workspace {
         {
             self.routine_reads += 1;
         }
+        let asked = shown.clone();
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || session.metadata(|connection| connection.routines(&shown))
@@ -2971,9 +2983,13 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             _ = workspace.update(cx, |workspace, cx| {
+                // Under a filter saved over since, a schema it hides would
+                // come back through the merge; the catalog read again under
+                // the new one reads its routines too.
                 let Some(profile) = workspace
                     .issued_to(&id, generation)
                     .filter(|profile| profile.is_registered(&database, &session))
+                    .filter(|profile| profile.shown().in_another_database() == asked)
                 else {
                     return;
                 };
