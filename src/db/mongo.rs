@@ -1953,6 +1953,11 @@ fn statement_error(kind: &ErrorKind) -> DbError {
         ErrorKind::ServerSelection { .. } => "No server was available to run the statement.".into(),
         ErrorKind::DnsResolve { .. } => "A server's address could not be resolved.".into(),
         ErrorKind::Io(io) => format!("The connection to the server failed: {}.", io.kind()),
+        // The driver's message names the server whose pool was cleared, which
+        // may be a member the profile never named. Said as the `Io` it follows.
+        ErrorKind::ConnectionPoolCleared { .. } => {
+            "The connection to the server failed and its connections were closed.".into()
+        }
         kind => kind.to_string(),
     })
 }
