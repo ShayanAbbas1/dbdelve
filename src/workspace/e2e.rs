@@ -12577,15 +12577,19 @@ fn a_saved_agent_access_listens_at_launch_and_quit_removes_the_socket(cx: &mut T
     store::tests::with_home(|| {
         let path = crate::agent::socket_path().expect("the test home gives a socket path");
         let profile = sqlite_profile("orders", "Orders", "agent_visible = true");
-        // The second `true` is the next launch from the file the first quit
-        // left; the last two are a file that says off and one that says nothing.
+        // The second is the next launch from the file the first quit left,
+        // untouched; the last two are a file that says off and one that says
+        // nothing.
         for (setting, saved, listens) in [
-            ("agent_access = true", Some(true), true),
-            ("agent_access = true", Some(true), true),
-            ("agent_access = false", Some(false), false),
-            ("", None, false),
+            (Some("agent_access = true"), Some(true), true),
+            (None, Some(true), true),
+            (Some("agent_access = false"), Some(false), false),
+            (Some(""), None, false),
         ] {
-            let (workspace, cx) = launch_with_settings(cx, setting, &profile);
+            let (workspace, cx) = match setting {
+                Some(setting) => launch_with_settings(cx, setting, &profile),
+                None => launch(cx),
+            };
             cx.executor().allow_parking();
             assert_eq!(listening(&workspace, cx), listens, "{setting:?}");
             assert_eq!(path.exists(), listens, "{setting:?}");
