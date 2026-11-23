@@ -395,6 +395,11 @@ pub struct StoredQueryTab {
     /// Keep Mine was chosen and nothing saved since, so Save still asks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kept_mine: bool,
+    /// The tab's bar was up, unanswered. Its own flag because a tab that
+    /// came back asking took the file's new text as `saved_hash`, which
+    /// would match at the next relaunch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asking: bool,
 }
 
 /// An opened table, view or routine, stored by name rather than by content: the
@@ -5808,6 +5813,7 @@ active = true
                     schema: None,
                     saved_hash: None,
                     kept_mine: false,
+                    asking: false,
                 },
                 StoredQueryTab {
                     id: 4,
@@ -5819,6 +5825,7 @@ active = true
                     schema: None,
                     saved_hash: None,
                     kept_mine: false,
+                    asking: false,
                 },
             ],
             open_objects: vec![StoredObject {

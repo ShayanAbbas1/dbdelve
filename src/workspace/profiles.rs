@@ -3574,6 +3574,7 @@ fn first_buffer(name: Option<String>) -> Vec<store::StoredQueryTab> {
         schema: None,
         saved_hash: None,
         kept_mine: false,
+        asking: false,
     }]
 }
 
@@ -3954,6 +3955,7 @@ target = 'i-0123456789abcdef0'
             schema: None,
             saved_hash: None,
             kept_mine: false,
+            asking: false,
         };
         // A connection just made.
         assert_eq!(first_buffer(None), std::slice::from_ref(&blank));
@@ -3981,6 +3983,7 @@ target = 'i-0123456789abcdef0'
             schema: None,
             saved_hash: None,
             kept_mine: false,
+            asking: false,
         }];
         assert_eq!(stored_buffers(open.clone(), Some(3), None), open);
     }

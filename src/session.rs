@@ -3550,6 +3550,10 @@ impl QueryTab {
                 .file
                 .as_ref()
                 .is_some_and(|file| file.conflict == Some(Conflict::KeptMine)),
+            asking: self
+                .file
+                .as_ref()
+                .is_some_and(|file| file.conflict == Some(Conflict::Asking)),
         }
     }
 }
@@ -4274,7 +4278,8 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
 
 /// The conflict a file tab left with unsaved text comes back with, its file
 /// reading `saved` and its buffer `text`: the bar, when the file is not what
-/// that text was written against, or Keep Mine, as it was left.
+/// that text was written against or the bar was left up, or Keep Mine, as it
+/// was left.
 fn restored_conflict(
     stored: &store::StoredQueryTab,
     saved: Option<&str>,
@@ -4284,6 +4289,7 @@ fn restored_conflict(
     let saved = saved.filter(|saved| *saved != text)?;
     match &stored.saved_hash {
         Some(hash) if *hash != sql_file::text_hash(saved, bom) => Some(Conflict::Asking),
+        _ if stored.asking => Some(Conflict::Asking),
         _ => stored.kept_mine.then_some(Conflict::KeptMine),
     }
 }
@@ -5940,6 +5946,7 @@ mod tests {
             schema: None,
             saved_hash: None,
             kept_mine: false,
+            asking: false,
         };
         let adopted = adopted(
             vec![
@@ -5978,6 +5985,7 @@ mod tests {
                 schema: None,
                 saved_hash: None,
                 kept_mine: false,
+                asking: false,
             };
 
             let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
@@ -6002,6 +6010,7 @@ mod tests {
                 schema: None,
                 saved_hash: None,
                 kept_mine: false,
+                asking: false,
             };
             let StoredText {
                 file, text, notice, ..
@@ -6324,6 +6333,7 @@ mod tests {
                     schema: None,
                     saved_hash: None,
                     kept_mine: false,
+                    asking: false,
                 })
                 .collect::<Vec<_>>()
         };

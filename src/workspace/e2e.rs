@@ -13458,6 +13458,15 @@ fn a_relaunch_asks_about_a_change_made_while_the_app_was_closed(cx: &mut TestApp
             front_conflict(&workspace, cx),
             Some(crate::session::Conflict::Asking)
         );
+
+        close_window(workspace, cx);
+        let (workspace, cx) = launch_again(cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::Asking),
+            "asking until it is answered"
+        );
         quit(workspace, cx);
     });
 }
