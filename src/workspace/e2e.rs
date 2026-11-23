@@ -11247,6 +11247,38 @@ fn an_unreadable_profile_file_is_read_again_on_the_next_refresh(cx: &mut TestApp
     });
 }
 
+#[gpui::test]
+fn a_profile_removed_in_another_window_is_hidden_here_and_kept(cx: &mut TestAppContext) {
+    use super::agent::AgentLookup;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &format!(
+                "{}{}",
+                sqlite_profile("dev", "Dev", "agent_visible = true"),
+                sqlite_profile("other", "Other", "")
+            ),
+        );
+        assert!(agent_visible(&workspace, cx, "dev"));
+
+        let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        list.profiles.retain(|profile| profile.id != "dev");
+        store::save_profiles(&list).expect("the other window saves");
+
+        workspace.update(cx, |workspace, cx| workspace.adopt_saved_visibility(cx));
+        // `agent_visible` finds it, so it is still in this window's list.
+        assert!(!agent_visible(&workspace, cx, "dev"));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(
+                workspace.agent_profile("Dev"),
+                Err(AgentLookup::NotAvailable)
+            ));
+        });
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }

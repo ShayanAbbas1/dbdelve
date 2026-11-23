@@ -1158,14 +1158,18 @@ impl Workspace {
             if self.agent.visibility_choices.contains(&profile.id) {
                 continue;
             }
-            // The first of a repeated id, as everywhere else.
-            let Some(stored) = saved.profiles.iter().find(|stored| stored.id == profile.id) else {
-                continue;
-            };
-            if profile.agent_visible && !stored.agent_visible {
+            // The first of a repeated id, as everywhere else. A profile the
+            // file no longer holds was removed in another window: it stays in
+            // this one's list, but nothing granted it any more.
+            let visible = saved
+                .profiles
+                .iter()
+                .find(|stored| stored.id == profile.id)
+                .is_some_and(|stored| stored.agent_visible);
+            if profile.agent_visible && !visible {
                 hidden.push(profile.id.clone());
             }
-            profile.agent_visible = stored.agent_visible;
+            profile.agent_visible = visible;
         }
         hidden
     }
