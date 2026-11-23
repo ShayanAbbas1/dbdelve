@@ -578,7 +578,9 @@ pub(super) const PUBLIC_GRANTS_SQL: &str = "
 
 /// Roles that cannot log in, have no members, own nothing in this database
 /// (nor any database), and hold no grant on its schemas, relations or
-/// routines. Another database's grants are not seen from here.
+/// routines. `pg_shdepend` adds what those leave out, in every database of
+/// the server: a policy naming it, a column grant, a default privilege, a
+/// grant on a database, and anything another database holds of it.
 pub(super) const UNUSED_ROLES_SQL: &str = "
     SELECT r.rolname AS name
     FROM pg_catalog.pg_roles AS r
@@ -598,6 +600,9 @@ pub(super) const UNUSED_ROLES_SQL: &str = "
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace AS n WHERE n.nspowner = r.oid)
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc AS p WHERE p.proowner = r.oid)
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_database AS d WHERE d.datdba = r.oid)
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_shdepend AS d
+          WHERE d.refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
+            AND d.refobjid = r.oid)
     ORDER BY 1";
 
 pub(super) const SESSIONS_SQL: &str = "

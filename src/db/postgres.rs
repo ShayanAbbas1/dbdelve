@@ -4235,7 +4235,9 @@ mod tests {
         let reset = "DROP SCHEMA IF EXISTS dbdelve_reach_probe CASCADE; \
                      DROP SCHEMA IF EXISTS dbdelve_reach_hidden CASCADE; \
                      DROP ROLE IF EXISTS dbdelve_probe_reach; \
-                     DROP ROLE IF EXISTS dbdelve_probe_owner";
+                     DROP ROLE IF EXISTS dbdelve_probe_owner; \
+                     DROP ROLE IF EXISTS dbdelve_probe_policy; \
+                     DROP ROLE IF EXISTS dbdelve_probe_idle";
         plain
             .query(reset, Fetch::default())
             .expect("an earlier run's probe should drop");
@@ -4252,7 +4254,11 @@ mod tests {
                  GRANT USAGE ON SCHEMA dbdelve_reach_probe TO dbdelve_probe_reach; \
                  GRANT SELECT (email) ON dbdelve_reach_probe.users TO dbdelve_probe_reach; \
                  GRANT USAGE ON SEQUENCE dbdelve_reach_probe.ids TO dbdelve_probe_reach; \
-                 GRANT SELECT ON dbdelve_reach_hidden.secrets TO dbdelve_probe_reach",
+                 GRANT SELECT ON dbdelve_reach_hidden.secrets TO dbdelve_probe_reach; \
+                 CREATE ROLE dbdelve_probe_policy NOLOGIN; \
+                 CREATE ROLE dbdelve_probe_idle NOLOGIN; \
+                 CREATE POLICY only_policy ON dbdelve_reach_probe.users \
+                     TO dbdelve_probe_policy USING (true)",
                 Fetch::default(),
             )
             .expect("the probe should be created");
@@ -4261,9 +4267,18 @@ mod tests {
         let owner = plain.role_grants("dbdelve_probe_owner");
         let me = live_config().user;
         let mine = plain.role_grants(&me);
+        let unused = plain
+            .roles()
+            .and_then(|roles| plain.role_reports(&roles))
+            .map(|reports| reports.unused_roles);
         plain
             .query(reset, Fetch::default())
             .expect("the probe should drop");
+
+        // A role a policy names is used, though it holds no grant.
+        let unused = unused.expect("the reports should read");
+        assert!(unused.contains(&"dbdelve_probe_idle".to_string()));
+        assert!(!unused.contains(&"dbdelve_probe_policy".to_string()));
 
         let reach = reach.expect("reach should read");
         let entries: Vec<_> = (reach.entries.iter())
