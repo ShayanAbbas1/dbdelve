@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -1130,6 +1131,11 @@ pub struct Connection {
     /// A bound run that picks no schema puts the session back on it. `None`
     /// where no script ran, and `RESET` does the job there.
     after_startup_search_path: Option<String>,
+    /// Whether the profile holds this connection to reads
+    /// ([`super::Connection::set_read_only`]): every session opened for it
+    /// from here on takes the hold before the startup script replays, so the
+    /// script never runs unheld. Shared with the sessions opened beside it.
+    held: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -1150,10 +1156,15 @@ impl Connection {
         match &server.ssh {
             Some(ssh) if server.host.starts_with('/') => {
                 let bridge = SocketBridge::new(ssh, &socket_path(server))?;
-                Self::connect(server, Route::Socket(Arc::new(bridge)), &[])
+                Self::connect(server, Route::Socket(Arc::new(bridge)), &[], false)
             }
             _ => tunnelled(server, DEFAULT_PORT, |tunnel| {
-                Self::connect(server, tunnel.map_or(Route::Direct, Route::Tunnel), &[])
+                Self::connect(
+                    server,
+                    tunnel.map_or(Route::Direct, Route::Tunnel),
+                    &[],
+                    false,
+                )
             }),
         }
     }
@@ -1169,11 +1180,35 @@ impl Connection {
         std::thread::spawn(move || this.aside(Duration::ZERO, |_| Some(())));
     }
 
-    fn connect(server: &ServerConfig, route: Route, startup: &[String]) -> Result<Self, DbError> {
-        server.forgetting_on_failure(Engine::Postgres, Self::sign_in(server, route, startup))
+    /// A session at `server`, `held` to reads before `startup` replays.
+    fn connect(
+        server: &ServerConfig,
+        route: Route,
+        startup: &[String],
+        held: bool,
+    ) -> Result<Self, DbError> {
+        server.forgetting_on_failure(
+            Engine::Postgres,
+            Self::sign_in(server, route, startup, held),
+        )
     }
 
-    fn sign_in(server: &ServerConfig, route: Route, startup: &[String]) -> Result<Self, DbError> {
+    /// What [`super::Connection::set_read_only`] just set on this session,
+    /// for the sessions opened from here on to take too.
+    pub(super) fn remember_hold(&self, read_only: bool) {
+        self.held.store(read_only, Ordering::SeqCst);
+    }
+
+    fn held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
+
+    fn sign_in(
+        server: &ServerConfig,
+        route: Route,
+        startup: &[String],
+        held: bool,
+    ) -> Result<Self, DbError> {
         let connector = tls::connector(server.sslmode, server.root_certificate.as_deref())
             .map_err(|message| DbError {
                 message,
@@ -1267,6 +1302,11 @@ impl Connection {
         if let Some(schema) = &server.schema {
             set_search_path(&mut client, Some(schema))?;
         }
+        // Before the script: a function call the gate reads as a read is one
+        // only because the hold stops its writes.
+        if held && let Some(hold) = super::read_only_statement(Engine::Postgres, true) {
+            replay(&mut client, &[hold.to_string()])?;
+        }
         // After the schema pick, so a `search_path` the script sets wins.
         replay(&mut client, startup)?;
         let after_startup_search_path = match startup.is_empty() {
@@ -1287,6 +1327,7 @@ impl Connection {
             graph: GraphCancel::default(),
             startup: startup.into(),
             after_startup_search_path,
+            held: Arc::new(AtomicBool::new(held)),
         })
     }
 
@@ -1367,7 +1408,13 @@ impl Connection {
         Ok(Self {
             side: self.side.clone(),
             server: self.server.clone(),
-            ..Self::connect(&self.server(), self.route.clone(), &self.startup)?
+            held: self.held.clone(),
+            ..Self::connect(
+                &self.server(),
+                self.route.clone(),
+                &self.startup,
+                self.held(),
+            )?
         })
     }
 
@@ -1400,6 +1447,7 @@ impl Connection {
             },
             self.route.clone(),
             &self.startup,
+            self.held(),
         )
     }
 
@@ -1840,7 +1888,7 @@ impl Connection {
                 statement_timeout: SIDE_TIMEOUT_SECONDS,
                 ..self.server()
             };
-            *side = Self::connect(&server, self.route.clone(), &self.startup)
+            *side = Self::connect(&server, self.route.clone(), &self.startup, self.held())
                 .and_then(|side| side.with_side_bound())
                 .ok();
         }
@@ -1970,7 +2018,12 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(&self.server(), self.route.clone(), &self.startup)?;
+        let side = Self::connect(
+            &self.server(),
+            self.route.clone(),
+            &self.startup,
+            self.held(),
+        )?;
         assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
@@ -3390,6 +3443,7 @@ mod tests {
             &scripted.server(),
             scripted.route.clone(),
             &scripted.startup,
+            false,
         )
         .expect("a session opens");
         assert_eq!(cell(&sizes, STARTUP_COUNT).as_deref(), Some("1"));

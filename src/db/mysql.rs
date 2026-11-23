@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -859,6 +860,11 @@ pub struct Connection {
     /// [`Self::alongside`] and [`Self::on_database`] on every session opened
     /// for the user. Empty until [`Self::with_startup`] sets it.
     startup: Arc<[String]>,
+    /// Whether the profile holds this connection to reads
+    /// ([`super::Connection::set_read_only`]): every session opened for the
+    /// user takes the hold before the startup script runs, so the script
+    /// never runs unheld.
+    held: Arc<AtomicBool>,
 }
 
 /// The profile's startup statements on `connection`, in the order written.
@@ -895,6 +901,7 @@ impl Connection {
                 graph: GraphCancel::default(),
                 statistics_expression: Arc::default(),
                 startup: Arc::default(),
+                held: Arc::default(),
             })
         })
     }
@@ -918,11 +925,29 @@ impl Connection {
         self.engine
     }
 
+    /// What [`super::Connection::set_read_only`] just set on this session,
+    /// for the sessions opened from here on to take too.
+    pub(super) fn remember_hold(&self, read_only: bool) {
+        self.held.store(read_only, Ordering::SeqCst);
+    }
+
+    /// The Read-only hold, where the profile has one, then the startup
+    /// script, on a session just opened for the user: the hold first, so
+    /// nothing in the script runs unheld.
+    fn hold_and_replay(&self, connection: &mut Conn) -> Result<(), DbError> {
+        if self.held.load(Ordering::SeqCst)
+            && let Some(hold) = super::read_only_statement(self.engine, true)
+        {
+            replay(connection, &[hold.to_string()])?;
+        }
+        replay(connection, &self.startup)
+    }
+
     /// A second session, for a statement to run on beside this one's; see
     /// [`super::Connection::query_alongside`]. It shares the side session.
     pub fn alongside(&self) -> Result<Self, DbError> {
         let mut connection = connect(&self.server, self.engine, self.dial()?)?;
-        replay(&mut connection, &self.startup)?;
+        self.hold_and_replay(&mut connection)?;
         Ok(Self {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
@@ -945,12 +970,14 @@ impl Connection {
             ..self.server.clone()
         };
         let mut connection = connect(&server, self.engine, self.dial()?)?;
-        replay(&mut connection, &self.startup)?;
+        self.hold_and_replay(&mut connection)?;
         Ok(Self {
             connection_id: connection.connection_id(),
             server,
             connection: Arc::new(Mutex::new(connection)),
             side: Arc::default(),
+            // Its own, as the caller holds it on its own.
+            held: Arc::new(AtomicBool::new(self.held.load(Ordering::SeqCst))),
             // Its own: a Cancel on this session would otherwise drop the next
             // statement of a diagram read on the first.
             graph: GraphCancel::default(),
@@ -1548,6 +1575,7 @@ impl Connection {
             statistics_expression: Arc::default(),
             // Reads of DBDelve's own, never a statement of the user's.
             startup: Arc::default(),
+            held: self.held.clone(),
         };
         let matched = side.matched(shown)?;
         let names = matched.as_ref().map(|(names, _)| names.as_slice());

@@ -2944,8 +2944,15 @@ impl Connection {
         let Some(statement) = read_only_statement(engine, read_only) else {
             return Ok(());
         };
-        self.query(statement, &CancelToken::default(), Fetch::default())
-            .map(|_| ())
+        self.query(statement, &CancelToken::default(), Fetch::default())?;
+        // Every session the driver opens or resets from here on takes it
+        // before the startup script replays.
+        match self {
+            Self::Postgres(connection) => connection.remember_hold(read_only),
+            Self::MySql(connection) => connection.remember_hold(read_only),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// The database the driver says it reached, where a plugin driver
