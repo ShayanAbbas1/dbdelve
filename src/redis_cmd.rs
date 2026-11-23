@@ -440,11 +440,8 @@ pub(crate) fn expiry(text: &str) -> Option<Expiry> {
 /// it on `SET`, `GETEX` and `SETEX`, and `EXPIRE` and the hash commands remove
 /// on it, which [`removes_in`] answers.
 ///
-/// ponytail: the option words are matched anywhere after the name, so a key,
-/// field or value spelled like one is named an expiry too. That is the safe
-/// direction: the human sees one sentence too many, never one too few. The
-/// ceiling is that this reads words and not each command's option grammar; the
-/// upgrade path is reading the grammar.
+/// The option words are read only where each command takes its options
+/// ([`options`]), so a key, field or value spelled like one is not an expiry.
 pub(crate) fn expiry_in(commands: &[Command]) -> Option<Expiry> {
     commands
         .iter()
@@ -464,13 +461,72 @@ pub(crate) fn expiry_in(commands: &[Command]) -> Option<Expiry> {
 }
 
 /// Whether `command` carries an absolute time, or a relative one the server
-/// takes as positive.
+/// takes as positive, among its options.
 fn times_out(command: &Command) -> bool {
-    has_option(command, &["EXAT", "PXAT"])
-        || command.words.iter().enumerate().skip(1).any(|(at, word)| {
-            (word.eq_ignore_ascii_case(b"EX") || word.eq_ignore_ascii_case(b"PX"))
-                && keeps_the_key(&self::word(&command.words, at + 1))
-        })
+    let options = options(command);
+    has_option(options, &["EXAT", "PXAT"]) || relative_timeouts(options).any(|t| keeps_the_key(&t))
+}
+
+/// The timeout after each `EX` or `PX` among `options`, empty when the option
+/// ends them.
+fn relative_timeouts(options: &[Vec<u8>]) -> impl Iterator<Item = String> + '_ {
+    options
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| word.eq_ignore_ascii_case(b"EX") || word.eq_ignore_ascii_case(b"PX"))
+        .map(|(at, _)| self::word(options, at + 1))
+}
+
+/// The words of `command` where it takes its options, so that a key, value,
+/// field or stream entry spelled like an option is not read as one: after the
+/// value on `SET`, after the key on `GETEX`, between the key and `FIELDS` on
+/// `HSETEX` and `HGETEX`, and between the key and the entry ID on `XADD`.
+/// Every word after the name on any other command.
+fn options(command: &Command) -> &[Vec<u8>] {
+    let words = command.words.as_slice();
+    let from = |at: usize| words.get(at..).unwrap_or_default();
+    match command.name().as_str() {
+        "SET" => from(3),
+        "GETEX" => from(2),
+        "HSETEX" | "HGETEX" => {
+            let options = from(2);
+            let fields = options
+                .iter()
+                .position(|word| word.eq_ignore_ascii_case(b"FIELDS"))
+                .unwrap_or(options.len());
+            &options[..fields]
+        }
+        // The ID is `*` or `<ms>`, `<ms>-<seq>` or `<ms>-*`; the options are
+        // what comes before the first word shaped like one. A `MAXLEN` or
+        // `MINID` threshold can be shaped like one too, but it follows the
+        // word that makes the command a trim, which is kept.
+        "XADD" => {
+            let options = from(2);
+            let id = options
+                .iter()
+                .position(|word| entry_id(word))
+                .unwrap_or(options.len());
+            &options[..id]
+        }
+        _ => from(1),
+    }
+}
+
+/// Whether `word` is a stream entry ID as `XADD` takes one.
+fn entry_id(word: &[u8]) -> bool {
+    let digits = |part: &[u8]| !part.is_empty() && part.iter().all(u8::is_ascii_digit);
+    match word {
+        b"*" => true,
+        _ => match word.iter().position(|byte| *byte == b'-') {
+            None => digits(word),
+            Some(dash) => {
+                digits(&word[..dash]) && {
+                    let seq = &word[dash + 1..];
+                    seq == b"*" || digits(seq)
+                }
+            }
+        },
+    }
 }
 
 fn removes_data(command: &Command) -> bool {
@@ -480,14 +536,11 @@ fn removes_data(command: &Command) -> bool {
         "XGROUP" => matches!(command.subcommand().as_str(), "DESTROY" | "DELCONSUMER"),
         "EXPIRE" | "PEXPIRE" | "HEXPIRE" | "HPEXPIRE" => !keeps_the_key(&word(&command.words, 2)),
         // An `XADD` that trims is an `XTRIM`, and `LIMIT` only ever follows
-        // `MAXLEN` or `MINID`.
-        "XADD" => has_option(command, &["MAXLEN", "MINID"]),
+        // `MAXLEN` or `MINID`. A field named `MAXLEN` after the ID is data.
+        "XADD" => has_option(options(command), &["MAXLEN", "MINID"]),
         // Unlike `SET`, these take a zero `EX` or `PX` and delete the field
-        // at once (checked on Redis 8.10.3).
-        "HSETEX" | "HGETEX" => command.words.iter().enumerate().skip(1).any(|(at, word)| {
-            (word.eq_ignore_ascii_case(b"EX") || word.eq_ignore_ascii_case(b"PX"))
-                && !keeps_the_key(&self::word(&command.words, at + 1))
-        }),
+        // at once (checked on Redis 8.10.3). Read before `FIELDS` only.
+        "HSETEX" | "HGETEX" => relative_timeouts(options(command)).any(|t| !keeps_the_key(&t)),
         name => REMOVES.contains(&name),
     }
 }
@@ -501,10 +554,9 @@ fn keeps_the_key(timeout: &str) -> bool {
         && !timeout.starts_with('0')
 }
 
-/// Whether any word after the command's name is one of `options`, compared
-/// without regard to case.
-fn has_option(command: &Command, options: &[&str]) -> bool {
-    command.words.iter().skip(1).any(|word| {
+/// Whether any of `words` is one of `options`, compared without regard to case.
+fn has_option(words: &[Vec<u8>], options: &[&str]) -> bool {
+    words.iter().any(|word| {
         options
             .iter()
             .any(|option| word.eq_ignore_ascii_case(option.as_bytes()))
@@ -1482,12 +1534,56 @@ mod tests {
             "GETEX k EX 10",
             "GETEX k EXAT 1",
             "GETEX k PXAT 1",
-            // A value spelled like the option is read as the option, which
-            // fails safe.
-            "SET k EXAT",
         ] {
             assert_eq!(expiry(text), Some(Expiry::Key), "{text}");
             assert!(!removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_option_word_outside_the_options_is_data() {
+        // A key, a value or a field spelled like an option schedules nothing.
+        for text in [
+            "SET k EXAT",
+            "SET EXAT v",
+            "SET k PXAT KEEPTTL",
+            "GETEX EXAT",
+            "GETEX PXAT PERSIST",
+            "HSETEX h FIELDS 1 EXAT 1",
+            "HSETEX h FIELDS 2 f PXAT EX 10",
+            "HGETEX h PERSIST FIELDS 1 EXAT",
+        ] {
+            assert_eq!(expiry(text), None, "{text}");
+        }
+        // A field or value spelled `EX` with a zero after it removes nothing.
+        for text in [
+            "HSETEX h EX 10 FIELDS 2 EX 0 f v",
+            "HGETEX h FIELDS 3 EX 0 f",
+            "HSETEX h FIELDS 1 PX 0",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+        assert!(removes("HSETEX h FNX EX 0 FIELDS 1 EX 10"));
+    }
+
+    #[test]
+    fn a_stream_add_reads_its_trim_before_the_entry_id_only() {
+        for text in [
+            "XADD s * MAXLEN 10",
+            "XADD s 1-1 MINID 1",
+            "XADD s 5-* f MAXLEN",
+            "XADD s NOMKSTREAM 7 MAXLEN ~ 10",
+            "XADD MAXLEN * f v",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+        for text in [
+            "XADD s MAXLEN 10 * MAXLEN 1",
+            "XADD s KEEPREF MINID 1-0 1-1 f v",
+            // No ID found: the whole line is options, which fails safe.
+            "XADD s MAXLEN",
+        ] {
+            assert!(removes(text), "{text}");
         }
     }
 
