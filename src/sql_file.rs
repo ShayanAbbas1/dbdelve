@@ -298,6 +298,7 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
     let mut at = path;
     loop {
         if let Ok(found) = fs::canonicalize(at) {
+            let found = without_verbatim_prefix(found);
             return rest.iter().rev().fold(found, |path, part| path.join(part));
         }
         match (at.parent(), at.file_name()) {
@@ -308,6 +309,28 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
             _ => return path.to_path_buf(),
         }
     }
+}
+
+/// `found` without the `\\?\` Windows' canonicalize puts on every path, where
+/// the plain spelling resolves back to the same file. Left on, it is what the
+/// tab, the recent list and every message show, and a path joined from the
+/// plain spelling of the same directory never compares equal to it.
+fn without_verbatim_prefix(found: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let plain = found
+            .to_str()
+            .and_then(|verbatim| match verbatim.strip_prefix(r"\\?\UNC\") {
+                Some(share) => Some(format!(r"\\{share}")),
+                None => verbatim.strip_prefix(r"\\?\").map(str::to_string),
+            });
+        if let Some(plain) = plain.map(PathBuf::from)
+            && fs::canonicalize(&plain).is_ok_and(|again| again == found)
+        {
+            return plain;
+        }
+    }
+    found
 }
 
 /// What Save As writes to: the path picked, with `.sql` added when the user
@@ -443,6 +466,14 @@ mod tests {
             assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         }
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_resolved_path_is_spelled_without_the_verbatim_prefix() {
+        let dir = scratch_dir("plain");
+        assert!(!dir.to_string_lossy().starts_with(r"\\?\"), "{dir:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

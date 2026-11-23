@@ -5966,10 +5966,15 @@ mod tests {
             ],
             Path::new("/support/queries/dev"),
         );
+        // Resolved, it is on the current drive on Windows.
+        let daily = sql_file::canonical(Path::new("/support/queries/dev/daily.sql"));
         assert_eq!(
             adopted,
             [
-                tab(None, Some("/support/queries/dev/daily.sql")),
+                store::StoredQueryTab {
+                    path: Some(daily),
+                    ..tab(None, None)
+                },
                 tab(None, None),
                 tab(None, Some("/q/a.sql")),
             ]
