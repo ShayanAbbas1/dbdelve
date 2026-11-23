@@ -502,6 +502,17 @@ impl Profile {
         )
     }
 
+    /// The database the rows of the profile's own catalog are listed under,
+    /// as the connections tree names it: the session's, where the target
+    /// keeps schemas inside a database, and none where the catalog spans the
+    /// databases or is the one it holds. An action handed it asks again when
+    /// it runs, so one a database switch overtook is refused.
+    pub(crate) fn listed_database(&self) -> Option<String> {
+        (self.config.target().levels() == Levels::DatabaseThenSchema)
+            .then(|| self.active_database())
+            .flatten()
+    }
+
     /// Whether the include lists hide an object in `schema` of `database`
     /// (`None` for the connection's own), so the narrowed catalog not
     /// listing it says nothing about whether it exists.

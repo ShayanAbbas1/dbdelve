@@ -3410,6 +3410,10 @@ impl Workspace {
         let syntax = profile.config.engine().syntax();
         let active_schema = profile.active_schema().map(gpui::SharedString::from);
         let menu_profile = profile.id.clone();
+        // The database the rows are drawn from, which the connections tree's
+        // rows name as theirs, so an export the menu offers is refused once a
+        // switch has moved the connection.
+        let menu_database = profile.listed_database();
         let drop_line = self.explorer_drop.clone();
         let open_queries: HashSet<String> = profile
             .session
@@ -3807,6 +3811,7 @@ impl Workspace {
                         id,
                         profile: menu_profile.clone(),
                         database: None,
+                        listed: menu_database.clone(),
                         shortcut,
                     },
                     &menu_workspace,
@@ -3916,6 +3921,10 @@ pub(super) struct MenuRow {
     pub(super) profile: String,
     /// The database the connections tree lists the row under.
     pub(super) database: Option<String>,
+    /// The database the row was drawn from, which an export of it checks the
+    /// connection is still on: `database` in the connections tree, and in
+    /// simple mode, whose rows name none, the one its catalog is of.
+    pub(super) listed: Option<String>,
     /// What the row opens, if it is an object.
     pub(super) leaf: Option<ExplorerLeaf>,
     pub(super) shortcut: Option<Shortcut>,
@@ -4003,14 +4012,14 @@ pub(super) fn explorer_menu(
             return menu;
         }
         let (workspace, profile_id) = (workspace.clone(), row.profile.clone());
-        let schema = row.label.to_string();
+        let (schema, database) = (row.label.to_string(), row.listed.clone());
         return menu
             .separator()
             .item(
                 PopupMenuItem::new("Export Schema as SQL…").on_click(move |_, _, cx| {
-                    let schema = schema.clone();
+                    let (schema, database) = (schema.clone(), database.clone());
                     on_profile(&workspace, &profile_id, cx, |workspace, cx| {
-                        workspace.open_schema_export(schema, cx);
+                        workspace.open_schema_export(database, schema, cx);
                     });
                 }),
             );
@@ -4071,7 +4080,7 @@ pub(super) fn explorer_menu(
     // tree hands over its own.
     let (export_workspace, export_names, export_profile) = (
         workspace.clone(),
-        (row.database.clone(), schema.clone(), relation.clone()),
+        (row.listed.clone(), schema.clone(), relation.clone()),
         row.profile.clone(),
     );
     let exports = PopupMenu::build(window, cx, move |submenu, _, _| {

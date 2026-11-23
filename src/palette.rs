@@ -452,7 +452,9 @@ pub enum Command {
     SetSchema(String),
     /// Put the palette back up over the catalog's schemas, to export one.
     PickSchemaToExport,
-    ExportSchema(String),
+    /// The schema, and the database the list was of where the connections
+    /// tree names one, so a switch that landed meanwhile is refused.
+    ExportSchema(Option<String>, String),
     /// Put the palette back up over the font list for this slot.
     PickFont(FontSlot),
     SetFont(FontSlot, String),
@@ -3374,12 +3376,19 @@ fn schema_items(profile: &Profile, pick: SchemaPick) -> Vec<Item> {
         .by_name()
         .into_iter()
         .map(|(_, schema)| &schema.name);
-    schema_items_from(names, profile.schema_in().as_deref(), pick)
+    let database = profile.listed_database();
+    schema_items_from(
+        names,
+        profile.schema_in().as_deref(),
+        database.as_deref(),
+        pick,
+    )
 }
 
 fn schema_items_from<'a>(
     names: impl Iterator<Item = &'a String>,
     active: Option<&str>,
+    database: Option<&str>,
     pick: SchemaPick,
 ) -> Vec<Item> {
     names
@@ -3391,7 +3400,9 @@ fn schema_items_from<'a>(
             };
             let command = match pick {
                 SchemaPick::Activate => Command::SetSchema(name.clone()),
-                SchemaPick::Export => Command::ExportSchema(name.clone()),
+                SchemaPick::Export => {
+                    Command::ExportSchema(database.map(str::to_string), name.clone())
+                }
             };
             Item::new(name.clone(), icon::SCHEMA, command).hint(hint)
         })
@@ -5489,9 +5500,12 @@ mod tests {
     #[test]
     fn the_schema_list_exports_or_activates_as_it_was_opened_for() {
         let names = ["main".to_string(), "sales".to_string()];
-        let rows = |pick| schema_items_from(names.iter(), Some("sales"), pick);
+        let rows = |pick| schema_items_from(names.iter(), Some("sales"), Some("shop"), pick);
         let exporting = rows(SchemaPick::Export);
-        assert!(matches!(&exporting[1].command, Command::ExportSchema(name) if name == "sales"));
+        assert!(matches!(
+            &exporting[1].command,
+            Command::ExportSchema(Some(database), name) if database == "shop" && name == "sales"
+        ));
         assert_eq!(exporting[1].hint.as_ref(), "active");
         let activating = rows(SchemaPick::Activate);
         assert!(matches!(&activating[0].command, Command::SetSchema(name) if name == "main"));

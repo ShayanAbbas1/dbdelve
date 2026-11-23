@@ -1385,6 +1385,7 @@ impl Workspace {
                         label: entry.item().label.clone(),
                         profile: node.profile.clone(),
                         database: node.database.clone(),
+                        listed: node.database.clone(),
                         leaf: node.leaf,
                         shortcut,
                     },

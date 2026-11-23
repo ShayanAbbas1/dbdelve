@@ -6914,7 +6914,7 @@ fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
     store::tests::with_home(|| {
         let (workspace, cx) = two_databases_each_holding_t(cx);
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
@@ -6969,7 +6969,7 @@ fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
 
         // A disconnect drops the connection the dialog read its keys on.
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
@@ -7002,7 +7002,7 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         };
 
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
@@ -7041,7 +7041,7 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         // each table, Cancel and Export. `space` unticks a table and `enter`
         // on Export asks where, and writes what is ticked.
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         for _ in 0..500 {
@@ -29086,6 +29086,38 @@ fn a_relation_export_from_a_row_of_a_database_the_connection_left_is_refused(
         workspace.read_with(cx, |workspace, _| {
             let session = &workspace.profile().expect("a profile is in front").session;
             assert!(session.exporting.is_none(), "nothing is exported");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_schema_export_from_a_database_the_connection_left_is_refused(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        // What simple mode's rows and the palette's schema list carry: the
+        // database they were drawn from, as the connections tree's rows do.
+        let listed = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().listed_database()
+        });
+        assert_eq!(listed.as_deref(), Some("e2e"));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(workspace.set_database("other".into(), window, cx));
+            })
+        });
+        settle(cx);
+        // As the menu or the palette opened over `e2e` asks once the switch
+        // has landed under it.
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_schema_export(listed, "main".into(), cx);
+        });
+        settle(cx);
+        let notice = shown_notice(&workspace, cx).expect("the refusal is said");
+        assert!(notice.contains("e2e"), "{notice}");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().unwrap().session.schema_export.is_none());
         });
         quit(workspace, cx);
     });

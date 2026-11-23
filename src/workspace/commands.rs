@@ -821,7 +821,7 @@ impl Workspace {
             Command::SelectSchema => self.select_schema(window, cx),
             Command::SetSchema(name) => _ = self.set_schema(name, cx),
             Command::PickSchemaToExport => self.pick_schema_to_export(window, cx),
-            Command::ExportSchema(name) => self.open_schema_export(name, cx),
+            Command::ExportSchema(database, name) => self.open_schema_export(database, name, cx),
             // The row holds the theme as the list opened on it; a file
             // rewritten since must not be put back on screen and kept there.
             Command::SetTheme(side, theme) => {
