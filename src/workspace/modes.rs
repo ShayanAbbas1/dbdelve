@@ -39,6 +39,15 @@ impl Workspace {
             );
             return;
         }
+        if regate && profile.config.lives_with_its_connection() {
+            // The reconnect would open a new, empty database in its place.
+            self.note(
+                "The mode was not changed: the startup script needs the higher mode, and reconnecting would discard this in-memory database."
+                    .into(),
+                cx,
+            );
+            return;
+        }
         if regate && let Some(running) = self.running_import_into(&id) {
             // `reconnect` declines to interrupt an import, and a mode lowered
             // without it would show less than the open sessions ran under.

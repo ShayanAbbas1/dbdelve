@@ -28240,6 +28240,35 @@ fn the_mode_is_not_lowered_below_the_script_inside_a_transaction(cx: &mut TestAp
     });
 }
 
+/// A DuckDB in memory reconnected for a lowered mode would come back empty:
+/// the mode stays, and the tables with it.
+#[gpui::test]
+fn the_mode_is_not_lowered_below_the_script_of_a_database_in_memory(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            "[[profiles]]\nid = \"memory\"\nname = \"Memory\"\nhost = \"\"\n\
+             database = \"\"\nuser = \"\"\nengine = \"duckdb\"\npath = \":memory:\"\n\
+             mode = \"full\"\nstartup_script = \"PRAGMA threads = 2\"\n",
+        );
+        connect_profile(&workspace, cx, "memory");
+        run_in_front(&workspace, cx, "CREATE TABLE kept (id INTEGER)");
+        let before = generation_of(&workspace, cx, "memory");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::Full, "the mode was not lowered");
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("in-memory"), "{notice}");
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn lowering_the_mode_to_one_the_script_passes_keeps_the_session(cx: &mut TestAppContext) {
     use crate::sql::Mode;
