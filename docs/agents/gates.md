@@ -655,12 +655,18 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   `/*M! … */` a comment, so that is unreadable on both (`runs_mariadb_comment`):
   the dialect cannot tell the server that runs it from the one that ignores it.
   A versioned one (`/*!99999 … */`, `/*M!100100 … */`) runs only on a server
-  at or past that version, which the classifier does not know, so the
-  submission is read once per version range its comments split it into, each
-  comment run from its floor on and ignored below it, and needs what the most
-  demanding reading needs (`versioned_comments`): `/*!99999 EXPLAIN */ DELETE
-  FROM t` is the delete it is to an older server, not the read it is to a newer
-  one.
+  at or past that version, which the classifier does not know. It reads them
+  by a conservative model, not by any one server's rules: the submission is
+  read once per version range its comments split it into, each comment run
+  from its floor on and ignored below it, and needs what the most demanding
+  reading needs (`versioned_comments`): `/*!99999 EXPLAIN */ DELETE FROM t` is
+  the delete it is to an older server, not the read it is to a newer one. Real
+  servers are not that regular: MariaDB ignores a MySQL-style comment whose
+  floor is 50700 through 99999 even on a newer server, while its own
+  `/*M! … */` has no such exception, and the model has no reading of its own
+  for that. Past 16 distinct floors (`MAX_VERSION_FLOORS`) it stops reading
+  ranges and adds an unreadable verdict to the whole submission's reading,
+  rather than parse once per range.
 - **What lifts or ignores the hold is never a read.** A `SET` of
   `default_transaction_read_only`, `transaction_read_only` or `tx_read_only`
   to anything but on, a `READ WRITE` transaction characteristic (`BEGIN`,
