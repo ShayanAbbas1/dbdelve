@@ -1635,6 +1635,16 @@ impl Session {
         unbound
     }
 
+    /// The file deleting the saved query `name` takes away, as a tab on it is
+    /// bound: `None` when the query is a link, which goes alone, leaving the
+    /// file it leads to and any tab on that.
+    pub(crate) fn deleted_with(&self, name: &str) -> Option<PathBuf> {
+        let entry = self.query_directory.join(format!("{name}.sql"));
+        let link = std::fs::symlink_metadata(&entry)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        (!link).then(|| sql_file::canonical(&entry))
+    }
+
     /// The tab bound to the saved query `name`, if one is open.
     pub(crate) fn tab_holding(&self, name: &str) -> Option<u64> {
         self.tab_on(&self.saved_query_path(name))

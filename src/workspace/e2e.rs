@@ -12835,6 +12835,17 @@ fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
         });
         assert!(listed_on_a, "A's list follows its tab");
 
+        workspace.update(cx, |workspace, cx| {
+            workspace.ask_delete_saved_query("weekly".into(), cx)
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds(
+                "delete-question: Delete weekly? Its tab is closed too. This cannot be undone."
+            )
+            .is_some(),
+            "the tab on A closes too"
+        );
         cx.update(|window, cx| {
             workspace.update(cx, |workspace, cx| {
                 workspace.delete_saved_query("weekly".into(), window, cx)
@@ -12888,6 +12899,40 @@ fn a_rename_onto_a_deleted_querys_open_tab_is_refused(cx: &mut TestAppContext) {
             rename.and_then(|rename| rename.error.clone())
         });
         assert_eq!(error.as_deref(), Some("daily is open in another tab."));
+        quit(workspace, cx);
+    });
+}
+
+/// Deleting a saved query that is a link takes the link alone, so the tab
+/// on the file it leads to keeps its unsaved text.
+#[cfg(unix)]
+#[gpui::test]
+fn deleting_a_link_query_leaves_the_tab_on_its_file(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "real", "select 1").expect("the query saves");
+        let queries = crate::sql_file::canonical(&store::query_directory("e2e").unwrap());
+        std::os::unix::fs::symlink(queries.join("real.sql"), queries.join("alias.sql")).unwrap();
+        let (workspace, cx) = launch_on_sqlite(cx);
+        open_sql_file(&workspace, cx, &queries.join("real.sql"));
+        cx.simulate_input("-- ");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.ask_delete_saved_query("alias".into(), cx)
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("delete-question: Delete alias? This cannot be undone.")
+                .is_some()
+        );
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.delete_saved_query("alias".into(), window, cx)
+            });
+        });
+        settle(cx);
+        assert!(!queries.join("alias.sql").exists());
+        assert!(is_open(&workspace, cx, &queries.join("real.sql")));
+        assert!(front_dirty(&workspace, cx));
         quit(workspace, cx);
     });
 }

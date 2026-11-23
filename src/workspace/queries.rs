@@ -1876,8 +1876,10 @@ impl Workspace {
         };
         profile.session.pending_delete = None;
         let owner = profile.id.clone();
-        let path = profile.session.saved_query_path(&name);
-        let holder = self.bring_up_holder(&path, window, cx).map(Tab::Query);
+        let deleted = profile.session.deleted_with(&name);
+        let holder = deleted
+            .and_then(|path| self.bring_up_holder(&path, window, cx))
+            .map(Tab::Query);
         if let Some(tab) = holder.filter(|tab| self.would_lose_on_close(*tab, cx)) {
             if let Some(profile) = self.profile_mut() {
                 profile.session.pending_discard = Some(PendingDiscard {
@@ -1924,8 +1926,8 @@ impl Workspace {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == owner) else {
             return;
         };
-        let path = profile.session.saved_query_path(&name);
-        let holder = self.bring_up_holder(&path, window, cx);
+        let deleted = profile.session.deleted_with(&name);
+        let holder = deleted.and_then(|path| self.bring_up_holder(&path, window, cx));
         if let Err(message) = store::delete_query(&owner, &name) {
             self.note(message, cx);
             return;

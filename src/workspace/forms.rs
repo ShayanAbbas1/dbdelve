@@ -2181,10 +2181,16 @@ impl Workspace {
         let session = &self.profile()?.session;
         let deleting = session.pending_delete.clone()?;
         let (heading, question) = match &deleting {
-            PendingDelete::Query(name) if session.tab_holding(name).is_some() => (
-                "Delete query",
-                format!("Delete {name}? Its tab is closed too. This cannot be undone."),
-            ),
+            PendingDelete::Query(name)
+                if session
+                    .deleted_with(name)
+                    .is_some_and(|path| self.tab_on_file(&path).is_some()) =>
+            {
+                (
+                    "Delete query",
+                    format!("Delete {name}? Its tab is closed too. This cannot be undone."),
+                )
+            }
             PendingDelete::Query(name) => (
                 "Delete query",
                 format!("Delete {name}? This cannot be undone."),
@@ -2215,6 +2221,10 @@ impl Workspace {
                         .child(section_label(t, heading))
                         .child(
                             div()
+                                .debug_selector({
+                                    let question = question.clone();
+                                    move || format!("delete-question: {question}")
+                                })
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
                                 .child(question),
