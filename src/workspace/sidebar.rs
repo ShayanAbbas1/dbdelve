@@ -41,6 +41,11 @@ use crate::sidebar::{
 };
 use crate::ui::{Status, row_icon_tinted, status_dot};
 
+/// What a pinned or foldered object the connection's filter hides says when
+/// hovered, so it is not taken for one the server dropped.
+pub(super) const HIDDEN_BY_FILTER: &str =
+    "Hidden by this connection's database filter, not missing";
+
 /// The id of the row of `profile`'s front tab in the connections tree, if
 /// the tab has one.
 pub(crate) fn front_row_id(profile: &Profile) -> Option<String> {
@@ -878,7 +883,14 @@ impl Workspace {
             .listed_files()
             .into_iter()
             .find(|path| explorer::file_row(path) == row);
-        if leaf.is_none() && query.is_none() && file.is_none() {
+        let hidden = self
+            .connections
+            .shortcuts
+            .get(id)
+            .and_then(Shortcut::hidden_relation)
+            .filter(|_| elsewhere.is_none())
+            .map(|(object, kind)| (object.clone(), kind));
+        if leaf.is_none() && query.is_none() && file.is_none() && hidden.is_none() {
             return false;
         }
         if self.active != Some(index) {
@@ -894,7 +906,11 @@ impl Workspace {
                 self.open_object_on(profile, database, leaf.target, window, cx)
             }
             (None, Some(leaf), None) => self.open_explorer_target(leaf.target, window, cx),
-            (None, None, _) => {}
+            (None, None, _) => {
+                if let Some((object, kind)) = hidden {
+                    self.open_hidden_relation(&object, kind, window, cx);
+                }
+            }
         }
         true
     }
@@ -978,6 +994,8 @@ impl Workspace {
             };
             let shortcut = shortcuts.get(id);
             let missing = matches!(shortcut, Some(Shortcut::Member { missing: true, .. }));
+            let hidden = matches!(shortcut, Some(Shortcut::Member { hidden: true, .. }));
+            let hidden_relation = shortcut.and_then(Shortcut::hidden_relation).is_some();
             let query = inner
                 .and_then(saved_query)
                 .or_else(|| shortcut.and_then(Shortcut::query))
@@ -1002,10 +1020,17 @@ impl Workspace {
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text_muted),
                 ),
-                _ if leaf.is_some() || query.is_some() || file.is_some() || folder_shortcut => (
-                    highlighted(label, matched, t),
-                    ListItem::new(index).text_color(t.text),
-                ),
+                _ if leaf.is_some()
+                    || query.is_some()
+                    || file.is_some()
+                    || folder_shortcut
+                    || hidden_relation =>
+                {
+                    (
+                        highlighted(label, matched, t),
+                        ListItem::new(index).text_color(t.text),
+                    )
+                }
                 Some(Node::Role { .. }) => (
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
@@ -1252,12 +1277,16 @@ impl Workspace {
                     row.tooltip(move |window, cx| {
                         Tooltip::new(path.display().to_string()).build(window, cx)
                     })
+                })
+                .when(hidden, |row| {
+                    row.tooltip(|window, cx| Tooltip::new(HIDDEN_BY_FILTER).build(window, cx))
                 });
             if matches!(node, Some(Node::Notice)) {
                 return row;
             }
             let opens = !missing
                 && (leaf.is_some()
+                    || hidden_relation
                     || query.is_some()
                     || file.is_some()
                     || matches!(node, Some(Node::Users { .. } | Node::Role { .. })));

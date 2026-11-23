@@ -2707,7 +2707,9 @@ fn everything_that_reads_the_catalog_follows_the_filter(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mut TestAppContext) {
+fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_hidden_and_opens(
+    cx: &mut TestAppContext,
+) {
     store::tests::with_home(|| {
         store::write_query("e2e", "q", "SELECT 1").expect("the test home takes a saved query");
         let (workspace, cx) = launch_duckdb_seeded(
@@ -2738,7 +2740,8 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mu
         });
         settle(cx);
 
-        // What the tree draws of the pin, by whether its object is listed.
+        // What the tree draws of the pin, by whether its object is listed:
+        // missing, and hidden by the filter.
         let pin_missing = |cx: &mut VisualTestContext| {
             workspace.read_with(cx, |workspace, _| {
                 let profile = workspace.profile().expect("a profile is in front");
@@ -2750,8 +2753,9 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mu
                         crate::explorer::Shortcut::Member {
                             folder: None,
                             missing,
+                            hidden,
                             ..
-                        } => Some(*missing),
+                        } => Some((*missing, *hidden)),
                         _ => None,
                     });
                 let pin = pins.next().expect("the object is pinned");
@@ -2779,7 +2783,7 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mu
             survivors(cx),
             (vec![object.clone()], 1, vec!["q".to_string()])
         );
-        assert!(!pin_missing(cx));
+        assert_eq!(pin_missing(cx), (false, false));
 
         // The two steps Save performs on the filter.
         workspace.update(cx, |workspace, cx| {
@@ -2796,7 +2800,11 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mu
             survivors(cx),
             (vec![object.clone()], 1, vec!["q".to_string()])
         );
-        assert!(pin_missing(cx), "the pin is greyed, not dropped");
+        assert_eq!(
+            pin_missing(cx),
+            (false, true),
+            "hidden by the filter, not drawn as dropped"
+        );
         assert_eq!(
             store::read_query("e2e", "q").expect("the file reads"),
             Some("SELECT 1".to_string())
@@ -2816,6 +2824,27 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mu
             assert!(matches!(query, QueryState::Complete { .. }));
         });
 
+        // Closed, the tab opens again from the pin, by the relation's name.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_object(id, window, cx);
+        });
+        settle(cx);
+        assert_eq!(survivors(cx).0, Vec::new());
+        let pin = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .connections
+                .shortcuts
+                .iter()
+                .find(|(_, shortcut)| shortcut.hidden_relation().is_some())
+                .map(|(row, _)| row.clone())
+                .expect("the connections tree lists the hidden pin")
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.open_connection_row(&pin, window, cx));
+        });
+        settle(cx);
+        assert_eq!(survivors(cx).0, vec![object.clone()]);
+
         // Removing the filter lists the object again, and the pin with it.
         workspace.update(cx, |workspace, cx| {
             workspace
@@ -2827,7 +2856,11 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_missing(cx: &mu
             workspace.refresh_schema(cx);
         });
         settle(cx);
-        assert!(!pin_missing(cx), "the pin is drawn present again");
+        assert_eq!(
+            pin_missing(cx),
+            (false, false),
+            "the pin is drawn present again"
+        );
         assert_eq!(survivors(cx), (vec![object], 1, vec!["q".to_string()]));
         quit(workspace, cx);
     });
@@ -7186,6 +7219,7 @@ fn shortcut_row(
             member: member.clone(),
             folder: folder.map(str::to_string),
             missing: false,
+            hidden: false,
         };
         session
             .explorer_shortcuts

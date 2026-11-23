@@ -3452,6 +3452,10 @@ impl Workspace {
                     let leaf = leaves.get(id).copied();
                     let shortcut = shortcuts.get(id);
                     let missing = matches!(shortcut, Some(Shortcut::Member { missing: true, .. }));
+                    let hidden = matches!(shortcut, Some(Shortcut::Member { hidden: true, .. }));
+                    let hidden_relation = shortcut
+                        .and_then(Shortcut::hidden_relation)
+                        .map(|(object, kind)| (object.clone(), kind));
                     let query = saved_query(id)
                         .or_else(|| shortcut.and_then(Shortcut::query))
                         .map(str::to_string);
@@ -3505,6 +3509,7 @@ impl Workspace {
                         ),
                         _ if query.is_some()
                             || file.is_some()
+                            || hidden_relation.is_some()
                             || matches!(shortcut, Some(Shortcut::Folder(_))) =>
                         {
                             (
@@ -3671,6 +3676,11 @@ impl Workspace {
                             row.tooltip(move |window, cx| {
                                 Tooltip::new(path.display().to_string()).build(window, cx)
                             })
+                        })
+                        .when(hidden, |row| {
+                            row.tooltip(|window, cx| {
+                                Tooltip::new(super::sidebar::HIDDEN_BY_FILTER).build(window, cx)
+                            })
                         });
                     // A drag that starts while the database is not known
                     // carries nothing, as the menus offer nothing then.
@@ -3734,6 +3744,14 @@ impl Workspace {
                         return row.on_click(move |_, window, cx| {
                             _ = workspace.update(cx, |workspace, cx| {
                                 workspace.open_saved_query(name.clone(), window, cx);
+                            });
+                        });
+                    }
+                    if let Some((object, kind)) = hidden_relation {
+                        let workspace = workspace.clone();
+                        return row.on_click(move |_, window, cx| {
+                            _ = workspace.update(cx, |workspace, cx| {
+                                workspace.open_hidden_relation(&object, kind, window, cx);
                             });
                         });
                     }
@@ -4167,11 +4185,16 @@ pub(super) fn explorer_menu(
 }
 
 /// Whether `id` is a row [`shortcut_row_menu`] draws the menu of: a saved
-/// query, a folder, the Pinned group or a pin whose object is gone.
+/// query, a folder, the Pinned group, or a pin whose object is gone or the
+/// connection's filter hides.
 pub(super) fn is_shortcut_row(id: &str, shortcut: Option<&Shortcut>) -> bool {
     matches!(
         shortcut,
-        Some(Shortcut::Folder(_) | Shortcut::Member { missing: true, .. })
+        Some(
+            Shortcut::Folder(_)
+                | Shortcut::Member { missing: true, .. }
+                | Shortcut::Member { hidden: true, .. }
+        )
     ) || id == PINNED_GROUP
         || saved_query(id)
             .or_else(|| shortcut.and_then(Shortcut::query))
@@ -4207,6 +4230,11 @@ pub(super) fn shortcut_row_menu(
         Some(Shortcut::Member {
             member,
             missing: true,
+            ..
+        })
+        | Some(Shortcut::Member {
+            member,
+            hidden: true,
             ..
         }) => {
             return removal_items(menu, member, held_in, shortcuts, profile, workspace);

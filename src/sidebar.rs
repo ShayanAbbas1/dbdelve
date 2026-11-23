@@ -1748,6 +1748,7 @@ mod tests {
             Some(&catalog),
             &queries,
             &ShortcutDatabase::On(database.to_string()),
+            &crate::db::Shown::everything(),
             filter,
         );
         content.extend(explorer::files(
@@ -2477,6 +2478,7 @@ mod tests {
             Some(&catalog),
             &queries,
             &ShortcutDatabase::Unnamed,
+            &crate::db::Shown::everything(),
             "",
         );
         content.extend(explorer::files(

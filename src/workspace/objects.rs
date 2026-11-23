@@ -49,6 +49,29 @@ impl Workspace {
         }
     }
 
+    /// Open a pinned relation the connection's filter hides, by its name: the
+    /// narrowed catalog does not list it, and a relation's tab needs nothing
+    /// the catalog holds.
+    pub(crate) fn open_hidden_relation(
+        &mut self,
+        object: &crate::explorer::ObjectRef,
+        kind: RelationKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opened = OpenedObject::Relation {
+            schema: object.schema.clone(),
+            name: object.name.clone(),
+            kind,
+            filter: String::new(),
+            filters: Vec::new(),
+        };
+        if let Some(id) = self.open_object(opened, None, window, cx) {
+            self.activate_tab(Tab::Object(id), window, cx);
+            self.remember_profiles(cx);
+        }
+    }
+
     /// Open the object `target` names in the catalog read for `database`,
     /// another database of `profile`'s server, as a tab bound to it: the
     /// profile comes to the front first, and a database whose catalog has not

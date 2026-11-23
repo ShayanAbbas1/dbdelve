@@ -118,6 +118,7 @@ pub(super) fn explorer_content(
         catalog,
         &profile.session.saved_queries,
         &profile.shortcut_database(),
+        &profile.shown(),
         filter,
     );
     explorer.extend(explorer::files(
