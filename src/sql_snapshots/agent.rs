@@ -964,10 +964,32 @@ fn agent_gate_corpus_for_composed_explains() {
 }
 
 /// Every cell of the corpus, SQL and not, and the egress cells.
+/// Every explain `explain_query` composes in the composed-explain corpus, as
+/// `(engine, case, text)`, so the invariants below hold for them too.
+fn composed_explain_cells() -> Vec<(Engine, String, String)> {
+    let mut cells = Vec::new();
+    for engine in Engine::ALL {
+        let kinds = match engine.syntax() {
+            Syntax::Sql => EXPLAIN_SQL_KINDS,
+            Syntax::Mongo => EXPLAIN_MONGO_KINDS,
+            Syntax::Redis => &[],
+        };
+        for mode in ExplainMode::ALL {
+            for (kind, sql, _) in kinds {
+                if let Some(text) = engine.explain(mode, sql) {
+                    cells.push((engine, format!("{mode:?} of {kind}"), text));
+                }
+            }
+        }
+    }
+    cells
+}
+
 fn all_cells() -> Vec<(Engine, String, String)> {
     let mut cells = sql_cells();
     cells.extend(nonsql_cells());
     cells.extend(egress_cells());
+    cells.extend(composed_explain_cells());
     cells
 }
 
