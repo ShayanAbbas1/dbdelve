@@ -13751,6 +13751,34 @@ fn the_move_files_each_connections_queries_and_repoints_a_dirty_tab_on_another(
 }
 
 #[gpui::test]
+fn the_move_skips_a_name_a_tab_on_a_deleted_file_holds(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        store::write_query("a", "nightly", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_connections(cx, "", "", &sqlite_profile("a", "A", ""));
+        let folder = store::home().unwrap().join("Moved");
+        std::fs::create_dir_all(folder.join("A")).unwrap();
+        let taken = user_sql_file("Moved/A/nightly.sql", "select 2");
+        open_sql_file(&workspace, cx, &taken);
+        std::fs::remove_file(&taken).unwrap();
+        let queries = crate::sql_file::canonical(&store::query_directory("a").unwrap());
+        let legacy = queries.join("nightly.sql");
+        open_sql_file(&workspace, cx, &legacy);
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_saved_queries(&folder, cx)
+        });
+        settle(cx);
+
+        assert!(legacy.exists(), "left where it was");
+        assert!(!taken.exists());
+        assert!(is_open(&workspace, cx, &legacy));
+        assert!(is_open(&workspace, cx, &taken));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);

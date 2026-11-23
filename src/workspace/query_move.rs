@@ -117,6 +117,12 @@ impl Workspace {
                     .query_directory
                     .join(format!("{name}.sql"));
                 let to = directory.join(format!("{name}.sql"));
+                // A tab stays bound to a file deleted on disk, and the copy
+                // would give the query's own tab that path too.
+                if self.tab_on_file(&sql_file::canonical(&to)).is_some() {
+                    skipped += 1;
+                    continue;
+                }
                 let fresh = self.seen_as_it_is(&from);
                 match sql_file::copy_new(&from, &to) {
                     Move::Done => copied.push((index, name, from, to, fresh)),
