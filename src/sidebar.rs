@@ -1060,8 +1060,18 @@ fn connection_item(
                     }
                 }
                 None => {
-                    count = counts_databases.then_some(catalog.len());
-                    catalog_left_out = left_out;
+                    // The schemas of a database it does not name are not
+                    // databases: the row counts the databases alone, and its
+                    // total adds the databases the filter hides, never the
+                    // schemas.
+                    let schemas_are_databases = connection.levels != Levels::DatabaseThenSchema;
+                    count = counts_databases.then_some(match schemas_are_databases {
+                        true => catalog.len(),
+                        false => 0,
+                    });
+                    if schemas_are_databases {
+                        catalog_left_out = left_out;
+                    }
                     children.extend(
                         catalog
                             .into_iter()
@@ -2851,6 +2861,29 @@ mod tests {
         assert_eq!(total(Levels::DatabaseThenSchema, 3), (Some(2), Some(5)));
         assert_eq!(total(Levels::DatabaseThenSchema, 0), (Some(2), None));
         assert_eq!(total(Levels::Flat, 3), (None, None));
+    }
+
+    #[test]
+    fn a_connection_naming_no_database_counts_databases_not_schemas() {
+        let listed = Listed {
+            database: None,
+            databases_left_out: 3,
+            content: Content::Loaded(left_out(content_of(schemas(&["public", "staging"])), 4)),
+            ..with_others(
+                Levels::DatabaseThenSchema,
+                "d",
+                vec![("other".into(), Content::Unloaded)],
+            )
+        };
+        let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+        assert_eq!(
+            (
+                count_of(&tree, &connection_row("a")),
+                tree.totals.get(&connection_row("a")).copied(),
+            ),
+            (Some(1), Some(4)),
+            "one database of four, the hidden schemas left out of it"
+        );
     }
 
     #[test]
