@@ -10191,6 +10191,28 @@ fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
     });
 }
 
+/// A filter saved while a read was out asks that read's landing to read
+/// again. A reconnect drops that landing, and the new connection's reads take
+/// the saved filter anyway, so no read nobody asked for follows the load.
+#[gpui::test]
+fn a_reconnect_forgets_a_reread_the_dropped_read_was_to_start(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "");
+        let reads = workspace.update(cx, |workspace, cx| {
+            workspace.profile_mut().unwrap().reread_after_load = true;
+            let index = workspace.active.unwrap();
+            workspace.reconnect(index, cx);
+            assert!(!workspace.profile().unwrap().reread_after_load);
+            workspace.routine_reads
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.routine_reads, reads + 1, "the load's read alone");
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// A reconnect lets go of a read still out from the connection it replaces,
 /// which could stall there and hold the slot the new connection's read needs.
 #[gpui::test]

@@ -1754,6 +1754,9 @@ impl Workspace {
             "disconnected"
         );
         profile.generation = generation;
+        // A read the old generation had under way lands nowhere now, and every
+        // read of the new one takes the saved filter and depth as it starts.
+        profile.reread_after_load = false;
         profile.drop_sessions();
         profile.keep_alive_task = None;
         profile.idle_task = None;
@@ -1969,6 +1972,9 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
+        // A read the old generation had under way lands nowhere now, and every
+        // read of the new one takes the saved filter and depth as it starts.
+        profile.reread_after_load = false;
         profile.drop_sessions();
         profile.catalog = CatalogState::Loading;
         profile.session.structure_requests.clear();
@@ -2340,6 +2346,9 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
+        // A read the old generation had under way lands nowhere now, and every
+        // read of the new one takes the saved filter and depth as it starts.
+        profile.reread_after_load = false;
         profile.drop_sessions();
         profile.keep_alive_task = None;
         profile.idle_task = None;
