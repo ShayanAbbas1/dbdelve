@@ -4165,6 +4165,22 @@ fn run_startup(
 /// and says so, rather than connecting somewhere the user did not ask for
 /// without mentioning it; a plugin profile is held back here instead, because
 /// read as Postgres it would be saved as one.
+/// What a stored profile connects to, read as a restore reads it, or `None`
+/// when a restore could not read it at all.
+pub(super) fn stored_target(
+    stored: &store::StoredProfile,
+    plugins: &[&'static Plugin],
+) -> Option<ConnectionConfig> {
+    // As `restore_profile` reads it: absent is `prefer`, unreadable fails closed.
+    let sslmode = match stored.sslmode.as_deref() {
+        None => SslMode::default(),
+        Some(slug) => SslMode::parse(slug).unwrap_or(SslMode::VerifyFull),
+    };
+    restored_config(stored, sslmode, plugins)
+        .ok()
+        .map(|(config, _)| config)
+}
+
 fn restored_config(
     stored: &store::StoredProfile,
     sslmode: SslMode,

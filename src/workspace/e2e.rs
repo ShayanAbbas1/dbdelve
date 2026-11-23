@@ -11279,6 +11279,37 @@ fn a_profile_removed_in_another_window_is_hidden_here_and_kept(cx: &mut TestAppC
     });
 }
 
+#[gpui::test]
+fn a_grant_saved_for_another_target_is_not_taken_on(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_with_profiles(cx, &sqlite_profile("dev", "Dev", "agent_visible = true"));
+        assert!(agent_visible(&workspace, cx, "dev"));
+
+        // The same grant, for the same file: still taken on.
+        let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        store::save_profiles(&list).expect("the other window saves");
+        workspace.update(cx, |workspace, cx| workspace.adopt_saved_visibility(cx));
+        assert!(agent_visible(&workspace, cx, "dev"));
+
+        // Another window moved it to another file and granted it there.
+        let moved = list
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == "dev")
+            .expect("the profile was saved");
+        moved.path = Some("/elsewhere/other.db".into());
+        moved.agent_visible = true;
+        store::save_profiles(&list).expect("the other window saves");
+        workspace.update(cx, |workspace, cx| workspace.adopt_saved_visibility(cx));
+        assert!(
+            !agent_visible(&workspace, cx, "dev"),
+            "this window's copy still reaches the old file"
+        );
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }
@@ -18215,6 +18246,15 @@ fn no_reply_dbdelve_writes_depends_on_where_the_file_is(cx: &mut TestAppContext)
                 };
                 *stored = path.display().to_string();
             });
+            // Saved too, as an edit is: a grant is adopted only for the
+            // target the file names.
+            let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+            list.profiles
+                .iter_mut()
+                .find(|profile| profile.id == "orders")
+                .expect("the profile was saved")
+                .path = Some(path.display().to_string());
+            store::save_profiles(&list).expect("the profile file is writable");
             calls(&path.display().to_string())
                 .into_iter()
                 .map(|(tool, args)| {
