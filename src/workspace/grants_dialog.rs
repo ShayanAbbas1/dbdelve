@@ -498,7 +498,7 @@ fn grants_row(
                             chevron.text_color(gpui::transparent_black())
                         }),
                 )
-                .child(who_icon(row.who, &row.name, 15., t))
+                .child(who_icon(row.who, &row.key, 15., t))
                 .child(
                     div()
                         .min_w_0()
@@ -541,10 +541,7 @@ fn grants_row(
                 Mark::None => "not granted",
             };
             div()
-                .id(SharedString::from(format!(
-                    "grant-{}-{privilege}",
-                    row.name
-                )))
+                .id(SharedString::from(format!("grant-{}-{privilege}", row.key)))
                 .w(px(PRIVILEGE_COLUMN))
                 .flex_none()
                 .flex()

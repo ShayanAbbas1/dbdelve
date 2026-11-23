@@ -2,7 +2,10 @@
 //! four marks, built from what the server listed and nothing else. Pure, so
 //! the reading of the catalog is tested apart from the window.
 
+use std::collections::HashMap;
+
 use crate::db::roles::{ObjectGrants, RoleGrants, Roles};
+use crate::fuzzy::{Fuzzy, Query};
 
 /// One cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +16,28 @@ pub(crate) enum Mark {
     /// Held through a role the row's role belongs to.
     Through,
     None,
+}
+
+impl Mark {
+    /// Which of two marks for one cell wins: a grant that can be passed on
+    /// over one that cannot, over one held through a role, over none. So a
+    /// privilege listed twice, by two grantors or two paths, reads the same
+    /// whatever order the server listed them in.
+    fn rank(self) -> u8 {
+        match self {
+            Mark::Grantable => 3,
+            Mark::Granted => 2,
+            Mark::Through => 1,
+            Mark::None => 0,
+        }
+    }
+
+    fn merge(self, other: Mark) -> Mark {
+        match other.rank() > self.rank() {
+            true => other,
+            false => self,
+        }
+    }
 }
 
 /// What a row's icon says of it.
@@ -40,6 +65,10 @@ impl Who {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MatrixRow {
+    /// What tells it from every other row of the matrix, for its element
+    /// ids: a role is listed again as a member of each role it belongs to,
+    /// and two relations' `schema.name` can be spelled alike.
+    pub(crate) key: String,
     pub(crate) name: String,
     /// The line under the name: what the row is and how it holds them.
     pub(crate) via: String,
@@ -82,31 +111,56 @@ fn plural(count: usize, one: &str) -> String {
     }
 }
 
+/// Who belongs to whom, read once per matrix rather than by a scan of every
+/// membership at every step: each role's direct members, in name order.
+struct Members<'a>(HashMap<&'a str, Vec<&'a str>>);
+
+impl<'a> Members<'a> {
+    fn of(roles: &'a Roles) -> Self {
+        let mut by_role: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (member, role) in &roles.memberships {
+            by_role
+                .entry(role.as_str())
+                .or_default()
+                .push(member.as_str());
+        }
+        for members in by_role.values_mut() {
+            members.sort_unstable();
+            members.dedup();
+        }
+        Self(by_role)
+    }
+
+    fn of_role(&self, role: &str) -> &[&'a str] {
+        self.0.get(role).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// The rows of an object's grants: superusers, the owner, every other role
 /// holding something, then PUBLIC. `with_members` lists, under each role
 /// with members, every role that belongs to it, at any depth. `filter`
-/// keeps rows whose name holds it, ignoring case, with the roles they are
-/// listed under.
+/// keeps rows whose name it matches, through the one fuzzy matcher, with
+/// the roles they are listed under.
 pub(crate) fn object_rows(
     grants: &ObjectGrants,
     with_members: bool,
     filter: &str,
 ) -> Vec<MatrixRow> {
     let roles = &grants.roles;
+    let members = Members::of(roles);
     let marks_of = |grantee: Option<&str>| -> Vec<Mark> {
         (grants.privileges.iter())
             .map(|privilege| {
                 // One entry per grantor: grantable if any grantor gave it so.
-                let held: Vec<_> = (grants.grants.iter())
+                (grants.grants.iter())
                     .filter(|grant| {
                         grant.grantee.as_deref() == grantee && grant.privilege == *privilege
                     })
-                    .collect();
-                match held.as_slice() {
-                    [] => Mark::None,
-                    held if held.iter().any(|grant| grant.grantable) => Mark::Grantable,
-                    _ => Mark::Granted,
-                }
+                    .map(|grant| match grant.grantable {
+                        true => Mark::Grantable,
+                        false => Mark::Granted,
+                    })
+                    .fold(Mark::None, Mark::merge)
             })
             .collect()
     };
@@ -114,6 +168,7 @@ pub(crate) fn object_rows(
     let mut top: Vec<MatrixRow> = Vec::new();
     for role in roles.roles.iter().filter(|role| role.superuser) {
         top.push(MatrixRow {
+            key: role.name.clone(),
             name: role.name.clone(),
             via: "superuser · bypasses grants".into(),
             who: Who::Superuser,
@@ -131,11 +186,11 @@ pub(crate) fn object_rows(
     grantees.dedup();
     let owner = (!superuser(&grants.owner)).then_some(grants.owner.as_str());
     for name in owner.into_iter().chain(grantees) {
-        let members = roles.members(name);
+        let count = members.of_role(name).len();
         let via = if name == grants.owner {
             "owner".to_string()
         } else {
-            match (who(roles, name), members.len()) {
+            match (who(roles, name), count) {
                 (Who::NoLogin, 0) => "role, cannot log in".into(),
                 (Who::NoLogin, n) => format!("role, cannot log in · {}", plural(n, "member")),
                 _ => "login · direct".into(),
@@ -152,6 +207,7 @@ pub(crate) fn object_rows(
             }
         }
         top.push(MatrixRow {
+            key: name.to_string(),
             name: name.to_string(),
             via,
             who: who(roles, name),
@@ -161,6 +217,8 @@ pub(crate) fn object_rows(
         });
     }
     top.push(MatrixRow {
+        // No role's name: PUBLIC is a keyword, never one.
+        key: "\u{1f}PUBLIC".into(),
         name: "PUBLIC".into(),
         via: "every role".into(),
         who: Who::Public,
@@ -169,22 +227,24 @@ pub(crate) fn object_rows(
         marks: marks_of(None),
     });
 
-    let needle = filter.trim().to_lowercase();
-    let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
+    let query = Query::new(filter);
+    let mut fuzzy = Fuzzy::new();
+    let mut matches = |name: &str| fuzzy.matches(&query, name);
     let mut rows = Vec::new();
     for mut row in top {
         let listed = match (with_members, row.who) {
-            (true, Who::Login | Who::NoLogin) => members_of(roles, &row.name, &row.marks),
+            (true, Who::Login | Who::NoLogin) => members_of(roles, &members, &row.name, &row.marks),
             _ => Vec::new(),
         };
-        let shown: Vec<MatrixRow> = match matches(&row.name) {
+        let kept = matches(&row.name);
+        let shown: Vec<MatrixRow> = match kept {
             true => listed,
             false => listed
                 .into_iter()
                 .filter(|member| matches(&member.name))
                 .collect(),
         };
-        if !matches(&row.name) && shown.is_empty() {
+        if !kept && shown.is_empty() {
             continue;
         }
         row.opened = !shown.is_empty();
@@ -196,15 +256,10 @@ pub(crate) fn object_rows(
 
 /// Every role that belongs to `role`, depth first, each named by the role
 /// it is listed under and the one it came through. A member holds what the
-/// role holds only where every membership on its way inherits.
-fn members_of(roles: &Roles, role: &str, marks: &[Mark]) -> Vec<MatrixRow> {
-    let mut rows = Vec::new();
-    let mut stack: Vec<(String, Option<String>, bool)> = roles
-        .members(role)
-        .into_iter()
-        .rev()
-        .map(|member| (member.to_string(), None, roles.inherits(member, role)))
-        .collect();
+/// role holds only where every membership on its way inherits; one reached
+/// by several paths holds it if any of them does, and is said to come
+/// through that one.
+fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> Vec<MatrixRow> {
     let through_marks = |inherits: bool| -> Vec<Mark> {
         (marks.iter())
             .map(|mark| match (mark, inherits) {
@@ -213,41 +268,50 @@ fn members_of(roles: &Roles, role: &str, marks: &[Mark]) -> Vec<MatrixRow> {
             })
             .collect()
     };
-    let mut seen = vec![role.to_string()];
+    let via = |name: &str, through: Option<&str>| match through {
+        None => format!("member of {role} · {}", kind_text(roles, name)),
+        Some(through) => format!(
+            "member of {role} · {}, through {through}",
+            kind_text(roles, name)
+        ),
+    };
+    let mut rows: Vec<MatrixRow> = Vec::new();
+    // Each row's place and whether it inherits, by name.
+    let mut placed: HashMap<String, (usize, bool)> = HashMap::new();
+    let mut stack: Vec<(&str, Option<&str>, bool)> = (members.of_role(role).iter().rev())
+        .map(|member| (*member, None, roles.inherits(member, role)))
+        .collect();
     while let Some((name, through, inherits)) = stack.pop() {
-        if seen.contains(&name) {
-            // Reached again: a path that inherits wins over one that does not.
-            if inherits
-                && let Some(row) = rows
-                    .iter_mut()
-                    .find(|row: &&mut MatrixRow| row.name == name)
-            {
-                row.marks = through_marks(true);
-            }
+        if name == role {
             continue;
         }
-        seen.push(name.clone());
-        let via = match &through {
-            None => format!("member of {role} · {}", kind_text(roles, &name)),
-            Some(through) => format!(
-                "member of {role} · {}, through {through}",
-                kind_text(roles, &name)
-            ),
-        };
-        rows.push(MatrixRow {
-            name: name.clone(),
-            via,
-            who: who(roles, &name),
-            member: true,
-            opened: false,
-            marks: through_marks(inherits),
-        });
-        for member in roles.members(&name).into_iter().rev() {
-            stack.push((
-                member.to_string(),
-                Some(name.clone()),
-                inherits && roles.inherits(member, &name),
-            ));
+        match placed.get_mut(name) {
+            // Reached again with nothing new: an inheriting row stays one,
+            // and a path that does not inherit adds nothing.
+            Some((_, already)) if *already || !inherits => continue,
+            // Raised: this path inherits where the first did not. Once per
+            // row, so the walk still ends; its members are walked again to
+            // raise them too.
+            Some((at, already)) => {
+                *already = true;
+                rows[*at].marks = through_marks(true);
+                rows[*at].via = via(name, through);
+            }
+            None => {
+                placed.insert(name.to_string(), (rows.len(), inherits));
+                rows.push(MatrixRow {
+                    key: format!("{role}\u{1f}{name}"),
+                    name: name.to_string(),
+                    via: via(name, through),
+                    who: who(roles, name),
+                    member: true,
+                    opened: false,
+                    marks: through_marks(inherits),
+                });
+            }
+        }
+        for member in members.of_role(name).iter().rev() {
+            stack.push((member, Some(name), inherits && roles.inherits(member, name)));
         }
     }
     rows
@@ -279,21 +343,30 @@ pub(crate) fn role_columns(grants: &RoleGrants) -> Vec<String> {
     columns
 }
 
-/// A role's own grants, a row per relation it holds anything on. A grant
-/// of its own wins over the same one held through a role.
+/// A role's own grants, a row per relation it holds anything on, told
+/// apart by schema and name and not by their spelling joined: `"a.b".c` and
+/// `a."b.c"` are two rows. Each cell takes the strongest of its marks
+/// ([`Mark::merge`]), so a grant of its own wins over the same one held
+/// through a role, and one a grantor made grantable over one another did
+/// not.
 pub(crate) fn role_rows(grants: &RoleGrants, columns: &[String], filter: &str) -> Vec<MatrixRow> {
-    let needle = filter.trim().to_lowercase();
+    let query = Query::new(filter);
+    let mut fuzzy = Fuzzy::new();
     let mut rows: Vec<MatrixRow> = Vec::new();
     let mut through_of: Vec<Vec<String>> = Vec::new();
+    let mut placed: HashMap<(&str, &str), usize> = HashMap::new();
     for held in &grants.held {
-        let name = format!("{}.{}", held.schema, held.relation);
-        if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
-            continue;
-        }
-        let at = match rows.iter().position(|row| row.name == name) {
-            Some(at) => at,
+        let key = (held.schema.as_str(), held.relation.as_str());
+        let at = match placed.get(&key) {
+            Some(at) => *at,
             None => {
+                let name = format!("{}.{}", held.schema, held.relation);
+                if !fuzzy.matches(&query, &name) {
+                    continue;
+                }
+                placed.insert(key, rows.len());
                 rows.push(MatrixRow {
+                    key: format!("{}\u{1f}{}", held.schema, held.relation),
                     name,
                     via: String::new(),
                     who: Who::Object,
@@ -319,9 +392,7 @@ pub(crate) fn role_rows(grants: &RoleGrants, columns: &[String], filter: &str) -
             (None, false) => Mark::Granted,
         };
         let cell = &mut rows[at].marks[column];
-        if *cell == Mark::None || *cell == Mark::Through {
-            *cell = mark;
-        }
+        *cell = cell.merge(mark);
     }
     for (row, through) in rows.iter_mut().zip(through_of) {
         let direct = row
@@ -432,9 +503,127 @@ mod tests {
 
     #[test]
     fn a_filter_keeps_a_member_with_the_role_it_is_listed_under() {
-        let rows = object_rows(&orders(), true, "AN");
+        let rows = object_rows(&orders(), true, "ANA");
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(names, ["reporting", "ana", "analytics_team"]);
+    }
+
+    #[test]
+    fn a_member_reached_again_through_an_inheriting_path_holds_it_and_so_do_its_members() {
+        // R holds SELECT. A belongs to R without inheriting, B with. X
+        // belongs to both and is reached through A first; Y belongs to X.
+        let grants = ObjectGrants {
+            owner: "owner".into(),
+            privileges: vec!["SELECT".into()],
+            grants: vec![grant(Some("r"), "SELECT", false)],
+            roles: Roles {
+                roles: ["owner", "r", "a", "b", "x", "y"]
+                    .into_iter()
+                    .map(|name| role(name, false, false))
+                    .collect(),
+                memberships: vec![
+                    ("a".into(), "r".into()),
+                    ("b".into(), "r".into()),
+                    ("x".into(), "a".into()),
+                    ("x".into(), "b".into()),
+                    ("y".into(), "x".into()),
+                ],
+                not_inherited: vec![("a".into(), "r".into())],
+                records_logins: false,
+            },
+        };
+        let rows = object_rows(&grants, true, "");
+        let row = |name: &str| {
+            (rows.iter())
+                .find(|row| row.member && row.name == name)
+                .unwrap_or_else(|| panic!("{name} is listed"))
+        };
+        assert_eq!(row("a").marks, [Mark::None]);
+        assert_eq!(row("b").marks, [Mark::Through]);
+        assert_eq!(row("x").marks, [Mark::Through]);
+        assert_eq!(row("x").via, "member of r · role, through b");
+        assert_eq!(row("y").marks, [Mark::Through], "raised with x");
+        assert_eq!(rows.iter().filter(|row| row.name == "x").count(), 1);
+    }
+
+    #[test]
+    fn every_row_of_the_matrix_has_a_key_of_its_own() {
+        let mut grants = orders();
+        // ana holds a grant of its own and is listed under reporting too.
+        grants.grants.push(grant(Some("ana"), "INSERT", false));
+        let rows = object_rows(&grants, true, "");
+        assert!(rows.iter().filter(|row| row.name == "ana").count() > 1);
+        let mut keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before, "{keys:?}");
+    }
+
+    #[test]
+    fn two_relations_spelled_alike_once_joined_are_two_rows() {
+        let held = |schema: &str, relation: &str| HeldGrant {
+            schema: schema.into(),
+            relation: relation.into(),
+            privilege: "SELECT".into(),
+            grantable: false,
+            through: None,
+        };
+        let grants = RoleGrants {
+            database: "d".into(),
+            held: vec![held("a.b", "c"), held("a", "b.c")],
+        };
+        let rows = role_rows(&grants, &role_columns(&grants), "");
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].key, rows[1].key);
+    }
+
+    #[test]
+    fn a_privilege_from_two_grantors_shows_the_stronger_mark_in_either_order() {
+        let held = |grantable: bool| HeldGrant {
+            schema: "public".into(),
+            relation: "orders".into(),
+            privilege: "SELECT".into(),
+            grantable,
+            through: None,
+        };
+        for order in [[false, true], [true, false]] {
+            let grants = RoleGrants {
+                database: "d".into(),
+                held: order.into_iter().map(held).collect(),
+            };
+            let rows = role_rows(&grants, &role_columns(&grants), "");
+            assert_eq!(rows[0].marks, [Mark::Grantable], "{order:?}");
+        }
+        let mut object = orders();
+        object
+            .grants
+            .insert(0, grant(Some("reporting"), "SELECT", true));
+        let rows = object_rows(&object, false, "");
+        let reporting = rows.iter().find(|row| row.name == "reporting").unwrap();
+        assert_eq!(reporting.marks[0], Mark::Grantable);
+    }
+
+    #[test]
+    fn the_filters_match_through_the_fuzzy_matcher() {
+        let names = |rows: Vec<MatrixRow>| -> Vec<String> {
+            rows.into_iter().map(|row| row.name).collect()
+        };
+        assert_eq!(names(object_rows(&orders(), false, "rptg")), ["reporting"]);
+        let grants = RoleGrants {
+            database: "d".into(),
+            held: vec![HeldGrant {
+                schema: "sales".into(),
+                relation: "orders".into(),
+                privilege: "SELECT".into(),
+                grantable: false,
+                through: None,
+            }],
+        };
+        assert_eq!(
+            names(role_rows(&grants, &role_columns(&grants), "slsord")),
+            ["sales.orders"]
+        );
     }
 
     #[test]
