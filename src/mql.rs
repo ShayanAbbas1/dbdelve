@@ -1797,9 +1797,10 @@ pub(crate) fn runs_script_parsed(parsed: &Result<Vec<Statement>, ParseError>) ->
 
 fn holds_javascript(value: &Value) -> bool {
     match value {
-        Value::Document(fields) => fields
-            .iter()
-            .any(|(key, value)| JS_OPERATORS.contains(&key.as_str()) || holds_javascript(value)),
+        // What `$literal` holds is returned as it is, never evaluated.
+        Value::Document(fields) => fields.iter().any(|(key, value)| {
+            key != LITERAL && (JS_OPERATORS.contains(&key.as_str()) || holds_javascript(value))
+        }),
         Value::Array(values) => values.iter().any(holds_javascript),
         _ => false,
     }
@@ -2149,6 +2150,11 @@ fn command_reads(command: &Value) -> bool {
 /// added here reaches all three.
 const JS_OPERATORS: &[&str] = &["$where", "$function", "$accumulator"];
 
+/// The expression whose argument is data: the server returns it as it is and
+/// reads no operator inside it, so the walks above do not look in it. Not a
+/// query operator, so a filter cannot use it to hide a `$where`.
+const LITERAL: &str = "$literal";
+
 /// What a `$out`, `$merge` or JavaScript operator anywhere in `value` does.
 /// `$out` replaces its target collection whole, as `CREATE OR REPLACE TABLE …
 /// AS SELECT` does, so it is a drop; `$merge` writes into what is there.
@@ -2156,6 +2162,7 @@ fn out_verdict(value: &Value) -> Verdict {
     match value {
         Value::Document(fields) => fields.iter().fold(Verdict::READ, |verdict, (key, value)| {
             let stage = match key.as_str() {
+                LITERAL => return verdict,
                 "$out" => Verdict::destroys(Destructive::Drop),
                 "$merge" => Verdict::WRITE,
                 // Not `browse::runs_code`, which also flags a string where
@@ -5622,6 +5629,25 @@ mod tests {
             "garbage(",
         ] {
             assert!(!runs_script(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_literal_document_spelled_like_javascript_is_data() {
+        for text in [
+            r#"db.c.aggregate([{$project: {x: {$literal: {$where: "sleep(1)"}}}}])"#,
+            r#"db.c.aggregate([{$addFields: {x: {$literal: [{$function: "f"}]}}}])"#,
+        ] {
+            assert!(!runs_script(text), "{text}");
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+        // Beside a `$literal`, or in a filter, the operator is still code.
+        for text in [
+            r#"db.c.aggregate([{$project: {x: {$literal: 1}}}, {$match: {$where: "1"}}])"#,
+            r#"db.c.find({$where: "1", a: {$literal: 1}})"#,
+        ] {
+            assert!(runs_script(text), "{text}");
+            assert_eq!(classify(text), Verdict::FULL, "{text}");
         }
     }
 
