@@ -3435,6 +3435,43 @@ fn save_filter_overtakes_a_listing_under_way_and_narrows_the_list_held(cx: &mut 
     });
 }
 
+/// Save lets go of a session the tree opened to read a database the filter
+/// now hides, and keeps one a tab is bound to.
+#[gpui::test]
+fn save_filter_closes_a_hidden_databases_session_no_tab_is_bound_to(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        press(cx, "escape");
+        for database in ["other", "scratch"] {
+            let at = connections_row(&workspace, cx, &database_row("e2e", database))
+                .unwrap_or_else(|| panic!("`{database}` shows"));
+            click_connections_row(cx, at);
+        }
+        new_query_here(&workspace, cx, Some("scratch"), None);
+        let open = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let mut open: Vec<String> =
+                    workspace.profile().unwrap().bound.keys().cloned().collect();
+                open.sort();
+                open
+            })
+        };
+        assert_eq!(open(cx), ["other", "scratch"]);
+
+        let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection");
+        pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.patterns = vec!["e2e".to_string()];
+            workspace.save_filter(cx);
+        });
+        settle(cx);
+        assert_eq!(open(cx), ["scratch"], "the bound tab's session stays");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_save_past_the_cap_keeps_the_first_500_entries_in_the_profile_and_the_file(
     cx: &mut TestAppContext,

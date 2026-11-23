@@ -836,12 +836,14 @@ impl Workspace {
                 CatalogState::Loading | CatalogState::Loaded(_, Routines::Loading)
             );
         profile.reread_after_load = under_way;
-        // What the filter now hides is not read: its catalog goes. A session
-        // a tab is bound to stays, since the tab keeps running on it.
+        // What the filter now hides is not read: its catalog goes.
         let shown = profile.shown();
         profile
             .database_catalogs
             .retain(|database, _| shown.shows_database(database));
+        // A session opened only for the tree to read a database now hidden
+        // has nothing left to read; one a tab is bound to stays.
+        profile.release_hidden_sessions(&shown);
         // A listing asked under the old filter may still land and put back a
         // database this one hides; it is overtaken here. Until the next one
         // lands -- or for good, if it fails -- the list held is narrowed by

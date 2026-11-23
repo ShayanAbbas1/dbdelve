@@ -712,6 +712,54 @@ impl Profile {
         self.session.schema_export = None;
     }
 
+    /// Let go of each session open for a database `shown` hides that only the
+    /// tree's reads were using: no query or object tab is bound to it, no
+    /// import is writing into it, and no transaction or session setting is
+    /// open on it, which closing would lose. A read still out over one keeps
+    /// it alive until it lands, and lands on nothing ([`Self::is_registered`]).
+    /// Returns the databases let go of.
+    pub(crate) fn release_hidden_sessions(&mut self, shown: &Shown) -> Vec<String> {
+        let held: HashSet<&str> = self
+            .session
+            .queries
+            .iter()
+            .filter_map(|tab| {
+                tab.binding
+                    .as_ref()
+                    .map(|binding| binding.database.as_str())
+            })
+            .chain(
+                self.session
+                    .objects
+                    .iter()
+                    .filter_map(|tab| tab.database.as_deref()),
+            )
+            .chain(
+                self.session
+                    .import_rows
+                    .as_ref()
+                    .and_then(|import| import.database.as_deref()),
+            )
+            .collect();
+        let released: Vec<String> = self
+            .bound
+            .iter()
+            .filter(|(database, session)| {
+                !shown.shows_database(database)
+                    && !held.contains(database.as_str())
+                    && match session {
+                        BoundSession::Open(bound) => !bound.changed(),
+                        BoundSession::Opening => true,
+                    }
+            })
+            .map(|(database, _)| database.clone())
+            .collect();
+        for database in &released {
+            self.bound.remove(database);
+        }
+        released
+    }
+
     /// Why an edit under `binding` is not sent, as far as is known before it
     /// goes ([`Bound::write_refusal`]); [`Bound::edit`] asks again once it is
     /// the edit's turn on the session.
