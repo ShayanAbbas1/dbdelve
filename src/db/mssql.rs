@@ -3163,8 +3163,11 @@ fn transaction_outcome(
             false => "The transaction the batch began is still open.",
         }
     } else if after == 0 && before > 0 {
-        "The transaction that was open before this statement was rolled back, and everything \
-         written in it is gone."
+        super::TRANSACTION_ROLLED_BACK
+    } else if after > 0 && !bracketed && crate::sql::ends_transaction(Engine::SqlServer, sql) {
+        // A compile error stops the batch before its `COMMIT` or `ROLLBACK`
+        // runs, and `XACT_ABORT` rolls back only on a runtime one.
+        super::TRANSACTION_KEPT_OPEN
     } else if bracketed {
         match before {
             0 => "The transaction did not commit: nothing the batch wrote remains.",
@@ -6235,6 +6238,58 @@ mod tests {
             error
                 .message
                 .contains("open before this statement was rolled back"),
+            "{}",
+            error.message
+        );
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("0")]);
+    }
+
+    /// What the app reads off an error to keep its transaction state true
+    /// to the session's: a runtime error under `XACT_ABORT` ended the
+    /// transaction, and a compile error stopped the batch before the
+    /// `COMMIT` that would have.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_failure_tells_the_app_whether_the_transaction_outlived_it() {
+        let connection = live();
+        connection
+            .query("CREATE TABLE #work (id int)", Fetch::default())
+            .unwrap();
+        connection
+            .query(
+                "BEGIN TRANSACTION; INSERT INTO #work VALUES (1)",
+                Fetch::default(),
+            )
+            .unwrap();
+        let error = connection
+            .query(
+                "INSERT INTO #work (no_such_column) VALUES (2); COMMIT",
+                Fetch::default(),
+            )
+            .expect_err("the column does not exist");
+        assert!(
+            crate::db::transaction_kept_open(&error),
+            "{}",
+            error.message
+        );
+        assert!(
+            !crate::db::transaction_rolled_back(&error),
+            "{}",
+            error.message
+        );
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+
+        let error = connection
+            .query("SELECT 1/0", Fetch::default())
+            .expect_err("division by zero");
+        assert!(
+            crate::db::transaction_rolled_back(&error),
             "{}",
             error.message
         );

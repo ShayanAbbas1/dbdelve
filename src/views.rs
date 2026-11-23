@@ -3284,6 +3284,8 @@ pub(crate) fn render_transaction(
     }
     let t = *theme(cx);
     let (auto_commit, open) = (profile.auto_commit, profile.in_transaction);
+    // Only Roll back ends a failed transaction: a COMMIT would roll it back.
+    let failed = profile.transaction_failed();
     let mut control = div()
         .flex_shrink_0()
         .flex()
@@ -3320,9 +3322,12 @@ pub(crate) fn render_transaction(
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .text_color(t.text_muted)
-                    .child("open"),
+                    .child(match failed {
+                        true => "failed",
+                        false => "open",
+                    }),
             )
-            .child(
+            .children((!failed).then(|| {
                 button(
                     "commit-transaction",
                     "Commit",
@@ -3332,8 +3337,8 @@ pub(crate) fn render_transaction(
                 )
                 .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                     workspace.commit_transaction(&CommitTransaction, window, cx);
-                })),
-            )
+                }))
+            }))
             .child(
                 button(
                     "rollback-transaction",

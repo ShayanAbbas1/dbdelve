@@ -5221,6 +5221,49 @@ pub(crate) fn ends_transaction(engine: Engine, sql: &str) -> bool {
     })
 }
 
+/// Whether the last statement of `sql` that ends a transaction commits it,
+/// rather than rolling it back.
+pub(crate) fn last_end_commits(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements
+            .iter()
+            .rev()
+            .find(|statement| {
+                matches!(
+                    statement,
+                    Statement::Commit { .. }
+                        | Statement::Rollback {
+                            savepoint: None,
+                            ..
+                        }
+                )
+            })
+            .is_some_and(|statement| matches!(statement, Statement::Commit { .. }))
+    })
+}
+
+/// Whether `sql` rolls back to a savepoint, which takes a failed Postgres
+/// transaction back to before its failure.
+pub(crate) fn rolls_back_to_savepoint(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::Rollback {
+                    savepoint: Some(_),
+                    ..
+                }
+            )
+        })
+    })
+}
+
 /// What `sql` runs after the last statement that ends a transaction: all of
 /// it when none does or the text cannot be read, nothing when it ends on the
 /// end. What a submission leaves inside the transaction it opens, for a

@@ -1370,7 +1370,12 @@ impl Workspace {
             // Cancel, so an `enter` held or repeated from the click that
             // raised it cancels rather than commits or discards. The ring is
             // drawn by the dialogs above, before this ran.
-            self.dialog_choice.set(first_choice(front));
+            let first = match front {
+                // Cancel, wherever a failed transaction's missing Commit puts it.
+                Some("end-transaction") => self.dialog_buttons().saturating_sub(1),
+                _ => first_choice(front),
+            };
+            self.dialog_choice.set(first);
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
         // The palette is stacked over the dialogs and holds the keyboard
@@ -1462,7 +1467,14 @@ impl Workspace {
             // keyboard through and whose buttons act through their own handlers.
             Some("import-rows" | "schema-export" | "filter-picker" | "role-form") | None => 0,
             Some("show-grants") => 1,
-            Some("end-transaction") => 3,
+            // Commit is not offered over a failed transaction.
+            Some("end-transaction") => match self
+                .profile()
+                .is_some_and(crate::session::Profile::transaction_failed)
+            {
+                true => 2,
+                false => 3,
+            },
             Some(_) => 2 + checkbox,
         }
     }
@@ -1599,9 +1611,10 @@ impl Workspace {
             ("discard", _) => _ = self.cancel_discard_close(cx),
             ("forget-file", 0) => self.confirm_forget_file(cx),
             ("forget-file", _) => _ = self.cancel_forget_file(cx),
-            ("end-transaction", 0) => self.end_transaction_for_auto("COMMIT", window, cx),
-            ("end-transaction", 1) => self.end_transaction_for_auto("ROLLBACK", window, cx),
-            ("end-transaction", _) => _ = self.cancel_auto_commit_prompt(cx),
+            ("end-transaction", choice) => match self.end_transaction_choice(choice) {
+                Some(verb) => self.end_transaction_for_auto(verb, window, cx),
+                None => _ = self.cancel_auto_commit_prompt(cx),
+            },
             ("delete", 0) => match deleting {
                 Some(PendingDelete::Query(name)) => self.delete_saved_query(name, window, cx),
                 Some(PendingDelete::Folder(name, _)) => self.delete_folder(name, cx),
@@ -2236,6 +2249,20 @@ impl Workspace {
         )
     }
 
+    /// What the Auto dialog's button `choice`, counted from the right, ends
+    /// the transaction with; `None` for Cancel. Commit is not offered over a
+    /// failed transaction, which moves the others one to the right.
+    fn end_transaction_choice(&self, choice: usize) -> Option<&'static str> {
+        let failed = self
+            .profile()
+            .is_some_and(crate::session::Profile::transaction_failed);
+        let verbs: &[&'static str] = match failed {
+            true => &["ROLLBACK"],
+            false => &["COMMIT", "ROLLBACK"],
+        };
+        verbs.get(choice).copied()
+    }
+
     /// What turning auto-commit back on asks while a transaction is open:
     /// commit it, roll it back, or leave it, with the statements it has run
     /// behind a toggle. Drawn only while the transaction is still open under
@@ -2251,6 +2278,14 @@ impl Workspace {
         let syntax = profile.config.engine().syntax();
         let statements = &profile.transaction_statements;
         let shown = prompt.statements_shown;
+        // A failed transaction only rolls back: a `COMMIT` would roll it back
+        // under a button that said otherwise.
+        let failed = profile.transaction_failed();
+        let at = |verb| {
+            (0..3)
+                .find(|choice| self.end_transaction_choice(*choice) == verb)
+                .unwrap_or_default()
+        };
         let highlight = cx.theme().highlight_theme.clone();
         let code = fonts(cx).editor.clone();
         let cancel = cx.entity().downgrade();
@@ -2298,11 +2333,18 @@ impl Workspace {
                             div()
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                .child(
-                                    "A transaction is open on this connection's own session. \
-                                     Turning auto-commit on ends it: commit what it ran, or \
-                                     roll it back.",
-                                ),
+                                .child(match failed {
+                                    true => {
+                                        "The transaction open on this connection's own session \
+                                         failed, so it can only be rolled back. Turning \
+                                         auto-commit on ends it."
+                                    }
+                                    false => {
+                                        "A transaction is open on this connection's own \
+                                         session. Turning auto-commit on ends it: commit what \
+                                         it ran, or roll it back."
+                                    }
+                                }),
                         )
                         .child(
                             div()
@@ -2340,7 +2382,7 @@ impl Workspace {
                                 .child(
                                     self.choice(
                                         "end-transaction",
-                                        2,
+                                        at(None),
                                         button(
                                             "cancel-end-transaction",
                                             "Cancel",
@@ -2361,7 +2403,7 @@ impl Workspace {
                                 .child(
                                     self.choice(
                                         "end-transaction",
-                                        1,
+                                        at(Some("ROLLBACK")),
                                         button(
                                             "rollback-end-transaction",
                                             "Roll back",
@@ -2381,10 +2423,10 @@ impl Workspace {
                                         t,
                                     ),
                                 )
-                                .child(
+                                .children((!failed).then(|| {
                                     self.choice(
                                         "end-transaction",
-                                        0,
+                                        at(Some("COMMIT")),
                                         button(
                                             "commit-end-transaction",
                                             "Commit",
@@ -2402,8 +2444,8 @@ impl Workspace {
                                             },
                                         ),
                                         t,
-                                    ),
-                                ),
+                                    )
+                                })),
                         ),
                 )
                 .into_any_element(),

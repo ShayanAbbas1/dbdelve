@@ -202,6 +202,30 @@ pub(crate) fn sent_nothing(error: &DbError) -> bool {
         || error.message.starts_with(UNPLACED)
 }
 
+/// What a driver adds to an error when the server rolled back the
+/// transaction open before the statement on its own (SQL Server under
+/// `XACT_ABORT`): the session is autocommitting again.
+pub(crate) const TRANSACTION_ROLLED_BACK: &str = "The transaction that was open before this \
+     statement was rolled back, and everything written in it is gone.";
+
+/// What a driver adds to an error when a statement that would have ended the
+/// open transaction failed short of it (SQL Server's compile error, which
+/// stops the batch before its `COMMIT`): the transaction is still open.
+pub(crate) const TRANSACTION_KEPT_OPEN: &str =
+    "The transaction that was open before this statement is still open.";
+
+/// Whether the driver says `error` ended the open transaction
+/// ([`TRANSACTION_ROLLED_BACK`]).
+pub(crate) fn transaction_rolled_back(error: &DbError) -> bool {
+    error.message.ends_with(TRANSACTION_ROLLED_BACK)
+}
+
+/// Whether the driver says the open transaction outlived `error`
+/// ([`TRANSACTION_KEPT_OPEN`]).
+pub(crate) fn transaction_kept_open(error: &DbError) -> bool {
+    error.message.ends_with(TRANSACTION_KEPT_OPEN)
+}
+
 const UNPLACED: &str = "The statement was not sent:";
 
 /// An error from putting a bound tab's database and schema back, which is
@@ -664,6 +688,13 @@ impl Engine {
     /// safe side for the list of what the next `COMMIT` ends.
     pub fn begin_ends_open_transaction(self) -> bool {
         matches!(self, Self::MySql | Self::MariaDb)
+    }
+
+    /// Whether a statement that fails inside a transaction leaves it able
+    /// only to roll back: Postgres refuses every later statement but its end,
+    /// and answers a `COMMIT` by rolling it back, without an error.
+    pub fn failure_aborts_transaction(self) -> bool {
+        self == Self::Postgres
     }
 
     /// Whether a `COMMIT` or `ROLLBACK` that failed with `message` left the

@@ -27258,6 +27258,148 @@ fn a_failed_pair_that_ended_the_transaction_leaves_manual(cx: &mut TestAppContex
     });
 }
 
+/// The notice the profile in front holds.
+fn profile_notice(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace.profile().unwrap().session.notice.clone()
+    })
+}
+
+/// A `COMMIT` typed in Manual ends the transaction Manual was holding: the
+/// session autocommits from there, and the switch says so rather than read
+/// Manual over it.
+#[gpui::test]
+fn a_typed_commit_in_manual_turns_auto_on_and_says_so(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_in_front(&workspace, cx, "COMMIT");
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "nothing is open, and Auto says so");
+        assert_eq!(
+            profile_notice(&workspace, cx).as_deref(),
+            Some("The transaction ended, so auto-commit is on again.")
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// The server's word that it ended the transaction (SQL Server's
+/// `XACT_ABORT`) clears it and leaves Manual; its word that the transaction
+/// outlived a failed end keeps it open. Neither reaches SQLite, so they are
+/// handed to the profile as the landing does.
+#[gpui::test]
+fn the_servers_word_on_the_transaction_outranks_what_was_sent(cx: &mut TestAppContext) {
+    use crate::db::{DbError, TRANSACTION_KEPT_OPEN, TRANSACTION_ROLLED_BACK};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let kept = DbError {
+                message: format!("Invalid column name 'b'.\n\n{TRANSACTION_KEPT_OPEN}"),
+                position: None,
+            };
+            assert!(!profile.end_landed("UPDATE t SET b = 1; COMMIT", true, false, Some(&kept)));
+            assert!(profile.in_transaction && !profile.auto_commit, "still open");
+            let since = profile.transaction_statements.len();
+            assert!(!profile.reopen_landed(
+                "UPDATE t SET b = 1; COMMIT;\n\nBEGIN;",
+                since,
+                false,
+                Some(&kept)
+            ));
+            assert!(profile.in_transaction && !profile.auto_commit, "still open");
+
+            let rolled_back = DbError {
+                message: format!("Divide by zero error encountered.\n\n{TRANSACTION_ROLLED_BACK}"),
+                position: None,
+            };
+            assert!(crate::db::transaction_rolled_back(&rolled_back));
+            // A transaction opened after the statement went is not the one
+            // that ended.
+            let before = profile.transaction_sends();
+            profile.transaction_sent();
+            assert!(!profile.ended_by_server(before));
+            assert!(profile.in_transaction);
+            assert!(profile.ended_by_server(profile.transaction_sends()));
+            assert!(profile.auto_commit && !profile.in_transaction);
+            assert!(profile.transaction_statements.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Against the Postgres the environment names, as CI's live job sets: a
+/// statement failing inside the transaction leaves it able only to roll
+/// back, and a `COMMIT` sent anyway is said to have rolled it back.
+#[gpui::test]
+fn live_a_failed_postgres_transaction_only_rolls_back(cx: &mut TestAppContext) {
+    if std::env::var_os("PGHOST").is_none() {
+        return;
+    }
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.executor().allow_parking();
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        settle(cx);
+        let failed = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().transaction_failed()
+            })
+        };
+        let run = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, sql: &str| {
+            cx.update(|window, cx| {
+                let editor = workspace
+                    .read(cx)
+                    .profile()
+                    .and_then(|profile| profile.session.active_query_tab())
+                    .expect("a query tab")
+                    .editor
+                    .clone();
+                editor.update(cx, |input, cx| input.set_value(sql, window, cx));
+            });
+            cx.dispatch_action(crate::actions::RunQuery);
+            settle(cx);
+        };
+
+        toggle_auto_commit(cx);
+        assert!(!failed(&workspace, cx));
+        run(&workspace, cx, "SAVEPOINT s");
+        run(&workspace, cx, "SELECT 1/0");
+        assert!(failed(&workspace, cx), "the division failed inside it");
+        run(&workspace, cx, "ROLLBACK TO SAVEPOINT s");
+        assert!(!failed(&workspace, cx), "the savepoint took it back");
+
+        run(&workspace, cx, "SELECT 1/0");
+        assert!(failed(&workspace, cx));
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(
+            profile_notice(&workspace, cx).as_deref(),
+            Some("A statement failed inside the transaction, so it can only be rolled back.")
+        );
+        assert!(in_transaction(&workspace, cx), "nothing was sent");
+
+        run(&workspace, cx, "COMMIT");
+        let said = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.tab_notice.clone()
+        });
+        assert!(
+            said.is_some_and(|(_, notice)| notice.contains(super::queries::COMMIT_ROLLED_BACK)),
+            "the COMMIT says it rolled back"
+        );
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open);
+        assert!(!failed(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_auto_prompt_leaves_auto_off_when_its_commit_is_not_sent(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -27507,19 +27649,14 @@ fn a_failed_commit_from_the_auto_prompt_does_not_keep_a_stale_open_flag(cx: &mut
         });
         let (auto_commit, open, _) = transaction_state(&workspace, cx);
         assert!(
-            !auto_commit && !open,
-            "a COMMIT that failed because none was active is not read as leaving one open"
+            auto_commit && !open,
+            "a COMMIT that failed because none was active is not read as leaving one open, \
+             and the switch says the session is autocommitting"
         );
         assert!(
             recorded_statements(&workspace, cx).is_empty(),
             "the list of a transaction no longer read as open is not put back"
         );
-
-        // A second attempt settles: nothing is open to ask about.
-        toggle_auto_commit(cx);
-        assert_eq!(front_dialog(&workspace, cx), None);
-        let (auto_commit, open, _) = transaction_state(&workspace, cx);
-        assert!(auto_commit && !open, "Auto is reached");
         quit(workspace, cx);
     });
 }

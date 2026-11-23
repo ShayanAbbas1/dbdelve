@@ -140,6 +140,18 @@ impl Workspace {
             self.note("No transaction is open on this connection.".into(), cx);
             return None;
         }
+        // The server would roll it back and answer as if it had committed.
+        if verb == "COMMIT"
+            && self
+                .profile()
+                .is_some_and(crate::session::Profile::transaction_failed)
+        {
+            self.note(
+                "A statement failed inside the transaction, so it can only be rolled back.".into(),
+                cx,
+            );
+            return None;
+        }
         let begin = (reopen && !auto_commit)
             .then(|| engine.begins_transaction())
             .flatten();

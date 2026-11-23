@@ -109,6 +109,11 @@ pub(crate) struct Profile {
     /// queue's reads would not see. Read off what was sent, not asked of the
     /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
     pub(crate) in_transaction: bool,
+    /// Whether a statement failed inside that transaction on an engine that
+    /// then refuses everything but its end (Postgres), whose `COMMIT` rolls
+    /// it back. Read only through [`Self::transaction_failed`], and cleared
+    /// as the next transaction opens.
+    pub(crate) transaction_aborted: bool,
     /// Every statement the next `COMMIT` or `ROLLBACK` on the connection's
     /// session ends: the user's statements and dbdelve's edits applied on that
     /// session, but never dbdelve's reads, for the Auto prompt to list. Held in memory only and never written to the
@@ -303,26 +308,63 @@ impl Profile {
     /// a guess there would keep a flag no COMMIT could clear, or offer a Roll
     /// Back for work the server had already rolled back. A `lost` session has
     /// no transaction left to keep.
+    ///
+    /// An end that did end the transaction leaves Manual too, since nothing
+    /// is holding one open any more: whether it did, for the caller to say.
+    /// The driver's own word that the transaction outlived the failure
+    /// ([`crate::db::transaction_kept_open`]: SQL Server's compile error
+    /// ahead of the `COMMIT` in its batch) keeps it open whatever else.
     pub(crate) fn end_landed(
         &mut self,
         sql: &str,
         lone: bool,
         lost: bool,
         error: Option<&DbError>,
-    ) {
+    ) -> bool {
         let still_open = !lost
             && error.is_some_and(|error| {
                 crate::db::sent_nothing(error)
+                    || crate::db::transaction_kept_open(error)
                     || (lone
                         && self
                             .config
                             .engine()
                             .failed_end_keeps_transaction(&error.message))
             });
-        if !still_open {
-            self.record_sent(sql, Some(false));
-            self.in_transaction = false;
+        if still_open {
+            return false;
         }
+        self.record_sent(sql, Some(false));
+        self.in_transaction = false;
+        self.leave_manual()
+    }
+
+    /// Auto again, the transaction Manual was holding having ended: whether
+    /// the switch read Manual until now.
+    pub(crate) fn leave_manual(&mut self) -> bool {
+        let manual = !self.auto_commit;
+        self.auto_commit = true;
+        manual
+    }
+
+    /// The server ended the open transaction on its own while running a
+    /// statement sent at `sent_at` ([`crate::db::transaction_rolled_back`]:
+    /// SQL Server's `XACT_ABORT`). Nothing is open, and Manual gives way to
+    /// Auto: whether it did. A transaction opened since is not the one that
+    /// ended.
+    pub(crate) fn ended_by_server(&mut self, sent_at: u64) -> bool {
+        if !self.in_transaction || self.superseded(sent_at) {
+            return false;
+        }
+        self.transaction_statements.clear();
+        self.in_transaction = false;
+        self.leave_manual()
+    }
+
+    /// Whether the open transaction failed and can only be rolled back
+    /// ([`Self::transaction_aborted`]).
+    pub(crate) fn transaction_failed(&self) -> bool {
+        self.in_transaction && self.transaction_aborted
     }
 
     /// [`Self::transaction_sends`] as it stands.
@@ -357,13 +399,15 @@ impl Profile {
     /// `lost` session has no transaction left. What another tab sent while
     /// the pair was out, recorded from `since` on, may have run after it, in
     /// the transaction it opened, so a pair that ran whole keeps it.
+    ///
+    /// Whether Manual gave way to Auto, for the caller to say.
     pub(crate) fn reopen_landed(
         &mut self,
         sql: &str,
         since: usize,
         lost: bool,
         error: Option<&DbError>,
-    ) {
+    ) -> bool {
         match error {
             None => {
                 let later = self
@@ -371,21 +415,25 @@ impl Profile {
                     .split_off(since.min(self.transaction_statements.len()));
                 self.record_sent(sql, Some(true));
                 self.transaction_statements.extend(later);
+                self.transaction_aborted = false;
+                false
             }
-            Some(error) if crate::db::sent_nothing(error) && !lost => {}
+            Some(error) if crate::db::sent_nothing(error) && !lost => false,
             Some(error)
                 if !lost
-                    && self
-                        .config
-                        .engine()
-                        .failed_end_keeps_transaction(&error.message) =>
+                    && (crate::db::transaction_kept_open(error)
+                        || self
+                            .config
+                            .engine()
+                            .failed_end_keeps_transaction(&error.message)) =>
             {
-                self.transaction_statements.push(sql.to_string())
+                self.transaction_statements.push(sql.to_string());
+                false
             }
             Some(_) => {
                 self.record_sent(sql, Some(false));
                 self.in_transaction = false;
-                self.auto_commit = true;
+                self.leave_manual()
             }
         }
     }

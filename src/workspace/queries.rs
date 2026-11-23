@@ -19,6 +19,10 @@ use crate::session::{
     next_step, query_name_refusal, reveals_results,
 };
 
+/// What a `COMMIT` over a failed transaction says it did instead.
+pub(crate) const COMMIT_ROLLED_BACK: &str =
+    "The transaction had failed, so the server rolled it back: nothing in it was committed.";
+
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
     /// the grid rather than held anywhere, so nothing can disagree with the
@@ -2649,12 +2653,26 @@ impl Workspace {
             } else {
                 profile.record_sent(&sql, leaves.transaction);
                 if let Some(open) = leaves.transaction {
+                    if open && !profile.in_transaction {
+                        profile.transaction_aborted = false;
+                    }
                     profile.in_transaction = open;
                     published = Some(profile.transaction_sent());
                 }
             }
             profile.session_changed |= leaves.settings;
         }
+        // A failed Postgres transaction is usable again once this succeeds.
+        let rolls_back_to_savepoint =
+            binding.is_none() && sql::rolls_back_to_savepoint(engine, &sql);
+        // Where the transaction state stood once this went, on the profile's
+        // own session: a server's word that the statement ended the
+        // transaction is about the one open then, not one opened since.
+        let own_sent_at = binding
+            .is_none()
+            .then(|| self.issued_to(&id, generation))
+            .flatten()
+            .map(|profile| profile.transaction_sends());
         // The same, for the session of a bound tab's database, which a
         // transaction holds for every tab bound to it: marked on the session
         // as the statement goes (`Bound::leave`).
@@ -3184,14 +3202,55 @@ impl Workspace {
                         if profile.transaction_in_flight == Some(tab) {
                             profile.transaction_in_flight = None;
                         }
+                        // Whether the transaction Manual was holding ended
+                        // here, which turns the switch back to Auto.
+                        let mut left_manual = false;
+                        // A `COMMIT` that ran over a failed transaction,
+                        // which the server rolled back instead.
+                        let mut commit_rolled_back = false;
+                        let error = result.as_ref().err();
                         if let Some((sent, lone, reopens, sent_at, since)) = &ending
                             && (lost || !profile.superseded(*sent_at))
                         {
-                            let error = result.as_ref().err();
-                            match reopens {
+                            commit_rolled_back = error.is_none()
+                                && profile.transaction_failed()
+                                && sql::last_end_commits(engine, sent);
+                            left_manual = match reopens {
                                 true => profile.reopen_landed(sent, *since, lost, error),
                                 false => profile.end_landed(sent, *lone, lost, error),
+                            };
+                        } else if bound_db.is_none()
+                            && !lost
+                            && let (Some(error), Some(sent_at)) = (error, own_sent_at)
+                        {
+                            if crate::db::transaction_rolled_back(error) {
+                                left_manual = profile.ended_by_server(sent_at);
+                            } else if engine.failure_aborts_transaction()
+                                && profile.in_transaction
+                                && !crate::db::sent_nothing(error)
+                                && !profile.superseded(sent_at)
+                            {
+                                profile.transaction_aborted = true;
                             }
+                        } else if bound_db.is_none()
+                            && error.is_none()
+                            && engine.failure_aborts_transaction()
+                            && rolls_back_to_savepoint
+                        {
+                            profile.transaction_aborted = false;
+                        }
+                        let ended_by_server = error.is_some_and(crate::db::transaction_rolled_back);
+                        if left_manual && profile.session.auto_after_end != Some(tab) {
+                            profile.session.notice = Some(
+                                match ended_by_server {
+                                    true => {
+                                        "The server rolled the transaction back, so \
+                                         auto-commit is on again."
+                                    }
+                                    false => "The transaction ended, so auto-commit is on again.",
+                                }
+                                .into(),
+                            );
                         }
                         if profile.session.manual_after_begin == Some(tab) {
                             profile.session.manual_after_begin = None;
@@ -3270,6 +3329,18 @@ impl Workspace {
                                     error.message = format!("{}\n\n{cost}", error.message);
                                 }
                                 Err(error)
+                            }
+                            result => result,
+                        };
+                        // Postgres answers it with the `ROLLBACK` tag and no
+                        // error, so the run reads as a commit otherwise.
+                        let result = match result {
+                            Ok(mut ran) if commit_rolled_back => {
+                                ran.notice = Some(match ran.notice.take() {
+                                    Some(notice) => format!("{notice}\n\n{COMMIT_ROLLED_BACK}"),
+                                    None => COMMIT_ROLLED_BACK.into(),
+                                });
+                                Ok(ran)
                             }
                             result => result,
                         };
