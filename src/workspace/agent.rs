@@ -177,6 +177,9 @@ pub(crate) struct CallFacts {
     pub(crate) decision: Option<Decision>,
     /// The engine of the profile the call was about, for the audit file.
     pub(crate) engine: Option<Engine>,
+    /// The bridge session the call was accepted in, for a call that can
+    /// outlive its bridge (an approved write); `None` is the current one.
+    pub(crate) session: Option<u64>,
 }
 
 /// What a person did with a statement that waited for them.
@@ -312,7 +315,7 @@ impl AgentState {
         let waited = facts.decision.is_some();
         let line = AuditLine {
             v: 1,
-            session: self.session,
+            session: facts.session.unwrap_or(self.session),
             id: id.0,
             at: unix_millis(),
             phase: "outcome",
@@ -1932,6 +1935,43 @@ mod tests {
                 assert_eq!(kept.chars().count(), AUDIT_SQL_CAP + SQL_CLIPPED.len());
                 assert!(kept.ends_with(SQL_CLIPPED));
             }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_outcome_names_the_session_its_call_was_accepted_in() {
+        crate::store::tests::with_home(|| {
+            let mut state = AgentState {
+                session: 2,
+                ..AgentState::default()
+            };
+            for session in [Some(1), None] {
+                state.record(
+                    CallId(0),
+                    Tool::ExecuteSql,
+                    None,
+                    None,
+                    Status::Executed,
+                    CallFacts {
+                        session,
+                        ..CallFacts::default()
+                    },
+                );
+            }
+            let path = crate::store::dbdelve_directory()
+                .expect("the test home has a data directory")
+                .join(crate::store::AGENT_AUDIT_FILE);
+            let text = std::fs::read_to_string(path).expect("the audit is readable");
+            let sessions: Vec<u64> = text
+                .lines()
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).expect("a JSON line")["session"]
+                        .as_u64()
+                        .expect("a session")
+                })
+                .collect();
+            assert_eq!(sessions, [1, 2]);
         });
     }
 

@@ -74,6 +74,10 @@ pub(crate) struct Writing {
     bound: Duration,
     /// The statement exactly as it was approved, for the audit.
     sql: String,
+    /// The bridge session its `started` line was written in. The write
+    /// outlives a disconnect, and a bridge started meanwhile numbers its calls
+    /// from zero again, so its `outcome` line must name the same session.
+    session: u64,
     verdict: Option<AuditVerdict>,
     /// The caller hung up while the window already knew, as a `Hangup` that
     /// found this write running said. It is not cancelled for that.
@@ -259,6 +263,7 @@ impl Workspace {
             arrived,
             bound,
             sql,
+            session: self.agent.session,
             verdict,
             requester_gone: false,
             gone,
@@ -325,6 +330,7 @@ impl Workspace {
                 requester_gone,
                 decision: Some(Decision::Approved),
                 engine: Some(write.engine),
+                session: Some(write.session),
                 ..CallFacts::default()
             },
         );
