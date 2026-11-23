@@ -883,14 +883,10 @@ pub fn reports_csv(reports: &Reports) -> String {
             count.to_string(),
         ]);
     }
-    let quote = |field: &str| match field.contains([',', '"', '\n']) {
-        true => format!("\"{}\"", field.replace('"', "\"\"")),
-        false => field.to_string(),
-    };
     rows.iter()
         .map(|row| {
             row.iter()
-                .map(|field| quote(field))
+                .map(|field| crate::export::csv_field(',', field))
                 .collect::<Vec<_>>()
                 .join(",")
         })
@@ -1108,6 +1104,14 @@ mod tests {
         assert_eq!(
             reports_csv(&reports),
             "report,name,count\nSessions right now,api,8\nSessions right now,ana,2\n"
+        );
+        let odd = Reports {
+            superusers: vec!["a\rb".into(), "c,d".into()],
+            ..Reports::default()
+        };
+        assert_eq!(
+            reports_csv(&odd),
+            "report,name,count\nSuperusers,\"a\rb\",\nSuperusers,\"c,d\",\n"
         );
     }
 
