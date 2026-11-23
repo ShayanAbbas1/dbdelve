@@ -6789,14 +6789,24 @@ pub(crate) fn gate(verdict: &Verdict, mode: Mode, confirmed: &[Destructive]) -> 
 /// `gate` for a statement the user ran, with `run_unreadable`, their app-wide
 /// opt-in, letting what dbdelve cannot parse through unasked. Only `RunOnce`
 /// gives way: an unreadable `Upgrade` is the mode check where nothing on the
-/// server holds Read-only, and Read-only has to keep meaning it.
+/// server holds Read-only, and Read-only has to keep meaning it. Nor does a
+/// kind the submission was also read to carry: `DROP TABLE t; SELCT 1` still
+/// asks about the `DROP` unless that kind is silenced.
 pub(crate) fn gate_own_run(
     verdict: &Verdict,
     mode: Mode,
     confirmed: &[Destructive],
     run_unreadable: bool,
 ) -> Option<Stop> {
-    gate(verdict, mode, confirmed).filter(|stop| !(run_unreadable && *stop == Stop::RunOnce))
+    match gate(verdict, mode, confirmed) {
+        Some(Stop::RunOnce) if run_unreadable => verdict
+            .destructive
+            .iter()
+            .find(|kind| **kind != Destructive::Unreadable && !confirmed.contains(kind))
+            .copied()
+            .map(Stop::Confirm),
+        stop => stop,
+    }
 }
 
 /// The statements of a profile's startup script, judged as the statements of
@@ -13204,6 +13214,23 @@ mod tests {
                 "{sql}"
             );
             for mode in [Mode::ReadWrite, Mode::Full] {
+        // A known kind beside the unreadable one still asks, unless silenced.
+        let both = Verdict {
+            mode: Mode::Full,
+            destructive: vec![Destructive::Unreadable, Destructive::Drop],
+        };
+        assert_eq!(
+            gate_own_run(&both, Mode::Full, &[], true),
+            Some(Stop::Confirm(Destructive::Drop))
+        );
+        assert_eq!(
+            gate_own_run(&both, Mode::Full, &[Destructive::Drop], true),
+            None
+        );
+        assert_eq!(
+            gate_own_run(&both, Mode::Full, &[], false),
+            Some(Stop::RunOnce)
+        );
                 assert_eq!(gate(&verdict, mode, &[]), Some(Stop::RunOnce), "{sql}");
             }
             assert!(!rerunnable(*engine, sql), "{sql}");
