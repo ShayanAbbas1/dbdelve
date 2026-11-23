@@ -11397,13 +11397,17 @@ fn a_failed_save_keeps_the_hide_and_the_kill_switch_for_the_next(cx: &mut TestAp
     });
 }
 
-#[gpui::test]
-fn a_new_target_hides_a_grant_this_window_had_not_taken_on_yet(cx: &mut TestAppContext) {
+/// Launches one hidden SQLite profile `dev`, has another window grant it for
+/// the target this one still has, then saves `edit` of its config from this
+/// window: the grant must not carry over to what the edit points at.
+fn assert_edit_hides_a_grant_not_taken_on_yet(
+    cx: &mut TestAppContext,
+    edit: impl FnOnce(&mut ConnectionConfig),
+) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("dev", "Dev", ""));
         assert!(!agent_visible(&workspace, cx, "dev"));
 
-        // Another window granted it, for the target this one still has.
         let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
         list.profiles
             .iter_mut()
@@ -11412,20 +11416,48 @@ fn a_new_target_hides_a_grant_this_window_had_not_taken_on_yet(cx: &mut TestAppC
             .agent_visible = true;
         store::save_profiles(&list).expect("the other window saves");
 
-        // A timeout is a change `needs_reconnect` sees and `retargets` does not.
         workspace.update_in(cx, |workspace, window, cx| {
-            let mut config = workspace.profiles[0].config.clone();
-            if let ConnectionConfig::Sqlite {
-                statement_timeout, ..
-            } = &mut config
-            {
-                *statement_timeout += 1;
-            }
+            let mut config = workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "dev")
+                .expect("the profile is open")
+                .config
+                .clone();
+            edit(&mut config);
             workspace.save_profile("dev", "Dev".into(), config, None, window, cx);
         });
         assert!(!agent_visible(&workspace, cx, "dev"));
         assert!(!saved_visible("dev"));
         quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_new_target_hides_a_grant_this_window_had_not_taken_on_yet(cx: &mut TestAppContext) {
+    assert_edit_hides_a_grant_not_taken_on_yet(cx, |config| {
+        let ConnectionConfig::Sqlite { path, .. } = config else {
+            panic!("the profile is SQLite");
+        };
+        let other = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("other.db");
+        std::fs::write(&other, b"").expect("the second file is written");
+        *path = other.display().to_string();
+    });
+}
+
+#[gpui::test]
+fn a_timeout_edit_hides_a_grant_this_window_had_not_taken_on_yet(cx: &mut TestAppContext) {
+    // A timeout is a change `needs_reconnect` sees and `retargets` does not.
+    assert_edit_hides_a_grant_not_taken_on_yet(cx, |config| {
+        let ConnectionConfig::Sqlite {
+            statement_timeout, ..
+        } = config
+        else {
+            panic!("the profile is SQLite");
+        };
+        *statement_timeout += 1;
     });
 }
 
