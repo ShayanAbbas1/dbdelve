@@ -143,6 +143,19 @@ impl Shown {
             || entries.iter().any(|entry| matches(entry, name))
     }
 
+    /// Whether an object in `schema` is listed: of the own database where
+    /// `elsewhere` is `None`, else of that other database, which has to be
+    /// shown itself and whose schemas are matched without the active one. A
+    /// tab or a shortcut on an object this does not list is hidden, not gone.
+    pub fn lists_object(&self, elsewhere: Option<&str>, schema: &str) -> bool {
+        match elsewhere {
+            None => self.shows_schema(schema),
+            Some(database) => {
+                self.shows_database(database) && self.in_another_database().shows_schema(schema)
+            }
+        }
+    }
+
     /// What this shows of a catalog another database's session read: the same
     /// lists, with no active schema, which is the own database's.
     pub fn in_another_database(&self) -> Self {
@@ -610,6 +623,32 @@ mod tests {
             .narrow_catalog(catalog(&["main", "x"]));
         assert_eq!(names(&other), ["x"]);
         assert_eq!(other.left_out, 1);
+    }
+
+    #[test]
+    fn an_object_is_listed_by_its_schema_and_elsewhere_by_its_database_too() {
+        let include = Include::from_stored(text(&["app*"]), text(&["public"]));
+        let shown = include.resolve(Levels::DatabaseThenSchema, Some("db"), Some("main"));
+
+        assert!(shown.lists_object(None, "public"));
+        assert!(shown.lists_object(None, "main"), "the active schema");
+        assert!(!shown.lists_object(None, "audit"));
+        assert!(shown.lists_object(Some("app1"), "public"));
+        assert!(
+            !shown.lists_object(Some("app1"), "main"),
+            "active only at home"
+        );
+        assert!(!shown.lists_object(Some("other"), "public"));
+
+        let mysql = Include::from_stored(text(&["app*"]), Vec::new()).resolve(
+            Levels::DatabaseIsSchema,
+            Some("db"),
+            None,
+        );
+        assert!(mysql.lists_object(None, "app1"));
+        assert!(mysql.lists_object(None, "db"));
+        assert!(!mysql.lists_object(None, "reporting"));
+        assert!(Shown::everything().lists_object(Some("any"), "thing"));
     }
 
     #[test]

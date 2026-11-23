@@ -478,8 +478,6 @@ impl Profile {
             .or_else(|| connection?.current_database().map(str::to_string))
     }
 
-    /// The include lists as they apply to this connection now, owned so a
-    /// read on a background thread can narrow its answer with them.
     /// Starts a listing of the databases, returning what [`Self::latest_listing`]
     /// asks of its answer.
     pub(crate) fn start_listing(&mut self) -> u64 {
@@ -492,12 +490,23 @@ impl Profile {
         self.listings == started
     }
 
+    /// The include lists as they apply to this connection now, owned so a
+    /// read on a background thread can narrow its answer with them.
     pub(crate) fn shown(&self) -> Shown {
         self.include.resolve(
             self.config.target().levels(),
             self.active_database().as_deref(),
             self.active_schema(),
         )
+    }
+
+    /// Whether the include lists hide an object in `schema` of `database`
+    /// (`None` for the connection's own), so the narrowed catalog not
+    /// listing it says nothing about whether it exists.
+    pub(crate) fn filter_hides(&self, database: Option<&str>, schema: &str) -> bool {
+        let own = self.active_database();
+        let elsewhere = database.filter(|database| own.as_deref() != Some(*database));
+        !self.shown().lists_object(elsewhere, schema)
     }
 
     /// The database a folder or a pin names its objects by, where the

@@ -2580,6 +2580,7 @@ impl Workspace {
             let (got, waiting) = restorable(
                 profile.config.engine(),
                 profile.draws_diagrams(),
+                profile.filter_hides(stored.database.as_deref(), &stored.schema),
                 profile.catalog_state_of(stored.database.as_deref()),
                 std::slice::from_ref(stored),
             );
@@ -2693,10 +2694,13 @@ fn opened_from(catalog: &Catalog, target: ExplorerTarget) -> Option<OpenedObject
 /// A routine waits for the routines, not just the catalog: resolved against
 /// relations alone it would find nothing and be dropped for good. One whose
 /// routines failed to load keeps waiting, because a failed listing says nothing
-/// about whether the routine still exists.
+/// about whether the routine still exists. One in a schema or database the
+/// connection's filter hides, `hidden`, waits too: the narrowed catalog does
+/// not list it, which says nothing about whether it still exists either.
 fn restorable(
     engine: Engine,
     draws: bool,
+    hidden: bool,
     catalog: &CatalogState,
     pending: &[store::StoredObject],
 ) -> (Vec<(Reopened, bool)>, Vec<store::StoredObject>) {
@@ -2718,6 +2722,8 @@ fn restorable(
                 ),
                 stored.active,
             ));
+        } else if stored.routine && hidden {
+            still_pending.push(stored.clone());
         } else if stored.routine {
             match catalog {
                 Some(catalog) if routines == Routines::Loaded => opened.extend(
@@ -2907,8 +2913,13 @@ mod tests {
             stored("digest()", true),
         ];
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
 
         assert_eq!(opened.len(), 2, "before the catalog, as a relation");
         assert_eq!(name(&opened[0].0), "accounts");
@@ -2937,8 +2948,13 @@ mod tests {
         };
         let pending = [stored("accounts", false), diagram.clone()];
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, false, &CatalogState::Loading, &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            false,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
         assert_eq!(opened.len(), 1);
         assert_eq!(name(&opened[0].0), "accounts");
         assert_eq!(
@@ -2947,8 +2963,13 @@ mod tests {
             "kept whole, view and all"
         );
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, true, &CatalogState::Loading, &waiting);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &waiting,
+        );
         assert!(matches!(opened[..], [(Reopened::Diagram(..), true)]));
         assert!(waiting.is_empty());
     }
@@ -2987,8 +3008,13 @@ mod tests {
         // Relations are in, routines are not: the relation opens, and the
         // routine is neither resolved against a catalog without it nor dropped.
         for routines in [Routines::Loading, Routines::Failed] {
-            let (opened, waiting) =
-                restorable(Engine::Postgres, true, &catalog_with(routines), &pending);
+            let (opened, waiting) = restorable(
+                Engine::Postgres,
+                true,
+                false,
+                &catalog_with(routines),
+                &pending,
+            );
             assert_eq!(opened.len(), 1);
             assert_eq!(name(&opened[0].0), "accounts");
             assert_eq!(waiting, [stored("digest()", true)]);
@@ -2997,11 +3023,26 @@ mod tests {
         let (opened, waiting) = restorable(
             Engine::Postgres,
             true,
+            false,
             &catalog_with(Routines::Loaded),
             &pending,
         );
         assert_eq!(opened.len(), 2);
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_routine_in_a_schema_the_filter_hides_waits_rather_than_being_dropped() {
+        let pending = [stored("digest()", true)];
+        let hidden = CatalogState::Loaded(Catalog::default(), Routines::Loaded);
+
+        let (opened, waiting) = restorable(Engine::Postgres, true, true, &hidden, &pending);
+
+        assert!(opened.is_empty());
+        assert_eq!(
+            waiting, pending,
+            "kept on disk for when the filter shows it"
+        );
     }
 
     #[test]
@@ -3011,6 +3052,7 @@ mod tests {
         let (opened, waiting) = restorable(
             Engine::Postgres,
             true,
+            false,
             &catalog_with(Routines::Skipped),
             &pending,
         );
@@ -3031,7 +3073,13 @@ mod tests {
             stored("accounts", false),
         ];
 
-        let (opened, _) = restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+        let (opened, _) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
 
         assert!(matches!(
             opened[0].0,
@@ -3051,8 +3099,13 @@ mod tests {
             ..stored("accounts", false)
         }];
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
 
         assert_eq!(opened.len(), 1);
         assert_eq!(name(&opened[0].0), "accounts");
