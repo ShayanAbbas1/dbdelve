@@ -1,7 +1,8 @@
 //! The single answer for a statement an agent originates: run it, ask the human
 //! to approve it, or refuse it by name.
 //!
-//! [`agent_gate`] is a pure function of `(engine, sql, mode)`. It reads no
+//! [`agent_gate_on`] is a pure function of `(engine, version, sql, mode)`,
+//! the version being data the caller read when it connected. It reads no
 //! profile, no silenced confirmation and no earlier approval, so the mode passed
 //! for a call is the ceiling for that call and nothing else, and two callers
 //! cannot change each other's answers. It reads the parse [`super::classify`]
@@ -68,7 +69,10 @@
 //!     and Full, and `Run`s at Read-only: the call may be a user-defined
 //!     function that writes, and at Read-write and Full no engine holds one
 //!     back. The name is judged as written, so a schema-qualified or quoted one
-//!     is unlisted. It narrows what the mode lets run and never widens it.
+//!     is unlisted. On Postgres a listed name counts only on a server at least
+//!     as new as the release it first exists in ([`agent_gate_on`]), since the
+//!     list is read off the newest one; an unknown version is the oldest.
+//!     It narrows what the mode lets run and never widens it.
 //! 12. Anything else is a read, and `Run`s.
 //!
 //! The mode stays the ceiling: `Run` and `Approve` both imply that `gate` with
@@ -201,9 +205,23 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// The answer for `sql` as an agent originates it on a profile whose mode is
-/// `mode`. See the module header for the order the reasons are asked in.
+/// [`agent_gate_on`] on a server whose version is not known.
+#[cfg(test)]
 pub(crate) fn agent_gate(engine: Engine, sql: &str, mode: Mode) -> AgentVerdict {
+    agent_gate_on(engine, None, sql, mode)
+}
+
+/// The answer for `sql` as an agent originates it on a profile whose mode is
+/// `mode`, on a server that reported `version` (Postgres's
+/// `server_version_num`). See the module header for the order the reasons
+/// are asked in. The version is data the caller read when it connected, so
+/// the gate stays pure; `None` counts as the oldest release.
+pub(crate) fn agent_gate_on(
+    engine: Engine,
+    version: Option<u32>,
+    sql: &str,
+    mode: Mode,
+) -> AgentVerdict {
     let read = parsed(engine, sql);
     let verdict = read.verdict;
 
@@ -305,11 +323,42 @@ pub(crate) fn agent_gate(engine: Engine, sql: &str, mode: Mode) -> AgentVerdict 
     // and a read runs.
     if super::calls_listed(engine, sql, engine.spec().sql.egress_functions, &[])
         || reads_a_bare_path(engine, sql)
-        || (mode >= Mode::ReadWrite && read.unlisted_call)
+        || (mode >= Mode::ReadWrite
+            && (read.unlisted_call || calls_a_newer_built_in(engine, version, sql)))
     {
         return AgentVerdict::Approve(verdict, None);
     }
     AgentVerdict::Run
+}
+
+/// Whether `sql` calls a name on `engine`'s built-in list that a server of
+/// `version` does not have, so a user function may hold it. Read by the same
+/// token scan as the egress list, which matches a qualified spelling too: the
+/// safe direction.
+fn calls_a_newer_built_in(engine: Engine, version: Option<u32>, sql: &str) -> bool {
+    let newer: Vec<&str> = newer_built_ins(engine, version).collect();
+    super::calls_listed(engine, sql, &newer, &[])
+}
+
+/// The listed names a server of `version` lacks; `None` is the oldest release.
+fn newer_built_ins(engine: Engine, version: Option<u32>) -> impl Iterator<Item = &'static str> {
+    let since = match engine {
+        Engine::Postgres => crate::db::POSTGRES_BUILTIN_SINCE,
+        _ => "",
+    };
+    let version = version.unwrap_or(0);
+    since
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once(' '))
+        // A line that does not read as a version counts as newer than any.
+        .filter(move |(_, since)| {
+            since
+                .parse::<u32>()
+                .ok()
+                .is_none_or(|since| since > version)
+        })
+        .map(|(name, _)| name)
 }
 
 /// What an approvable statement does, which is what the approval says first.
@@ -324,7 +373,7 @@ pub(crate) enum ApprovalKind {
     UnlistedCall,
 }
 
-/// The kind of a statement [`agent_gate`] approved with `verdict`. It asks the
+/// The kind of a statement [`agent_gate_on`] approved with `verdict`. It asks the
 /// predicates step 10 asks rather than restating them, so what the dialog says
 /// cannot contradict the gate: a write is the step-9 verdict at Read-write, and
 /// of the reads the gate approves the ones that are not egress are the ones
@@ -364,7 +413,7 @@ pub(crate) fn creates_index_concurrently(engine: Engine, sql: &str) -> bool {
 /// zero is also what a command with no row count reports (see
 /// [`crate::db::QueryResult::rows_affected`]), so it means "no rows" only for
 /// these two statements. `DELETE` and `MERGE` would count too, and are not
-/// listed because [`agent_gate`] approves neither: every `DELETE` is refused,
+/// listed because [`agent_gate_on`] approves neither: every `DELETE` is refused,
 /// and a `MERGE` needs Full.
 pub(crate) fn counts_rows(engine: Engine, sql: &str) -> bool {
     matches!(
@@ -766,6 +815,64 @@ mod tests {
             "SELECT * FROM t WHERE v = 'data.csv'",
             AgentVerdict::Run,
         );
+    }
+
+    #[test]
+    fn a_listed_name_counts_only_from_the_release_it_first_exists_in() {
+        for (version, expected) in [
+            (Some(180_000), AgentVerdict::Run),
+            (Some(180_006), AgentVerdict::Run),
+            (Some(170_009), AgentVerdict::Approve(Verdict::READ, None)),
+            (None, AgentVerdict::Approve(Verdict::READ, None)),
+        ] {
+            let sql = "SELECT uuidv7()";
+            assert_eq!(
+                agent_gate_on(Engine::Postgres, version, sql, Mode::ReadWrite),
+                expected,
+                "{version:?}"
+            );
+            assert_eq!(
+                agent_gate_on(Engine::Postgres, version, sql, Mode::ReadOnly),
+                AgentVerdict::Run,
+                "{version:?}"
+            );
+        }
+        // A name every release has runs whatever the version.
+        assert_eq!(
+            agent_gate_on(
+                Engine::Postgres,
+                None,
+                "SELECT lower(a) FROM t",
+                Mode::ReadWrite
+            ),
+            AgentVerdict::Run
+        );
+        // Grammar added in 17 is a plain call before it.
+        let scalar = "SELECT json_scalar(1)";
+        assert_eq!(
+            agent_gate_on(Engine::Postgres, Some(160_000), scalar, Mode::ReadWrite),
+            AgentVerdict::Approve(Verdict::READ, None)
+        );
+        assert_eq!(
+            agent_gate_on(Engine::Postgres, Some(170_000), scalar, Mode::ReadWrite),
+            AgentVerdict::Run
+        );
+    }
+
+    #[test]
+    fn every_dated_built_in_is_listed_and_dated_after_9_2() {
+        let listed: Vec<&str> = listed_names(Engine::Postgres).collect();
+        for line in crate::db::POSTGRES_BUILTIN_SINCE
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let (name, since) = line.split_once(' ').expect("a name and a version");
+            assert!(listed.contains(&name), "{name} is dated and not listed");
+            let since: u32 = since.parse().expect("a server_version_num");
+            assert!((90_201..=180_000).contains(&since), "{line}");
+        }
+        // Not Postgres grammar in any release, so a user function can take it.
+        assert!(!listed.contains(&"try_cast"));
     }
 
     #[test]
@@ -2184,8 +2291,9 @@ mod tests {
                 (Engine::MySql, "SELECT last_insert_id()"),
                 (Engine::Postgres, "SELECT make_interval(days := 10)"),
             ] {
+                // On a server new enough for each name: `make_interval` is 9.4's.
                 assert_eq!(
-                    agent_gate(engine, sql, mode),
+                    agent_gate_on(engine, Some(180_000), sql, mode),
                     AgentVerdict::Run,
                     "{engine:?} {mode:?}: {sql}"
                 );

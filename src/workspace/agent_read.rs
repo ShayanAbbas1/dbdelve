@@ -8,7 +8,7 @@
 //! user's profile is never connected, reconnected or marked by it.
 //!
 //! The statement is sent exactly as the agent wrote it, after
-//! [`crate::sql::agent_gate`] judged that text. Nothing is appended to it,
+//! [`crate::sql::agent_gate_on`] judged that text. Nothing is appended to it,
 //! wrapped around it or rewritten, so the gate's verdict is about what the
 //! server receives. The one exception is `explain_query`, which sends the
 //! engine's EXPLAIN of the statement: [`explain_statement`] composes it first
@@ -30,7 +30,7 @@ use crate::{
         KeyTarget, QueryResult, RelationKind, Routine, RoutineKind, Structure,
     },
     explain::compact,
-    sql::{AgentVerdict, agent_gate},
+    sql::{AgentVerdict, agent_gate_on},
 };
 
 // ponytail: an agent is told the first hundred rows, and the tool takes no
@@ -353,10 +353,15 @@ pub(crate) const ACCESS_CHANGED: &str =
 /// or `None` when it still may: it was admitted for another target, or the
 /// gate no longer gives its statement the verdict it was admitted under (a
 /// read it let run, or the approval a person gave).
+///
+/// `known` is the server version known now; an approval is asked again on
+/// the version it was given on, so a version learned meanwhile changes
+/// nothing a person decided.
 fn no_longer_admitted(
     waiting: &Waiting,
     config: &ConnectionConfig,
     mode: Mode,
+    known: Option<u32>,
 ) -> Option<(Status, &'static str)> {
     if waiting.admitted.retargets(config) {
         return Some((Status::Rejected, super::agent::NO_LONGER_AVAILABLE));
@@ -370,8 +375,12 @@ fn no_longer_admitted(
         | AgentWork::Relationships { .. }
         | AgentWork::Routines { .. } => return None,
     };
+    let version = waiting
+        .work
+        .approved()
+        .map_or(known, |approved| approved.server_version);
     let approved = waiting.work.approved().map(|approved| approved.verdict);
-    let now = AuditVerdict::held_by(agent_gate(config.engine(), sql, mode));
+    let now = AuditVerdict::held_by(agent_gate_on(config.engine(), version, sql, mode));
     match (approved, now) {
         (was, now) if was == now => None,
         (Some(_), _) => Some((Status::RefusedByGate, super::agent::CHANGED_SINCE_SHOWN)),
@@ -408,6 +417,8 @@ pub(super) struct Ended {
 pub(crate) struct Approved {
     pub(crate) verdict: AuditVerdict,
     pub(crate) engine: Engine,
+    /// The server version the gate gave `verdict` on.
+    pub(crate) server_version: Option<u32>,
 }
 
 /// What a read that ended records of itself: for a statement, that the gate
@@ -718,13 +729,14 @@ impl Workspace {
         // or the mode the gate judged it at changed. Such a call is answered
         // here and never sent; one already running is left to finish, as the
         // mode it was sent under was in force when it was sent.
+        let known = self.known_server_version(profile_id, &config);
         let Some(lane) = self.agent.lanes.get_mut(profile_id) else {
             return;
         };
         let mut stale = Vec::new();
         let mut kept = VecDeque::new();
         for waiting in lane.waiting.drain(..) {
-            match no_longer_admitted(&waiting, &config, mode) {
+            match no_longer_admitted(&waiting, &config, mode, known) {
                 Some(why) => stale.push((waiting, why)),
                 None => kept.push_back(waiting),
             }
@@ -884,13 +896,16 @@ impl Workspace {
         profile_id: &str,
         connection: &Connection,
     ) -> bool {
-        let running = self
-            .agent
-            .lanes
-            .get_mut(profile_id)
-            .and_then(|lane| lane.running.as_mut())
-            .filter(|running| running.id == id);
-        match running {
+        let Some(lane) = self.agent.lanes.get_mut(profile_id) else {
+            return false;
+        };
+        // Learned here, so the next call is gated on the server it reaches.
+        if let Some(version) = connection.server_version() {
+            self.agent
+                .server_versions
+                .insert(profile_id.to_string(), (lane.opened_from.clone(), version));
+        }
+        match lane.running.as_mut().filter(|running| running.id == id) {
             Some(running) => {
                 running.connection = Some(connection.clone());
                 true
@@ -1688,11 +1703,12 @@ impl Declined {
 /// already an EXPLAIN; an engine with no plan; `analyze` on an engine with no
 /// analyzed plan, which is never answered with a plain plan, and where the
 /// engine composes its EXPLAIN; a statement the engine cannot explain. Then
-/// [`agent_gate`] judges that composed text, so an ANALYZE follows the verdict
+/// [`agent_gate_on`] judges that composed text, so an ANALYZE follows the verdict
 /// of the statement it wraps. Only `Run` returns the statement, and that string
 /// is what is sent.
 pub(crate) fn explain_statement(
     engine: Engine,
+    server_version: Option<u32>,
     sql: &str,
     analyze: bool,
     mode: Mode,
@@ -1717,7 +1733,7 @@ pub(crate) fn explain_statement(
     if let Err(message) = crate::sql::explainable(engine, sql) {
         return Err(Declined::said(Status::RefusedByGate, message));
     }
-    let verdict = agent_gate(engine, &composed, mode);
+    let verdict = agent_gate_on(engine, server_version, &composed, mode);
     // What an approval would show is not for the agent.
     let text = match &verdict {
         AgentVerdict::Run => return Ok(composed),
@@ -1925,6 +1941,7 @@ mod tests {
                 expiry: None,
             },
             engine: Engine::DuckDb,
+            server_version: None,
         };
         let facts = facts_of(sql(), Some(approved), Instant::now(), Ended::default());
         assert_eq!(
@@ -1965,16 +1982,16 @@ mod tests {
     #[test]
     fn a_statement_is_sent_only_as_the_composed_explain_the_gate_ran() {
         let select = "SELECT * FROM t";
-        let composed = explain_statement(Engine::Postgres, select, false, Mode::ReadOnly)
+        let composed = explain_statement(Engine::Postgres, None, select, false, Mode::ReadOnly)
             .expect("a plain plan of a read runs");
         assert_eq!(composed, "EXPLAIN SELECT * FROM t");
-        let composed = explain_statement(Engine::Postgres, select, true, Mode::ReadOnly)
+        let composed = explain_statement(Engine::Postgres, None, select, true, Mode::ReadOnly)
             .expect("an analyzed plan of a read runs");
         assert_eq!(composed, "EXPLAIN ANALYZE SELECT * FROM t");
 
         // An ANALYZE of a write is never sent, and says what the gate judged.
         for mode in Mode::ALL {
-            let held = explain_statement(Engine::Postgres, "UPDATE t SET a = 1", true, mode)
+            let held = explain_statement(Engine::Postgres, None, "UPDATE t SET a = 1", true, mode)
                 .expect_err("an analyzed update is not run");
             assert_eq!(held.status, Status::RefusedByGate);
             assert_eq!(
@@ -1983,12 +2000,18 @@ mod tests {
             );
             assert!(held.verdict.is_some());
             assert_ne!(held.text, "");
-            let removed = explain_statement(Engine::Postgres, "DELETE FROM t", true, mode)
+            let removed = explain_statement(Engine::Postgres, None, "DELETE FROM t", true, mode)
                 .expect_err("an analyzed delete is not run");
             assert_eq!(removed.status, Status::RefusedByGate);
         }
-        let held = explain_statement(Engine::Postgres, "UPDATE t SET a = 1", true, Mode::Full)
-            .expect_err("a person approves it first");
+        let held = explain_statement(
+            Engine::Postgres,
+            None,
+            "UPDATE t SET a = 1",
+            true,
+            Mode::Full,
+        )
+        .expect_err("a person approves it first");
         assert_eq!(held.text, NOT_EXPLAINED);
         assert_eq!(
             NOT_EXPLAINED,
@@ -1999,12 +2022,13 @@ mod tests {
     #[test]
     fn explain_analyze_follows_the_wrapped_statement() {
         let mode = Mode::ReadWrite;
-        let composed = explain_statement(Engine::Postgres, "SELECT a FROM t", true, mode)
+        let composed = explain_statement(Engine::Postgres, None, "SELECT a FROM t", true, mode)
             .expect("an analyzed read runs");
         assert_eq!(composed, "EXPLAIN ANALYZE SELECT a FROM t");
 
         let held = explain_statement(
             Engine::Postgres,
+            None,
             "UPDATE t SET a = 1 WHERE id = 1",
             true,
             mode,
@@ -2013,8 +2037,14 @@ mod tests {
         assert_eq!(held.status, Status::RefusedByGate);
         assert_eq!(held.text, NOT_EXPLAINED);
 
-        let removed = explain_statement(Engine::Postgres, "DELETE FROM t WHERE id = 1", true, mode)
-            .expect_err("an analyzed delete is refused");
+        let removed = explain_statement(
+            Engine::Postgres,
+            None,
+            "DELETE FROM t WHERE id = 1",
+            true,
+            mode,
+        )
+        .expect_err("an analyzed delete is refused");
         assert_eq!(removed.status, Status::RefusedByGate);
         assert_eq!(
             removed.text,
@@ -2024,12 +2054,12 @@ mod tests {
         // A leading keyword says nothing: this reads as a SELECT and deletes.
         let writable = "WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d";
         for mode in Mode::ALL {
-            let refused = explain_statement(Engine::Postgres, writable, true, mode)
+            let refused = explain_statement(Engine::Postgres, None, writable, true, mode)
                 .expect_err("an analyzed writable CTE is never run");
             assert_eq!(refused.status, Status::RefusedByGate);
         }
 
-        let refused = explain_statement(Engine::MongoDb, "db.c.deleteMany({})", true, mode)
+        let refused = explain_statement(Engine::MongoDb, None, "db.c.deleteMany({})", true, mode)
             .expect_err("a delete is not explained");
         assert_eq!(refused.status, Status::RefusedByGate);
         assert_eq!(
@@ -2041,7 +2071,7 @@ mod tests {
     #[test]
     fn explain_defaults_to_the_plain_plan_and_never_downgrades_analyze() {
         for engine in Engine::ALL {
-            let plain = explain_statement(engine, "SELECT 1", false, Mode::ReadOnly);
+            let plain = explain_statement(engine, None, "SELECT 1", false, Mode::ReadOnly);
             match engine.explain_prefix(ExplainMode::Plan) {
                 Some(_) => {
                     // Mongo and SQL alike: whatever is sent is what the engine
@@ -2056,7 +2086,7 @@ mod tests {
                 None => assert!(plain.is_err(), "{engine:?} has no plan to ask for"),
             }
 
-            let analyzed = explain_statement(engine, "SELECT 1", true, Mode::ReadOnly);
+            let analyzed = explain_statement(engine, None, "SELECT 1", true, Mode::ReadOnly);
             if matches!(engine, Engine::Postgres | Engine::MySql | Engine::MariaDb) {
                 assert!(plain.is_ok() && analyzed.is_ok(), "{engine:?} runs a read");
             }
@@ -2084,7 +2114,7 @@ mod tests {
         }
         // Not left to the loop above: it must have found these two.
         for engine in [Engine::Sqlite, Engine::ClickHouse] {
-            let said = explain_statement(engine, "SELECT 1", true, Mode::Full)
+            let said = explain_statement(engine, None, "SELECT 1", true, Mode::Full)
                 .expect_err("neither measures a plan");
             assert_eq!(said.status, Status::Executed);
             assert_eq!(
@@ -2108,7 +2138,7 @@ mod tests {
             Engine::Generic,
         ] {
             for analyze in [false, true] {
-                let said = explain_statement(engine, "SELECT 1", analyze, Mode::Full)
+                let said = explain_statement(engine, None, "SELECT 1", analyze, Mode::Full)
                     .expect_err("there is no plan to ask for");
                 assert_eq!(said.status, Status::Executed, "{engine:?}");
                 assert_eq!(
@@ -2127,7 +2157,7 @@ mod tests {
             (Engine::MongoDb, r#"db.c.find({}).explain("queryPlanner")"#),
         ] {
             for analyze in [false, true] {
-                let refused = explain_statement(engine, sql, analyze, Mode::Full)
+                let refused = explain_statement(engine, None, sql, analyze, Mode::Full)
                     .expect_err("an explanation is not explained again");
                 assert_eq!(refused.status, Status::RefusedByGate, "{engine:?}");
                 assert_eq!(refused.text, "the statement is already an EXPLAIN");
@@ -2180,6 +2210,7 @@ mod tests {
         let connection = live_agent_connection();
         let statement = explain_statement(
             Engine::Postgres,
+            None,
             "SELECT * FROM accounts",
             true,
             Mode::ReadOnly,

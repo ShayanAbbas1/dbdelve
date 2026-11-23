@@ -1162,6 +1162,9 @@ pub struct Connection {
     /// The schema the server's own `search_path` put the session in, read
     /// before a picked one is set. None if it would not say, or names none.
     current_schema: Option<String>,
+    /// The server's `server_version_num`, read when the session opened. None
+    /// if it would not say.
+    server_version: Option<u32>,
     /// The database this session is on, which a service may have named where
     /// the profile left it blank. A session stays on the one it opened.
     current_database: String,
@@ -1349,22 +1352,23 @@ impl Connection {
             },
             _bridged: bridged,
         };
-        let row =
-            client
-                .driver
-                .block_on(client.client.simple_query(
-                    "SELECT pg_catalog.pg_backend_pid(), pg_catalog.current_schema()",
-                ))
-                .ok()
-                .and_then(Result::ok)
-                .and_then(|messages| {
-                    messages.into_iter().find_map(|message| match message {
-                        SimpleQueryMessage::Row(row) => Some(row),
-                        _ => None,
-                    })
-                });
+        let row = client
+            .driver
+            .block_on(client.client.simple_query(
+                "SELECT pg_catalog.pg_backend_pid(), pg_catalog.current_schema(), \
+                     pg_catalog.current_setting('server_version_num')",
+            ))
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|messages| {
+                messages.into_iter().find_map(|message| match message {
+                    SimpleQueryMessage::Row(row) => Some(row),
+                    _ => None,
+                })
+            });
         let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
-        let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
+        let current_schema = row.as_ref().and_then(|row| row.get(1).map(str::to_string));
+        let server_version = row.and_then(|row| row.get(2)?.parse().ok());
         verify_startup_options(&mut client, server)?;
         // Before the pick and the script, so a zone the script sets wins. A
         // `SET` after connecting, not a startup option, as the pick is.
@@ -1394,6 +1398,7 @@ impl Connection {
             cancel: client.client.cancel_token(),
             pid,
             current_schema,
+            server_version,
             current_database: dbname(server).to_string(),
             side: Arc::default(),
             connector,
@@ -1448,6 +1453,11 @@ impl Connection {
 
     pub fn current_schema(&self) -> Option<&str> {
         self.current_schema.as_deref()
+    }
+
+    /// The server's `server_version_num`, as it said when the session opened.
+    pub fn server_version(&self) -> Option<u32> {
+        self.server_version
     }
 
     /// `SET` on this session, then on the side session, which is never in a
@@ -4498,8 +4508,10 @@ mod tests {
 
     /// The built-in list is pinned against the server's own catalog: a listed
     /// name the server has must be no volatile function, which is how a
-    /// function that writes shows itself. A name the server lacks only fails
-    /// on a server as new as the list, because a user function could take it.
+    /// function that writes shows itself. A name the server lacks must be
+    /// grammar, or dated after this server's release on
+    /// `POSTGRES_BUILTIN_SINCE`, because a user function could take it; the
+    /// agent gate counts it as listed only from that release on.
     #[test]
     #[ignore = "requires the compose databases"]
     fn live_every_listed_built_in_changes_nothing() {
@@ -4521,7 +4533,9 @@ mod tests {
             "SELECT DISTINCT proname::text FROM pg_catalog.pg_proc \
              WHERE pronamespace = 'pg_catalog'::regnamespace AND provolatile = 'v'",
         );
-        let keywords = names("SELECT word FROM pg_catalog.pg_get_keywords()");
+        // Only the kinds no function can be called by unqualified.
+        let keywords =
+            names("SELECT word FROM pg_catalog.pg_get_keywords() WHERE catcode IN ('C', 'R')");
         let version: u32 = names("SELECT current_setting('server_version_num')")
             .into_iter()
             .next()
@@ -4544,10 +4558,18 @@ mod tests {
                     !volatile.contains(name) || HARMLESS_VOLATILE.contains(&name),
                     "{name} is on the built-in list and has a volatile overload"
                 );
-            } else if version >= 180000 {
+            } else {
+                let dated_later = crate::db::POSTGRES_BUILTIN_SINCE.lines().any(|line| {
+                    line.split_once(' ').is_some_and(|(dated, since)| {
+                        dated == name && since.parse::<u32>().is_ok_and(|since| since > version)
+                    })
+                });
                 assert!(
-                    keywords.contains(name) || crate::db::spec::GRAMMAR_FUNCTIONS.contains(&name),
-                    "{name} is on the built-in list and in no catalog of this server"
+                    dated_later
+                        || keywords.contains(name)
+                        || crate::db::spec::GRAMMAR_FUNCTIONS.contains(&name),
+                    "{name} is on the built-in list, in no catalog of this server, \
+                     and not dated after it"
                 );
             }
         }

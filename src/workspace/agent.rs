@@ -22,7 +22,7 @@ use super::*;
 use crate::{
     agent::{CallId, EXPIRY, Inbound, Reply, Status, result::Total, tools::Tool},
     db::ConnectionConfig,
-    sql::{AgentVerdict, ApprovalKind, agent_gate, approval_kind, creates_index_concurrently},
+    sql::{AgentVerdict, ApprovalKind, agent_gate_on, approval_kind, creates_index_concurrently},
     ui::size_fact,
 };
 
@@ -65,6 +65,11 @@ pub(crate) struct AgentState {
     /// The approved writes running now, found by their id. Each holds no
     /// connection and no way to cancel it: see [`agent_write`].
     pub(crate) writes: Vec<agent_write::Writing>,
+    /// The server version an agent connection to each profile reported, by
+    /// profile id, with the config it was opened from: the gate dates the
+    /// built-in list by it ([`crate::sql::agent_gate_on`]), and a config that
+    /// has changed since is a server not yet asked.
+    pub(crate) server_versions: HashMap<String, (ConnectionConfig, u32)>,
     /// The call whose Approve is live: the approval in front, once
     /// [`ARM_DELAY`] has passed since it was shown. At most one.
     pub(crate) armed: Option<CallId>,
@@ -507,6 +512,9 @@ pub(crate) struct Approval {
     /// user's own readers and writers while it runs, read once when the call
     /// arrived.
     pub(crate) locks_the_file: bool,
+    /// The server version `verdict` was given on, so the re-gate at Approve
+    /// asks the same question.
+    pub(crate) server_version: Option<u32>,
     /// Set by the socket's hangup watcher the moment the caller leaves, before
     /// the window hears of it. Read at Approve, so a click that lands in that
     /// gap starts nothing.
@@ -1018,8 +1026,12 @@ impl Workspace {
                 (Status::RefusedByGate, CHANGED_SINCE_SHOWN, None)
             }
             Some(profile)
-                if agent_gate(profile.config.engine(), &approval.sql, profile.mode)
-                    != approval.verdict
+                if agent_gate_on(
+                    profile.config.engine(),
+                    approval.server_version,
+                    &approval.sql,
+                    profile.mode,
+                ) != approval.verdict
                     || profile.config != approval.config =>
             {
                 (Status::RefusedByGate, CHANGED_SINCE_SHOWN, None)
@@ -1068,7 +1080,11 @@ impl Workspace {
                                 },
                                 AgentWork::Query {
                                     sql: approval.sql,
-                                    approved: Some(Approved { verdict, engine }),
+                                    approved: Some(Approved {
+                                        verdict,
+                                        engine,
+                                        server_version: approval.server_version,
+                                    }),
                                 },
                                 reply,
                                 arrived,
@@ -1530,7 +1546,8 @@ impl Workspace {
                 // has none; it is the empty statement.
                 let sql = args.sql.unwrap_or_default();
                 let engine = resolved.config.engine();
-                let verdict = agent_gate(engine, &sql, mode);
+                let server_version = self.known_server_version(&resolved.id, &resolved.config);
+                let verdict = agent_gate_on(engine, server_version, &sql, mode);
                 // The verdict's contents are what an approval will show,
                 // which agents do not get.
                 let (refused, audited) = match &verdict {
@@ -1570,6 +1587,7 @@ impl Workspace {
                                             .config
                                             .agent_read_can_block_commits(),
                                         config: resolved.config,
+                                        server_version,
                                         gone,
                                     },
                                     _expiry: expiry,
@@ -1641,7 +1659,14 @@ impl Workspace {
                 // has none; it is the empty statement.
                 let sql = args.sql.unwrap_or_default();
                 let engine = resolved.config.engine();
-                match explain_statement(engine, &sql, args.analyze.unwrap_or(false), mode) {
+                let server_version = self.known_server_version(&resolved.id, &resolved.config);
+                match explain_statement(
+                    engine,
+                    server_version,
+                    &sql,
+                    args.analyze.unwrap_or(false),
+                    mode,
+                ) {
                     Ok(statement) => self.run_agent_work(
                         id,
                         resolved,
@@ -1775,6 +1800,28 @@ impl Workspace {
         // The caller may have hung up, and then nobody reads this.
         let _ = reply.send(answer);
         self.agent.record(id, tool, resolved, asked, status, facts);
+    }
+
+    /// The server version the gate dates `profile_id`'s built-in list by: what
+    /// an agent connection to it reported, else what the user's own
+    /// connection did, either only while the profile's config is still
+    /// `config`. `None` when neither has said, which the gate reads as the
+    /// oldest release.
+    pub(crate) fn known_server_version(
+        &self,
+        profile_id: &str,
+        config: &ConnectionConfig,
+    ) -> Option<u32> {
+        if let Some((opened_from, version)) = self.agent.server_versions.get(profile_id)
+            && opened_from == config
+        {
+            return Some(*version);
+        }
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == profile_id && profile.config == *config)?
+            .connection()?
+            .server_version()
     }
 
     /// The one door every call ends through: answered, expired or hung up.
@@ -1922,6 +1969,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use crate::sql::agent_gate;
+
     #[test]
     fn a_connection_list_past_the_budget_says_what_it_left_out() {
         use crate::agent::result::RESULT_BUDGET;

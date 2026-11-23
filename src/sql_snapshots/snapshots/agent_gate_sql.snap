@@ -106,7 +106,7 @@ source: src/sql_snapshots.rs
 [postgres] roll back to a savepoint: ROLLBACK TO SAVEPOINT a => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
 [postgres] read a sequence's current value: SELECT currval('s') => |ro=run rw=run full=run|
 [postgres] read the last insert id: SELECT last_insert_id() => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
-[postgres] named argument: SELECT make_interval(days := 10) => |ro=run rw=run full=run|
+[postgres] named argument: SELECT make_interval(days := 10) => |ro=run rw=approve(ReadOnly) full=approve(ReadOnly)|
 [postgres] replace into: REPLACE INTO t (a) VALUES (1) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
 [postgres] insert or replace: INSERT OR REPLACE INTO t (a) VALUES (1) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
 [postgres] select for update: SELECT a FROM t FOR UPDATE => |ro=run rw=run full=run|

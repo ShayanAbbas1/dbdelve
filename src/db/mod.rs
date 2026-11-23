@@ -44,6 +44,7 @@ mod rewrites;
 pub mod roles;
 mod snowflake;
 mod spec;
+pub(crate) use spec::POSTGRES_BUILTIN_SINCE;
 mod sqlite;
 mod ssh;
 pub(crate) mod ssm;
@@ -3206,6 +3207,15 @@ impl Connection {
             Self::Postgres(connection) => connection.current_schema(),
             Self::DuckDb(connection) => Some(connection.current_schema()),
             Self::SqlServer(connection) => connection.current_schema(),
+            _ => None,
+        }
+    }
+
+    /// The server's version as a number, where the agent gate dates its
+    /// built-in list by one: Postgres's `server_version_num`.
+    pub fn server_version(&self) -> Option<u32> {
+        match self {
+            Self::Postgres(connection) => connection.server_version(),
             _ => None,
         }
     }

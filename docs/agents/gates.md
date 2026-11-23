@@ -582,7 +582,17 @@ does not hold asks at Read-write and Full, in any clause, in `FROM` and under
 holds one back there. How each list was built:
 
 - Postgres from `pg_proc` volatility, with the volatile names that change
-  nothing added by hand.
+  nothing added by hand. The list is read off 18, so `postgres-since.txt`
+  dates every name a 9.2 server lacks by the release it first appears in:
+  in `pg_proc.h` or `pg_proc.dat`, in a SQL-defined `pg_catalog` function, or
+  as a column-name or reserved keyword, which no user function can take
+  unqualified. The agent gate reads the server's `server_version_num` from the
+  sign-in of an agent connection, or of the user's own connection to the same
+  config, and counts a dated name as listed only from its release on
+  (`agent_gate_on`); before any connection has said, it takes the oldest
+  release, so a newer name asks. A server older than 9.2 is read as 9.2.
+  `try_cast` is not on it: Postgres has no such grammar, so a user function
+  can take the name on every release.
 - MySQL from its help tables, and MariaDB from `information_schema.sql_functions`,
   each minus the lock, sleep, benchmark, file and replication-wait functions.
 - ClickHouse from `system.functions` minus its excluded categories, plus the
@@ -615,9 +625,6 @@ What the text cannot show is accepted:
   writing function.
 - A user overload of a listed name with other argument types.
 - A `search_path` the owner set ahead of `pg_catalog`.
-- A listed name the connected server does not have, because the list came from a
-  newer release or the name belongs to the grammar. A user function can take
-  that name and run unasked.
 - A ClickHouse executable UDF. It reaches outside the database, so the Read-only
   hold does not stop it, and at Read-only it runs.
 

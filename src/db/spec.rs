@@ -607,6 +607,13 @@ impl SqlSpec {
     }
 }
 
+/// The release each name on Postgres's built-in list first exists in, as
+/// `name server_version_num` lines, for the names a 9.2 server lacks. The
+/// list is read off 18, so a user function can take a newer name on an older
+/// server, and the agent gate counts a name as listed only from its release
+/// on.
+pub(crate) const POSTGRES_BUILTIN_SINCE: &str = include_str!("functions/postgres-since.txt");
+
 /// Names sqlparser reads as a call that a catalog may not list: the standard's
 /// grammar-defined functions and the standard window functions. The generated
 /// built-in lists and the live pins add these to what the catalog answers.

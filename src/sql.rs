@@ -45,6 +45,8 @@ use crate::result_grid::{NewValue, PendingRow};
 
 mod agent;
 
+#[cfg(test)]
+pub(crate) use agent::agent_gate;
 #[cfg_attr(
     not(test),
     expect(
@@ -52,7 +54,7 @@ mod agent;
         reason = "the agent tools (Phase 4) are the first caller"
     )
 )]
-pub(crate) use agent::{AgentVerdict, Expiry, Refusal, agent_gate};
+pub(crate) use agent::{AgentVerdict, Expiry, Refusal, agent_gate_on};
 pub(crate) use agent::{ApprovalKind, approval_kind, counts_rows, creates_index_concurrently};
 
 /// The runnable statements of a query buffer, as byte ranges into it.
@@ -4291,9 +4293,9 @@ fn db2_spelled(dialect: &dyn Dialect, sql: &str) -> Option<String> {
 /// ponytail: the ceiling is what the text does not show. Postgres field
 /// notation (`t.f` calls `f(t)` with no parenthesis, and telling it from a
 /// column takes the catalog), a view, policy, rule, cast or operator that
-/// calls a function, and a listed name the connected server's version lacks,
-/// which a user function can take. The upgrade path is a catalog lookup on the
-/// live connection.
+/// calls a function. A listed name the connected server's version lacks is
+/// the agent gate's to weigh, by version (`agent_gate_on`). The upgrade path
+/// is a catalog lookup on the live connection.
 fn calls_unlisted_function(engine: Engine, statement: &Statement) -> bool {
     struct Calls(Engine);
     impl Visitor for Calls {
