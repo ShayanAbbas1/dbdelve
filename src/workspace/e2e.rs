@@ -12872,7 +12872,7 @@ fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
         settle(cx);
         assert!(
             cx.debug_bounds(
-                "delete-question: Delete weekly? Its tab is closed too. This cannot be undone."
+                "delete-question: Delete weekly.sql? Its tab is closed too. This cannot be undone."
             )
             .is_some(),
             "the tab on A closes too"
@@ -12952,7 +12952,7 @@ fn deleting_a_link_query_leaves_the_tab_on_its_file(cx: &mut TestAppContext) {
         });
         settle(cx);
         assert!(
-            cx.debug_bounds("delete-question: Delete alias? This cannot be undone.")
+            cx.debug_bounds("delete-question: Delete alias.sql? This cannot be undone.")
                 .is_some()
         );
         cx.update(|window, cx| {

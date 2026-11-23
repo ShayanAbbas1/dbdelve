@@ -2378,9 +2378,13 @@ fn query_items(profile: &Profile) -> Vec<Item> {
     std::iter::once(scratch)
         .chain(files)
         .chain(profile.session.saved_queries.iter().map(|name| {
-            Item::new(name.clone(), saved, Command::OpenQuery(name.clone()))
-                .hint("query")
-                .scope(Scope::Queries)
+            Item::new(
+                crate::explorer::query_file_name(name),
+                saved,
+                Command::OpenQuery(name.clone()),
+            )
+            .hint("query")
+            .scope(Scope::Queries)
         }))
         .collect()
 }
@@ -2393,12 +2397,15 @@ fn delete_query_items(profile: &Profile) -> Vec<Item> {
         .saved_queries
         .iter()
         .map(|name| {
-            Item::new(name.clone(), saved, Command::DeleteQuery(name.clone())).hint(
-                match profile.session.tab_holding(name) {
-                    Some(_) => "open",
-                    None => "query",
-                },
+            Item::new(
+                crate::explorer::query_file_name(name),
+                saved,
+                Command::DeleteQuery(name.clone()),
             )
+            .hint(match profile.session.tab_holding(name) {
+                Some(_) => "open",
+                None => "query",
+            })
         })
         .collect()
 }

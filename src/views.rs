@@ -3171,26 +3171,6 @@ pub(crate) fn render_view_sorting(
 /// The element name of a chip, or of `part` of it (`context`, `tint`), for a
 /// test to find. `profile` is in it because two connections' tabs can share an
 /// id.
-/// A file tab's name on its chip: its file's stem, with its folder's name
-/// beside it while another of the `open` files has the same stem.
-fn file_title<'a>(
-    path: &std::path::Path,
-    mut open: impl Iterator<Item = &'a std::path::Path>,
-) -> String {
-    let stem = |path: &std::path::Path| {
-        path.file_stem()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned()
-    };
-    let own = stem(path);
-    let shared = open.any(|other| other != path && stem(other) == own);
-    match path.parent().and_then(|parent| parent.file_name()) {
-        Some(folder) if shared => format!("{own} — {}", folder.to_string_lossy()),
-        _ => own,
-    }
-}
-
 pub(crate) fn chip_selector(part: &str, profile: &str, tab: Tab) -> String {
     let (kind, id) = match tab {
         Tab::Query(id) => ('q', id),
@@ -3543,7 +3523,7 @@ fn render_tab_strip(
                         t,
                         saved_query_icon(profile.config.engine().syntax()),
                     ))
-                    .child(name_label(file_title(
+                    .child(name_label(crate::explorer::file_label(
                         &path,
                         profiles
                             .iter()
@@ -4062,21 +4042,6 @@ mod tests {
     use lsp_types::CompletionItem;
 
     use super::*;
-
-    #[test]
-    fn a_file_chip_names_its_folder_only_beside_another_file_of_its_name() {
-        use std::path::Path;
-        let (orders, other, report) = (
-            Path::new("/work/reports/orders.sql"),
-            Path::new("/work/archive/orders.sql"),
-            Path::new("/work/report.sql"),
-        );
-        assert_eq!(file_title(orders, [orders, report].into_iter()), "orders");
-        assert_eq!(
-            file_title(orders, [orders, other, report].into_iter()),
-            "orders — reports"
-        );
-    }
 
     #[test]
     fn the_button_over_staged_edits_names_what_it_does_in_each_mode() {

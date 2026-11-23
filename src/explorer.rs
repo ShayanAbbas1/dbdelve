@@ -481,7 +481,9 @@ pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTre
         .iter()
         .map(|path| file_row(path))
         .zip(file_labels(files));
-    let query_rows = queries.iter().map(|name| (query_row(name), name.clone()));
+    let query_rows = queries
+        .iter()
+        .map(|name| (query_row(name), query_file_name(name)));
     let children: Vec<TreeItem> = file_rows
         .chain(query_rows)
         .filter_map(|(id, label)| {
@@ -509,20 +511,27 @@ pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTre
 /// Each of `files` by its name, and by its folder too where another listed
 /// beside it has the same name.
 pub fn file_labels(files: &[PathBuf]) -> Vec<String> {
-    let name = crate::sql_file::file_name;
     files
         .iter()
-        .map(|path| {
-            let own = name(path);
-            let shared = files
-                .iter()
-                .any(|other| other != path && name(other) == own);
-            match path.parent().and_then(Path::file_name) {
-                Some(folder) if shared => format!("{own} — {}", folder.to_string_lossy()),
-                _ => own,
-            }
-        })
+        .map(|path| file_label(path, files.iter().map(PathBuf::as_path)))
         .collect()
+}
+
+/// `path` by its name, and by its folder too where another of `listed` has
+/// the same name.
+pub fn file_label<'a>(path: &Path, mut listed: impl Iterator<Item = &'a Path>) -> String {
+    let name = crate::sql_file::file_name;
+    let own = name(path);
+    let shared = listed.any(|other| other != path && name(other) == own);
+    match path.parent().and_then(Path::file_name) {
+        Some(folder) if shared => format!("{own} — {}", folder.to_string_lossy()),
+        _ => own,
+    }
+}
+
+/// A saved query by its file's name, as the files listed beside it are.
+pub fn query_file_name(name: &str) -> String {
+    format!("{name}.sql")
 }
 
 /// The id of the sidebar's Pinned group, listed above everything else.
@@ -1140,7 +1149,7 @@ impl ShortcutBuilder<'_> {
     ) -> Option<TreeItem> {
         let id = nested_row(parent, &member.id());
         let (label, leaf, present) = match member {
-            Member::Query(name) => (name.as_str(), None, self.queries.contains(name)),
+            Member::Query(name) => (query_file_name(name), None, self.queries.contains(name)),
             Member::Object(object) => {
                 let here = match (self.database, object.database.as_deref()) {
                     (ShortcutDatabase::Unnamed, _) => true,
@@ -1151,7 +1160,7 @@ impl ShortcutBuilder<'_> {
                 let leaf = here
                     .then(|| self.catalog.and_then(|catalog| object.leaf(catalog)))
                     .flatten();
-                (object.name.as_str(), leaf, leaf.is_some())
+                (object.name.clone(), leaf, leaf.is_some())
             }
         };
         // A routine's label carries its arguments; only its name is matched,
@@ -1160,8 +1169,8 @@ impl ShortcutBuilder<'_> {
             Member::Object(ObjectRef {
                 kind: ObjectKind::Routine(_),
                 ..
-            }) => label.split('(').next().unwrap_or(label),
-            _ => label,
+            }) => label.split('(').next().unwrap_or(&label),
+            _ => &label,
         };
         if !(self.builder.name_matches(&id, name) || inherited) {
             return None;
@@ -1177,7 +1186,7 @@ impl ShortcutBuilder<'_> {
                 missing: !present,
             },
         );
-        Some(TreeItem::new(id, label.to_string()))
+        Some(TreeItem::new(id, label))
     }
 }
 
@@ -1833,10 +1842,17 @@ mod tests {
                 (r#"file:"/work/reports/orders.sql""#, "orders.sql — reports"),
                 (r#"file:"/work/billing/orders.sql""#, "orders.sql — billing"),
                 (r#"file:"/work/daily.sql""#, "daily.sql"),
-                ("query:nightly", "nightly"),
+                ("query:nightly", "nightly.sql"),
             ]
         );
         assert!(rows.iter().take(3).all(|(id, _)| is_file_row(id)));
+        let chip =
+            |open: &[&PathBuf]| file_label(&files_listed[0], open.iter().map(|p| p.as_path()));
+        assert_eq!(chip(&[&files_listed[0], &files_listed[2]]), "orders.sql");
+        assert_eq!(
+            chip(&[&files_listed[0], &files_listed[1]]),
+            "orders.sql — reports"
+        );
         assert_eq!(listed.items[0].label.as_ref(), "Files");
         let narrowed = files(&files_listed, &["nightly".to_string()], "dai");
         assert_eq!(narrowed.items[0].children.len(), 1);
@@ -1869,15 +1885,15 @@ mod tests {
         assert_eq!(
             rows,
             [
-                (Some("daily revenue"), "daily revenue"),
-                (Some("signups"), "signups")
+                (Some("daily revenue"), "daily revenue.sql"),
+                (Some("signups"), "signups.sql")
             ]
         );
 
         let narrowed = files(&[], &names, "rev");
         assert_eq!(narrowed.items[0].children.len(), 1);
         assert_eq!(
-            marked(&narrowed, "query:daily revenue", "daily revenue").as_deref(),
+            marked(&narrowed, "query:daily revenue", "daily revenue.sql").as_deref(),
             Some("rev")
         );
 
@@ -2198,7 +2214,7 @@ mod tests {
             ["Hot", "Files", "analytics", "public"]
         );
         let hot = &explorer.items[0];
-        assert_eq!(labels(&hot.children), ["accounts", "daily"]);
+        assert_eq!(labels(&hot.children), ["accounts", "daily.sql"]);
         // The shortcut opens what the row it repeats opens.
         assert_eq!(
             explorer.leaves.get(hot.children[0].id.as_ref()),
@@ -2312,7 +2328,7 @@ mod tests {
 
         assert_eq!(labels(&explorer.items), ["Pinned", "Alpha", "gamma"]);
         let pinned = &explorer.items[0];
-        assert_eq!(labels(&pinned.children), ["daily", "beta", "accounts"]);
+        assert_eq!(labels(&pinned.children), ["daily.sql", "beta", "accounts"]);
         assert_eq!(labels(&pinned.children[1].children), ["events"]);
         // Nothing pinned is no group at all.
         let unpinned = Shortcuts {
@@ -2360,7 +2376,7 @@ mod tests {
         );
         let rows = &explorer.items[0].children;
 
-        assert_eq!(labels(rows), ["accounts", "dropped", "gone"]);
+        assert_eq!(labels(rows), ["accounts", "dropped", "gone.sql"]);
         let missing: Vec<_> = rows
             .iter()
             .map(|row| match &explorer.shortcuts[row.id.as_ref()] {

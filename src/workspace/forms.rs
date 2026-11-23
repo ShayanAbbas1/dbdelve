@@ -2181,19 +2181,23 @@ impl Workspace {
         let session = &self.profile()?.session;
         let deleting = session.pending_delete.clone()?;
         let (heading, question) = match &deleting {
-            PendingDelete::Query(name)
+            PendingDelete::Query(query)
                 if session
-                    .deleted_with(name)
+                    .deleted_with(query)
                     .is_some_and(|path| self.tab_on_file(&path).is_some()) =>
             {
+                let name = crate::explorer::query_file_name(query);
                 (
                     "Delete query",
                     format!("Delete {name}? Its tab is closed too. This cannot be undone."),
                 )
             }
-            PendingDelete::Query(name) => (
+            PendingDelete::Query(query) => (
                 "Delete query",
-                format!("Delete {name}? This cannot be undone."),
+                format!(
+                    "Delete {}? This cannot be undone.",
+                    crate::explorer::query_file_name(query)
+                ),
             ),
             PendingDelete::Folder(name, held) => (
                 "Delete folder",

@@ -762,8 +762,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`session::is_dirty`), compared rather than flagged so an undo back clears
   it; `QueryTab::dirty` caches it from the editor's change event, because the
   strip and the window's edited mark read it every frame. An untitled tab is
-  never dirty. The chip names the file's stem, with its folder beside it
-  while another open file shares the stem, the full path on hover, and a dot
+  never dirty. The chip names the file, extension and all, with its folder
+  beside it while another open file shares the name (`explorer::file_label`,
+  as the Files group names it; a saved query reads as `name.sql` there and in
+  the palette), the full path on hover, and a dot
   in the close button's place that gives way to it under the pointer.
   **Save writes the buffer as it is** (`sql_file::write`): no formatting, no
   added newline, line endings as the editor holds them (the input keeps

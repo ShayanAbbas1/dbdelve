@@ -1935,7 +1935,10 @@ impl Workspace {
         if let Some(holder) = holder {
             self.remove_query_tab(holder, window, cx);
         }
-        self.note(format!("Deleted {name}."), cx);
+        self.note(
+            format!("Deleted {}.", crate::explorer::query_file_name(&name)),
+            cx,
+        );
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == owner) {
             profile.shortcuts.forget_query(&name);
         }
