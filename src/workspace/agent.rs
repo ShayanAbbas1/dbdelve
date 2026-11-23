@@ -1145,11 +1145,14 @@ impl Workspace {
     /// The flags half of [`Self::adopt_saved_visibility`]: takes on what the
     /// file holds and returns the ids it hid, whose calls the caller rejects.
     pub(crate) fn read_saved_visibility(&mut self) -> Vec<String> {
-        // Taken before the read, so a save landing during it reads as a change.
-        self.agent.visibility_stamp = store::profiles_stamp();
+        // Sampled before the read, so a save landing during it reads as a
+        // change, and kept only once the read has worked: a file that could
+        // not be read is read again on the next call.
+        let stamp = store::profiles_stamp();
         let Some(saved) = store::peek_profiles(&self.plugins) else {
             return Vec::new();
         };
+        self.agent.visibility_stamp = stamp;
         let mut hidden = Vec::new();
         for profile in &mut self.profiles {
             if self.agent.visibility_choices.contains(&profile.id) {

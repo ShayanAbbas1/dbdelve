@@ -11226,6 +11226,27 @@ fn a_hidden_profile_and_a_missing_one_answer_byte_for_byte_the_same(cx: &mut Tes
     });
 }
 
+#[gpui::test]
+fn an_unreadable_profile_file_is_read_again_on_the_next_refresh(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            launch_with_profiles(cx, &sqlite_profile("dev", "Dev", "agent_visible = true"));
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        std::fs::write(&path, "not = = toml").expect("the file is writable");
+
+        workspace.update(cx, |workspace, cx| workspace.adopt_saved_visibility(cx));
+        assert!(agent_visible(&workspace, cx, "dev"), "nothing was read");
+        workspace.read_with(cx, |workspace, _| {
+            assert_ne!(
+                workspace.agent.visibility_stamp,
+                store::profiles_stamp(),
+                "a failed read is not cached as seen, so the next call reads again"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }
