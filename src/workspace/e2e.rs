@@ -28856,6 +28856,31 @@ fn an_idle_profile_shows_the_reconnect_button(cx: &mut TestAppContext) {
     });
 }
 
+/// SQLite opens a transaction at a `SAVEPOINT`, so the update after it is
+/// still to be released or rolled back: an idle close would drop it.
+#[gpui::test]
+fn a_savepoint_keeps_the_idle_close_from_dropping_what_it_holds(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = closing_after_a_minute(cx, "CREATE TABLE t (a INTEGER);");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        settle(cx);
+        run_in_front(&workspace, cx, "SAVEPOINT s; INSERT INTO t VALUES (1)");
+        assert!(in_transaction(&workspace, cx), "the SAVEPOINT opened one");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        workspace.update(cx, |workspace, _| {
+            if let Some(profile) = workspace.profile_mut() {
+                profile.behaviour.idle_timeout = None;
+            }
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_relation_visited_on_an_idle_profile_reconnects_first(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

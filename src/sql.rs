@@ -5135,7 +5135,7 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
     match SqlParser::parse_sql(dialect.as_ref(), sql) {
         Ok(statements) => statements
             .iter()
-            .for_each(|statement| leaves.add(statement)),
+            .for_each(|statement| leaves.add(engine, statement)),
         Err(_) => {
             let tokens = Tokenizer::new(dialect.as_ref(), sql)
                 .tokenize()
@@ -5243,15 +5243,24 @@ pub(crate) fn after_last_end(engine: Engine, sql: &str) -> &str {
 }
 
 impl Leaves {
-    fn add(&mut self, statement: &Statement) {
+    fn add(&mut self, engine: Engine, statement: &Statement) {
         match statement {
             // A T-SQL `BEGIN … END` block, which opens no transaction itself.
             Statement::StartTransaction {
                 has_end_keyword: true,
                 statements,
                 ..
-            } => statements.iter().for_each(|statement| self.add(statement)),
+            } => statements
+                .iter()
+                .for_each(|statement| self.add(engine, statement)),
             Statement::StartTransaction { .. } => self.transaction = Some(true),
+            // SQLite opens a transaction at a `SAVEPOINT` outside one, which
+            // stays open until its `RELEASE` -- read as nothing here, so a
+            // transaction it may have ended is still read as open, the side
+            // an idle close cannot lose work on.
+            Statement::Savepoint { .. } if matches!(engine, Engine::Sqlite | Engine::Turso) => {
+                self.transaction = Some(true)
+            }
             // `AND CHAIN` opens the next one as it ends this one.
             Statement::Commit { chain, .. }
             | Statement::Rollback {
@@ -6161,6 +6170,31 @@ mod tests {
                 assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_savepoint_opens_a_transaction_on_sqlite_and_turso_only() {
+        use crate::db::Engine;
+
+        for engine in [Engine::Sqlite, Engine::Turso] {
+            assert_eq!(
+                leaves(engine, "SAVEPOINT s").transaction,
+                Some(true),
+                "{engine:?}"
+            );
+            assert_eq!(
+                leaves(engine, "SAVEPOINT s; UPDATE t SET a = 1").transaction,
+                Some(true),
+                "{engine:?}"
+            );
+            // A startup script would start every session inside it.
+            let refused = startup_statements(engine, Mode::Full, &[], "SAVEPOINT s")
+                .expect_err("a savepoint leaves a transaction open");
+            assert!(refused.contains("transaction"), "{refused}");
+        }
+        // Postgres refuses one outside a transaction; inside one it ends
+        // nothing.
+        assert_eq!(leaves(Engine::Postgres, "SAVEPOINT s").transaction, None);
     }
 
     #[test]
