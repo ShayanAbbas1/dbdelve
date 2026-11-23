@@ -13131,6 +13131,50 @@ fn close_all_tabs_asks_once_about_every_dirty_file_tab(cx: &mut TestAppContext) 
     });
 }
 
+/// Close All Tabs over a file tab holding cell edits asks about the edits
+/// first, holding the other dirty file tab with them, and Discard leaves one
+/// Save question over both files.
+#[gpui::test]
+fn close_all_asks_about_edits_then_once_about_every_dirty_file(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let edited = user_sql_file("edited.sql", "select * from birds");
+        open_sql_file(&workspace, cx, &edited);
+        cx.dispatch_action(crate::actions::RunQuery);
+        settle(cx);
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.simulate_input("-- ");
+        assert!(front_dirty(&workspace, cx));
+        let other = open_dirty_file(&workspace, cx, "other.sql");
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("discard"));
+        confirm_discard(&workspace, cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let asked = session.pending_discard.as_ref().expect("one question");
+            assert_eq!(asked.tabs().count(), 2, "both files, in one question");
+        });
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(
+            std::fs::read_to_string(&edited).unwrap(),
+            "-- select * from birds"
+        );
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "-- SELECT 1;");
+        assert_eq!(query_tab_count(&workspace, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
 /// The tab on `path` brought back to the front.
 fn bring_back(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, path: &std::path::Path) {
     cx.update(|window, cx| {
