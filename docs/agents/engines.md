@@ -1259,6 +1259,13 @@ carries, engine by engine:
   and DuckDB stop a statement with a wall-clock interrupt, which counts time
   spent blocked on a lock as readily as time spent scanning; a Redis timeout
   closes the session, with anything it held, and the next call reopens one.
+  On ClickHouse the timeout is `max_execution_time` on every request, sent
+  unless the server already has that value, so a `readonly=1` account, which
+  may change no setting, fails the connection's validation request, before the
+  agent's first read, whenever the server's `max_execution_time` differs from
+  the agent's timeout. Such an account needs either a server-side
+  `max_execution_time` equal to the agent's timeout (30 seconds, or the
+  profile's when lower) or permission to change it.
 - **File engines are opened read-only by the engine.** SQLite and DuckDB open
   with the engine's read-only flag, and Turso takes `PRAGMA query_only`, so a
   write the gate misjudged still cannot change the file.
