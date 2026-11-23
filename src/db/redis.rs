@@ -2850,17 +2850,25 @@ mod tests {
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
     fn live_config_get_and_client_list_still_disclose_what_the_gate_now_stops() {
-        /// Puts `masterauth` back as it was found, whether the test passed or
-        /// panicked. A failure reports neither the value nor the server's
-        /// message, which may carry it.
+        /// Puts `masterauth` back as it was found. The test does it itself and
+        /// fails if it cannot; dropped before that, on an earlier failure, it
+        /// tries once more and can only warn. A failure reports neither the
+        /// value nor the server's message, which may carry it.
         struct Restore<'a> {
             connection: &'a Connection,
             was: String,
+            restored: bool,
+        }
+        impl Restore<'_> {
+            fn put_back(&mut self) -> bool {
+                let put_back = format!("CONFIG SET masterauth {}", redis_cmd::quoted(&self.was));
+                self.restored = self.connection.query(&put_back, Fetch::default()).is_ok();
+                self.restored
+            }
         }
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
-                let put_back = format!("CONFIG SET masterauth {}", redis_cmd::quoted(&self.was));
-                if self.connection.query(&put_back, Fetch::default()).is_err() {
+                if !self.restored && !self.put_back() {
                     eprintln!("masterauth was not put back to the value it held");
                 }
             }
@@ -2882,16 +2890,23 @@ mod tests {
         }
 
         let was = value_of(&config("masterauth"), "masterauth").expect("masterauth is listed");
-        let _restore = Restore {
+        let mut restore = Restore {
             connection: &connection,
             was,
+            restored: false,
         };
         let marker = "dbdelve-premise-not-a-credential";
         ran(&connection, &format!("CONFIG SET masterauth {marker}"));
-        assert_eq!(
-            value_of(&config("masterauth"), "masterauth").as_deref(),
-            Some(marker),
+        // Compared, never printed: on a mismatch the value read back is
+        // whatever the server holds, which may be a credential.
+        let read_back = value_of(&config("masterauth"), "masterauth");
+        assert!(
+            read_back.as_deref() == Some(marker),
             "CONFIG GET masterauth no longer returns the value it holds"
+        );
+        assert!(
+            restore.put_back(),
+            "masterauth was not put back to the value it held"
         );
 
         let name = "dbdelve-premise-client";
