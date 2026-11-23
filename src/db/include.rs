@@ -118,10 +118,13 @@ impl Shown {
         let Some(entries) = &self.databases else {
             return true;
         };
+        self.is_own_database(name) || entries.iter().any(|entry| matches(entry, name))
+    }
+
+    fn is_own_database(&self, name: &str) -> bool {
         self.own_database
             .as_deref()
             .is_some_and(|own| same_name(own, name))
-            || entries.iter().any(|entry| matches(entry, name))
     }
 
     /// Whether a schema of a catalog is shown: by the databases list where the
@@ -195,11 +198,12 @@ impl Shown {
     /// Where one catalog read spans every database, the names of `listed`
     /// that read may ask about, and how many it need not: `None` when no list
     /// narrows the catalog, so the read stays exactly as it was. Otherwise the
-    /// non-system names this shows, in the server's order, each listed
-    /// spelling once, and how many non-system names it hid. The names are the
-    /// server's own, never the pattern text, so they are all a statement ever
-    /// carries. An empty list means nothing matched, which is the caller's cue
-    /// to send no statement.
+    /// non-system names this shows, and the own database even when it is a
+    /// system one, as the unfiltered read keeps it, in the server's order,
+    /// each listed spelling once, and how many non-system names it hid. The
+    /// names are the server's own, never the pattern text, so they are all a
+    /// statement ever carries. An empty list means nothing matched, which is
+    /// the caller's cue to send no statement.
     ///
     /// Both numbers are drawn from `listed`, whichever listing the caller
     /// passes. ClickHouse's and MySQL's `catalog` pass `catalog_databases`, the
@@ -220,7 +224,7 @@ impl Shown {
         let (shown, left_out): (Vec<_>, Vec<_>) = listed
             .names
             .iter()
-            .filter(|name| !engine.is_system_database(name))
+            .filter(|name| !engine.is_system_database(name) || self.is_own_database(name))
             .partition(|name| self.shows_schema(name));
         Some((shown.into_iter().cloned().collect(), left_out.len()))
     }
@@ -583,6 +587,12 @@ mod tests {
             shown(&["ab"], None).matched_databases(&listed(&["Ab", "ab", "Zed"], None), engine),
             Some((text(&["Ab", "ab"]), 1)),
             "each listed spelling, in the server's order"
+        );
+        assert_eq!(
+            shown(&["dbdelve_arch*"], Some("mysql"))
+                .matched_databases(&listed(&server, Some("mysql")), engine),
+            Some((text(&["dbdelve_archive", "mysql"]), 1)),
+            "a system database the session is on is still its own"
         );
     }
 
