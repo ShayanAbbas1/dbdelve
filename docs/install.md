@@ -276,8 +276,12 @@ a small process Claude Code starts and DBDelve answers over a socket only your
 user can open. It is registered once, with one line:
 
 1. In DBDelve, open the command palette and choose `Turn agent access on`.
-2. Choose `Copy Claude Code registration`.
-3. Paste the line into a terminal.
+2. For each connection an agent may use, choose `Make <name> visible to
+   agents…` and confirm. No connection is visible until you do.
+3. Choose `Copy Claude Code registration`.
+4. Paste the line into a terminal.
+5. In Claude Code, check that `list_connections` names the connections you
+   made visible before asking it to query them.
 
 The line is for the DBDelve that copied it. For the macOS app it is
 
