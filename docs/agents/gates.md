@@ -165,9 +165,10 @@ mode, always where the user can read it before it runs:
   from there (`Workspace::run_in_buffer`, `src/workspace/transactions.rs`).
   Turning auto-commit off opens the transaction at once, because a switch
   reading "off" over a session that is still autocommitting is wrong for as
-  long as it takes to lose a row; Commit and Roll Back send `COMMIT;` and the
-  next `BEGIN;` as one submission, because a gap between them is a statement
-  that commits itself under a switch saying "off". `Engine::begins_transaction`
+  long as it takes to lose a row; Commit sends `COMMIT;` and Roll Back sends
+  `ROLLBACK;`, each followed, while auto-commit is off, by the next `BEGIN;`
+  as one submission, because a gap between them is a statement that commits
+  itself under a switch saying "off". `Engine::begins_transaction`
   spells the `BEGIN`, and is not `Engine::transaction_start`: that one answers
   whether a *generated* batch needs brackets, and says `None` for Postgres,
   where one submission is already one implicit transaction. Turning
