@@ -14852,6 +14852,7 @@ fn a_closed_approval_hands_the_keyboard_back(cx: &mut TestAppContext) {
         assert_eq!(answers.try_recv().ok(), Some(denied()));
         assert_eq!(front_dialog(&workspace, cx), None);
         assert!(editor_has_keyboard(&workspace, cx));
+        assert_eq!(logged_gone(&workspace, cx, id), [false]);
 
         // Hung up.
         let (id, answers) = inject_update(&workspace, cx, Some("Orders"));
@@ -14867,6 +14868,7 @@ fn a_closed_approval_hands_the_keyboard_back(cx: &mut TestAppContext) {
             "a hung-up call is sent nothing"
         );
         assert!(editor_has_keyboard(&workspace, cx));
+        assert_eq!(logged_gone(&workspace, cx, id), [true]);
 
         // Expired.
         let (_, answers) = inject_update(&workspace, cx, Some("Orders"));
@@ -16593,6 +16595,23 @@ fn logged(
     })
 }
 
+/// Whether each log entry of call `id` says its caller left.
+fn logged_gone(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: crate::agent::CallId,
+) -> Vec<bool> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .agent
+            .log
+            .iter()
+            .filter(|entry| entry.id == id)
+            .map(|entry| entry.requester_gone)
+            .collect()
+    })
+}
+
 #[gpui::test]
 fn calls_on_one_profile_run_one_at_a_time_in_arrival_order(cx: &mut TestAppContext) {
     use crate::agent::{Status, tools::Tool};
@@ -17266,7 +17285,9 @@ fn hanging_up_a_waiting_read_never_starts_it(cx: &mut TestAppContext) {
         assert_eq!(one.status, Status::Executed, "{}", one.text);
         cx.run_until_parked();
         assert_eq!(logged(&workspace, cx, second), [Status::Cancelled]);
+        assert_eq!(logged_gone(&workspace, cx, second), [true]);
         assert_eq!(logged(&workspace, cx, first), [Status::Executed]);
+        assert_eq!(logged_gone(&workspace, cx, first), [false]);
         quit(workspace, cx);
     });
 }
@@ -17294,6 +17315,7 @@ fn hanging_up_a_running_read_cancels_it_and_frees_the_lane(cx: &mut TestAppConte
             workspace.on_agent_message(Inbound::Hangup { id: first }, cx)
         });
         assert_eq!(logged(&workspace, cx, first), [Status::Cancelled]);
+        assert_eq!(logged_gone(&workspace, cx, first), [true]);
         workspace.read_with(cx, |workspace, _| {
             assert!(
                 workspace.agent.lanes.get("orders").is_none_or(|lane| {

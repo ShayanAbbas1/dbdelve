@@ -964,9 +964,12 @@ impl Workspace {
                 None,
             ))
         });
-        let Some((profile_id, tool, name, reply, facts, stop)) = found else {
+        let Some((profile_id, tool, name, reply, mut facts, stop)) = found else {
             return false;
         };
+        // Only a hangup ends a read `Cancelled`: a deadline fails it and a
+        // hidden profile rejects it.
+        facts.requester_gone = status == Status::Cancelled;
         if let Some((connection, cancel)) = stop {
             // A thread of its own: the pool may be full of the very statements
             // this stops.

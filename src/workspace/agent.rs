@@ -1748,6 +1748,8 @@ impl Workspace {
                 verdict: AuditVerdict::held_by(approval.verdict),
                 sql: Some(approval.sql),
                 elapsed_ms: elapsed_ms(call.arrived),
+                // Only a hangup ends a call `Cancelled`.
+                requester_gone: status == Status::Cancelled,
                 decision,
                 engine: Some(engine),
                 ..CallFacts::default()
