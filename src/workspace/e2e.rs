@@ -3815,13 +3815,15 @@ fn the_picker_says_the_filter_is_not_an_access_boundary(cx: &mut TestAppContext)
             assert_eq!(
                 picker.boundary(),
                 "This filter changes what is listed, not what can be reached: a statement can \
-                 still read a hidden database or schema."
+                 still read a hidden database or schema, though completion and Go to Object \
+                 offer only what is listed."
             );
         });
         assert_eq!(
             boundary(crate::db::Levels::DatabaseIsSchema),
             "This filter changes what is listed, not what can be reached: a statement can \
-             still read a hidden database."
+             still read a hidden database, though completion and Go to Object offer only \
+             what is listed."
         );
         quit(workspace, cx);
     });

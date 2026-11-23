@@ -69,16 +69,20 @@ fn lists_schemas(levels: Levels) -> bool {
 
 /// What the dialog says the filter is not. A filter narrows what is listed;
 /// a statement can still read what it hides, so the sentence is always
-/// drawn.
+/// drawn. Completion and Go to Object read the narrowed catalog, which on
+/// MySQL, MariaDB and ClickHouse is narrowed in the read itself, so the
+/// sentence says they offer only what is listed.
 pub(crate) fn boundary(levels: Levels) -> &'static str {
     match lists_schemas(levels) {
         true => {
             "This filter changes what is listed, not what can be reached: a statement can \
-             still read a hidden database or schema."
+             still read a hidden database or schema, though completion and Go to Object \
+             offer only what is listed."
         }
         false => {
             "This filter changes what is listed, not what can be reached: a statement can \
-             still read a hidden database."
+             still read a hidden database, though completion and Go to Object offer only \
+             what is listed."
         }
     }
 }

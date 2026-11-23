@@ -94,7 +94,14 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   outside `ConnectionConfig`, so changing them never reconnects. A list is
   narrowed where each answer is read (`Connection::databases(.., &Shown)`),
   so nothing stores an unnarrowed answer, and a database it hides is neither
-  drawn nor opened. `Databases::left_out` carries how many it hid, which
+  drawn nor opened. Completion and Go to Object read that narrowed catalog,
+  so they offer nothing the filter hides, though a statement still reaches
+  it: an unnarrowed copy for them would cost the whole-server read the
+  filter exists to avoid on MySQL, MariaDB and ClickHouse, which push it
+  into the catalog SQL. A tab, a pin or a saved query on a hidden object
+  survives: a restored routine tab whose schema is hidden stays pending
+  (`Profile::filter_hides`), and a pin there is drawn hidden, not missing
+  (`Shortcut::Member::hidden`), a relation's opening by its name. `Databases::left_out` carries how many it hid, which
   `SidebarTree::totals` turns into the connection row's `1 of 2` while no
   search text is typed.
   Save and load both pass the lists through `Include::from_stored` (entries
