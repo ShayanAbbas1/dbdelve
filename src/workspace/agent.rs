@@ -1909,26 +1909,30 @@ mod tests {
 
     #[test]
     fn an_audit_entry_keeps_a_cut_of_a_long_error_as_it_does_of_a_long_statement() {
-        let mut state = AgentState::default();
-        let long = "e".repeat(AUDIT_SQL_CAP * 3);
-        state.record(
-            CallId(1),
-            Tool::ExecuteSql,
-            None,
-            None,
-            Status::Failed,
-            CallFacts {
-                sql: Some(long.clone()),
-                error: Some(long),
-                ..CallFacts::default()
-            },
-        );
-        let entry = state.log.front().expect("the call is logged");
-        for kept in [entry.sql.as_deref(), entry.error.as_deref()] {
-            let kept = kept.expect("kept");
-            assert_eq!(kept.chars().count(), AUDIT_SQL_CAP + SQL_CLIPPED.len());
-            assert!(kept.ends_with(SQL_CLIPPED));
-        }
+        // `record` appends to the audit file, so it goes to a test home and
+        // never to the user's own.
+        crate::store::tests::with_home(|| {
+            let mut state = AgentState::default();
+            let long = "e".repeat(AUDIT_SQL_CAP * 3);
+            state.record(
+                CallId(1),
+                Tool::ExecuteSql,
+                None,
+                None,
+                Status::Failed,
+                CallFacts {
+                    sql: Some(long.clone()),
+                    error: Some(long),
+                    ..CallFacts::default()
+                },
+            );
+            let entry = state.log.front().expect("the call is logged");
+            for kept in [entry.sql.as_deref(), entry.error.as_deref()] {
+                let kept = kept.expect("kept");
+                assert_eq!(kept.chars().count(), AUDIT_SQL_CAP + SQL_CLIPPED.len());
+                assert!(kept.ends_with(SQL_CLIPPED));
+            }
+        });
     }
 
     #[test]
