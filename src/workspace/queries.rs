@@ -3204,10 +3204,20 @@ impl Workspace {
                         }
                         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())
                         else {
+                            // A role change whose Users tab closed under it
+                            // may still have changed the roles: they are read
+                            // again, or the tree and a reopened tab keep the
+                            // list from before it.
+                            if role_change {
+                                profile.roles = RolesState::Unloaded;
+                            }
                             // A tab closed mid-run has no slot, but the
                             // connection's row still has to say it failed.
                             if lost && bound_db.is_none() {
                                 workspace.rebuild_connections(cx);
+                            }
+                            if role_change {
+                                workspace.load_roles(&id, cx);
                             }
                             return;
                         };

@@ -6189,31 +6189,74 @@ fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut Te
     });
 }
 
+/// A Users and roles tab put behind the editor, which SQLite never opens
+/// itself, and its id.
+fn users_tab_on(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut gpui::Context<Workspace>,
+) -> u64 {
+    let view = cx.new(|_| crate::users_view::UsersView::new("main".into()));
+    let results = crate::result_grid::new_grid(window, cx);
+    let profile = workspace.profile_mut().expect("a connection is in front");
+    let id = profile.session.next_object_id;
+    profile.session.next_object_id += 1;
+    profile.session.objects.push(crate::session::ObjectTab {
+        id,
+        database: None,
+        schema: String::new(),
+        name: crate::sidebar::USERS_AND_ROLES.into(),
+        kind: None,
+        body: ObjectBody::Users {
+            view,
+            query: QueryState::Idle,
+            results,
+        },
+    });
+    id
+}
+
+#[gpui::test]
+fn a_role_change_whose_users_tab_closed_under_it_leaves_the_roles_to_be_read_again(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles = crate::session::RolesState::Loaded(Default::default());
+            // The change goes out; the tab is closed before it lands.
+            workspace.execute_and_then(
+                "SELECT 1".into(),
+                Tab::Object(tab),
+                Some(crate::session::Refresh::Roles),
+                false,
+                None,
+                cx,
+            );
+            let profile = workspace.profile_mut().unwrap();
+            profile.session.objects.retain(|object| object.id != tab);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(
+                workspace.profile().unwrap().roles,
+                crate::session::RolesState::Unloaded
+            ));
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
-        // The form belongs to a Users and roles tab, which SQLite never
-        // opens itself: one is put behind the editor for it.
+        // The form belongs to a Users and roles tab.
         workspace.update_in(cx, |workspace, window, cx| {
-            let view = cx.new(|_| crate::users_view::UsersView::new("main".into()));
-            let results = crate::result_grid::new_grid(window, cx);
-            let profile = workspace.profile_mut().expect("a connection is in front");
-            let id = profile.session.next_object_id;
-            profile.session.next_object_id += 1;
-            profile.session.objects.push(crate::session::ObjectTab {
-                id,
-                database: None,
-                schema: String::new(),
-                name: crate::sidebar::USERS_AND_ROLES.into(),
-                kind: None,
-                body: ObjectBody::Users {
-                    view,
-                    query: QueryState::Idle,
-                    results,
-                },
-            });
-            let profile = profile.id.clone();
+            users_tab_on(workspace, window, cx);
+            let profile = workspace.profile().unwrap().id.clone();
             workspace.open_role_form(
                 &profile,
                 super::RoleFormKind::New { login: true },
