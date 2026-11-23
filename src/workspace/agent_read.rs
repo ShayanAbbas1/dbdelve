@@ -270,6 +270,9 @@ pub(crate) struct Waiting {
     reply: SyncSender<Reply>,
     arrived: Instant,
     work: AgentWork,
+    /// The config the call was admitted for. It starts only on that target:
+    /// see [`no_longer_admitted`].
+    admitted: ConnectionConfig,
 }
 
 /// What a waiting call will do once its lane is free.
@@ -338,6 +341,41 @@ impl AgentWork {
             | AgentWork::Relationships { .. }
             | AgentWork::Routines { .. } => None,
         }
+    }
+}
+
+/// Said for a read the gate let run whose profile's access level changed
+/// before it started.
+pub(crate) const ACCESS_CHANGED: &str =
+    "The connection's access level changed before the statement started, so it was not run.";
+
+/// Why `waiting` may not start on a profile that now holds `config` at `mode`,
+/// or `None` when it still may: it was admitted for another target, or the
+/// gate no longer gives its statement the verdict it was admitted under (a
+/// read it let run, or the approval a person gave).
+fn no_longer_admitted(
+    waiting: &Waiting,
+    config: &ConnectionConfig,
+    mode: Mode,
+) -> Option<(Status, &'static str)> {
+    if waiting.admitted.retargets(config) {
+        return Some((Status::Rejected, super::agent::NO_LONGER_AVAILABLE));
+    }
+    let sql = match &waiting.work {
+        AgentWork::Query { sql, .. } => sql,
+        AgentWork::Explain { statement } => statement,
+        AgentWork::Catalog { .. }
+        | AgentWork::Structure { .. }
+        | AgentWork::Search { .. }
+        | AgentWork::Relationships { .. }
+        | AgentWork::Routines { .. } => return None,
+    };
+    let approved = waiting.work.approved().map(|approved| approved.verdict);
+    let now = AuditVerdict::held_by(agent_gate(config.engine(), sql, mode));
+    match (approved, now) {
+        (was, now) if was == now => None,
+        (Some(_), _) => Some((Status::RefusedByGate, super::agent::CHANGED_SINCE_SHOWN)),
+        (None, _) => Some((Status::RefusedByGate, ACCESS_CHANGED)),
     }
 }
 
@@ -608,6 +646,7 @@ impl Workspace {
             );
             return;
         }
+        let admitted = config.clone();
         self.agent
             .lanes
             .entry(profile_id.clone())
@@ -626,6 +665,7 @@ impl Workspace {
                 reply,
                 arrived,
                 work,
+                admitted,
             });
         self.start_next(&profile_id, cx);
     }
@@ -650,9 +690,9 @@ impl Workspace {
         // The one profile with this id, as `agent_profile` resolved it: a
         // repeated id is never resolved, so the lane cannot open another
         // entry's config.
-        let Some(config) = self
+        let Some((config, mode)) = self
             .sole_profile(profile_id)
-            .map(|profile| profile.config.clone())
+            .map(|profile| (profile.config.clone(), profile.mode))
         else {
             // Not expected to run: the only place a profile leaves the list is
             // `remove_profile`, which ends this lane in the same turn through
@@ -667,9 +707,51 @@ impl Workspace {
             );
             return;
         };
+        // What waited may no longer be what was admitted: the target moved,
+        // or the mode the gate judged it at changed. Such a call is answered
+        // here and never sent; one already running is left to finish, as the
+        // mode it was sent under was in force when it was sent.
         let Some(lane) = self.agent.lanes.get_mut(profile_id) else {
             return;
         };
+        let mut stale = Vec::new();
+        let mut kept = VecDeque::new();
+        for waiting in lane.waiting.drain(..) {
+            match no_longer_admitted(&waiting, &config, mode) {
+                Some(why) => stale.push((waiting, why)),
+                None => kept.push_back(waiting),
+            }
+        }
+        lane.waiting = kept;
+        for (waiting, (status, text)) in stale {
+            let _ = waiting.reply.send(Reply {
+                status,
+                text: text.to_string(),
+            });
+            self.agent.record(
+                waiting.id,
+                waiting.tool,
+                Some(waiting.profile_name),
+                None,
+                status,
+                facts_of(
+                    waiting.work.sql(),
+                    waiting.work.approved(),
+                    waiting.arrived,
+                    Ended::default(),
+                ),
+            );
+        }
+        let Some(lane) = self.agent.lanes.get_mut(profile_id) else {
+            return;
+        };
+        if lane.waiting.is_empty() {
+            if lane.connection.is_none() {
+                self.agent.lanes.remove(profile_id);
+            }
+            cx.notify();
+            return;
+        }
         if lane.opened_from != config {
             // ponytail: a changed connection is reopened on the next read
             // rather than on the change, since nothing is read until then.
@@ -684,6 +766,7 @@ impl Workspace {
             reply,
             arrived,
             work,
+            ..
         }) = lane.waiting.pop_front()
         else {
             return;

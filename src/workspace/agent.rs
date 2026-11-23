@@ -143,7 +143,7 @@ impl AuditVerdict {
 
     /// What the audit says of a gate verdict that held or refused a statement;
     /// `None` for `Run`, which the read itself gives its verdict.
-    fn held_by(verdict: AgentVerdict) -> Option<Self> {
+    pub(super) fn held_by(verdict: AgentVerdict) -> Option<Self> {
         match verdict {
             AgentVerdict::Run => None,
             AgentVerdict::Approve(verdict, expiry) => Some(Self::Approve {

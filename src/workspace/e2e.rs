@@ -17013,6 +17013,95 @@ fn a_read_shown_at_read_write_and_lowered_to_read_only_is_not_run(cx: &mut TestA
     });
 }
 
+#[cfg(unix)]
+#[gpui::test]
+fn an_approved_read_waiting_its_turn_is_not_run_once_the_mode_changes(cx: &mut TestAppContext) {
+    use crate::{
+        agent::{Reply, Status},
+        sql::Mode,
+    };
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
+        cx.executor().allow_parking();
+        // A read that holds the lane, so the approved one waits behind it.
+        workspace.update(cx, |workspace, _| {
+            workspace.agent.opener = Some(|executor, _, _| executor.spawn(std::future::pending()));
+        });
+        let (_, first_answers) = inject_orders_read(&workspace, cx, "SELECT 1");
+        let (id, answers) = inject_approval(&workspace, cx, "Orders", "SELECT my_udf(1)");
+        approve_front(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let lane = workspace.agent.lanes.get("orders").expect("a lane");
+            assert_eq!(lane.waiting.len(), 1, "the approved read waits its turn");
+        });
+
+        // Lowered while it waits: the gate would no longer give it the verdict
+        // the person approved.
+        workspace.update(cx, |workspace, cx| {
+            workspace.active = Some(
+                workspace
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.id == "orders")
+                    .expect("Orders is in the list"),
+            );
+            workspace.set_mode(Mode::ReadOnly, cx);
+        });
+        workspace.update(cx, |workspace, _| workspace.agent.opener = None);
+        cx.executor()
+            .advance_clock(super::agent_read::CALL_DEADLINE + std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(answer_of(cx, &first_answers).status, Status::Failed);
+        assert_eq!(
+            answer_of(cx, &answers),
+            Reply {
+                status: Status::RefusedByGate,
+                text: super::agent::CHANGED_SINCE_SHOWN.to_string(),
+            }
+        );
+        assert_eq!(logged(&workspace, cx, id), [Status::RefusedByGate]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_read_waiting_its_turn_is_not_run_on_another_target(cx: &mut TestAppContext) {
+    use crate::agent::Status;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "");
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, _| {
+            workspace.agent.opener = Some(|executor, _, _| executor.spawn(std::future::pending()));
+        });
+        let (_, first_answers) = inject_orders_read(&workspace, cx, "SELECT 1");
+        let (second, second_answers) = inject_orders_read(&workspace, cx, "SELECT 2");
+
+        // The profile now reaches another file, by a path that hides nothing
+        // (a picked database found gone at connect is one).
+        workspace.update(cx, |workspace, _| {
+            let orders = workspace
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.id == "orders")
+                .expect("Orders is in the list");
+            if let ConnectionConfig::Sqlite { path, .. } = &mut orders.config {
+                *path = "/elsewhere/other.db".into();
+            }
+            workspace.agent.opener = None;
+        });
+        cx.executor()
+            .advance_clock(super::agent_read::CALL_DEADLINE + std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(answer_of(cx, &first_answers).status, Status::Failed);
+        let two = answer_of(cx, &second_answers);
+        assert_eq!(two.status, Status::Rejected, "{}", two.text);
+        assert_eq!(logged(&workspace, cx, second), [Status::Rejected]);
+        quit(workspace, cx);
+    });
+}
+
 /// What Approve answers when the call in front is armed, its pending
 /// statement is made `pending` and the call is approved in the same update,
 /// so no frame is drawn between the two.
