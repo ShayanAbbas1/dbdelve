@@ -152,6 +152,14 @@ pub(super) fn database_content(
     }
 }
 
+/// Why a connection save that reconnects is refused.
+const TRANSACTION_BLOCKS_SAVE: &str = "A transaction is open on this connection, and saving \
+     reconnects it, which would roll it back. Commit or roll it back first.";
+
+/// Why Select Database is refused.
+const TRANSACTION_BLOCKS_SWITCH: &str = "The database was not switched: a transaction is open on \
+     this connection. Commit or roll it back first.";
+
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
         match self.save_profiles(cx) {
@@ -1038,6 +1046,21 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The reconnect would drop the sessions, and the server would roll
+        // back work the user chose neither to commit nor to discard.
+        if editing.as_deref().is_some_and(|id| {
+            self.profiles.iter().any(|profile| {
+                profile.id == id
+                    && profile.config.needs_reconnect(&config)
+                    && profile.any_transaction_open()
+            })
+        }) {
+            if let Some(form) = &mut self.form {
+                form.error = Some(TRANSACTION_BLOCKS_SAVE.into());
+            }
+            cx.notify();
+            return;
+        }
         self.form = None;
         if let Some(project) = &project {
             self.project_named(project);
@@ -1679,6 +1702,12 @@ impl Workspace {
         }
         if let Some(edited) = self.unapplied_edits(cx) {
             self.note(format!("{edited}, so the database was not switched."), cx);
+            return false;
+        }
+        // A switch reconnects or drops the sessions open for other
+        // databases, and the server rolls back what the transaction ran.
+        if self.profile().is_some_and(Profile::any_transaction_open) {
+            self.note(TRANSACTION_BLOCKS_SWITCH.into(), cx);
             return false;
         }
 

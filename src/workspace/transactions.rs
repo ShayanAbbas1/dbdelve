@@ -230,6 +230,54 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Quit, unless a transaction is open that quitting would roll back: then
+    /// ask first. Quit again, or its button, quits whatever is open.
+    pub(crate) fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.may_quit(cx) {
+            cx.quit();
+        }
+    }
+
+    /// Whether the app may go now: nothing a quit would roll back is open, or
+    /// the user was asked and asked again. Otherwise the question goes up.
+    pub(crate) fn may_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.open_transactions().is_empty() {
+            self.quit_prompt = false;
+            return true;
+        }
+        if self.quit_prompt {
+            return true;
+        }
+        self.quit_prompt = true;
+        cx.notify();
+        false
+    }
+
+    /// The connections a transaction of the user's is open on, by name.
+    pub(crate) fn open_transactions(&self) -> Vec<&str> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.any_transaction_open())
+            .map(|profile| profile.name.as_str())
+            .collect()
+    }
+
+    /// The quit question's Quit.
+    pub(crate) fn confirm_quit(&mut self, cx: &mut Context<Self>) {
+        self.quit_prompt = true;
+        cx.quit();
+    }
+
+    /// Close the quit question and keep going.
+    pub(crate) fn cancel_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        let asked = std::mem::take(&mut self.quit_prompt);
+        if asked {
+            self.refocus_front();
+            cx.notify();
+        }
+        asked
+    }
+
     /// Append `statement` to the buffer in front and run it from there.
     ///
     /// `recall_statement`'s shape, for its reasons: appended rather than

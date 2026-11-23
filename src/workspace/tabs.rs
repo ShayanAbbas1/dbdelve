@@ -1090,6 +1090,10 @@ impl Workspace {
             self.cancel_auto_commit_prompt(cx);
             return;
         }
+        if self.render_quit(cx).is_some() {
+            self.cancel_quit(cx);
+            return;
+        }
         if self.cancel_forget_file(cx) {
             return;
         }

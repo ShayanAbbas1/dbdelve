@@ -1609,6 +1609,8 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
+            ("quit", 0) => self.confirm_quit(cx),
+            ("quit", _) => _ = self.cancel_quit(cx),
             ("forget-file", 0) => self.confirm_forget_file(cx),
             ("forget-file", _) => _ = self.cancel_forget_file(cx),
             ("end-transaction", choice) => match self.end_transaction_choice(choice) {
@@ -2247,6 +2249,36 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// What Quit asks while a transaction is open: quitting ends every
+    /// session, and the server rolls back what an open transaction ran.
+    pub(crate) fn render_quit(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.quit_prompt {
+            return None;
+        }
+        let open = self.open_transactions();
+        if open.is_empty() {
+            return None;
+        }
+        Some(self.question(
+            "quit",
+            "Quit",
+            format!(
+                "A transaction is open on {}. Quitting ends it, and the server rolls back \
+                 everything it ran.",
+                open.join(", ")
+            ),
+            [
+                ("cancel-quit", "Cancel", Tone::Quiet, |workspace, _, cx| {
+                    workspace.cancel_quit(cx);
+                }),
+                ("confirm-quit", "Quit", Tone::Danger, |workspace, _, cx| {
+                    workspace.confirm_quit(cx)
+                }),
+            ],
+            cx,
+        ))
     }
 
     /// What the Auto dialog's button `choice`, counted from the right, ends
@@ -5094,6 +5126,8 @@ fn first_choice(dialog: Option<&str>) -> usize {
         // Commit and Roll back cannot be undone, so an `enter` held or
         // repeated from the click that raised it opens nothing it should not.
         Some("end-transaction") => 2,
+        // Quitting rolls the transaction back.
+        Some("quit") => 1,
         _ => 0,
     }
 }

@@ -510,6 +510,9 @@ pub(crate) struct Workspace {
     /// Something `profiles.toml` holds changed and is waiting on
     /// [`Self::remember_profiles_soon`]'s timer, so quitting writes it.
     pub(crate) profiles_unsaved: bool,
+    /// Whether Quit is asking first, a transaction being open that quitting
+    /// would roll back.
+    pub(crate) quit_prompt: bool,
     /// That timer; replaced, the one before it stops.
     profiles_save: Option<gpui::Task<()>>,
 }
@@ -691,6 +694,7 @@ impl Workspace {
             theme_reloads: None,
             themes_revision: 0,
             profiles_unsaved: false,
+            quit_prompt: false,
             profiles_save: None,
         };
 
@@ -954,6 +958,13 @@ impl Workspace {
         // would wait for background work to finish. The profiles only when a
         // write is pending: written unasked, they would put this session's
         // copy over one another instance saved since.
+        // Closing the one window quits, so it asks as Quit does.
+        let closing = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            closing
+                .update(cx, |workspace, cx| workspace.may_quit(cx))
+                .unwrap_or(true)
+        });
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             if workspace.profiles_unsaved {
@@ -2837,6 +2848,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_mode))
             .on_action(cx.listener(Self::toggle_auto_commit))
+            .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::commit_transaction))
             .on_action(cx.listener(Self::rollback_transaction))
             .on_action(cx.listener(Self::switch_connection))
@@ -2993,6 +3005,7 @@ impl Render for Workspace {
                     ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
                     ("end-transaction", self.render_end_transaction(cx)),
+                    ("quit", self.render_quit(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),

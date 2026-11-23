@@ -7119,6 +7119,36 @@ fn the_palette_opens_the_schema_export_through_the_schema_picker(cx: &mut TestAp
     });
 }
 
+/// Select Database reconnects or drops the sessions a transaction may be
+/// open on: refused while one is.
+#[gpui::test]
+fn select_database_is_refused_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(!workspace.set_database("other".into(), window, cx));
+            })
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_ne!(profile.config.database(), Some("other"));
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("transaction"), "{notice}");
+            assert!(profile.in_transaction);
+        });
+        run_in_front(&workspace, cx, "ROLLBACK");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(workspace.set_database("other".into(), window, cx));
+            })
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// A switch made in the session (DuckDB) drops every landing of the old
 /// generation, so a transaction statement still marked in flight would keep
 /// every other tab's Commit waiting on it until a reconnect.
@@ -27254,6 +27284,60 @@ fn a_failed_pair_that_ended_the_transaction_leaves_manual(cx: &mut TestAppContex
         let (auto_commit, open, _) = transaction_state(&workspace, cx);
         assert!(auto_commit && !open, "no transaction, and Auto says so");
         assert!(recorded_statements(&workspace, cx).is_empty());
+        quit(workspace, cx);
+    });
+}
+
+/// Quitting ends every session, and the server rolls back what an open
+/// transaction ran: Quit asks first, and Escape keeps the app going.
+#[gpui::test]
+fn quit_asks_first_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        cx.dispatch_action(crate::actions::Quit);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        // Asked and asked again, it goes.
+        let asked = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(!asked, "the question goes up again");
+        let again = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(again, "a second Quit quits");
+        quit(workspace, cx);
+    });
+}
+
+/// A save that reconnects would drop the session holding the transaction:
+/// it is refused, and the form stays open.
+#[gpui::test]
+fn a_save_that_reconnects_is_refused_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        let before =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().generation);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let index = workspace.active.expect("a profile is in front");
+            workspace.edit_profile(index, window, cx);
+            let form = workspace.form.as_mut().expect("the edit form is open");
+            form.path.update(cx, |input, cx| {
+                input.set_value("elsewhere.db".to_string(), window, cx)
+            });
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().expect("the form stays open");
+            let error = form.error.as_deref().expect("the refusal is shown");
+            assert!(error.contains("transaction"), "{error}");
+            let profile = workspace.profile().unwrap();
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            assert!(profile.in_transaction);
+        });
         quit(workspace, cx);
     });
 }

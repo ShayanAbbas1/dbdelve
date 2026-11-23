@@ -526,10 +526,12 @@ fn window_buttons(t: Theme, buttons: Vec<WindowButton>, window: &Window) -> impl
                         .size(px(layout::chrome(layout::ICON_SIZE)))
                         .text_color(t.text),
                 )
-                .on_click(move |_, window, _| match button {
+                .on_click(move |_, window, cx| match button {
                     WindowButton::Minimize => window.minimize_window(),
                     WindowButton::Maximize => window.zoom_window(),
-                    WindowButton::Close => window.remove_window(),
+                    // As Quit goes, which asks first over an open
+                    // transaction: closing the one window quits.
+                    WindowButton::Close => window.dispatch_action(Box::new(crate::Quit), cx),
                 })
         }))
 }
