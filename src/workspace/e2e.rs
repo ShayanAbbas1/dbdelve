@@ -27316,6 +27316,30 @@ fn a_failed_pair_that_ended_the_transaction_leaves_manual(cx: &mut TestAppContex
     });
 }
 
+/// The Auto prompt describes the transaction open when it was asked: a pair
+/// landing under it ended that one, so the prompt goes rather than ending the
+/// transaction the pair opened.
+#[gpui::test]
+fn a_pair_landing_under_the_auto_prompt_closes_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("end-transaction"));
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let since = profile.transaction_statements.len();
+            profile.reopen_landed("COMMIT;\n\nBEGIN;", since, false, None);
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit && open, "the new transaction is left as it is");
+        quit(workspace, cx);
+    });
+}
+
 /// Quitting ends every session, and the server rolls back what an open
 /// transaction ran: Quit asks first, and Escape keeps the app going.
 #[gpui::test]

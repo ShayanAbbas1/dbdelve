@@ -416,6 +416,9 @@ impl Profile {
                 self.record_sent(sql, Some(true));
                 self.transaction_statements.extend(later);
                 self.transaction_aborted = false;
+                // An Auto prompt open over the pair was answered for the
+                // transaction it ended; the one it opened needs asking anew.
+                self.session.auto_commit_prompt = None;
                 false
             }
             Some(error) if crate::db::sent_nothing(error) && !lost => false,
