@@ -174,7 +174,13 @@ impl Workspace {
                 .get(id.as_ref())
                 .and_then(|shortcut| shortcut.query())
         });
-        if let Some(name) = query {
+        let file = profile
+            .listed_files()
+            .into_iter()
+            .find(|path| crate::explorer::file_row(path) == id.as_ref());
+        if let Some(path) = file {
+            self.open_listed_file(path, window, cx);
+        } else if let Some(name) = query {
             self.open_saved_query(name.to_string(), window, cx);
         } else if let Some(leaf) = leaf {
             self.open_explorer_target(leaf.target, window, cx);
@@ -1055,6 +1061,12 @@ impl Workspace {
         if self.cancel_pending_export(cx) {
             return;
         }
+        if self.cancel_forget_file(cx) {
+            return;
+        }
+        if self.cancel_overwrite(cx) {
+            return;
+        }
         if self.cancel_schema_export(cx) {
             return;
         }
@@ -1098,15 +1110,6 @@ impl Workspace {
         // is scoped to the active tab's own form, so one left open elsewhere
         // falls through to the steps below instead of eating this keystroke.
         if self.close_new_row(cx) {
-            return;
-        }
-        let Some(profile) = self.profile_mut() else {
-            return;
-        };
-        if profile.session.naming {
-            profile.session.naming = false;
-            profile.session.editor_needs_focus = true;
-            cx.notify();
             return;
         }
         // The tree has nothing to back out of, so `escape` there leaves it for
@@ -1186,7 +1189,7 @@ impl Workspace {
             Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
             Focus::Diagram(handle) => handle.focus(window, cx),
             Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
-            Focus::Field(_) | Focus::Window => return,
+            Focus::Window => return,
         }
         // A hand-back asked for earlier would take the keyboard straight back.
         if let Some(profile) = self.profile_mut() {
@@ -1248,7 +1251,8 @@ impl Workspace {
     }
 
     /// Close every tab in the strip. The ones holding unapplied cell edits are
-    /// left for a single question once the rest have gone.
+    /// left for a single question once the rest have gone, and file tabs with
+    /// unsaved changes for one Save question after it.
     pub(crate) fn close_all_tabs(
         &mut self,
         _: &CloseAllTabs,
@@ -1275,12 +1279,9 @@ impl Workspace {
         let (dirty, clean): (Vec<Tab>, Vec<Tab>) = tabs
             .into_iter()
             .partition(|tab| self.would_lose_on_close(*tab, cx));
-        for tab in clean {
-            self.close_now(tab, window, cx);
-        }
         // A tab whose edits are being sent stays: closing it would cancel the
         // send, leaving whether it was written unknown, and discard the rest.
-        let (busy, dirty): (Vec<Tab>, Vec<Tab>) = dirty.into_iter().partition(|tab| {
+        let (busy, mut dirty): (Vec<Tab>, Vec<Tab>) = dirty.into_iter().partition(|tab| {
             self.profile()
                 .is_some_and(|profile| profile.session.running(*tab))
         });
@@ -1291,21 +1292,97 @@ impl Workspace {
             );
         }
         if dirty.is_empty() {
+            self.close_or_ask_to_save(clean, window, cx);
             return;
         }
+        self.look_before_closing(&clean, cx);
+        let (unsaved, clean): (Vec<Tab>, Vec<Tab>) = clean
+            .into_iter()
+            .partition(|tab| self.has_unsaved_file(*tab));
+        for tab in clean {
+            self.close_now(tab, window, cx);
+        }
         if let Some(profile) = self.profile_mut() {
-            // The tab in front, sorted last, is the one the prompt is over;
-            // the others go with it.
+            // The tab in front, sorted last among those with edits, is the one
+            // the prompt is over; the others go with it, and the unsaved file
+            // tabs wait with them for the Save question.
+            let tab = dirty.pop().expect("dirty is not empty");
             let mut also = dirty;
-            let tab = also.pop().expect("dirty is not empty");
+            also.extend(unsaved);
             profile.session.pending_discard = Some(PendingDiscard {
                 tab,
                 then: AfterEdits::Close { deleting: None },
                 row: None,
                 also,
+                unsaved: false,
             });
         }
         cx.notify();
+    }
+
+    /// Close `tabs`, but leave the file tabs among them with unsaved changes
+    /// for one Save / Don't Save question.
+    fn close_or_ask_to_save(
+        &mut self,
+        tabs: Vec<Tab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.look_before_closing(&tabs, cx);
+        let (unsaved, clean): (Vec<Tab>, Vec<Tab>) = tabs
+            .into_iter()
+            .partition(|tab| self.has_unsaved_file(*tab));
+        for tab in clean {
+            self.close_now(tab, window, cx);
+        }
+        if unsaved.is_empty() {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            let mut also = unsaved;
+            let tab = also.remove(0);
+            profile.session.pending_discard = Some(PendingDiscard {
+                tab,
+                then: AfterEdits::Close { deleting: None },
+                row: None,
+                also,
+                unsaved: true,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Mark each clean file tab among `tabs` whose file has gone since it was
+    /// last looked at: a tab behind another is looked at only when it comes
+    /// forward, and its buffer is now the only copy of the text. One stat
+    /// each. A file changed rather than gone leaves nothing of the user's
+    /// in a clean buffer, so it closes unasked.
+    fn look_before_closing(&mut self, tabs: &[Tab], cx: &mut Context<Self>) {
+        for tab in tabs {
+            let Tab::Query(id) = *tab else {
+                continue;
+            };
+            let gone = self
+                .profile()
+                .and_then(|profile| profile.session.query_tab(id)?.file.as_ref())
+                .is_some_and(|file| {
+                    file.saved.is_some() && matches!(crate::sql_file::stamp(&file.path), Ok(None))
+                });
+            if gone {
+                self.mark_gone(id, cx);
+            }
+        }
+    }
+
+    /// A file tab holding text its file does not. An untitled tab is never
+    /// asked about.
+    pub(crate) fn has_unsaved_file(&self, tab: Tab) -> bool {
+        let Tab::Query(id) = tab else {
+            return false;
+        };
+        self.profile()
+            .and_then(|profile| profile.session.query_tab(id))
+            .is_some_and(|tab| tab.dirty)
     }
 
     /// Close a tab, asking first if it holds cell edits nobody has applied.
@@ -1326,7 +1403,7 @@ impl Workspace {
             return;
         }
         if !self.held_for_edits(tab, AfterEdits::Close { deleting: None }, cx) {
-            self.close_now(tab, window, cx);
+            self.close_or_ask_to_save(vec![tab], window, cx);
         }
     }
 
@@ -1390,6 +1467,7 @@ impl Workspace {
                         then,
                         row: Some(row),
                         also: Vec::new(),
+                        unsaved: false,
                     });
                 }
                 cx.notify();
@@ -1419,6 +1497,7 @@ impl Workspace {
                 then,
                 row: None,
                 also: Vec::new(),
+                unsaved: false,
             });
         }
         cx.notify();
@@ -1560,7 +1639,8 @@ impl Workspace {
     }
 
     /// Drop the edits of the tab the discard prompt was raised over, and do
-    /// what it was raised for.
+    /// what it was raised for, or, over unsaved files, Don't Save. Discarded
+    /// edits still leave a file tab's unsaved text to ask about.
     pub(crate) fn confirm_discard_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(discard) = self
             .profile_mut()
@@ -1568,6 +1648,14 @@ impl Workspace {
         else {
             return;
         };
+        if discard.unsaved {
+            for tab in discard.tabs().collect::<Vec<_>>() {
+                self.close_now(tab, window, cx);
+            }
+            self.refocus_unless_asking();
+            cx.notify();
+            return;
+        }
         // The grids the question read, every one of them: a Discard that left
         // one holding edits would put the action back in front of the prompt.
         let grids = self
@@ -1605,12 +1693,48 @@ impl Workspace {
         }) {
             self.row_panel.inputs = None;
         }
-        for tab in discard.also {
-            self.close_now(tab, window, cx);
+        if discard.also.is_empty() {
+            self.resume_after_edits(discard.tab, discard.then, window, cx);
+        } else {
+            // Close All Tabs: the file tabs it held with the edits are asked
+            // about in one Save question, with any whose edits just went.
+            let mut tabs = discard.also;
+            tabs.push(discard.tab);
+            self.close_or_ask_to_save(tabs, window, cx);
         }
-        self.resume_after_edits(discard.tab, discard.then, window, cx);
-        self.refocus_front();
+        self.refocus_unless_asking();
         cx.notify();
+    }
+
+    /// Save in the close question: each file written closes, and one that
+    /// cannot be written stays open, saying why.
+    pub(crate) fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discard) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_discard.take())
+        else {
+            return;
+        };
+        let ids = discard
+            .tabs()
+            .filter_map(|tab| match tab {
+                Tab::Query(id) => Some(id),
+                Tab::Object(_) => None,
+            })
+            .collect();
+        self.save_in_place(ids, true, window, cx);
+        self.refocus_unless_asking();
+    }
+
+    /// Focus back on the tab in front, unless what was just answered raised
+    /// another question, which holds the keyboard itself.
+    fn refocus_unless_asking(&mut self) {
+        let asking = self.profile().is_some_and(|profile| {
+            profile.session.pending_discard.is_some() || profile.session.pending_overwrite.is_some()
+        });
+        if !asking {
+            self.refocus_front();
+        }
     }
 
     /// Carry out what was held back for `tab`'s edits, which are gone. Each
@@ -1627,8 +1751,8 @@ impl Workspace {
         let in_front = self.profile().map(|profile| profile.session.active) == Some(tab);
         match then {
             AfterEdits::Close {
-                deleting: Some(name),
-            } => self.delete_saved_query_now(name, window, cx),
+                deleting: Some((owner, name)),
+            } => self.delete_saved_query_now(owner, name, window, cx),
             // Asked again rather than closed outright: the rows a Row view
             // still holds are sent first.
             AfterEdits::Close { deleting: None } => self.ask_before_close(tab, window, cx),

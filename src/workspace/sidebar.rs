@@ -18,17 +18,19 @@ use gpui::{Entity, SharedString, StyledText};
 use gpui_base::actions::{SelectDown, SelectUp};
 use gpui_component::{
     ActiveTheme as _,
+    tooltip::Tooltip,
     tree::{TreeEvent, TreeItem, TreeState},
 };
 
 use super::forms::{
-    MenuRow, explorer_menu, is_shortcut_row, node_items, selection_menu, shortcut_row_menu,
+    ListedFiles, MenuRow, explorer_menu, file_row_menu, is_shortcut_row, node_items,
+    selection_menu, shortcut_row_menu,
 };
 use super::profiles::{database_content, explorer_content};
 use super::*;
 use crate::db::{Levels, Syntax};
 use crate::explorer::{
-    ExplorerLeaf, Member, PINNED_GROUP, QUERIES_GROUP, Shortcut, is_schema_row, saved_query,
+    ExplorerLeaf, FILES_GROUP, Member, PINNED_GROUP, Shortcut, is_schema_row, saved_query,
     schema_row_name,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
@@ -834,11 +836,19 @@ impl Workspace {
             .or_else(|| self.connections.shortcuts.get(id).and_then(Shortcut::query))
             .map(str::to_string)
             .filter(|_| elsewhere.is_none());
-        if leaf.is_none() && query.is_none() {
+        let file = self.profiles[index]
+            .listed_files()
+            .into_iter()
+            .find(|path| explorer::file_row(path) == row);
+        if leaf.is_none() && query.is_none() && file.is_none() {
             return false;
         }
         if self.active != Some(index) {
             self.activate(index, cx);
+        }
+        if let Some(path) = file {
+            self.open_listed_file(path, window, cx);
+            return true;
         }
         match (query, leaf, elsewhere) {
             (Some(name), ..) => self.open_saved_query(name, window, cx),
@@ -899,6 +909,11 @@ impl Workspace {
             .flatten()
             .cloned()
             .collect();
+        let files: HashMap<String, ListedFiles> = self
+            .profiles
+            .iter()
+            .map(|profile| (profile.id.clone(), ListedFiles::of(profile)))
+            .collect();
         let menu_workspace = workspace.clone();
         let menu_shortcuts = shortcuts.clone();
         let menu_selected = selected.clone();
@@ -928,6 +943,11 @@ impl Workspace {
                 .and_then(saved_query)
                 .or_else(|| shortcut.and_then(Shortcut::query))
                 .map(str::to_string);
+            let listed = scoped
+                .as_ref()
+                .and_then(|scoped| Some((files.get(scoped.profile)?, scoped.inner)));
+            let file = listed.and_then(|(files, row)| files.paths.get(row).cloned());
+            let file_missing = listed.is_some_and(|(files, row)| files.missing.contains(row));
             let pinned_group = inner == Some(PINNED_GROUP);
             let schema_row = inner.is_some_and(is_schema_row);
             let folder_shortcut = matches!(shortcut, Some(Shortcut::Folder(_)));
@@ -939,11 +959,11 @@ impl Workspace {
                     StyledText::new(label),
                     ListItem::new(index).text_color(t.text_muted),
                 ),
-                _ if missing => (
+                _ if missing || file_missing => (
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text_muted),
                 ),
-                _ if leaf.is_some() || query.is_some() || folder_shortcut => (
+                _ if leaf.is_some() || query.is_some() || file.is_some() || folder_shortcut => (
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
                 ),
@@ -981,7 +1001,7 @@ impl Workspace {
                         ..
                     }),
                 ) => Some(object_icon(object.kind)),
-                _ if query.is_some() || missing => {
+                _ if query.is_some() || file.is_some() || missing => {
                     target.map(|(_, syntax, _)| saved_query_icon(*syntax))
                 }
                 _ if entry.is_expanded() => Some(icon::CHEVRON_DOWN),
@@ -991,7 +1011,7 @@ impl Workspace {
                 Some(Node::Group) => Some(icon::PROJECT),
                 Some(Node::Connection { .. }) => target.map(|(logo, ..)| *logo),
                 Some(Node::Database { .. }) => Some(icon::DATABASE),
-                _ if inner == Some(QUERIES_GROUP) => {
+                _ if inner == Some(FILES_GROUP) => {
                     target.map(|(_, syntax, _)| queries_group_icon(*syntax))
                 }
                 _ if pinned_group => Some(icon::PIN),
@@ -1048,7 +1068,7 @@ impl Workspace {
                         .min_w_0()
                         .flex_1()
                         .when_some(lead, |row, path| {
-                            row.child(match missing {
+                            row.child(match missing || file_missing {
                                 true => row_icon_tinted(t, path, None).into_any_element(),
                                 false => row_icon(t, path).into_any_element(),
                             })
@@ -1164,11 +1184,16 @@ impl Workspace {
                             },
                         ),
                 )
-                .debug_selector(move || format!("connections-row-{index}"));
+                .debug_selector(move || format!("connections-row-{index}"))
+                .when_some(file.clone(), |row, path| {
+                    row.tooltip(move |window, cx| {
+                        Tooltip::new(path.display().to_string()).build(window, cx)
+                    })
+                });
             if matches!(node, Some(Node::Notice)) {
                 return row;
             }
-            let opens = !missing && (leaf.is_some() || query.is_some());
+            let opens = !missing && (leaf.is_some() || query.is_some() || file.is_some());
             let workspace = workspace.clone();
             let id = id.to_string();
             row.on_click(move |event, window, cx| {
@@ -1204,6 +1229,12 @@ impl Workspace {
                 }
             }
             let shortcut = menu_shortcuts.get(id).cloned();
+            if let Some(scoped) = model::unscoped(id)
+                && let Some(profile) = state.profiles.iter().find(|p| p.id == scoped.profile)
+                && let Some(path) = ListedFiles::of(profile).paths.get(scoped.inner)
+            {
+                return file_row_menu(menu, path, &profile.id, &menu_workspace);
+            }
             let Some(node) = state.connections_node(id) else {
                 // A saved query, a folder, the Pinned group or a pin whose
                 // object is gone: the menu simple mode draws for it, but for

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
+    path::{Path, PathBuf},
 };
 
 use gpui_component::tree::TreeItem;
@@ -35,17 +36,21 @@ const ROUTINE_CATEGORIES: [(RoutineKind, &str); 2] = [
     (RoutineKind::Procedure, "Procedures"),
 ];
 
-/// The id of the sidebar's Queries group, the profile's saved queries listed
-/// above its schemas.
-pub const QUERIES_GROUP: &str = "queries";
+/// The id of the sidebar's Files group, the profile's files and saved
+/// queries listed above its schemas. Still `queries`, the id it had as the
+/// Queries group, so the fold stored for it in `profiles.toml` still applies.
+pub const FILES_GROUP: &str = "queries";
 
 /// What a saved query's row id starts with. Its name follows: query names are
 /// file names, so no other row's id can take this shape.
 const QUERY_ROW: &str = "query:";
 
+/// What a listed file's row id starts with, its path following.
+const FILE_ROW: &str = "file:";
+
 /// Whether a row is a schema's own: the only row "Set as Active Schema" and
 /// "Show Diagram" mean anything on. Asked by id, since a schema's label can be anything,
-/// "Queries" included.
+/// "Files" included.
 pub fn is_schema_row(id: &str) -> bool {
     id.starts_with(SCHEMA_ROW)
 }
@@ -130,6 +135,18 @@ pub fn saved_query(id: &str) -> Option<&str> {
 /// The row id of a saved query, the inverse of [`saved_query`].
 pub fn query_row(name: &str) -> String {
     format!("{QUERY_ROW}{name}")
+}
+
+/// The row id of a file the Files group lists. Matched against the listed
+/// paths rather than parsed back, since a path need not be UTF-8. Spelled by
+/// `Debug`, which escapes the bytes that are not, where `display` would make
+/// two such paths one row.
+pub fn file_row(path: &Path) -> String {
+    format!("{FILE_ROW}{path:?}")
+}
+
+pub fn is_file_row(id: &str) -> bool {
+    id.starts_with(FILE_ROW)
 }
 
 /// The row id of a relation. By name and not by place, so that a row is the
@@ -453,24 +470,32 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     }
 }
 
-/// The Queries group, holding every saved query whose name the filter keeps,
-/// or no row at all when it keeps none. Only the names are matched: a filter
-/// that matched the group's own label would keep every query for typing `q`.
-pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
+/// The Files group: every file in `files` and saved query in `queries` whose
+/// name the filter keeps, or no row at all when it keeps none. Only the names
+/// are matched: a filter that matched the group's own label would keep every
+/// row for typing `f`. A file shares its name with another listed only
+/// alongside its folder's name.
+pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTree {
     let mut builder = Builder::new(filter);
-    let children: Vec<TreeItem> = names
+    let file_rows = files
         .iter()
-        .filter_map(|name| {
-            let id = query_row(name);
+        .map(|path| file_row(path))
+        .zip(file_labels(files));
+    let query_rows = queries
+        .iter()
+        .map(|name| (query_row(name), query_file_name(name)));
+    let children: Vec<TreeItem> = file_rows
+        .chain(query_rows)
+        .filter_map(|(id, label)| {
             builder
-                .name_matches(&id, name)
-                .then(|| TreeItem::new(id, name.clone()))
+                .name_matches(&id, &label)
+                .then(|| TreeItem::new(id, label))
         })
         .collect();
     let items = match children.is_empty() {
         true => Vec::new(),
         false => vec![
-            TreeItem::new(QUERIES_GROUP, "Queries")
+            TreeItem::new(FILES_GROUP, "Files")
                 .expanded(true)
                 .children(children),
         ],
@@ -481,6 +506,32 @@ pub fn queries(names: &[String], filter: &str) -> ExplorerTree {
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
     }
+}
+
+/// Each of `files` by its name, and by its folder too where another listed
+/// beside it has the same name.
+pub fn file_labels(files: &[PathBuf]) -> Vec<String> {
+    files
+        .iter()
+        .map(|path| file_label(path, files.iter().map(PathBuf::as_path)))
+        .collect()
+}
+
+/// `path` by its name, and by its folder too where another of `listed` has
+/// the same name.
+pub fn file_label<'a>(path: &Path, mut listed: impl Iterator<Item = &'a Path>) -> String {
+    let name = crate::sql_file::file_name;
+    let own = name(path);
+    let shared = listed.any(|other| other != path && name(other) == own);
+    match path.parent().and_then(Path::file_name) {
+        Some(folder) if shared => format!("{own} — {}", folder.to_string_lossy()),
+        _ => own,
+    }
+}
+
+/// A saved query by its file's name, as the files listed beside it are.
+pub fn query_file_name(name: &str) -> String {
+    format!("{name}.sql")
 }
 
 /// The id of the sidebar's Pinned group, listed above everything else.
@@ -979,7 +1030,7 @@ impl Shortcut {
         }
     }
 
-    /// The row in the schema tree or the Queries group it repeats.
+    /// The row in the schema tree or the Files group it repeats.
     fn repeats(&self) -> Option<String> {
         match self {
             Shortcut::Folder(_) => None,
@@ -998,7 +1049,7 @@ impl Shortcut {
 /// The Pinned group, when anything is pinned, then every folder not pinned,
 /// by name. The filter is the schema tree's: a folder whose name matches keeps
 /// every member, otherwise it keeps those whose names match and goes when none
-/// do. The group's own label is never matched, as the Queries group's is not.
+/// do. The group's own label is never matched, as the Files group's is not.
 ///
 /// Where the catalog is one database's, a member of another is left out
 /// rather than greyed, since it is not missing, only elsewhere, and so is
@@ -1098,7 +1149,7 @@ impl ShortcutBuilder<'_> {
     ) -> Option<TreeItem> {
         let id = nested_row(parent, &member.id());
         let (label, leaf, present) = match member {
-            Member::Query(name) => (name.as_str(), None, self.queries.contains(name)),
+            Member::Query(name) => (query_file_name(name), None, self.queries.contains(name)),
             Member::Object(object) => {
                 let here = match (self.database, object.database.as_deref()) {
                     (ShortcutDatabase::Unnamed, _) => true,
@@ -1109,7 +1160,7 @@ impl ShortcutBuilder<'_> {
                 let leaf = here
                     .then(|| self.catalog.and_then(|catalog| object.leaf(catalog)))
                     .flatten();
-                (object.name.as_str(), leaf, leaf.is_some())
+                (object.name.clone(), leaf, leaf.is_some())
             }
         };
         // A routine's label carries its arguments; only its name is matched,
@@ -1118,8 +1169,8 @@ impl ShortcutBuilder<'_> {
             Member::Object(ObjectRef {
                 kind: ObjectKind::Routine(_),
                 ..
-            }) => label.split('(').next().unwrap_or(label),
-            _ => label,
+            }) => label.split('(').next().unwrap_or(&label),
+            _ => &label,
         };
         if !(self.builder.name_matches(&id, name) || inherited) {
             return None;
@@ -1135,7 +1186,7 @@ impl ShortcutBuilder<'_> {
                 missing: !present,
             },
         );
-        Some(TreeItem::new(id, label.to_string()))
+        Some(TreeItem::new(id, label))
     }
 }
 
@@ -1773,12 +1824,59 @@ mod tests {
     }
 
     #[test]
+    fn a_listed_file_is_named_by_its_file_and_by_its_folder_too_where_names_meet() {
+        let files_listed = [
+            PathBuf::from("/work/reports/orders.sql"),
+            PathBuf::from("/work/billing/orders.sql"),
+            PathBuf::from("/work/daily.sql"),
+        ];
+        let listed = files(&files_listed, &["nightly".to_string()], "");
+        let rows: Vec<_> = listed.items[0]
+            .children
+            .iter()
+            .map(|row| (row.id.as_ref(), row.label.as_ref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (r#"file:"/work/reports/orders.sql""#, "orders.sql — reports"),
+                (r#"file:"/work/billing/orders.sql""#, "orders.sql — billing"),
+                (r#"file:"/work/daily.sql""#, "daily.sql"),
+                ("query:nightly", "nightly.sql"),
+            ]
+        );
+        assert!(rows.iter().take(3).all(|(id, _)| is_file_row(id)));
+        let chip =
+            |open: &[&PathBuf]| file_label(&files_listed[0], open.iter().map(|p| p.as_path()));
+        assert_eq!(chip(&[&files_listed[0], &files_listed[2]]), "orders.sql");
+        assert_eq!(
+            chip(&[&files_listed[0], &files_listed[1]]),
+            "orders.sql — reports"
+        );
+        assert_eq!(listed.items[0].label.as_ref(), "Files");
+        let narrowed = files(&files_listed, &["nightly".to_string()], "dai");
+        assert_eq!(narrowed.items[0].children.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_whose_names_are_not_utf8_keep_rows_of_their_own() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = |bytes: &[u8]| Path::new(std::ffi::OsStr::from_bytes(bytes)).to_path_buf();
+        assert_ne!(
+            file_row(&path(b"/work/q\x80.sql")),
+            file_row(&path(b"/work/q\x81.sql"))
+        );
+    }
+
+    #[test]
     fn every_saved_query_is_listed_under_its_group_and_a_filter_narrows_them() {
         let names = ["daily revenue".to_string(), "signups".to_string()];
 
-        let all = queries(&names, "");
+        let all = files(&[], &names, "");
         assert_eq!(all.items.len(), 1);
-        assert_eq!(all.items[0].id.as_ref(), QUERIES_GROUP);
+        assert_eq!(all.items[0].id.as_ref(), FILES_GROUP);
         let rows: Vec<_> = all.items[0]
             .children
             .iter()
@@ -1787,22 +1885,22 @@ mod tests {
         assert_eq!(
             rows,
             [
-                (Some("daily revenue"), "daily revenue"),
-                (Some("signups"), "signups")
+                (Some("daily revenue"), "daily revenue.sql"),
+                (Some("signups"), "signups.sql")
             ]
         );
 
-        let narrowed = queries(&names, "rev");
+        let narrowed = files(&[], &names, "rev");
         assert_eq!(narrowed.items[0].children.len(), 1);
         assert_eq!(
-            marked(&narrowed, "query:daily revenue", "daily revenue").as_deref(),
+            marked(&narrowed, "query:daily revenue", "daily revenue.sql").as_deref(),
             Some("rev")
         );
 
         // No query, or none the filter keeps, is no group rather than an
         // empty one.
-        assert!(queries(&names, "zzz").items.is_empty());
-        assert!(queries(&[], "").items.is_empty());
+        assert!(files(&[], &names, "zzz").items.is_empty());
+        assert!(files(&[], &[], "").items.is_empty());
     }
 
     #[test]
@@ -1817,7 +1915,7 @@ mod tests {
         assert!(!ids.is_empty());
         assert!(
             ids.iter()
-                .all(|id| saved_query(id).is_none() && id != QUERIES_GROUP)
+                .all(|id| saved_query(id).is_none() && id != FILES_GROUP)
         );
     }
 
@@ -1826,7 +1924,7 @@ mod tests {
         // A schema named like the group is still a schema, and the group is
         // never one: picking it would set and save a schema called Queries.
         let names = ["daily".to_string()];
-        let mut explorer = queries(&names, "");
+        let mut explorer = files(&[], &names, "");
         explorer.extend(tree(&catalog(), ""));
         let roots: Vec<_> = explorer
             .items
@@ -1836,7 +1934,7 @@ mod tests {
         assert_eq!(
             roots,
             [
-                (QUERIES_GROUP, false),
+                (FILES_GROUP, false),
                 ("schema-analytics", true),
                 ("schema-public", true)
             ]
@@ -1851,7 +1949,7 @@ mod tests {
         // Each root of a sidebar built afresh, as `root_folds` leaves it. Built
         // expanded, so a schema it failed to close would show here as open.
         let shown = |catalog: &Catalog, saved: &BTreeMap<String, bool>, active| {
-            let mut explorer = queries(&["daily".to_string()], "");
+            let mut explorer = files(&[], &["daily".to_string()], "");
             explorer.extend(tree(catalog, ""));
             let folds = root_folds(&explorer.items, saved, active);
             with_folds(explorer.items, &folds)
@@ -1864,7 +1962,7 @@ mod tests {
         assert_eq!(
             shown(&catalog(), &none, Some("analytics")),
             [
-                row(QUERIES_GROUP, true),
+                row(FILES_GROUP, true),
                 row("schema-analytics", true),
                 row("schema-public", false)
             ]
@@ -1873,7 +1971,7 @@ mod tests {
             assert_eq!(
                 shown(&catalog(), &none, active),
                 [
-                    row(QUERIES_GROUP, true),
+                    row(FILES_GROUP, true),
                     row("schema-analytics", false),
                     row("schema-public", false)
                 ],
@@ -1884,13 +1982,13 @@ mod tests {
         let saved = BTreeMap::from([
             ("schema-analytics".to_string(), false),
             ("schema-public".to_string(), true),
-            (QUERIES_GROUP.to_string(), false),
+            (FILES_GROUP.to_string(), false),
             ("schema-dropped".to_string(), true),
         ]);
         assert_eq!(
             shown(&catalog(), &saved, Some("analytics")),
             [
-                row(QUERIES_GROUP, false),
+                row(FILES_GROUP, false),
                 row("schema-analytics", false),
                 row("schema-public", true)
             ],
@@ -1902,7 +2000,7 @@ mod tests {
         for within in [None, Some("gone")] {
             assert_eq!(
                 shown(&single, &none, within),
-                [row(QUERIES_GROUP, true), row("schema-analytics", true)],
+                [row(FILES_GROUP, true), row("schema-analytics", true)],
                 "the only schema, whatever names one not listed"
             );
         }
@@ -1911,7 +2009,7 @@ mod tests {
     #[test]
     fn a_change_to_the_saved_queries_keeps_what_was_folded_and_opened() {
         let build = |names: &[String]| {
-            let mut explorer = queries(names, "");
+            let mut explorer = files(&[], names, "");
             explorer.extend(tree(&partitioned_catalog(), ""));
             explorer.items
         };
@@ -1950,7 +2048,7 @@ mod tests {
         assert_eq!(state.get(&parent_id), Some(&true));
         // The group's new query is there, and the group is open as it was.
         assert_eq!(after[0].children.len(), 2);
-        assert_eq!(state.get(QUERIES_GROUP), Some(&true));
+        assert_eq!(state.get(FILES_GROUP), Some(&true));
     }
 
     fn marked(explorer: &ExplorerTree, id: &str, label: &str) -> Option<String> {
@@ -2108,15 +2206,15 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        explorer.extend(queries(&names, ""));
+        explorer.extend(files(&[], &names, ""));
         explorer.extend(tree(&catalog(), ""));
 
         assert_eq!(
             labels(&explorer.items),
-            ["Hot", "Queries", "analytics", "public"]
+            ["Hot", "Files", "analytics", "public"]
         );
         let hot = &explorer.items[0];
-        assert_eq!(labels(&hot.children), ["accounts", "daily"]);
+        assert_eq!(labels(&hot.children), ["accounts", "daily.sql"]);
         // The shortcut opens what the row it repeats opens.
         assert_eq!(
             explorer.leaves.get(hot.children[0].id.as_ref()),
@@ -2159,7 +2257,7 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        explorer.extend(queries(&names, ""));
+        explorer.extend(files(&[], &names, ""));
         explorer.extend(tree(&catalog, ""));
         let mut ids = Vec::new();
         every_id(&explorer.items, &mut ids);
@@ -2230,7 +2328,7 @@ mod tests {
 
         assert_eq!(labels(&explorer.items), ["Pinned", "Alpha", "gamma"]);
         let pinned = &explorer.items[0];
-        assert_eq!(labels(&pinned.children), ["daily", "beta", "accounts"]);
+        assert_eq!(labels(&pinned.children), ["daily.sql", "beta", "accounts"]);
         assert_eq!(labels(&pinned.children[1].children), ["events"]);
         // Nothing pinned is no group at all.
         let unpinned = Shortcuts {
@@ -2278,7 +2376,7 @@ mod tests {
         );
         let rows = &explorer.items[0].children;
 
-        assert_eq!(labels(rows), ["accounts", "dropped", "gone"]);
+        assert_eq!(labels(rows), ["accounts", "dropped", "gone.sql"]);
         let missing: Vec<_> = rows
             .iter()
             .map(|row| match &explorer.shortcuts[row.id.as_ref()] {
@@ -2458,7 +2556,7 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        explorer.extend(queries(&names, ""));
+        explorer.extend(files(&[], &names, ""));
         explorer.extend(tree(&catalog(), ""));
 
         let mut ids = Vec::new();
@@ -2906,7 +3004,7 @@ mod tests {
         assert_eq!(members(&moved, "Hot"), [query("a"), query("c")]);
         assert_eq!(members(&moved, "Cold"), [query("d"), query("b")]);
 
-        // From the schemas, Saved Queries or Pinned, the row stays where it was.
+        // From the schemas, Files or Pinned, the row stays where it was.
         for from in [None, Some(&Container::Pinned)] {
             let mut added = two_folders();
             added.drop_on(&Pin::Member(query("a")), from, &into_cold);

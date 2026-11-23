@@ -10,9 +10,9 @@
 //! changed but their visibility.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         Arc, Mutex, PoisonError,
@@ -47,7 +47,7 @@ use crate::{
     result_grid::{InsertTarget, NewValue, ResultGrid},
     sidebar::OPEN_ROWS_CAP,
     sql::{self, Destructive, Mode, SortKey, Verdict},
-    store,
+    sql_file, store,
     structure_grid::StructureGrid,
     theme::ConnectionColor,
     ui::row_readout,
@@ -118,6 +118,14 @@ pub(crate) struct Profile {
     /// loaded waits for it; the tree owns a row once it holds it.
     pub(crate) open_rows: Vec<String>,
     pub(crate) selected_rows: Vec<String>,
+    /// The `.sql` files last opened or saved here, newest first
+    /// ([`remember_recent`]), and those of them found gone at the last look,
+    /// which the Files group greys.
+    pub(crate) recent_files: Vec<PathBuf>,
+    pub(crate) missing_files: HashSet<PathBuf>,
+    /// Bumped whenever the recent files or what is known of one changes, so a
+    /// look that set out before lands on nothing ([`Self::take_missing`]).
+    pub(crate) recent_generation: u64,
     pub(crate) session: Session,
 }
 
@@ -277,9 +285,9 @@ impl Profile {
         shortcut_database(self.config.target(), shown, || self.active_database())
     }
 
-    /// The sidebar row of the tab in front: its object's, or its saved
-    /// query's. A scratch query has none, and nor has an object the catalog
-    /// does not list.
+    /// The sidebar row of the tab in front: its object's, its saved query's
+    /// or its file's. A scratch query has none, and nor has an object the
+    /// catalog does not list.
     pub(crate) fn front_row(&self) -> Option<String> {
         match self.session.active_object() {
             // Listed under its own database, not under the connection's.
@@ -290,13 +298,47 @@ impl Profile {
                 }
                 _ => None,
             },
-            None => self
-                .session
-                .active_query_tab()?
-                .open_query
-                .as_deref()
-                .map(crate::explorer::query_row),
+            None => {
+                let tab = self.session.active_query_tab()?;
+                match self.session.saved_query_of(tab) {
+                    Some(name) => Some(crate::explorer::query_row(name)),
+                    None => Some(crate::explorer::file_row(&tab.file.as_ref()?.path)),
+                }
+            }
         }
+    }
+
+    /// What the sidebar's Files group lists besides the saved queries: the
+    /// recent files, then any file open in a tab they no longer hold. A saved
+    /// query's file is listed as the query, so not here.
+    pub(crate) fn recent_files_changed(&mut self) {
+        self.recent_generation += 1;
+    }
+
+    /// What a look that set out at `generation` found gone, taken only if
+    /// nothing has changed since: a stale look would grey a file opened or
+    /// saved after it set out.
+    pub(crate) fn take_missing(&mut self, generation: u64, gone: HashSet<PathBuf>) {
+        if let Some(missing) =
+            still_missing(generation, self.recent_generation, gone, &self.recent_files)
+        {
+            self.missing_files = missing;
+        }
+    }
+
+    pub(crate) fn listed_files(&self) -> Vec<PathBuf> {
+        let mut listed: Vec<PathBuf> = Vec::new();
+        let open = self
+            .session
+            .queries
+            .iter()
+            .filter_map(|tab| Some(&tab.file.as_ref()?.path));
+        for path in self.recent_files.iter().chain(open) {
+            if !listed.contains(path) && path.parent() != Some(&self.session.query_directory) {
+                listed.push(path.clone());
+            }
+        }
+        listed
     }
 
     /// How far the catalog an object of `database` is looked up in has got:
@@ -588,6 +630,7 @@ impl Profile {
                 .take(OPEN_ROWS_CAP)
                 .cloned()
                 .collect(),
+            recent_files: self.recent_files.clone(),
             ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
@@ -738,18 +781,17 @@ pub(crate) struct Session {
     /// `cmd+enter` reaches the workspace only through the focused element's
     /// dispatch path, so an unfocused editor makes the primary keystroke dead.
     pub(crate) editor_needs_focus: bool,
-    /// The same hazard for the name field: an unfocused input asks for a name
-    /// nobody can type into.
-    pub(crate) save_name_needs_focus: bool,
     /// Every query file this profile has, open in a tab or not: what the
-    /// sidebar's Queries group and the palette list.
+    /// sidebar's Files group and the palette list.
     pub(crate) saved_queries: Vec<String>,
+    /// Where those files are, resolved as a file tab's path is, so a tab on
+    /// one can be told by its path.
+    pub(crate) query_directory: PathBuf,
     /// The statements this profile has run, newest first, each with what is
     /// known of its last run. Held rather than read off disk when the palette
     /// opens, for the reason `saved_queries` is: the list is wanted while a
     /// list is being built, which is a frame.
     pub(crate) history: Vec<store::HistoryEntry>,
-    pub(crate) save_name: Entity<InputState>,
     /// The page in front, and where to jump to once it is typed over: see
     /// `sync_page_input`. One field for the window, because only the relation
     /// in front can be paged.
@@ -757,16 +799,19 @@ pub(crate) struct Session {
     /// The page last written into `page_input`, to tell a page that moved
     /// from one that is being typed over.
     pub(crate) page_shown: usize,
-    pub(crate) naming: bool,
     /// The saved query the delete dialog is asking about.
     pub(crate) pending_delete: Option<PendingDelete>,
     /// The sidebar row a saved query is being renamed in.
     pub(crate) query_rename: Option<QueryRename>,
-    /// The same hazard as `save_name_needs_focus`, for the row's field.
+    /// The same hazard as `editor_needs_focus`, for the row's field.
     pub(crate) query_rename_needs_focus: bool,
     /// The tab a close is asking about, because it holds cell edits nobody
     /// has applied.
     pub(crate) pending_discard: Option<PendingDiscard>,
+    pub(crate) pending_overwrite: Option<PendingOverwrite>,
+    /// The recent file found gone when its Files row was opened, while the
+    /// question whether to leave it off the list is up.
+    pub(crate) pending_forget: Option<PathBuf>,
     /// An action a landed row send released, waiting for render, which has the
     /// `Window` its handler needs (`Workspace::resume_released`).
     pub(crate) resume_after: Option<(Tab, AfterEdits)>,
@@ -1245,20 +1290,6 @@ impl Session {
         })
         .detach();
 
-        let save_name = cx.new(|cx| InputState::new(window, cx).placeholder("Query name"));
-        // Subscribed with the window, because confirming a save can swap the
-        // editor's buffer and that cannot be done without one.
-        cx.subscribe_in(
-            &save_name,
-            window,
-            |workspace, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    workspace.confirm_save(window, cx);
-                }
-            },
-        )
-        .detach();
-
         let page_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(
             &page_input,
@@ -1272,7 +1303,8 @@ impl Session {
         .detach();
 
         let saved_queries = store::saved_queries(&id);
-        let stored_queries = unsaved_where_gone(stored_queries, &saved_queries);
+        let query_directory = sql_file::canonical(&store::query_directory(&id).unwrap_or_default());
+        let stored_queries = adopted(stored_queries, &query_directory);
         // No tab is a state a profile can be in: closing the last one leaves
         // the strip empty, and it comes back empty.
         let active = stored_queries
@@ -1309,17 +1341,17 @@ impl Session {
             explorer_highlights: Arc::new(HashMap::new()),
             explorer_shortcuts: Arc::new(HashMap::new()),
             editor_needs_focus: true,
-            save_name_needs_focus: false,
             saved_queries,
+            query_directory,
             history: store::history(&id),
-            save_name,
             page_input,
             page_shown: 0,
-            naming: false,
             pending_delete: None,
             query_rename: None,
             query_rename_needs_focus: false,
             pending_discard: None,
+            pending_overwrite: None,
+            pending_forget: None,
             resume_after: None,
             notice,
             tab_notice: None,
@@ -1489,7 +1521,7 @@ impl Session {
         default_chips(
             self.queries
                 .iter()
-                .map(|tab| (tab.id, tab.open_query.as_deref())),
+                .map(|tab| (tab.id, tab.file.as_ref().map(|file| file.path.as_path()))),
             self.objects.iter().map(|tab| tab.id),
         )
     }
@@ -1523,8 +1555,8 @@ impl Session {
         }
     }
 
-    /// Give a chip its new key where it stands, for a buffer whose name is
-    /// changing: saving or renaming it is not moving it.
+    /// Give a chip its new key where it stands, for a buffer whose file is
+    /// changing: saving it as another or renaming it is not moving it.
     pub(crate) fn rekey(&mut self, from: &TabKey, to: TabKey) {
         let mut order = self.strip_order();
         if let Some(key) = order.iter_mut().find(|key| *key == from) {
@@ -1554,23 +1586,78 @@ impl Session {
     pub(crate) fn tab_of(&self, key: &TabKey) -> Option<Tab> {
         match key {
             TabKey::Unsaved(id) => Some(Tab::Query(*id)),
-            TabKey::Saved(name) => self.tab_holding(name).map(Tab::Query),
+            TabKey::File(path) => self.tab_on(path).map(Tab::Query),
             TabKey::Object(id) => Some(Tab::Object(*id)),
         }
     }
 
-    /// The tab a buffer holding `name` is in, if one is open.
-    pub(crate) fn tab_holding(&self, name: &str) -> Option<u64> {
+    /// The tab bound to `path`, if one is open.
+    pub(crate) fn tab_on(&self, path: &Path) -> Option<u64> {
         self.queries
             .iter()
-            .find(|tab| tab.open_query.as_deref() == Some(name))
+            .find(|tab| tab.file.as_ref().is_some_and(|file| file.path == path))
             .map(|tab| tab.id)
     }
 
-    /// The name of the buffer in front, when it has one.
-    pub(crate) fn open_query(&self) -> Option<&str> {
-        self.active_query_tab()
-            .and_then(|tab| tab.open_query.as_deref())
+    /// Where the saved query `name` is on disk, resolved as every bound path
+    /// is, so a query that is a link names the file a tab on it is bound to.
+    pub(crate) fn saved_query_path(&self, name: &str) -> PathBuf {
+        sql_file::canonical(&self.query_directory.join(format!("{name}.sql")))
+    }
+
+    /// Unbind every tab on a file `held` already has open, or an earlier tab
+    /// here does, keeping its text as an untitled buffer's: two tabs on one
+    /// file would save over each other. Restored paths can meet when a link
+    /// they were stored through now leads somewhere else. What to say about
+    /// it, when anything was unbound.
+    pub(crate) fn unbind_duplicates(
+        &mut self,
+        mut held: HashSet<PathBuf>,
+        cx: &App,
+    ) -> Option<String> {
+        let mut unbound = None;
+        for tab in &mut self.queries {
+            let Some(file) = &tab.file else {
+                continue;
+            };
+            if held.insert(file.path.clone()) {
+                continue;
+            }
+            unbound.get_or_insert_with(|| {
+                format!(
+                    "{} was open in two tabs, so one of them is untitled now.",
+                    sql_file::file_name(&file.path)
+                )
+            });
+            tab.file = None;
+            tab.refresh_dirty(cx);
+        }
+        unbound
+    }
+
+    /// The file deleting the saved query `name` takes away, as a tab on it is
+    /// bound: `None` when the query is a link, which goes alone, leaving the
+    /// file it leads to and any tab on that.
+    pub(crate) fn deleted_with(&self, name: &str) -> Option<PathBuf> {
+        let entry = self.query_directory.join(format!("{name}.sql"));
+        let link = std::fs::symlink_metadata(&entry)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        (!link).then(|| sql_file::canonical(&entry))
+    }
+
+    /// The tab bound to the saved query `name`, if one is open.
+    pub(crate) fn tab_holding(&self, name: &str) -> Option<u64> {
+        self.tab_on(&self.saved_query_path(name))
+    }
+
+    /// The saved query `tab` is bound to, when its file is one of this
+    /// profile's saved queries.
+    pub(crate) fn saved_query_of<'a>(&self, tab: &'a QueryTab) -> Option<&'a str> {
+        let path = &tab.file.as_ref()?.path;
+        if path.parent()? != self.query_directory {
+            return None;
+        }
+        path.file_name()?.to_str()?.strip_suffix(".sql")
     }
 
     pub(crate) fn active_object(&self) -> Option<&ObjectTab> {
@@ -1838,9 +1925,8 @@ impl Session {
     /// All four name the buffer or tab they were raised over, so leaving one
     /// standing across a context change offers to delete one query while another
     /// is on screen. One method rather than a clear at each site, because the
-    /// two callers had drifted apart: switching profiles left `naming` set with
-    /// `save_name_needs_focus` already spent, which renders the name prompt and
-    /// then hands focus to nothing at all — and a window with nothing focused
+    /// two callers had drifted apart: a field left up with its focus already
+    /// spent hands focus to nothing at all, and a window with nothing focused
     /// has no dispatch path, so the keyboard goes dead until something is
     /// clicked.
     pub(crate) fn clear_prompts(&mut self) {
@@ -1858,8 +1944,8 @@ impl Session {
         if let Some((tab, then)) = self.resume_after.take() {
             self.put_back(tab, then);
         }
-        self.naming = false;
-        self.save_name_needs_focus = false;
+        self.pending_overwrite = None;
+        self.pending_forget = None;
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
@@ -1916,8 +2002,9 @@ pub(crate) enum PendingDelete {
 #[derive(Clone)]
 pub(crate) enum AfterEdits {
     /// Close the tab, and delete the saved query first when deleting it is
-    /// what closes the tab.
-    Close { deleting: Option<String> },
+    /// what closes the tab, by its profile's id and its name: the tab can be
+    /// on another connection.
+    Close { deleting: Option<(String, String)> },
     /// A relation tab's statement again, with the filter, sort, row limit and
     /// page offset the action produced. The tab's own are untouched until it
     /// runs, so a cancelled page turn leaves the page on screen as it was.
@@ -2006,17 +2093,32 @@ pub(crate) struct PendingDiscard {
     /// the action meets them. `None` for a draft, all of whose edits go.
     pub(crate) row: Option<usize>,
     /// The other tabs Close All Tabs found edits in, discarded and closed
-    /// with `tab`. Empty for every other action.
+    /// with `tab`, and the file tabs with unsaved changes it holds for the
+    /// Save question after. Empty for every other action.
     pub(crate) also: Vec<Tab>,
+    /// Asking Save / Don't Save about file tabs with unsaved changes, `tab`
+    /// and `also`, rather than about cell edits.
+    pub(crate) unsaved: bool,
+}
+
+impl PendingDiscard {
+    /// Every tab the question is over: `tab`, then `also`.
+    pub(crate) fn tabs(&self) -> impl Iterator<Item = Tab> + '_ {
+        std::iter::once(self.tab).chain(self.also.iter().copied())
+    }
+}
+
+/// File tabs whose Save is waiting on the Overwrite question, and whether
+/// each closes once written, as Save in the close question asked.
+pub(crate) struct PendingOverwrite {
+    pub(crate) tabs: Vec<u64>,
+    pub(crate) close: bool,
 }
 
 /// What takes focus when a surface comes to the front. A buffer, a field and a
 /// grid are all focusable and no two of them share a type.
 pub(crate) enum Focus {
     Buffer(Entity<EditorState>),
-    /// A single-line field — the save-name prompt. Not an [`EditorState`]:
-    /// gpui-component 0.8 splits the code editor off from the plain input.
-    Field(Entity<InputState>),
     Grid(Entity<TableState<ResultGrid>>),
     Structure(Entity<TableState<StructureGrid>>),
     Diagram(gpui::FocusHandle),
@@ -2336,27 +2438,26 @@ impl Tab {
     }
 }
 
-/// A chip of the tab strip. A saved query's is keyed by its name rather than
-/// its tab, which is what lets a rename keep the chip where it stands.
+/// A chip of the tab strip. A file tab's is keyed by its path rather than its
+/// tab, which is what lets a rename keep the chip where it stands.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TabKey {
     Unsaved(u64),
-    Saved(String),
+    File(PathBuf),
     Object(u64),
 }
 
-/// Unsaved buffers, then saved queries, then objects, each kind in the order
-/// its tabs were opened. A saved query is a chip only while a tab holds it:
-/// the sidebar is where the rest are listed.
+/// Untitled buffers, then file tabs, then objects, each kind in the order its
+/// tabs were opened.
 fn default_chips<'a>(
-    queries: impl Iterator<Item = (u64, Option<&'a str>)> + Clone,
+    queries: impl Iterator<Item = (u64, Option<&'a Path>)> + Clone,
     objects: impl Iterator<Item = u64>,
 ) -> Vec<TabKey> {
     queries
         .clone()
-        .filter(|(_, name)| name.is_none())
+        .filter(|(_, path)| path.is_none())
         .map(|(id, _)| TabKey::Unsaved(id))
-        .chain(queries.filter_map(|(_, name)| name.map(|name| TabKey::Saved(name.to_string()))))
+        .chain(queries.filter_map(|(_, path)| path.map(|path| TabKey::File(path.to_path_buf()))))
         .chain(objects.map(TabKey::Object))
         .collect()
 }
@@ -2484,6 +2585,93 @@ impl Sorting {
     }
 }
 
+/// The file a query tab is bound to.
+pub(crate) struct FileBinding {
+    /// Resolved through every link ([`sql_file::canonical`]), so one file is
+    /// one path however it was reached.
+    pub(crate) path: PathBuf,
+    /// The text as last read from or written to `path`, or `None` while
+    /// nothing is there: a tab whose file has gone has unsaved work whatever
+    /// it holds, and says the file was deleted.
+    pub(crate) saved: Option<String>,
+    pub(crate) bom: bool,
+    /// `path`'s stamp as of that read or write, `None` while nothing is there.
+    pub(crate) stamp: Option<sql_file::Stamp>,
+    pub(crate) conflict: Option<Conflict>,
+}
+
+/// The file changed on disk while its tab held changes of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Conflict {
+    /// The tab's bar asks Reload or Keep Mine.
+    Asking,
+    /// Keep Mine: the stamp is the file's again, so Save asks before writing
+    /// over what someone else wrote.
+    KeptMine,
+}
+
+/// What a look at a file tab's file does to the tab.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Settle {
+    Keep,
+    /// The tab has nothing unsaved, so it takes the file as it is now.
+    Reload,
+    /// Raise the bar: reloading would lose what the tab holds.
+    Ask,
+    /// Nothing is there any more.
+    Gone,
+}
+
+impl FileBinding {
+    /// What a tab on this file does about `now`, the file's stamp as a look
+    /// finds it, while it is `dirty` or not.
+    pub(crate) fn settle(&self, now: Option<sql_file::Stamp>, dirty: bool) -> Settle {
+        match now {
+            _ if now == self.stamp => Settle::Keep,
+            None => Settle::Gone,
+            Some(_) if self.conflict == Some(Conflict::Asking) => Settle::Keep,
+            Some(_) if dirty => Settle::Ask,
+            Some(_) => Settle::Reload,
+        }
+    }
+
+    /// Whether Save asks before writing over the file whose stamp is `now`:
+    /// someone else wrote it since the tab last read or wrote it, or did and
+    /// the user chose to keep their own text. A file that has gone has
+    /// nothing to overwrite, whatever was kept; one that could not be
+    /// stat'ed is asked about only over a known conflict, the write saying
+    /// what is wrong.
+    ///
+    /// An equal stamp is not trusted alone: a coarse clock, or a tool that
+    /// keeps timestamps, leaves a same-length edit with the old one. So the
+    /// file's text and byte order mark (`on_disk`, `None` when it will not
+    /// read) are compared with the saved text, under the 4 MB cap a cheap
+    /// read.
+    pub(crate) fn overwrites(
+        &self,
+        now: &std::io::Result<Option<sql_file::Stamp>>,
+        on_disk: impl FnOnce() -> Option<(String, bool)>,
+    ) -> bool {
+        match now {
+            Ok(None) => false,
+            Ok(Some(now)) => {
+                self.conflict.is_some()
+                    || self.stamp != Some(*now)
+                    || on_disk().as_ref().map(|(text, bom)| (text.as_str(), *bom))
+                        != self.saved.as_deref().map(|saved| (saved, self.bom))
+            }
+            Err(_) => self.conflict.is_some(),
+        }
+    }
+}
+
+/// Whether a tab holding `text` has changes its file does not. Compared
+/// against the saved text rather than set by an edit, so an undo back to it
+/// clears the mark.
+pub(crate) fn is_dirty(file: Option<&FileBinding>, text: &str) -> bool {
+    file.is_some_and(|file| file.saved.as_deref() != Some(text))
+}
+
 /// When a view's edits are sent. `Classic`, the default, is how editing worked
 /// before a view had a mode: cell edits are held until Save shows their
 /// `UPDATE`s. `Draft` holds every edit until it is applied through the review.
@@ -2562,11 +2750,17 @@ pub(crate) struct QueryTab {
     pub(crate) editor: Entity<EditorState>,
     pub(crate) results: Entity<TableState<ResultGrid>>,
     pub(crate) query: QueryState,
-    /// The saved query this buffer holds, or `None` while it is unsaved.
-    ///
-    /// It is also which file the buffer persists to: a name means the query
-    /// file, no name means this tab's own scratch file.
-    pub(crate) open_query: Option<String>,
+    /// The file this buffer is bound to, or `None` for an untitled one. Only
+    /// Save writes it: a quit or a switch writes the buffer to this tab's own
+    /// scratch file either way.
+    pub(crate) file: Option<FileBinding>,
+    /// [`is_dirty`], as of the editor's last change. Held because the strip
+    /// and the window's edited mark read it every frame, and a file can be
+    /// megabytes long.
+    pub(crate) dirty: bool,
+    /// [`StoredText::scratch_unread`], for the tab's life: neither Save nor
+    /// a close removes that file, the one copy of whatever it holds.
+    pub(crate) scratch_unread: bool,
     /// The statement behind this tab's grid.
     ///
     /// Held rather than derived from the buffer, unlike the sort path, and a
@@ -3232,23 +3426,68 @@ impl QueryTab {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> (Self, Option<String>) {
-        let (sql, notice) = match stored_text(profile_id, stored) {
-            Ok(sql) => (sql, None),
-            Err(message) => (None, Some(message)),
-        };
+        let StoredText {
+            file,
+            text,
+            notice,
+            scratch_unread,
+        } = stored_text(profile_id, stored);
+        let mut tab = Self::new(
+            profile_id, stored.id, text, file, engine, sorting, row_limit, window, cx,
+        );
+        tab.scratch_unread = scratch_unread;
+        tab.queued_results = stored.queued_results;
+        // Kept as written, and handed to the driver as data on the first
+        // run: a database the server no longer has fails that run with the
+        // open's own words, and the tab stays bound to it.
+        tab.binding = stored
+            .database
+            .clone()
+            .filter(|database| !database.is_empty())
+            .map(|database| Binding {
+                database,
+                schema: stored.schema.clone().filter(|schema| !schema.is_empty()),
+            });
+        (tab, notice)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        profile_id: &str,
+        id: u64,
+        text: String,
+        file: Option<FileBinding>,
+        engine: Engine,
+        sorting: Sorting,
+        row_limit: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Self {
+        let dirty = is_dirty(file.as_ref(), &text);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(engine.syntax().highlighter())
                 .soft_wrap(false)
                 .placeholder(engine.syntax().placeholder())
-                .default_value(sql.unwrap_or_default())
+                .default_value(text)
         });
-        let tab = Self {
-            id: stored.id,
+        cx.subscribe(&editor, {
+            let profile_id = profile_id.to_string();
+            move |workspace, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    workspace.buffer_changed(&profile_id, id, cx);
+                }
+            }
+        })
+        .detach();
+        Self {
+            id,
             editor,
             results: result_grid::new_grid(window, cx),
             query: QueryState::Idle,
-            open_query: stored.name.clone(),
+            file,
+            dirty,
+            scratch_unread: false,
             last_query: None,
             sent_from: None,
             ran_from: None,
@@ -3259,7 +3498,7 @@ impl QueryTab {
             // nothing of a run in flight is kept.
             queue: None,
             lent: None,
-            queued_results: stored.queued_results,
+            queued_results: 0,
             sorting: sorting.on(engine),
             row_limit,
             showing_plan: false,
@@ -3269,25 +3508,32 @@ impl QueryTab {
             row_panel_editing: false,
             row_panel_filter: Default::default(),
             row_panel_split: cx.new(|_| ResizableState::default()),
-            // Kept as written, and handed to the driver as data on the first
-            // run: a database the server no longer has fails that run with the
-            // open's own words, and the tab stays bound to it.
-            binding: stored
-                .database
-                .clone()
-                .filter(|database| !database.is_empty())
-                .map(|database| Binding {
-                    database,
-                    schema: stored.schema.clone().filter(|schema| !schema.is_empty()),
-                }),
-        };
-        (tab, notice)
+            binding: None,
+        }
+    }
+
+    /// Whether [`Self::dirty`] moved, read again off the editor.
+    pub(crate) fn refresh_dirty(&mut self, cx: &App) -> bool {
+        let dirty = is_dirty(self.file.as_ref(), &self.editor.read(cx).value());
+        std::mem::replace(&mut self.dirty, dirty) != dirty
+    }
+
+    /// The file's name without its extension, as its chip shows it.
+    pub(crate) fn file_stem(&self) -> Option<String> {
+        let path = &self.file.as_ref()?.path;
+        Some(
+            path.file_stem()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     pub(crate) fn stored(&self, active: bool) -> store::StoredQueryTab {
         store::StoredQueryTab {
             id: self.id,
-            name: self.open_query.clone(),
+            name: None,
+            path: self.file.as_ref().map(|file| file.path.clone()),
             active,
             // The live queue is the truth once there is one; until the tab is
             // hydrated, what was written last time is.
@@ -3303,6 +3549,21 @@ impl QueryTab {
                 .binding
                 .as_ref()
                 .and_then(|binding| binding.schema.clone()),
+            // Only for a dirty tab: a clean one has nothing to lose to a file
+            // changed while the app was closed.
+            saved_hash: self
+                .file
+                .as_ref()
+                .filter(|_| self.dirty)
+                .and_then(|file| Some(sql_file::text_hash(file.saved.as_deref()?, file.bom))),
+            kept_mine: self
+                .file
+                .as_ref()
+                .is_some_and(|file| file.conflict == Some(Conflict::KeptMine)),
+            asking: self
+                .file
+                .as_ref()
+                .is_some_and(|file| file.conflict == Some(Conflict::Asking)),
         }
     }
 }
@@ -3882,28 +4143,164 @@ pub(crate) enum QueryState {
     Failed(DbError),
 }
 
-/// The stored tabs, each naming a query whose file has gone turned into the
-/// unsaved buffer it now is, rather than a tab pointing at nothing: a file
-/// removed outside DBDelve, since deleting one inside it closes its tab.
-fn unsaved_where_gone(
+/// How many files a profile's recent list keeps.
+pub(crate) const RECENT_FILES_CAP: usize = 20;
+
+/// The recent files as `profiles.toml` holds them, as [`remember_recent`]
+/// would have left them: no saved query, each once, newest first, twenty.
+///
+/// ponytail: compared as written, not resolved through links, since a stat
+/// per path at launch waits on a stalled mount as long as it does. Every
+/// path DBDelve writes is already resolved, so only a hand edit can list a
+/// file twice; resolving on the blocking pool with the look at launch is
+/// the upgrade.
+pub(crate) fn restored_recent(stored: Vec<PathBuf>, query_directory: &Path) -> Vec<PathBuf> {
+    let mut recent = Vec::new();
+    for path in stored {
+        if recent.len() == RECENT_FILES_CAP {
+            break;
+        }
+        if path.parent() != Some(query_directory) && !recent.contains(&path) {
+            recent.push(path);
+        }
+    }
+    recent
+}
+
+fn still_missing(
+    looked_at: u64,
+    now: u64,
+    gone: HashSet<PathBuf>,
+    recent: &[PathBuf],
+) -> Option<HashSet<PathBuf>> {
+    (looked_at == now).then(|| {
+        gone.into_iter()
+            .filter(|path| recent.contains(path))
+            .collect()
+    })
+}
+
+/// `path`, already resolved through its links, to the front of `recent`, once.
+pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, path: PathBuf) {
+    recent.retain(|held| *held != path);
+    recent.insert(0, path);
+    recent.truncate(RECENT_FILES_CAP);
+}
+
+/// The stored tabs, each holding a saved query by name as a build before file
+/// tabs wrote it, bound to that query's file instead. Nothing moves: the next
+/// Save writes the file where it is.
+fn adopted(
     stored: Vec<store::StoredQueryTab>,
-    saved_queries: &[String],
+    query_directory: &Path,
 ) -> Vec<store::StoredQueryTab> {
     stored
         .into_iter()
         .map(|mut stored| {
-            stored.name = stored.name.filter(|name| saved_queries.contains(name));
+            if let Some(name) = stored.name.take() {
+                stored.path = stored.path.or_else(|| {
+                    Some(sql_file::canonical(
+                        &query_directory.join(format!("{name}.sql")),
+                    ))
+                });
+            }
             stored
         })
         .collect()
 }
 
-/// The text a stored tab comes back with: its query's file when it names
-/// one, its own scratch file when not.
-fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> Result<Option<String>, String> {
-    match &stored.name {
-        Some(name) => store::read_query(profile_id, name),
+/// What a stored tab comes back as.
+struct StoredText {
+    file: Option<FileBinding>,
+    text: String,
+    /// What went wrong reading the file or the scratch file.
+    notice: Option<String>,
+    /// The scratch file is there, could not be read, and could not be moved
+    /// aside: it may hold unsaved text the buffer does not, so nothing writes
+    /// or removes it.
+    scratch_unread: bool,
+}
+
+/// What a stored tab comes back as. An untitled tab holds its scratch file.
+/// A file tab holds its scratch file when it was left with unsaved text,
+/// which is what makes it come back dirty, and its file when not; one whose
+/// file has gone stays bound to it, holding what it last had.
+fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
+    let path = stored.path.as_deref().map(sql_file::canonical);
+    let scratch = match &path {
         None => store::read_scratch(profile_id, stored.id),
+        Some(_) => store::read_own_scratch(profile_id, stored.id),
+    };
+    // Set aside, the tab is free to keep its unsaved text again; left where
+    // it is, nothing may write or remove it, and so nothing keeps the tab's.
+    let (scratch, notice, scratch_unread) = match scratch {
+        Ok(scratch) => (scratch, None, false),
+        Err(message) => match store::set_aside_scratch(profile_id, stored.id) {
+            Ok(aside) => (
+                None,
+                Some(format!("{message} It was kept as {}.", aside.display())),
+                false,
+            ),
+            Err(_) => (None, Some(message), true),
+        },
+    };
+    let Some(path) = path else {
+        return StoredText {
+            file: None,
+            text: scratch.unwrap_or_default(),
+            notice,
+            scratch_unread,
+        };
+    };
+    // ponytail: read on the window's thread, as the scratch files beside it
+    // are, so a file on a stalled mount holds the launch; reading the bound
+    // files on the blocking pool before the tabs are built is the upgrade.
+    match sql_file::read(&path) {
+        Ok(on_disk) => {
+            let bom = on_disk.as_ref().is_some_and(|on_disk| on_disk.bom);
+            let stamp = on_disk.as_ref().map(|on_disk| on_disk.stamp);
+            let saved = on_disk.map(|on_disk| on_disk.text);
+            let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
+            let conflict = restored_conflict(stored, saved.as_deref(), bom, &text);
+            StoredText {
+                file: Some(FileBinding {
+                    path,
+                    saved,
+                    bom,
+                    stamp,
+                    conflict,
+                }),
+                text,
+                notice,
+                scratch_unread,
+            }
+        }
+        // Unbound rather than bound to text nobody has seen: Save would put
+        // the buffer over whatever the file holds.
+        Err(message) => StoredText {
+            file: None,
+            text: scratch.unwrap_or_default(),
+            notice: notice.or(Some(message)),
+            scratch_unread,
+        },
+    }
+}
+
+/// The conflict a file tab left with unsaved text comes back with, its file
+/// reading `saved` and its buffer `text`: the bar, when the file is not what
+/// that text was written against or the bar was left up, or Keep Mine, as it
+/// was left.
+fn restored_conflict(
+    stored: &store::StoredQueryTab,
+    saved: Option<&str>,
+    bom: bool,
+    text: &str,
+) -> Option<Conflict> {
+    let saved = saved.filter(|saved| *saved != text)?;
+    match &stored.saved_hash {
+        Some(hash) if *hash != sql_file::text_hash(saved, bom) => Some(Conflict::Asking),
+        _ if stored.asking => Some(Conflict::Asking),
+        _ => stored.kept_mine.then_some(Conflict::KeptMine),
     }
 }
 
@@ -3918,7 +4315,9 @@ impl QueryState {
     }
 }
 
-/// Write every one of a profile's buffers back to whichever file it came from.
+/// Write every one of a profile's buffers to its scratch file, or remove the
+/// scratch of a file tab with nothing unsaved. A scratch file that could not
+/// be read back is left as it is (`QueryTab::scratch_unread`).
 ///
 /// All of them rather than the one in front: a buffer that is not visible is
 /// still someone's unsaved work. The first failure is the one reported and
@@ -3926,11 +4325,17 @@ impl QueryState {
 /// than it has to.
 pub(crate) fn write_buffer(profile: &Profile, cx: &App) -> Result<(), String> {
     let mut failure = None;
-    for tab in &profile.session.queries {
+    for tab in profile
+        .session
+        .queries
+        .iter()
+        .filter(|tab| !tab.scratch_unread)
+    {
         let sql = tab.editor.read(cx).value().to_string();
-        let written = match &tab.open_query {
-            Some(name) => store::write_query(&profile.id, name, &sql),
-            None => store::write_scratch(&profile.id, tab.id, &sql),
+        // Never the file itself: only Save writes the user's file.
+        let written = match &tab.file {
+            Some(file) if !is_dirty(Some(file), &sql) => store::delete_scratch(&profile.id, tab.id),
+            _ => store::write_scratch(&profile.id, tab.id, &sql),
         };
         if let Err(message) = written {
             failure = failure.or(Some(message));
@@ -5501,25 +5906,260 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_whose_query_was_deleted_comes_back_as_an_unsaved_buffer() {
+    fn the_recent_files_restore_without_saved_queries_or_repeats_and_keep_twenty() {
+        let queries = Path::new("/support/queries/e2e");
+        let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
+        let mut stored = vec![path(0), queries.join("q.sql"), path(1), path(0)];
+        stored.extend((2..30).map(path));
+        let recent = restored_recent(stored, queries);
+        assert_eq!(recent.len(), RECENT_FILES_CAP);
+        assert_eq!(recent[..3], [path(0), path(1), path(2)]);
+        assert_eq!(recent[19], path(19));
+    }
+
+    #[test]
+    fn a_look_at_the_recent_files_lands_only_if_nothing_changed_since() {
+        let gone: HashSet<PathBuf> = [PathBuf::from("/a.sql"), PathBuf::from("/b.sql")].into();
+        let recent = [PathBuf::from("/a.sql")];
+        assert_eq!(still_missing(3, 4, gone.clone(), &recent), None);
+        assert_eq!(
+            still_missing(4, 4, gone, &recent),
+            Some([PathBuf::from("/a.sql")].into())
+        );
+    }
+
+    #[test]
+    fn the_recent_files_put_the_newest_first_once_and_keep_twenty() {
+        let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
+        let mut recent = Vec::new();
+        for n in 0..25 {
+            remember_recent(&mut recent, path(n));
+        }
+        assert_eq!(recent.len(), RECENT_FILES_CAP);
+        assert_eq!(recent[0], path(24));
+        assert_eq!(recent[19], path(5));
+        remember_recent(&mut recent, path(10));
+        assert_eq!(recent[0], path(10));
+        assert_eq!(recent.len(), RECENT_FILES_CAP);
+        assert_eq!(recent.iter().filter(|held| **held == path(10)).count(), 1);
+    }
+
+    #[test]
+    fn a_tab_holding_a_saved_query_by_name_is_bound_to_its_file_where_it_is() {
+        let tab = |name: Option<&str>, path: Option<&str>| store::StoredQueryTab {
+            id: 3,
+            name: name.map(str::to_string),
+            path: path.map(PathBuf::from),
+            active: true,
+            queued_results: 0,
+            database: None,
+            schema: None,
+            saved_hash: None,
+            kept_mine: false,
+            asking: false,
+        };
+        let adopted = adopted(
+            vec![
+                tab(Some("daily"), None),
+                tab(None, None),
+                tab(None, Some("/q/a.sql")),
+            ],
+            Path::new("/support/queries/dev"),
+        );
+        // Resolved, it is on the current drive on Windows.
+        let daily = sql_file::canonical(Path::new("/support/queries/dev/daily.sql"));
+        assert_eq!(
+            adopted,
+            [
+                store::StoredQueryTab {
+                    path: Some(daily),
+                    ..tab(None, None)
+                },
+                tab(None, None),
+                tab(None, Some("/q/a.sql")),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_query_that_is_a_link_is_bound_to_the_file_it_leads_to() {
         store::tests::with_home(|| {
-            store::write_query("dev", "daily", "SELECT 1").expect("a query must write");
-            let open = store::StoredQueryTab {
+            let home = sql_file::canonical(&store::home().unwrap());
+            let (queries, target) = (home.join("queries"), home.join("shared.sql"));
+            std::fs::create_dir_all(&queries).unwrap();
+            std::fs::write(&target, "SELECT 1").unwrap();
+            std::os::unix::fs::symlink(&target, queries.join("daily.sql")).unwrap();
+            let stored = |name: Option<&str>, path: Option<PathBuf>| store::StoredQueryTab {
                 id: 3,
-                name: Some("daily".into()),
+                name: name.map(str::to_string),
+                path,
                 active: true,
                 queued_results: 0,
                 database: None,
                 schema: None,
+                saved_hash: None,
+                kept_mine: false,
+                asking: false,
             };
-            assert_eq!(stored_text("dev", &open), Ok(Some("SELECT 1".to_string())));
 
-            store::delete_query("dev", "daily").expect("the delete must go through");
-
-            let restored = unsaved_where_gone(vec![open], &store::saved_queries("dev"));
-            assert_eq!(restored[0].name, None);
-            assert_eq!(stored_text("dev", &restored[0]), Ok(None));
+            let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
+            assert_eq!(adopted, [stored(None, Some(target.clone()))]);
+            let restored = stored_text("dev", &stored(None, Some(queries.join("daily.sql"))));
+            assert_eq!(restored.file.map(|file| file.path), Some(target));
         });
+    }
+
+    #[test]
+    fn a_file_tab_comes_back_holding_its_unsaved_text_and_stays_bound_when_its_file_goes() {
+        store::tests::with_home(|| {
+            let path = sql_file::canonical(&store::home().unwrap().join("q.sql"));
+            std::fs::write(&path, "SELECT 1").unwrap();
+            let stored = store::StoredQueryTab {
+                id: 3,
+                name: None,
+                path: Some(path.clone()),
+                active: true,
+                queued_results: 0,
+                database: None,
+                schema: None,
+                saved_hash: None,
+                kept_mine: false,
+                asking: false,
+            };
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 1");
+            assert!(!is_dirty(file.as_ref(), &text));
+            assert_eq!(notice, None);
+
+            store::write_scratch("dev", 3, "SELECT 2").unwrap();
+            let StoredText { file, text, .. } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 2");
+            assert!(is_dirty(file.as_ref(), &text));
+
+            std::fs::remove_file(&path).unwrap();
+            store::delete_scratch("dev", 3).unwrap();
+            let StoredText { file, text, .. } = stored_text("dev", &stored);
+            let file = file.expect("still bound");
+            assert_eq!((file.path.as_path(), text.as_str()), (path.as_path(), ""));
+            assert!(
+                is_dirty(Some(&file), &text),
+                "nothing on disk is unsaved work"
+            );
+        });
+    }
+
+    #[test]
+    fn dirty_is_whether_the_text_differs_from_the_saved_text() {
+        let file = FileBinding {
+            path: PathBuf::from("/q/a.sql"),
+            saved: Some("SELECT 1".into()),
+            bom: false,
+            stamp: None,
+            conflict: None,
+        };
+        assert!(
+            !is_dirty(None, "anything"),
+            "an untitled tab is never dirty"
+        );
+        assert!(is_dirty(Some(&file), "SELECT 12"));
+        assert!(!is_dirty(Some(&file), "SELECT 1"), "an undo back clears it");
+    }
+
+    fn file_read_at(stamp: sql_file::Stamp) -> FileBinding {
+        FileBinding {
+            path: PathBuf::from("/q/a.sql"),
+            saved: Some("SELECT 1".into()),
+            bom: false,
+            stamp: Some(stamp),
+            conflict: None,
+        }
+    }
+
+    #[test]
+    fn a_file_changed_on_disk_reloads_a_clean_tab_and_asks_a_dirty_one() {
+        let (read, written) = (sql_file::Stamp::of_len(8), sql_file::Stamp::of_len(9));
+        let mut file = file_read_at(read);
+        assert_eq!(file.settle(Some(read), true), Settle::Keep);
+        assert_eq!(file.settle(Some(written), false), Settle::Reload);
+        assert_eq!(file.settle(Some(written), true), Settle::Ask);
+        assert_eq!(file.settle(None, false), Settle::Gone);
+        file.conflict = Some(Conflict::Asking);
+        assert_eq!(
+            file.settle(Some(written), true),
+            Settle::Keep,
+            "the bar is already up"
+        );
+        assert_eq!(file.settle(None, true), Settle::Gone);
+
+        let gone = FileBinding {
+            saved: None,
+            stamp: None,
+            ..file_read_at(read)
+        };
+        assert_eq!(gone.settle(None, true), Settle::Keep, "already said");
+        assert_eq!(gone.settle(Some(written), true), Settle::Ask, "back again");
+    }
+
+    #[test]
+    fn a_relaunch_asks_again_where_the_file_moved_under_unsaved_text() {
+        let left = |saved_hash: Option<&str>, kept_mine| store::StoredQueryTab {
+            saved_hash: saved_hash.map(str::to_string),
+            kept_mine,
+            ..toml::from_str("id = 1").expect("a tab from before these fields")
+        };
+        let theirs = sql_file::text_hash("SELECT 1", false);
+        let ours = sql_file::text_hash("SELECT 0", false);
+        let conflict = |stored: &store::StoredQueryTab, text: &str| {
+            restored_conflict(stored, Some("SELECT 1"), false, text)
+        };
+        assert_eq!(conflict(&left(Some(&theirs), false), "mine"), None);
+        assert_eq!(
+            conflict(&left(Some(&ours), false), "mine"),
+            Some(Conflict::Asking)
+        );
+        assert_eq!(
+            conflict(&left(Some(&theirs), true), "mine"),
+            Some(Conflict::KeptMine)
+        );
+        assert_eq!(
+            conflict(&left(Some(&ours), false), "SELECT 1"),
+            None,
+            "clean"
+        );
+        assert_eq!(conflict(&left(None, false), "mine"), None);
+    }
+
+    #[test]
+    fn save_asks_before_writing_over_a_file_someone_else_wrote() {
+        let (read, written) = (sql_file::Stamp::of_len(8), sql_file::Stamp::of_len(9));
+        let unknown = || Err(std::io::Error::other("no stat"));
+        let as_saved = || Some(("SELECT 1".to_string(), false));
+        let mut file = file_read_at(read);
+        assert!(!file.overwrites(&Ok(Some(read)), as_saved));
+        assert!(file.overwrites(&Ok(Some(written)), as_saved));
+        assert!(
+            file.overwrites(&Ok(Some(read)), || Some(("SELECT 2".into(), false))),
+            "the stamp kept, the text not"
+        );
+        assert!(file.overwrites(&Ok(Some(read)), || None), "will not read");
+        assert!(
+            !file.overwrites(&Ok(None), as_saved),
+            "a deleted file is written again"
+        );
+        assert!(!file.overwrites(&unknown(), as_saved), "the write says why");
+        file.conflict = Some(Conflict::KeptMine);
+        assert!(
+            file.overwrites(&Ok(Some(read)), as_saved),
+            "kept, but still theirs on disk"
+        );
+        assert!(file.overwrites(&unknown(), as_saved));
+        assert!(
+            !file.overwrites(&Ok(None), as_saved),
+            "kept, then deleted: nothing to overwrite"
+        );
     }
 
     #[test]
@@ -5543,17 +6183,22 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_query_is_a_chip_only_while_a_tab_holds_it() {
+    fn a_file_is_a_chip_only_while_a_tab_holds_it() {
         // The strip draws open tabs and nothing else: a query closed is still
         // on disk and in the sidebar, but takes no room here.
-        let queries = [(0, None), (1, Some("daily")), (2, None), (3, Some("adhoc"))];
+        let queries = [
+            (0, None),
+            (1, Some(Path::new("/q/daily.sql"))),
+            (2, None),
+            (3, Some(Path::new("/q/adhoc.sql"))),
+        ];
         assert_eq!(
             default_chips(queries.into_iter(), [4].into_iter()),
             [
                 TabKey::Unsaved(0),
                 TabKey::Unsaved(2),
-                TabKey::Saved("daily".into()),
-                TabKey::Saved("adhoc".into()),
+                TabKey::File("/q/daily.sql".into()),
+                TabKey::File("/q/adhoc.sql".into()),
                 TabKey::Object(4),
             ]
         );
@@ -5563,7 +6208,7 @@ mod tests {
     fn a_new_tab_opens_at_the_right_end_of_the_strip_as_drawn() {
         let restored = vec![
             TabKey::Unsaved(0),
-            TabKey::Saved("daily".into()),
+            TabKey::File("/q/daily.sql".into()),
             TabKey::Object(0),
         ];
         // Nothing has been dragged, so the restored chips are in no order but
@@ -5696,10 +6341,14 @@ mod tests {
                 .map(|id| store::StoredQueryTab {
                     id: *id,
                     name: None,
+                    path: None,
                     active: false,
                     queued_results: 0,
                     database: None,
                     schema: None,
+                    saved_hash: None,
+                    kept_mine: false,
+                    asking: false,
                 })
                 .collect::<Vec<_>>()
         };

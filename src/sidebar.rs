@@ -17,7 +17,8 @@ use gpui_component::tree::TreeItem;
 
 use crate::db::{Levels, RelationKind, Target};
 use crate::explorer::{
-    Builder, ExplorerLeaf, ExplorerTree, RELATION_CATEGORIES, Shortcut, is_schema_row, saved_query,
+    Builder, ExplorerLeaf, ExplorerTree, RELATION_CATEGORIES, Shortcut, is_file_row, is_schema_row,
+    saved_query,
 };
 use crate::store::StoredProject;
 
@@ -288,16 +289,16 @@ fn catalog_database(levels: Levels, database: Option<&str>) -> Option<&str> {
 
 /// The id the tree gives `row`, one of the rows simple mode lists for the tab
 /// in front of a connection: an object's sits under the database where the
-/// connection has one, a saved query's under the connection.
+/// connection has one, a saved query's or a file's under the connection.
 pub(crate) fn listed_row(
     profile: &str,
     levels: Levels,
     database: Option<&str>,
     row: &str,
 ) -> String {
-    let database = match saved_query(row) {
-        Some(_) => None,
-        None => catalog_database(levels, database),
+    let database = match saved_query(row).is_some() || is_file_row(row) {
+        true => None,
+        false => catalog_database(levels, database),
     };
     scoped_row(profile, database, row)
 }
@@ -897,7 +898,7 @@ fn connection_item(
                 folds,
                 filtering: search.filtering,
             };
-            // The Pinned group, the folders and the Queries group stay on the
+            // The Pinned group, the folders and the Files group stay on the
             // connection; the catalog's rows go under its database.
             let (catalog, listed): (Vec<_>, Vec<_>) =
                 items.into_iter().partition(|item| is_schema_row(&item.id));
@@ -1512,7 +1513,7 @@ mod tests {
             &ShortcutDatabase::On(database.to_string()),
             filter,
         );
-        content.extend(explorer::queries(&queries, filter));
+        content.extend(explorer::files(&[], &queries, filter));
         content.extend(explorer::tree(&catalog, filter));
         content
     }
@@ -1540,7 +1541,7 @@ mod tests {
             row_ids(&connection.children),
             [
                 scoped_row("a", None, explorer::PINNED_GROUP),
-                scoped_row("a", None, explorer::QUERIES_GROUP),
+                scoped_row("a", None, explorer::FILES_GROUP),
                 database_row("a", "d"),
             ]
         );
@@ -2188,7 +2189,7 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        content.extend(explorer::queries(&queries, ""));
+        content.extend(explorer::files(&[], &queries, ""));
         content.extend(explorer::tree(&catalog, ""));
         let projects = [project("Zoo", &["a", "b"]), project("Empty", &[])];
         let tree = build(
@@ -2206,7 +2207,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            count_of(&tree, &scoped_row("a", None, explorer::QUERIES_GROUP)),
+            count_of(&tree, &scoped_row("a", None, explorer::FILES_GROUP)),
             Some(3)
         );
         assert_eq!(

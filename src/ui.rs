@@ -1060,15 +1060,15 @@ pub(crate) fn swatch(
 }
 
 /// The one action a surface exists to take, in the accent: the connection
-/// form's Connect. Everywhere else the primary button is the neutral control
-/// tone (see [`Tone`]).
+/// form's Connect, and the saved queries' Move to Folder…. Everywhere else the
+/// primary button is the neutral control tone (see [`Tone`]).
 pub(crate) fn accent_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
+    size: Control,
     t: Theme,
     cx: &gpui::App,
 ) -> Button {
-    let size = Control::Standard;
     Button::new(id)
         .custom(
             ButtonCustomVariant::new(cx)
@@ -1084,7 +1084,9 @@ pub(crate) fn accent_button(
         .bg(t.accent)
         .h(px(size.height()))
         .px(px(size.padding()))
-        .min_w(px(layout::CONTROL_MIN_WIDTH))
+        .when(size == Control::Standard, |standard| {
+            standard.min_w(px(layout::CONTROL_MIN_WIDTH))
+        })
         .child(
             div()
                 .whitespace_nowrap()

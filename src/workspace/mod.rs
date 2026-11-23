@@ -22,6 +22,7 @@ mod objects;
 mod profiles;
 mod projects;
 mod queries;
+mod query_move;
 mod sidebar;
 mod stable_import;
 mod tabs;
@@ -98,6 +99,9 @@ pub(crate) struct Settings {
     pub(crate) verbose_logging: bool,
     /// Whether the first-run greeting has played on the welcome surface.
     pub(crate) welcomed: bool,
+    /// Whether the offer to move the saved queries to a folder was turned
+    /// down or taken, so it is not made again.
+    pub(crate) queries_move_dismissed: bool,
     /// Keybinding overrides, keyed by action id. Applied to the keymap on
     /// the next launch -- see `src/keybindings.rs`.
     pub(crate) custom_keybindings: HashMap<String, String>,
@@ -150,6 +154,7 @@ impl Default for Settings {
             run_unreadable: false,
             verbose_logging: false,
             welcomed: false,
+            queries_move_dismissed: false,
             custom_keybindings: HashMap::new(),
             view_mode: ViewMode::default(),
             listing_scope: ListingScope::default(),
@@ -367,9 +372,16 @@ pub(crate) struct Workspace {
     /// on: the welcome surface's line.
     pub(crate) welcome_notice: Option<String>,
     pub(crate) cleanup_notices: Vec<crate::db::ssm::CleanupResult>,
+    pub(crate) queries_notice: Option<query_move::QueriesNotice>,
     /// Statements written for data files opened before their profile had
     /// connected: profile id, query tab, statement. Run once it has.
     pub(crate) runs_on_connect: Vec<(String, u64, String)>,
+    /// Where the last SQL file was opened or saved, for Save As to start in.
+    /// Kept for the session only.
+    pub(crate) sql_directory: Option<PathBuf>,
+    /// What the window's edited mark was last set to, so it is set only when
+    /// it changes rather than every frame.
+    pub(crate) window_edited: bool,
     /// Why the welcome surface's name field refused what was typed: a line
     /// of its own, so a refusal never covers the notice, which may be the
     /// only word that the profiles file failed to load.
@@ -436,6 +448,10 @@ pub(crate) struct Workspace {
     pub(crate) dialog_choice: std::cell::Cell<usize>,
     /// What held the keyboard when the first dialog went up.
     pub(crate) focus_before_dialog: std::cell::RefCell<Option<FocusHandle>>,
+    /// The tab in front, by its profile's id and its own, when its file was
+    /// last looked at: a tab reaching the front by any path is looked at
+    /// once, not every frame.
+    pub(crate) file_looked_at: Option<(String, u64)>,
     /// See [`Workspace::welcome_project_focus`].
     pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
     pub(crate) update: Option<update::Update>,
@@ -578,7 +594,10 @@ impl Workspace {
             stable_import: None,
             welcome_notice: None,
             cleanup_notices: Vec::new(),
+            queries_notice: None,
             runs_on_connect: Vec::new(),
+            sql_directory: None,
+            window_edited: false,
             project_name_error: None,
             welcome_needs_focus: true,
             welcome_url,
@@ -606,6 +625,7 @@ impl Workspace {
             dialog_in_front: std::cell::Cell::default(),
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
+            file_looked_at: None,
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
@@ -703,6 +723,8 @@ impl Workspace {
                     stored_settings.welcomed,
                     !profiles.is_empty() || !unavailable.is_empty(),
                 );
+                workspace.settings.queries_move_dismissed =
+                    stored_settings.queries_move_dismissed.unwrap_or(false);
                 workspace.settings.custom_keybindings = stored_settings
                     .custom_keybindings
                     .clone()
@@ -783,6 +805,8 @@ impl Workspace {
         // A connection nothing connects at launch gets no other rebuild, and
         // the tree would sit empty over profiles that are all there.
         workspace.rebuild_connections(cx);
+        workspace.look_at_recent_files(cx);
+        workspace.offer_to_move_queries();
 
         // After the environment's form, which takes the notice over the
         // welcome surface when there is one. A load failure's last, since it
@@ -872,6 +896,15 @@ impl Workspace {
                 let _ = workspace.save_profiles(cx);
             }
             async {}
+        })
+        .detach();
+        // Another editor may have written the front tab's file while the
+        // window was behind it.
+        cx.observe_window_activation(window, |workspace, window, cx| {
+            if window.is_window_active() {
+                workspace.check_front_file(window, cx);
+                workspace.look_at_recent_files(cx);
+            }
         })
         .detach();
         // Window release also persists when the window closes without Quit.
@@ -1663,6 +1696,14 @@ impl Render for Workspace {
             self.menu_imports_rows = imports_rows;
             cx.set_menus(crate::app_menus(imports_rows));
         }
+        let edited = self
+            .profiles
+            .iter()
+            .any(|profile| profile.session.queries.iter().any(|tab| tab.dirty));
+        if edited != self.window_edited {
+            self.window_edited = edited;
+            window.set_window_edited(edited);
+        }
         self.track_shown_diagram(cx);
         self.settle_sidebar(window, cx);
         self.reveal_landed_column(window, cx);
@@ -1714,6 +1755,21 @@ impl Render for Workspace {
         if let Some(active @ Tab::Query(_)) = self.profile().map(|profile| profile.session.active) {
             self.hydrate_tab(active, window, cx);
         }
+        // Here for the reason the snapshot is read here: a tab reaches the
+        // front along more paths than `activate_tab`.
+        let front = self.profile().and_then(|profile| {
+            let id = profile.session.active_query_tab()?.id;
+            Some((profile.id.as_str(), id))
+        });
+        if front
+            != self
+                .file_looked_at
+                .as_ref()
+                .map(|(profile, id)| (profile.as_str(), *id))
+        {
+            self.file_looked_at = front.map(|(profile, id)| (profile.to_string(), id));
+            self.check_front_file(window, cx);
+        }
 
         // Deferred for the same reason plus one: an element has to be mounted
         // before it can take focus.
@@ -1727,13 +1783,6 @@ impl Render for Workspace {
         let take_focus = self.profile_mut().and_then(|profile| {
             if form_open {
                 return None;
-            }
-            if profile.session.naming {
-                let wanted = profile.session.save_name_needs_focus;
-                return wanted.then(|| {
-                    profile.session.save_name_needs_focus = false;
-                    Focus::Field(profile.session.save_name.clone())
-                });
             }
             if !profile.session.editor_needs_focus {
                 return None;
@@ -1809,7 +1858,6 @@ impl Render for Workspace {
 
         match take_focus {
             Some(Focus::Buffer(editor)) => editor.focus_handle(cx).focus(window, cx),
-            Some(Focus::Field(input)) => input.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Diagram(handle)) => handle.focus(window, cx),
@@ -1930,6 +1978,7 @@ impl Render for Workspace {
                     Vec::new(),
                 ))
                 .children(self.render_cleanup_notice(t, cx))
+                .children(self.render_queries_notice(t, cx))
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
                     [
@@ -2649,6 +2698,7 @@ impl Render for Workspace {
 
         div()
             .id("workspace")
+            .key_context("Workspace")
             // A data file dropped anywhere on the window opens in DuckDB.
             .on_drop(cx.listener(Self::drop_files))
             .relative()
@@ -2697,6 +2747,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_logs_folder))
             .on_action(cx.listener(Self::copy_diagnostics))
+            .on_action(cx.listener(Self::open_sql_files_action))
             // Unregistered under the import dialog, which stops only the
             // mouse: these act on the tab it covers, out of sight, and their
             // menu items grey out with them.
@@ -2733,6 +2784,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::toggle_next_join))
                     .on_action(cx.listener(Self::new_row))
                     .on_action(cx.listener(Self::save_query))
+                    .on_action(cx.listener(Self::save_query_as))
                     .on_action(cx.listener(Self::close_tab))
                     .on_action(cx.listener(Self::close_all_tabs))
                     .on_action(cx.listener(Self::go_to_column))
@@ -2825,6 +2877,7 @@ impl Render for Workspace {
                 ],
             ))
             .children(self.render_cleanup_notice(t, cx))
+            .children(self.render_queries_notice(t, cx))
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
@@ -2833,6 +2886,9 @@ impl Render for Workspace {
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
+                    ("unsaved", self.render_unsaved_confirmation(cx)),
+                    ("overwrite", self.render_overwrite_confirmation(cx)),
+                    ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),

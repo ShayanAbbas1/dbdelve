@@ -166,6 +166,11 @@ pub struct StoredProfile {
     /// order they were picked. Same rules as `open_rows`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_rows: Vec<String>,
+    /// The `.sql` files last opened or saved on this connection, newest
+    /// first, each resolved through its links: the sidebar's Files group.
+    /// Left out when empty, so a profile without any is written as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_files: Vec<PathBuf>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -352,14 +357,19 @@ pub struct StoredShortcut {
     pub kind: Option<String>,
 }
 
-/// One query buffer in the strip. The SQL itself is not here: a saved buffer
-/// lives in its query file and an unsaved one in its scratch file.
+/// One query buffer in the strip. The SQL itself is not here: a file tab's
+/// is in its file, an untitled one's in its scratch file, and a file tab's
+/// unsaved text in its scratch file too.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoredQueryTab {
     pub id: u64,
-    /// The saved query in this buffer, or absent for an unsaved one.
-    #[serde(default)]
+    /// A saved query's name, as a build before file tabs wrote it. Read once,
+    /// into [`Self::path`], and never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The file this tab is bound to, or absent for an untitled one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     #[serde(default)]
     pub active: bool,
     /// How many of this buffer's queued results are on disk, under
@@ -377,6 +387,19 @@ pub struct StoredQueryTab {
     /// The schema in that database the tab runs in, where the engine picks one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    /// A file tab left with unsaved text: [`crate::sql_file::text_hash`] of
+    /// the file's text that text was written against. A file that reads
+    /// differently at relaunch was changed meanwhile, and the tab asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_hash: Option<String>,
+    /// Keep Mine was chosen and nothing saved since, so Save still asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept_mine: bool,
+    /// The tab's bar was up, unanswered. Its own flag because a tab that
+    /// came back asking took the file's new text as `saved_hash`, which
+    /// would match at the next relaunch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asking: bool,
 }
 
 /// An opened table, view or routine, stored by name rather than by content: the
@@ -717,6 +740,10 @@ pub struct StoredSettings {
     /// at all. Absent reads as on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_show_sizes: Option<bool>,
+    /// Whether the offer to move the saved queries out of the support
+    /// directory was turned down or taken. Absent until either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queries_move_dismissed: Option<bool>,
     /// The edit mode a new table tab starts in: `classic`, `draft` or `row`.
     /// Absent reads as classic, which is how every file written before it
     /// edited, and a slug this build cannot read reads as classic too. Not
@@ -1474,10 +1501,12 @@ pub fn saved_queries(profile_id: &str) -> Vec<String> {
     names
 }
 
+#[cfg(test)]
 pub fn read_query(profile_id: &str, name: &str) -> Result<Option<String>, String> {
     read_file(&query_path(profile_id, name)?)
 }
 
+#[cfg(test)]
 pub fn write_query(profile_id: &str, name: &str, sql: &str) -> Result<(), String> {
     write_file(&query_path(profile_id, name)?, sql)
 }
@@ -1505,43 +1534,26 @@ pub fn delete_query(profile_id: &str, name: &str) -> Result<(), String> {
     }
 }
 
-/// Write `sql` as `name`, moving the query's file there first when this
-/// renames `previous`.
-///
-/// The text is written under the old name before a rename, so a move that
-/// fails leaves it where it was. New saves and renames install their target
-/// atomically without replacing another file: directory enumeration is only
-/// an early name-conflict check, not protection against an unseen target.
-/// The native rename also handles case-only changes when both names address
-/// the same entry, without treating case variants as interchangeable files.
-pub fn save_query_as(
-    profile_id: &str,
-    previous: Option<&str>,
-    name: &str,
-    sql: &str,
-) -> Result<(), String> {
+/// Move the query `previous` to `name` and nothing else: its bytes and
+/// permissions stay as they are, since a tab bound to it may hold text the
+/// user has not saved, and the file may have been edited outside DBDelve.
+pub fn rename_saved_query(profile_id: &str, previous: &str, name: &str) -> Result<(), String> {
     if let Some(taken) = saved_queries(profile_id)
         .into_iter()
-        .find(|taken| Some(taken.as_str()) != previous && same_query_name(taken, name))
+        .find(|taken| taken != previous && same_query_name(taken, name))
     {
         return Err(format!("A query named {taken} already exists."));
     }
-    match previous {
-        Some(previous) if previous != name => {
-            write_query(profile_id, previous, sql)?;
-            let from = query_path(profile_id, previous)?;
-            let to = query_path(profile_id, name)?;
-            rename_query(&from, &to).map_err(|error| {
-                format!(
-                    "Could not rename {} to {}: {error}",
-                    from.display(),
-                    to.display()
-                )
-            })
-        }
-        Some(_) => write_query(profile_id, name, sql),
-        None => write_file_with(&query_path(profile_id, name)?, sql, rename_query),
-    }
+    let from = query_path(profile_id, previous)?;
+    let to = query_path(profile_id, name)?;
+    rename_query(&from, &to).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => format!("{previous} no longer exists."),
+        _ => format!(
+            "Could not rename {} to {}: {error}",
+            from.display(),
+            to.display()
+        ),
+    })
 }
 
 /// Whether two query names would name one file on a filesystem that ignores
@@ -1565,16 +1577,37 @@ pub fn validate_query_name(name: &str) -> Result<(), String> {
 /// name, and deleting the old one would take the buffer away from an older
 /// build run against the same directory afterwards.
 pub fn read_scratch(profile_id: &str, tab: u64) -> Result<Option<String>, String> {
-    let directory = query_directory(profile_id)?;
-    match read_file(&directory.join(scratch_file(tab)))? {
+    match read_own_scratch(profile_id, tab)? {
         Some(sql) => Ok(Some(sql)),
-        None if tab == 0 => read_file(&directory.join(LEGACY_SCRATCH_FILE)),
+        None if tab == 0 => read_file(&query_directory(profile_id)?.join(LEGACY_SCRATCH_FILE)),
         None => Ok(None),
     }
 }
 
+/// [`read_scratch`] without the fallback, for a file tab: what an older
+/// build left is no file tab's unsaved text.
+pub fn read_own_scratch(profile_id: &str, tab: u64) -> Result<Option<String>, String> {
+    read_file(&query_directory(profile_id)?.join(scratch_file(tab)))
+}
+
 pub fn write_scratch(profile_id: &str, tab: u64, sql: &str) -> Result<(), String> {
     write_file(&query_directory(profile_id)?.join(scratch_file(tab)), sql)
+}
+
+/// Move tab `tab`'s scratch file, which would not read, out of the way of
+/// the tab's own writes, to a name nothing writes or deletes, and say where.
+/// A rename needs only the directory, so this works where the file cannot
+/// be read, and the bytes stay as they were for the user to recover.
+pub fn set_aside_scratch(profile_id: &str, tab: u64) -> Result<PathBuf, String> {
+    let directory = query_directory(profile_id)?;
+    let from = directory.join(scratch_file(tab));
+    let to = (1..)
+        .map(|n| directory.join(format!(".scratch-{tab}.unread-{n}.sql")))
+        .find(|to| fs::symlink_metadata(to).is_err())
+        .expect("some name is free");
+    fs::rename(&from, &to)
+        .map(|()| to)
+        .map_err(|error| format!("Could not move {}: {error}", from.display()))
 }
 
 /// A file that is not there is not a failure: closing a buffer nothing was ever
@@ -2036,6 +2069,68 @@ pub(crate) fn unsafe_component(value: &str) -> Option<&'static str> {
     }
 }
 
+/// `name` as one folder name on every platform: what a path separator, a
+/// character Windows refuses or a control character would break becomes `-`,
+/// a leading dot (hidden) or a trailing dot or space (dropped by Windows)
+/// goes, and a name Windows keeps for a device is prefixed, since a suffix
+/// after its extension leaves it one.
+pub(crate) fn path_component(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            character if character.is_control() => '-',
+            character => character,
+        })
+        .collect();
+    let trimmed = replaced
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim();
+    match trimmed {
+        "" => "Connection".to_string(),
+        _ if windows_reserved(trimmed) => format!("_{trimmed}"),
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Whether Windows takes `name` for a device: by what comes before its first
+/// dot, whatever follows, so `CON.reports` is one too.
+fn windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_uppercase();
+    let numbered = ["COM", "LPT"].iter().any(|device| {
+        upper.strip_prefix(device).is_some_and(|number| {
+            let mut digits = number.chars();
+            matches!(
+                (digits.next(), digits.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    });
+    numbered || matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+}
+
+/// A folder name per connection, in `names`' order, from [`path_component`],
+/// with ` 2`, ` 3`… after a name an earlier one took. Compared without case,
+/// since macOS and Windows would make `Prod` and `prod` one folder.
+pub(crate) fn connection_folders(names: &[&str]) -> Vec<String> {
+    let mut taken = HashSet::new();
+    names
+        .iter()
+        .map(|name| {
+            let base = path_component(name);
+            let folder = std::iter::once(base.clone())
+                .chain((2..).map(|n| format!("{base} {n}")))
+                .find(|folder| !taken.contains(&folder.to_lowercase()))
+                .expect("some suffix is free");
+            taken.insert(folder.to_lowercase());
+            folder
+        })
+        .collect()
+}
+
 /// The channel's slug with `DBDELVE_VARIANT` unset or empty,
 /// `<slug>-<variant>` otherwise.
 ///
@@ -2138,7 +2233,7 @@ fn expanded_against(path: &str, home: Option<&Path>) -> PathBuf {
     }
 }
 
-fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
+pub fn query_directory(profile_id: &str) -> Result<PathBuf, String> {
     if let Some(reason) = unsafe_component(profile_id) {
         return Err(format!("Profile id {reason}."));
     }
@@ -3484,6 +3579,7 @@ user = "shayan"
                 open_query: None,
                 ssm: None,
                 open_rows: Vec::new(),
+                recent_files: Vec::new(),
                 selected_rows: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
@@ -3545,6 +3641,7 @@ user = "shayan"
             open_query: Some("daily".into()),
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -3694,6 +3791,7 @@ open_objects = []
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -3761,6 +3859,50 @@ open_objects = []
         assert!(
             !golden.contains("open_rows"),
             "the fixtures hold neither key"
+        );
+    }
+
+    #[test]
+    fn recent_files_round_trip_before_the_tables_and_an_old_file_reads_none() {
+        let mut profile = a_stored_profile();
+        profile.recent_files = vec!["/work/orders.sql".into(), "/work/daily.sql".into()];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        let recent = text
+            .find("recent_files")
+            .expect("the recent files are written");
+        let tunnel = text.find("[profiles.ssh]").expect("and the tunnel");
+        assert!(
+            recent < tunnel,
+            "an array of strings before any table:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].recent_files, profile.recent_files);
+
+        let bare = written_alone(a_stored_profile());
+        assert!(!bare.contains("recent_files"), "{bare}");
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].recent_files.is_empty());
+    }
+
+    #[test]
+    fn a_connection_name_becomes_one_folder_and_colliding_names_get_their_own() {
+        assert_eq!(path_component("Prod / EU: West"), "Prod - EU- West");
+        assert_eq!(path_component(".hidden."), "hidden");
+        assert_eq!(path_component("  "), "Connection");
+        assert_eq!(path_component("con"), "_con");
+        assert_eq!(path_component("COM1"), "_COM1");
+        assert_eq!(path_component("CON.reports"), "_CON.reports");
+        assert_eq!(path_component("com1.backup"), "_com1.backup");
+        assert_eq!(path_component("LPT\u{b2}"), "_LPT\u{b2}");
+        assert_eq!(path_component("Company"), "Company");
+        assert_eq!(path_component("console.logs"), "console.logs");
+        assert_eq!(
+            connection_folders(&["Prod", "prod", "Prod/", "Dev", "Prod 2"]),
+            ["Prod", "prod 2", "Prod-", "Dev", "Prod 2 2"]
         );
     }
 
@@ -4094,6 +4236,7 @@ folder = "Hot"
         let profile = StoredProfile {
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4124,6 +4267,7 @@ folder = "Hot"
         let profile = StoredProfile {
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4191,6 +4335,7 @@ folder = "Hot"
             schema: Some(r#"Sales "EU""#.into()),
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4318,6 +4463,7 @@ folder = "Hot"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4406,6 +4552,7 @@ folder = "Hot"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4480,6 +4627,7 @@ folder = "Hot"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4600,6 +4748,7 @@ open_objects = []
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4693,6 +4842,7 @@ open_objects = []
                 sidebar_density: Some("compact".into()),
                 sidebar_show_host: Some(false),
                 sidebar_show_sizes: Some(false),
+                queries_move_dismissed: Some(true),
                 edit_mode: Some("row".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
@@ -4748,6 +4898,7 @@ open_objects = []
                     open_query: None,
                     ssm: None,
                     open_rows: Vec::new(),
+                    recent_files: Vec::new(),
                     selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
@@ -4789,6 +4940,7 @@ open_objects = []
                     open_query: None,
                     ssm: None,
                     open_rows: Vec::new(),
+                    recent_files: Vec::new(),
                     selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
@@ -5390,24 +5542,39 @@ open_objects = []
         });
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_rename_moves_the_file_and_a_failed_one_changes_nothing() {
+    fn renaming_a_query_moves_its_file_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+
         with_home(|| {
-            write_query("dev", "daily", "SELECT 1").expect("a query must write");
+            let directory = query_directory("dev").unwrap();
+            fs::create_dir_all(&directory).unwrap();
+            let daily = directory.join("daily.sql");
+            fs::write(&daily, "SELECT 1 -- edited elsewhere").unwrap();
+            fs::set_permissions(&daily, fs::Permissions::from_mode(0o644)).unwrap();
+
+            assert_eq!(rename_saved_query("dev", "daily", "nightly"), Ok(()));
+            let nightly = directory.join("nightly.sql");
             assert_eq!(
-                save_query_as("dev", Some("daily"), "nightly", "SELECT 1 -- edited"),
-                Ok(())
+                fs::read_to_string(&nightly).unwrap(),
+                "SELECT 1 -- edited elsewhere"
             );
-            assert_eq!(saved_queries("dev"), ["nightly"]);
             assert_eq!(
-                read_query("dev", "nightly"),
-                Ok(Some("SELECT 1 -- edited".to_string()))
+                fs::metadata(&nightly).unwrap().permissions().mode() & 0o777,
+                0o644
             );
 
-            // An old name that will not take the text stops the rename.
-            block("dev", "held.sql");
-            assert!(save_query_as("dev", Some("held"), "kept", "SELECT 2").is_err());
-            assert_eq!(read_query("dev", "kept"), Ok(None));
+            write_query("dev", "weekly", "SELECT 2").unwrap();
+            assert!(rename_saved_query("dev", "nightly", "weekly").is_err());
+            assert_eq!(
+                read_query("dev", "weekly"),
+                Ok(Some("SELECT 2".to_string()))
+            );
+            assert_eq!(
+                rename_saved_query("dev", "gone", "other"),
+                Err("gone no longer exists.".to_string())
+            );
         });
     }
 
@@ -5418,10 +5585,7 @@ open_objects = []
         with_home(|| {
             write_query("dev", "daily", "SELECT 1").expect("a query must write");
 
-            assert_eq!(
-                save_query_as("dev", Some("daily"), "Daily", "SELECT 1"),
-                Ok(())
-            );
+            assert_eq!(rename_saved_query("dev", "daily", "Daily"), Ok(()));
 
             assert_eq!(saved_queries("dev"), ["Daily"]);
             assert_eq!(read_query("dev", "Daily"), Ok(Some("SELECT 1".to_string())));
@@ -5430,7 +5594,7 @@ open_objects = []
 
     #[cfg(unix)]
     #[test]
-    fn saving_or_renaming_never_overwrites_a_query_hidden_by_directory_permissions() {
+    fn renaming_never_overwrites_a_query_hidden_by_directory_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         with_home(|| {
@@ -5439,15 +5603,13 @@ open_objects = []
             let directory = query_directory("dev").unwrap();
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o300)).unwrap();
             let hidden = fs::read_dir(&directory).is_err();
-            let saved = save_query_as("dev", None, "daily", "SELECT 9");
-            let renamed = save_query_as("dev", Some("other"), "daily", "SELECT 3");
+            let renamed = rename_saved_query("dev", "other", "daily");
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
 
-            assert!(saved.is_err());
             assert!(renamed.is_err());
             assert_eq!(read_query("dev", "daily"), Ok(Some("SELECT 1".into())));
             if hidden {
-                assert_eq!(read_query("dev", "other"), Ok(Some("SELECT 3".into())));
+                assert_eq!(read_query("dev", "other"), Ok(Some("SELECT 2".into())));
             }
         });
     }
@@ -5493,8 +5655,7 @@ open_objects = []
             write_query("dev", "daily", "SELECT 1").expect("a query must write");
             write_query("dev", "weekly", "SELECT 7").expect("a query must write");
 
-            assert!(save_query_as("dev", Some("daily"), "WEEKLY", "SELECT 1").is_err());
-            assert!(save_query_as("dev", None, "Weekly", "SELECT 9").is_err());
+            assert!(rename_saved_query("dev", "daily", "WEEKLY").is_err());
 
             assert_eq!(
                 read_query("dev", "weekly"),
@@ -5576,6 +5737,32 @@ open_objects = []
     }
 
     #[test]
+    fn a_query_tab_written_before_file_tabs_keeps_its_name_and_has_no_path() {
+        let ProfileList { profiles, .. } = decode_profiles(
+            "\
+[[profiles]]
+id = \"dev\"
+name = \"Dev\"
+host = \"127.0.0.1\"
+database = \"dbdelve_dev\"
+user = \"dbdelve\"
+
+[[profiles.open_queries]]
+id = 4
+name = \"daily\"
+active = true
+",
+            &[],
+        )
+        .expect("an older open_queries entry must load");
+        let tab = &profiles[0].open_queries[0];
+        assert_eq!(
+            (tab.name.as_deref(), tab.path.as_deref()),
+            (Some("daily"), None)
+        );
+    }
+
+    #[test]
     fn open_queries_and_open_objects_both_survive_the_round_trip() {
         // Two arrays of tables in one profile: every scalar has to precede
         // both, and this is the encode that fails if one moves after them.
@@ -5612,24 +5799,33 @@ open_objects = []
             open_query: Some("daily".into()),
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: vec![
                 StoredQueryTab {
                     id: 0,
                     name: None,
+                    path: None,
                     active: false,
                     queued_results: 0,
                     database: None,
                     schema: None,
+                    saved_hash: None,
+                    kept_mine: false,
+                    asking: false,
                 },
                 StoredQueryTab {
                     id: 4,
-                    name: Some("daily".into()),
+                    name: None,
+                    path: Some(PathBuf::from("/q/daily.sql")),
                     active: true,
                     queued_results: 2,
                     database: None,
                     schema: None,
+                    saved_hash: None,
+                    kept_mine: false,
+                    asking: false,
                 },
             ],
             open_objects: vec![StoredObject {
@@ -6233,6 +6429,7 @@ name = \"accounts\"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -6363,6 +6560,7 @@ name = \"accounts\"
             open_query: None,
             ssm: None,
             open_rows: Vec::new(),
+            recent_files: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),

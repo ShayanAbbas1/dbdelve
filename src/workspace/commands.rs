@@ -709,6 +709,8 @@ impl Workspace {
         match command {
             Command::OpenObject(target) => self.open_explorer_target(target, window, cx),
             Command::OpenQuery(name) => self.open_saved_query(name, window, cx),
+            Command::OpenFile(path) => self.open_listed_file(path, window, cx),
+            Command::MoveSavedQueries => self.pick_queries_folder(window, cx),
             Command::OpenScratch => self.open_scratch_query(window, cx),
             Command::NewQuery => self.new_query(&NewQuery, window, cx),
             Command::RunQuery => self.run_query(&RunQuery, window, cx),
@@ -716,7 +718,7 @@ impl Workspace {
             Command::FormatQuery => self.format_query(&FormatQuery, window, cx),
             Command::ShowPlan(showing) => self.show_plan(showing, cx),
             Command::SaveQuery => self.save_query(&SaveQuery, window, cx),
-            Command::RenameQuery => self.rename_query(window, cx),
+            Command::SaveQueryAs => self.save_query_as(&crate::actions::SaveQueryAs, window, cx),
             Command::PickQueryToDelete => self.open_palette(PaletteMode::DeleteQuery, window, cx),
             Command::DeleteQuery(name) => self.ask_delete_saved_query(name, cx),
             Command::QueryHistory => {

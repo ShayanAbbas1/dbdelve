@@ -315,6 +315,10 @@ pub enum Command {
         centre: Option<String>,
     },
     OpenQuery(String),
+    /// A file of the connection's Files group, by its path.
+    OpenFile(std::path::PathBuf),
+    /// Pick a folder and move every saved query into it.
+    MoveSavedQueries,
     SetTarget(crate::db::Target),
     OpenScratch,
     NewQuery,
@@ -328,7 +332,7 @@ pub enum Command {
     /// Flip the results pane between the rows and the plan.
     ShowPlan(bool),
     SaveQuery,
-    RenameQuery,
+    SaveQueryAs,
     /// Put the palette back up over the saved queries, to delete one.
     PickQueryToDelete,
     /// Ask before deleting this saved query, in the dialog the sidebar's
@@ -2355,17 +2359,32 @@ fn search_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item>
     items
 }
 
-/// The scratch buffer and every saved query.
+/// The scratch buffer, every file the sidebar's Files group lists, and every
+/// saved query.
 fn query_items(profile: &Profile) -> Vec<Item> {
     let saved = saved_query_icon(profile.config.engine().syntax());
     let scratch = Item::new("Scratch query", icon::SCRATCH_QUERY, Command::OpenScratch)
         .hint("scratch")
         .scope(Scope::Queries);
+    let listed = profile.listed_files();
+    let labels = crate::explorer::file_labels(&listed);
+    let files = listed.into_iter().zip(labels).map(|(path, label)| {
+        let detail = path.display().to_string();
+        Item::new(label, saved, Command::OpenFile(path))
+            .detail(detail)
+            .hint("file")
+            .scope(Scope::Queries)
+    });
     std::iter::once(scratch)
+        .chain(files)
         .chain(profile.session.saved_queries.iter().map(|name| {
-            Item::new(name.clone(), saved, Command::OpenQuery(name.clone()))
-                .hint("query")
-                .scope(Scope::Queries)
+            Item::new(
+                crate::explorer::query_file_name(name),
+                saved,
+                Command::OpenQuery(name.clone()),
+            )
+            .hint("query")
+            .scope(Scope::Queries)
         }))
         .collect()
 }
@@ -2378,12 +2397,15 @@ fn delete_query_items(profile: &Profile) -> Vec<Item> {
         .saved_queries
         .iter()
         .map(|name| {
-            Item::new(name.clone(), saved, Command::DeleteQuery(name.clone())).hint(
-                match profile.session.tab_holding(name) {
-                    Some(_) => "open",
-                    None => "query",
-                },
+            Item::new(
+                crate::explorer::query_file_name(name),
+                saved,
+                Command::DeleteQuery(name.clone()),
             )
+            .hint(match profile.session.tab_holding(name) {
+                Some(_) => "open",
+                None => "query",
+            })
         })
         .collect()
 }
@@ -3366,7 +3388,7 @@ fn schema_items_from<'a>(
 /// bar while its rows are not loading.
 pub(crate) fn row_limit_target(session: &Session) -> Option<(LimitTarget, Option<usize>)> {
     if let Some(tab) = session.active_query_tab() {
-        return (!session.naming).then_some((LimitTarget::Query(tab.id), tab.row_limit));
+        return Some((LimitTarget::Query(tab.id), tab.row_limit));
     }
     let tab = session.active_object()?;
     match &tab.body {
@@ -3436,10 +3458,24 @@ fn welcome_items(workspace: &Workspace) -> Vec<Item> {
     let mut items = starting_items(workspace);
     items.extend(appearance_items(overrides));
     items.extend(workspace.update.iter().flat_map(update_items));
+    items.extend(move_queries_item(workspace));
     if !workspace.profiles.is_empty() || !workspace.unavailable.is_empty() {
         items.extend(connection_items(workspace));
     }
     items
+}
+
+/// Every connection's, since the move takes them all, so it needs none in
+/// front.
+fn move_queries_item(workspace: &Workspace) -> Option<Item> {
+    workspace.has_saved_queries().then(|| {
+        command(
+            "Move saved queries to a folder…",
+            icon::FOLDER,
+            Command::MoveSavedQueries,
+            QUERY,
+        )
+    })
 }
 
 /// The update's rows, as its pill offers them.
@@ -3662,11 +3698,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         "new_query",
     )];
     if profile.config.engine().syntax() == Syntax::Sql {
-        items.push(command(
-            "Open SQL file…",
-            icon::SCRATCH_QUERY,
-            Command::OpenSqlFiles,
-            QUERY,
+        items.push(bound(
+            command(
+                "Open SQL file…",
+                icon::SCRATCH_QUERY,
+                Command::OpenSqlFiles,
+                QUERY,
+            ),
+            "open_sql_files",
         ));
     }
 
@@ -3713,19 +3752,14 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 "copy_plan",
             ));
         }
-        if session.open_query().is_some() {
-            items.push(command(
-                "Rename query…",
-                icon::RENAME,
-                Command::RenameQuery,
-                QUERY,
-            ));
-        } else {
-            items.push(bound(
-                command("Save query…", icon::SAVE, Command::SaveQuery, QUERY),
-                "rename_query_tab",
-            ));
-        }
+        items.push(bound(
+            command("Save", icon::SAVE, Command::SaveQuery, QUERY),
+            "save_query",
+        ));
+        items.push(bound(
+            command("Save as…", icon::SAVE, Command::SaveQueryAs, QUERY),
+            "save_query_as",
+        ));
     }
 
     // Where the status bar offers its Cancel: a run in flight, or a count.
@@ -3744,6 +3778,8 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "cancel_query",
         ));
     }
+
+    items.extend(move_queries_item(workspace));
 
     // Not gated on a query tab: a saved query need not be open to be deleted.
     if !session.saved_queries.is_empty() {

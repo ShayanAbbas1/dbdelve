@@ -35,16 +35,16 @@ use crate::{
         GoToColumn, HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, Minimize,
         MoveTabLeft, MoveTabRight, NewConnection, NewProject, NewQuery, NewRow, NextDialogButton,
         NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenDiagramStructure,
-        OpenDiagramTable, OpenLogsFolder, OpenSettings, OpenSidebarItem, PaletteHistoryFilter,
-        PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious, PalettePreviousScope,
-        PaletteRowActions, PaletteScopeLeft, PaletteScopeRight, PreviousDialogButton, PreviousEdit,
-        PreviousPage, PreviousProfile, PreviousResult, PreviousTab, Quit, RefreshConnection,
-        RefreshRelation, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
-        SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetEmpty, SetMode, SetNull,
-        ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn,
-        SubmitConnection, SwitchConnection, TickDialogBox, ToggleComment, ToggleNextJoin,
-        TogglePinColumn, ToggleResults, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel,
-        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        OpenDiagramTable, OpenLogsFolder, OpenSettings, OpenSidebarItem, OpenSqlFiles,
+        PaletteHistoryFilter, PaletteHistorySort, PaletteNext, PaletteNextScope, PalettePrevious,
+        PalettePreviousScope, PaletteRowActions, PaletteScopeLeft, PaletteScopeRight,
+        PreviousDialogButton, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
+        PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetConfirmations, ResetEditorZoom,
+        RunQuery, SaveQuery, SaveQueryAs, SearchEverything, SelectDatabase, SelectTheme,
+        SetDefault, SetEmpty, SetMode, SetNull, ShowAllColumns, ShowEditor, ShowMessages,
+        ShowReferences, SortActiveColumn, SubmitConnection, SwitchConnection, TickDialogBox,
+        ToggleComment, ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleResultsFocus,
+        ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     export::RowsAs,
@@ -159,8 +159,14 @@ registry! {
     // accident when reaching for it is a write.
     ("explain_query", "Explain Query", None, ["secondary-shift-enter"], ExplainQuery { mode: ExplainMode::Plan }),
     ("format_query", "Format Query", None, ["secondary-shift-f"], FormatQuery),
-    ("apply_edits", "Apply Edits", None, ["secondary-s"], ApplyEdits),
-    ("rename_query_tab", "Rename Query Tab", None, ["secondary-k s"], SaveQuery),
+    // Scoped to the window's root rather than left global: a global binding
+    // outranks every scoped one, and Save takes this chord in the query
+    // editor, which sits deeper (see `INERT_IN`).
+    ("apply_edits", "Apply Edits", Some("Workspace"), ["secondary-s"], ApplyEdits),
+    ("save_query", "Save", Some("Editor > Input"), ["secondary-s"], SaveQuery),
+    // No chord: `secondary-shift-s` is Toggle Sidebar's.
+    ("save_query_as", "Save As", None, [], SaveQueryAs),
+    ("open_sql_files", "Open SQL File", None, ["secondary-o"], OpenSqlFiles),
     ("new_query", "New Query Tab", None, ["secondary-t"], NewQuery),
     ("new_connection", "New Connection", None, ["secondary-shift-n"], NewConnection),
     ("new_project", "New Project", None, [], NewProject),
@@ -322,22 +328,28 @@ pub(crate) fn available_registry() -> impl Iterator<Item = &'static KeybindingSp
 }
 
 /// Whether both bindings can apply at the same focus path. The query editor
-/// supplies both the surface's wrapper and the widget's editor-mode context.
+/// supplies both the surface's wrapper and the widget's editor-mode context,
+/// and the workspace's root is on every path.
 fn contexts_overlap(a: Option<&str>, b: Option<&str>) -> bool {
     match (a, b) {
-        (None, _) | (_, None) => true,
+        (None, _) | (_, None) | (Some("Workspace"), _) | (_, Some("Workspace")) => true,
         (Some("Editor > Input"), Some("Input && mode == editor"))
         | (Some("Input && mode == editor"), Some("Editor > Input")) => true,
         (Some(a), Some(b)) => a == b,
     }
 }
 
-/// Global actions with no handler inside a context, so a binding scoped there
-/// may take their chord. GPUI tries the unscoped binding first (AGENTS.md,
+/// Actions that never take their chord inside a context, so a binding scoped
+/// there may share it. GPUI tries the unscoped binding first (AGENTS.md,
 /// "GPUI hazards"), nothing on the connection form handles Run Query (a
 /// diagram's hands it on), and the keystroke goes on to the context's own
-/// binding.
-const INERT_IN: &[(&str, &str)] = &[("run_query", "ConnectionForm"), ("run_query", "Diagram")];
+/// binding. Apply Edits is scoped to the root, so the query editor's Save,
+/// deeper on the path, outranks it there.
+const INERT_IN: &[(&str, &str)] = &[
+    ("run_query", "ConnectionForm"),
+    ("run_query", "Diagram"),
+    ("apply_edits", "Editor > Input"),
+];
 
 fn inert(id: &str, context: Option<&str>) -> bool {
     INERT_IN
@@ -575,6 +587,26 @@ mod tests {
             conflict("secondary-enter", None, "quit", &overrides),
             Some("Connect or Save Connection")
         );
+    }
+
+    #[test]
+    fn save_takes_its_chord_in_the_query_editor_and_apply_edits_everywhere_else() {
+        let keymap = gpui::Keymap::new(build_bindings(&HashMap::new()));
+        let chord = [Keystroke::parse("secondary-s").unwrap()];
+        let path = |contexts: &[&str]| -> Vec<gpui::KeyContext> {
+            contexts
+                .iter()
+                .map(|context| gpui::KeyContext::parse(context).unwrap())
+                .collect()
+        };
+        let first = |contexts: &[&str]| {
+            keymap.bindings_for_input(&chord, &path(contexts)).0[0]
+                .action()
+                .boxed_clone()
+        };
+        assert!(first(&["Workspace", "Editor", "Input mode=editor"]).partial_eq(&SaveQuery));
+        assert!(first(&["Workspace", "DataTable"]).partial_eq(&ApplyEdits));
+        assert!(first(&["Workspace"]).partial_eq(&ApplyEdits));
     }
 
     #[test]

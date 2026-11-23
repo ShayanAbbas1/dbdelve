@@ -31,6 +31,7 @@ use gpui_component::{
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     spinner::Spinner,
     table::{DataTable, TableDelegate, TableState},
+    tooltip::Tooltip,
 };
 
 use crate::{
@@ -53,8 +54,9 @@ use crate::{
     result_grid::{NewValue, ResultGrid},
     scroller::{SmoothScrollable, scroll_to, smooth, smooth_for, smooth_scoped},
     session::{
-        EditMode, Explained, ObjectBody, ObjectTab, Profile, ProfileState, QueryState, QueryTab,
-        Said, Session, StructureState, Tab, insert_left_out, query_label, result_pane_is_expanded,
+        Conflict, EditMode, Explained, FileBinding, ObjectBody, ObjectTab, Profile, ProfileState,
+        QueryState, QueryTab, Said, Session, StructureState, Tab, insert_left_out, query_label,
+        result_pane_is_expanded,
     },
     sidebar::ViewMode,
     sql::Mode,
@@ -247,11 +249,13 @@ fn completion_target(editor: &Entity<EditorState>) -> Div {
 /// the query buffer and an opened relation differ in where their SQL came
 /// from, not in what they are. With no `bottom` -- results the user hid --
 /// the editor and its toolbar take the whole height.
+#[allow(clippy::too_many_arguments)]
 fn render_editor_surface(
     split: gpui::ElementId,
     editor: &Entity<EditorState>,
     font_size: f32,
     query: &QueryState,
+    banner: Option<AnyElement>,
     toolbar: AnyElement,
     bottom: Option<AnyElement>,
     cx: &mut Context<Workspace>,
@@ -299,6 +303,7 @@ fn render_editor_surface(
         .size_full()
         .flex()
         .flex_col()
+        .children(banner)
         .child(buffer)
         .child(toolbar);
     let Some(bottom) = bottom else {
@@ -414,9 +419,65 @@ fn render_query_surface(
         &tab.editor,
         editor_font_size,
         &tab.query,
+        tab.file
+            .as_ref()
+            .and_then(|file| render_file_banner(tab.id, file, cx)),
         render_query_toolbar(&profile.session, profile.config.target(), custom_limit, cx),
         bottom,
         cx,
+    )
+}
+
+/// A file tab's file when the disk no longer has what the tab last read or
+/// wrote: gone, which Save answers by writing it again, or changed under
+/// unsaved text, which the tab must not lose without being told.
+fn render_file_banner(
+    id: u64,
+    file: &FileBinding,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let t = *theme(cx);
+    let asking = file.conflict == Some(Conflict::Asking);
+    // Asking first: a file deleted and then written again is still `None`
+    // in `saved`, but it is there to reload.
+    let label = match () {
+        _ if asking => "Changed on disk",
+        _ if file.saved.is_none() => "Deleted on disk",
+        _ => return None,
+    };
+    let reload = cx.entity().downgrade();
+    let keep = reload.clone();
+    Some(
+        control_row()
+            .debug_selector(move || format!("file-banner: {label}"))
+            .gap(px(layout::SPACE_SM))
+            .border_b_1()
+            .border_color(t.border)
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
+            .text_color(t.text_muted)
+            .child(label)
+            .child(div().flex_1())
+            .when(asking, |row| {
+                row.child(
+                    button("reload-file", "Reload", Tone::Quiet, Control::Compact, t).on_click(
+                        move |_, window, cx| {
+                            _ = reload.update(cx, |workspace, cx| {
+                                workspace.answer_file_bar(id, true, window, cx);
+                            });
+                        },
+                    ),
+                )
+                .child(
+                    button("keep-mine", "Keep Mine", Tone::Quiet, Control::Compact, t).on_click(
+                        move |_, window, cx| {
+                            _ = keep.update(cx, |workspace, cx| {
+                                workspace.answer_file_bar(id, false, window, cx);
+                            });
+                        },
+                    ),
+                )
+            })
+            .into_any_element(),
     )
 }
 
@@ -3377,7 +3438,7 @@ fn render_tab_strip(
         let mut tabs = session
             .queries
             .iter()
-            .filter(|tab| tab.open_query.is_none())
+            .filter(|tab| tab.file.is_none())
             .enumerate()
             .map(|(position, tab)| {
                 let id = tab.id;
@@ -3435,60 +3496,98 @@ fn render_tab_strip(
             })
             .collect::<Vec<_>>();
 
-        // A saved query's chip closes like any other: the file stays, and the
-        // sidebar's Queries group is where it is opened again or deleted.
+        // A file tab's chip closes like any other: the file stays where it is.
         tabs.extend(session.queries.iter().filter_map(|tab| {
-            let name = tab.open_query.clone()?;
+            let path = tab.file.as_ref()?.path.clone();
             let id = tab.id;
             let this = Tab::Query(id);
-            let group = format!("saved-query-tab-{pid}-{id}");
+            let group = format!("file-tab-{pid}-{id}");
             let open_workspace = workspace.clone();
             let close_workspace = workspace.clone();
+            let dirty = tab.dirty;
             Some(
                 chip(active_is(this), tint)
-                    .id(SharedString::from(format!("saved-query-tab-{pid}-{id}")))
+                    .id(SharedString::from(format!("file-tab-{pid}-{id}")))
                     .debug_selector({
                         let name = chip_selector("", pid, this);
                         move || name
                     })
                     .group(group.clone())
                     .px(px(layout::SPACE_SM))
+                    .tooltip({
+                        let path = path.display().to_string();
+                        move |window, cx| Tooltip::new(path.clone()).build(window, cx)
+                    })
                     .children(leading(this))
                     .child(row_icon(
                         t,
                         saved_query_icon(profile.config.engine().syntax()),
                     ))
-                    .child(name_label(name.clone()))
+                    .child(name_label(crate::explorer::file_label(
+                        &path,
+                        profiles
+                            .iter()
+                            .flat_map(|profile| &profile.session.queries)
+                            .filter_map(|tab| tab.file.as_ref())
+                            .map(|file| file.path.as_path()),
+                    )))
                     .children(context_label(profile, this))
                     .child(
+                        // An unsaved file's dot sits where the close button
+                        // goes, and gives way to it under the pointer.
                         div()
-                            .opacity(0.)
-                            .group_hover(group, |style| style.opacity(1.))
+                            .relative()
                             .child(
-                                icon_button(
-                                    SharedString::from(format!("close-saved-query-{pid}-{id}")),
-                                    icon::CLOSE,
-                                    Tone::Quiet,
-                                    Control::Inline,
-                                    t,
+                                div()
+                                    .opacity(0.)
+                                    .group_hover(group.clone(), |style| style.opacity(1.))
+                                    .child(
+                                        icon_button(
+                                            SharedString::from(format!(
+                                                "close-file-tab-{pid}-{id}"
+                                            )),
+                                            icon::CLOSE,
+                                            Tone::Quiet,
+                                            Control::Inline,
+                                            t,
+                                        )
+                                        .tooltip("Close tab")
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                // Or the chip underneath activates
+                                                // the tab this just closed, in the
+                                                // same click.
+                                                cx.stop_propagation();
+                                                _ = close_workspace.update(cx, |workspace, cx| {
+                                                    workspace.close_chip(index, this, window, cx);
+                                                });
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .when(dirty, |slot| {
+                                slot.child(
+                                    div()
+                                        .debug_selector({
+                                            let name = chip_selector("dirty", pid, this);
+                                            move || name
+                                        })
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .group_hover(group, |style| style.opacity(0.))
+                                        .child(div().size(px(6.)).rounded_full().bg(t.text)),
                                 )
-                                .tooltip("Close tab")
-                                .on_click(move |_, window, cx| {
-                                    // Or the chip underneath activates the tab
-                                    // this just closed, in the same click.
-                                    cx.stop_propagation();
-                                    _ = close_workspace.update(cx, |workspace, cx| {
-                                        workspace.close_chip(index, this, window, cx);
-                                    });
-                                }),
-                            ),
+                            }),
                     )
                     .on_click(move |_, window, cx| {
                         _ = open_workspace.update(cx, |workspace, cx| {
                             workspace.activate_chip(index, this, window, cx);
                         });
                     })
-                    .map(|chip| wire(chip, TabKey::Saved(name), index, this, is_front)),
+                    .map(|chip| wire(chip, TabKey::File(path), index, this, is_front)),
             )
         }));
 
@@ -3684,43 +3783,6 @@ fn render_query_toolbar(
     let engine = target.engine;
     let t = *theme(cx);
     let workspace = cx.entity().downgrade();
-    let confirm_workspace = workspace.clone();
-    let naming_a_rename = session.open_query().is_some();
-    let naming = session.naming.then(|| {
-        div()
-            .w(px(240.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(layout::SPACE_XS))
-            // The input and the button share one size so the pair sits on a
-            // single centreline instead of jostling.
-            .child(Input::new(&session.save_name).small().flex_1())
-            .child(
-                icon_button(
-                    "confirm-save-query",
-                    if naming_a_rename {
-                        icon::RENAME
-                    } else {
-                        icon::SAVE
-                    },
-                    Tone::Primary,
-                    Control::Compact,
-                    t,
-                )
-                .tooltip(if naming_a_rename {
-                    "Rename query"
-                } else {
-                    "Save query"
-                })
-                .on_click(move |_, window, cx| {
-                    _ = confirm_workspace.update(cx, |workspace, cx| {
-                        workspace.confirm_save(window, cx);
-                    });
-                }),
-            )
-    });
-
     // Drawn only once there is a plan to turn to. Before that the pair would be
     // a control with one working half, which is the same as no control at all.
     // Nor while the pane it flips is hidden.
@@ -3751,9 +3813,8 @@ fn render_query_toolbar(
     // Only over rows read from one table with its key: what the grid
     // writes its edits back to is what the new row is inserted into. Named,
     // since a queue's results can each be a different table.
-    let new_row = (!session.naming)
-        .then(|| session.query_insert_target(target, cx))
-        .flatten()
+    let new_row = session
+        .query_insert_target(target, cx)
         .map(|(_, table, _)| insert_button("new-row", format!("Insert in {table}"), t));
 
     // First on the bar that is the editor/results boundary, and on every query
@@ -3775,9 +3836,7 @@ fn render_query_toolbar(
         .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleResults), cx))
     });
 
-    let named = session.open_query().is_some();
     let save_workspace = workspace.clone();
-    let rename_workspace = workspace.clone();
     let run_workspace = workspace.clone();
 
     control_row()
@@ -3789,86 +3848,61 @@ fn render_query_toolbar(
         .children(results_toggle)
         .children(plan_toggle)
         .child(div().flex_1())
-        .children(naming)
         .children(new_row)
-        // A named query is already written to disk on every swap, so there
-        // is nothing for a save button to do that has not been done. What
-        // it can still do is change the name.
-        .children((!session.naming && named).then(|| {
-            icon_button(
-                "rename-query",
-                icon::RENAME,
-                Tone::Quiet,
-                Control::Compact,
-                t,
-            )
-            .tooltip("Rename query")
-            .on_click(move |_, window, cx| {
-                _ = rename_workspace.update(cx, |workspace, cx| {
-                    workspace.rename_query(window, cx);
-                });
-            })
-        }))
-        .children((!session.naming && !named).then(|| {
+        .children(session.active_query_tab().map(|_| {
             icon_button("save-query", icon::SAVE, Tone::Quiet, Control::Compact, t)
-                .tooltip_with_action("Save query", &SaveQuery, None)
+                .tooltip_with_action("Save", &SaveQuery, None)
                 .on_click(move |_, window, cx| {
                     _ = save_workspace.update(cx, |workspace, cx| {
                         workspace.save_query(&SaveQuery, window, cx);
                     });
                 })
         }))
-        .children(
-            session
-                .active_query_tab()
-                .filter(|_| !session.naming)
-                .map(|tab| {
-                    let target = LimitTarget::Query(tab.id);
-                    let editing = custom_limit
-                        .filter(|(editing, _)| *editing == target)
-                        .map(|(_, input)| input);
-                    row_limit_menu(target, tab.row_limit, editing, t)
-                }),
-        )
+        .children(session.active_query_tab().map(|tab| {
+            let target = LimitTarget::Query(tab.id);
+            let editing = custom_limit
+                .filter(|(editing, _)| *editing == target)
+                .map(|(_, input)| input);
+            row_limit_menu(target, tab.row_limit, editing, t)
+        }))
         // Beside Run, because it asks about the same statement Run would run.
         // A menu rather than a button: the two modes differ by whether the
         // statement is executed, and a single button would have to pick one of
         // those on the user's behalf. Absent on an engine with no mode at all,
         // rather than a menu with nothing in it.
         .children(
-            (!session.naming
-                && ExplainMode::ALL
-                    .into_iter()
-                    .any(|mode| engine.explain_prefix(mode).is_some()))
-            .then(|| {
-                icon_button(
-                    "explain-query",
-                    icon::PLAN,
-                    Tone::Quiet,
-                    Control::Compact,
-                    t,
-                )
-                .tooltip_with_action(
-                    "Explain",
-                    &ExplainQuery {
-                        mode: ExplainMode::Plan,
-                    },
-                    None,
-                )
-                .dropdown_menu(move |menu, _, _| {
-                    ExplainMode::ALL
-                        .into_iter()
-                        // A mode the engine does not have is not offered, the
-                        // same way a filter operator it cannot express is not.
-                        .filter(|mode| engine.explain_prefix(*mode).is_some())
-                        .fold(menu, |menu, mode| {
-                            menu.menu(
-                                format!("{} — {}", mode.label(), mode.caption()),
-                                Box::new(ExplainQuery { mode }),
-                            )
-                        })
-                })
-            }),
+            ExplainMode::ALL
+                .into_iter()
+                .any(|mode| engine.explain_prefix(mode).is_some())
+                .then(|| {
+                    icon_button(
+                        "explain-query",
+                        icon::PLAN,
+                        Tone::Quiet,
+                        Control::Compact,
+                        t,
+                    )
+                    .tooltip_with_action(
+                        "Explain",
+                        &ExplainQuery {
+                            mode: ExplainMode::Plan,
+                        },
+                        None,
+                    )
+                    .dropdown_menu(move |menu, _, _| {
+                        ExplainMode::ALL
+                            .into_iter()
+                            // A mode the engine does not have is not offered, the
+                            // same way a filter operator it cannot express is not.
+                            .filter(|mode| engine.explain_prefix(*mode).is_some())
+                            .fold(menu, |menu, mode| {
+                                menu.menu(
+                                    format!("{} — {}", mode.label(), mode.caption()),
+                                    Box::new(ExplainQuery { mode }),
+                                )
+                            })
+                    })
+                }),
         )
         .child({
             // Filled where its neighbours are ghosts: running the buffer is

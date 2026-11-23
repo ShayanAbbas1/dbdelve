@@ -26,6 +26,7 @@ mod session;
 mod settings_panel;
 mod sidebar;
 mod sql;
+mod sql_file;
 #[cfg(test)]
 mod sql_snapshots;
 mod store;
@@ -66,15 +67,15 @@ use actions::{
     HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenLogsFolder,
-    OpenReference, OpenSettings, PreviousEdit, PreviousPage, PreviousProfile, PreviousResult,
-    PreviousTab, Quit, RefreshConnection, RefreshRelation, RefuseEdit, RemoveFilter,
-    RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery, SearchEverything,
-    SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit, SetEmpty, SetFilterColumn,
-    SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit, SetRowLimit, ShowAllColumns,
-    ShowEditor, ShowMessages, ShowReferences, SortActiveColumn, SortColumn, SubmitConnection,
-    SwitchConnection, ToggleComment, ToggleFilterJoin, ToggleNextJoin, TogglePinColumn,
-    ToggleResults, ToggleRowEdit, ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn,
-    ZoomEditorOut,
+    OpenReference, OpenSettings, OpenSqlFiles, PreviousEdit, PreviousPage, PreviousProfile,
+    PreviousResult, PreviousTab, Quit, RefreshConnection, RefreshRelation, RefuseEdit,
+    RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
+    SaveQueryAs, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit,
+    SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit,
+    SetRowLimit, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn,
+    SortColumn, SubmitConnection, SwitchConnection, ToggleComment, ToggleFilterJoin,
+    ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit, ToggleRowPanel, ToggleSidebar,
+    ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -393,7 +394,9 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
             )
             .chain([
                 MenuItem::separator(),
-                MenuItem::action("Save Query", SaveQuery),
+                MenuItem::action("Open SQL File…", OpenSqlFiles),
+                MenuItem::action("Save", SaveQuery),
+                MenuItem::action("Save As…", SaveQueryAs),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close All Tabs", CloseAllTabs),

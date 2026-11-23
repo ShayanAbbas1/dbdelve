@@ -1100,17 +1100,22 @@ fn the_sidebar_selects_the_row_of_the_tab_in_front(cx: &mut TestAppContext) {
         settle(cx);
         assert_eq!(selected(cx), None, "a new scratch query leaves no row lit");
 
+        let scratch = active(cx);
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.ask_for_name(String::new(), window, cx);
-            let name = workspace.profile().unwrap().session.save_name.clone();
-            name.update(cx, |input, cx| input.set_value("daily", window, cx));
-            workspace.confirm_save(window, cx);
+            let crate::session::Tab::Query(scratch) = scratch else {
+                panic!("the new query is in front");
+            };
+            workspace.close_buffer(scratch, window, cx);
+            let id = workspace.profile().unwrap().id.clone();
+            store::write_query(&id, "daily", "select 1").expect("the query saves");
+            workspace.reload_saved_queries(cx);
+            workspace.open_saved_query("daily".into(), window, cx);
         });
         settle(cx);
         assert_eq!(
             selected(cx),
             Some(explorer::query_row("daily")),
-            "saved, the query has a row of its own"
+            "a saved query's tab has its row"
         );
 
         let daily = active(cx);
@@ -10129,9 +10134,28 @@ fn relaunch_closing(
     workspace: Entity<Workspace>,
     cx: &mut VisualTestContext,
 ) -> (Entity<Workspace>, &mut VisualTestContext) {
+    close_window(workspace, cx);
+    launch_again(cx)
+}
+
+/// The window gone, and with it the workspace, having written what it keeps.
+fn close_window(workspace: Entity<Workspace>, cx: &mut VisualTestContext) {
+    let released = workspace.downgrade();
     cx.update(|window, _| window.remove_window());
     drop(workspace);
     cx.cx.run_until_parked();
+    // The window goes, and the workspace with it, writing its buffers on
+    // release, only when effects are next flushed.
+    cx.cx.update(|_| {});
+    assert!(
+        released.upgrade().is_none(),
+        "the first workspace is released"
+    );
+}
+
+/// A second window over the same home, once `close_window` has closed the
+/// first.
+fn launch_again(cx: &mut VisualTestContext) -> (Entity<Workspace>, &mut VisualTestContext) {
     let mut relaunched = None;
     let (_, cx) = cx.cx.add_window_view(|window, cx| {
         let entity = cx.new(|cx| Workspace::new(Vec::new(), window, cx));
@@ -11164,7 +11188,7 @@ fn the_connections_trees_object_menu_is_simple_modes_menu(cx: &mut TestAppContex
 fn a_saved_querys_row_in_the_connections_tree_has_its_menu(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         crate::IGNORE_ENVIRONMENT.set(true);
-        store::save_query_as("b", None, "nightly", "select 1").expect("the query saves");
+        store::write_query("b", "nightly", "select 1").expect("the query saves");
         let (workspace, cx) = launch_connections(
             cx,
             "create table birds (name text);",
@@ -11179,7 +11203,7 @@ fn a_saved_querys_row_in_the_connections_tree_has_its_menu(cx: &mut TestAppConte
         click_connections_row(cx, at);
         let query = scoped_row("b", None, &explorer::query_row("nightly"));
         if connections_row(&workspace, cx, &query).is_none() {
-            let group = scoped_row("b", None, explorer::QUERIES_GROUP);
+            let group = scoped_row("b", None, explorer::FILES_GROUP);
             let at = connections_row(&workspace, cx, &group).expect("b's queries are listed");
             click_connections_row(cx, at);
         }
@@ -11192,8 +11216,9 @@ fn a_saved_querys_row_in_the_connections_tree_has_its_menu(cx: &mut TestAppConte
         pick_from_connections_menu(cx, at, 1);
         assert_eq!(front_profile(&workspace, cx), "b");
         workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
             assert_eq!(
-                workspace.profile().unwrap().session.open_query(),
+                session.saved_query_of(session.active_query_tab().unwrap()),
                 Some("nightly")
             );
         });
@@ -12613,6 +12638,1430 @@ fn a_stored_selection_waits_for_a_connection_that_loads_later(cx: &mut TestAppCo
             [a_birds, b_birds],
             "and join the selection once b has loaded"
         );
+        quit(workspace, cx);
+    });
+}
+
+/// A `.sql` file in the test home, holding `text`, as the user's own file.
+fn user_sql_file(name: &str, text: &str) -> std::path::PathBuf {
+    let path = crate::sql_file::canonical(&store::home().expect("the test home").join(name));
+    std::fs::write(&path, text).expect("the file must be writable");
+    path
+}
+
+/// `path` opened as a dropped file is, waited on until its tab is in front:
+/// the file is read on the blocking pool, which the test scheduler does not
+/// own.
+fn open_sql_file(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    path: &std::path::Path,
+) {
+    cx.executor().allow_parking();
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_files(vec![path.to_path_buf()], window, cx)
+        });
+    });
+    for _ in 0..500 {
+        settle(cx);
+        if front_file(workspace, cx).as_deref() == Some(path) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{} never opened", path.display());
+}
+
+fn front_file(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<std::path::PathBuf> {
+    workspace.read_with(cx, |workspace, _| {
+        let tab = workspace.profile()?.session.active_query_tab()?;
+        Some(tab.file.as_ref()?.path.clone())
+    })
+}
+
+fn front_dirty(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    query_tab(workspace, cx, |tab, _, _| tab.dirty)
+}
+
+#[gpui::test]
+fn the_save_chord_in_the_editor_writes_the_bound_file_as_the_buffer_holds_it(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("orders.sql", "SELECT 1;\r\n");
+        open_sql_file(&workspace, cx, &path);
+        assert!(editor_has_keyboard(&workspace, cx));
+        assert_eq!(
+            buffer(&workspace, cx),
+            "SELECT 1;\r\n",
+            "line endings as read"
+        );
+        assert!(!front_dirty(&workspace, cx));
+
+        cx.simulate_input("x");
+        assert!(front_dirty(&workspace, cx));
+        cx.simulate_keystrokes("secondary-z");
+        settle(cx);
+        assert!(!front_dirty(&workspace, cx), "undone back to the file");
+
+        cx.simulate_input("-- ");
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(
+            std::fs::read(&path).expect("the file is there"),
+            b"-- SELECT 1;\r\n"
+        );
+        assert!(!front_dirty(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_open_chord_in_the_editor_binds_the_picked_file_to_a_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.executor().allow_parking();
+        let path = user_sql_file("picked.sql", "SELECT 1;");
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_keystrokes("secondary-o");
+        settle(cx);
+        assert!(cx.did_prompt_for_paths());
+        let picked = path.clone();
+        cx.simulate_path_prompt_response(|_| Some(vec![picked]));
+        for _ in 0..500 {
+            settle(cx);
+            if front_file(&workspace, cx).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert_eq!(buffer(&workspace, cx), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_as_binds_an_untitled_tab_to_the_file_it_writes(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("SELECT 2;");
+        // Untitled, so Save asks where.
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        let chosen = store::home().expect("the test home").join("report");
+        cx.simulate_new_path_selection(|_| Some(chosen));
+        settle(cx);
+
+        let path = crate::sql_file::canonical(&store::home().unwrap().join("report.sql"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 2;");
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert!(!front_dirty(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_save_chord_in_the_grid_applies_edits(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("select 1");
+        cx.simulate_keystrokes("secondary-enter");
+        settle(cx);
+        cx.simulate_keystrokes("secondary-k r");
+        settle(cx);
+        assert!(grid_has_keyboard(&workspace, cx));
+
+        let resolved: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let _observer = cx.update({
+            let resolved = resolved.clone();
+            |_, cx| {
+                cx.observe_keystrokes(move |event, _, _| {
+                    let action = event.action.as_ref().map(|action| action.as_any());
+                    resolved.borrow_mut().push(match action {
+                        Some(action) if action.is::<crate::actions::ApplyEdits>() => "apply",
+                        Some(action) if action.is::<crate::actions::SaveQuery>() => "save",
+                        _ => "other",
+                    });
+                })
+            }
+        });
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(*resolved.borrow(), ["apply"]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_relaunch_brings_a_file_tab_back_dirty_without_writing_its_file(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("draft.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_input("-- ");
+        assert!(front_dirty(&workspace, cx));
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        let tab = workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            session.tab_on(&path).expect("the file tab came back")
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(Tab::Query(tab), window, cx)
+            });
+        });
+        settle(cx);
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;");
+        assert!(front_dirty(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_relaunch_with_two_tabs_on_one_file_keeps_both_buffers(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("shared.sql", "SELECT 1;");
+        let link = path.with_file_name("link.sql");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        cx.simulate_input("SELECT 2;");
+        // As a build that stored paths as they were picked would have left it.
+        workspace.update(cx, |workspace, _| {
+            let session = &mut workspace.profile_mut().expect("a connection").session;
+            let Tab::Query(id) = session.active else {
+                panic!("a query tab is in front");
+            };
+            session.query_tab_mut(id).expect("the tab").file = Some(crate::session::FileBinding {
+                path: link.clone(),
+                saved: Some("SELECT 1;".into()),
+                bom: false,
+                stamp: None,
+                conflict: None,
+            });
+        });
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        let buffers = workspace.read_with(cx, |workspace, cx| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let mut buffers: Vec<_> = session
+                .queries
+                .iter()
+                .map(|tab| {
+                    let path = tab.file.as_ref().map(|file| file.path.clone());
+                    (path, tab.editor.read(cx).value().to_string())
+                })
+                .collect();
+            buffers.sort();
+            buffers
+        });
+        assert_eq!(
+            buffers,
+            [
+                (None, String::new()),
+                (None, "SELECT 2;".to_string()),
+                (Some(path.clone()), "SELECT 1;".to_string()),
+            ]
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        store::write_query("b", "nightly", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile("a", "A", ""),
+                sqlite_profile("b", "B", "")
+            ),
+        );
+        let queries = crate::sql_file::canonical(&store::query_directory("b").unwrap());
+        open_sql_file(&workspace, cx, &queries.join("nightly.sql"));
+        let on_a = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profiles[0]
+                    .session
+                    .queries
+                    .iter()
+                    .filter_map(|tab| Some(tab.file.as_ref()?.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        // A lists the file by its tab alone.
+        workspace.update(cx, |workspace, cx| {
+            workspace.forget_recent_file(&queries.join("nightly.sql"), cx)
+        });
+        workspace.update(cx, |workspace, cx| workspace.activate(1, cx));
+        settle(cx);
+
+        rename_query(&workspace, cx, "nightly", "weekly");
+        assert_eq!(on_a(&workspace, cx), [queries.join("weekly.sql")]);
+        let listed_on_a = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profiles[0].session.explorer_tree.clone();
+            let row = explorer::file_row(&queries.join("weekly.sql"));
+            tree.read(cx).index_of(&row.into()).is_some()
+        });
+        assert!(listed_on_a, "A's list follows its tab");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.ask_delete_saved_query("weekly".into(), cx)
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds(
+                "delete-question: Delete weekly.sql? Its tab is closed too. This cannot be undone."
+            )
+            .is_some(),
+            "the tab on A closes too"
+        );
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.delete_saved_query("weekly".into(), window, cx)
+            });
+        });
+        settle(cx);
+        assert_eq!(on_a(&workspace, cx), Vec::<std::path::PathBuf>::new());
+        assert!(!queries.join("weekly.sql").exists());
+        quit(workspace, cx);
+    });
+}
+
+/// The sidebar's rename of the front connection's saved query `from`.
+fn rename_query(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, from: &str, to: &str) {
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.start_query_rename(from.into(), from.into(), window, cx);
+            let input = workspace
+                .profile()
+                .unwrap()
+                .session
+                .query_rename
+                .as_ref()
+                .unwrap()
+                .input
+                .clone();
+            input.update(cx, |input, cx| input.set_value(to, window, cx));
+            workspace.commit_query_rename(cx);
+        });
+    });
+    settle(cx);
+}
+
+#[gpui::test]
+fn a_rename_onto_a_deleted_querys_open_tab_is_refused(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "daily", "select 1").expect("the query saves");
+        store::write_query("e2e", "weekly", "select 2").expect("the query saves");
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let queries = crate::sql_file::canonical(&store::query_directory("e2e").unwrap());
+        open_sql_file(&workspace, cx, &queries.join("daily.sql"));
+        open_sql_file(&workspace, cx, &queries.join("weekly.sql"));
+        std::fs::remove_file(queries.join("daily.sql")).unwrap();
+        workspace.update(cx, |workspace, cx| workspace.reload_saved_queries(cx));
+
+        rename_query(&workspace, cx, "weekly", "daily");
+        assert!(queries.join("weekly.sql").exists(), "nothing moved");
+        assert!(is_open(&workspace, cx, &queries.join("weekly.sql")));
+        let error = workspace.read_with(cx, |workspace, _| {
+            let rename = workspace.profile().unwrap().session.query_rename.as_ref();
+            rename.and_then(|rename| rename.error.clone())
+        });
+        assert_eq!(error.as_deref(), Some("daily is open in another tab."));
+        quit(workspace, cx);
+    });
+}
+
+/// Deleting a saved query that is a link takes the link alone, so the tab
+/// on the file it leads to keeps its unsaved text.
+#[cfg(unix)]
+#[gpui::test]
+fn deleting_a_link_query_leaves_the_tab_on_its_file(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "real", "select 1").expect("the query saves");
+        let queries = crate::sql_file::canonical(&store::query_directory("e2e").unwrap());
+        std::os::unix::fs::symlink(queries.join("real.sql"), queries.join("alias.sql")).unwrap();
+        let (workspace, cx) = launch_on_sqlite(cx);
+        open_sql_file(&workspace, cx, &queries.join("real.sql"));
+        cx.simulate_input("-- ");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.ask_delete_saved_query("alias".into(), cx)
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("delete-question: Delete alias.sql? This cannot be undone.")
+                .is_some()
+        );
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.delete_saved_query("alias".into(), window, cx)
+            });
+        });
+        settle(cx);
+        assert!(!queries.join("alias.sql").exists());
+        assert!(is_open(&workspace, cx, &queries.join("real.sql")));
+        assert!(front_dirty(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_link_dropped_with_its_file_opens_one_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("both.sql", "SELECT 1;");
+        let link = path.with_file_name("link.sql");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let before = query_tab_count(&workspace, cx);
+        cx.executor().allow_parking();
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_files(vec![link.clone(), path.clone()], window, cx)
+            });
+        });
+        for _ in 0..500 {
+            settle(cx);
+            if front_file(&workspace, cx).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert_eq!(query_tab_count(&workspace, cx), before + 1);
+        quit(workspace, cx);
+    });
+}
+
+/// A dirty file tab on `name` whose scratch file holds bytes that are not
+/// UTF-8 when the app comes back up, and the paths of the file and the
+/// scratch file. `before_launch` runs with the app closed.
+fn relaunch_over_an_unreadable_scratch<'a>(
+    workspace: Entity<Workspace>,
+    cx: &'a mut VisualTestContext,
+    name: &str,
+    before_launch: impl FnOnce(&std::path::Path),
+) -> (
+    Entity<Workspace>,
+    &'a mut VisualTestContext,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let path = open_dirty_file(&workspace, cx, name);
+    let (_, scratch) = front_scratch(&workspace, cx);
+    close_window(workspace, cx);
+    std::fs::write(&scratch, b"-- \xff SELECT 1;").unwrap();
+    before_launch(scratch.parent().unwrap());
+    let (workspace, cx) = launch_again(cx);
+    bring_back(&workspace, cx, &path);
+    (workspace, cx, path, scratch)
+}
+
+#[gpui::test]
+fn a_scratch_file_that_will_not_read_back_is_set_aside_and_the_tab_carries_on(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let (workspace, cx, path, scratch) =
+            relaunch_over_an_unreadable_scratch(workspace, cx, "draft.sql", |_| {});
+        let aside = scratch.with_file_name(
+            scratch
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace(".sql", ".unread-1.sql"),
+        );
+        assert_eq!(std::fs::read(&aside).unwrap(), b"-- \xff SELECT 1;");
+        workspace.read_with(cx, |workspace, _| {
+            let notice = workspace.profile().unwrap().session.notice.clone();
+            assert!(notice.is_some_and(|notice| notice.contains(".unread-1.sql")));
+        });
+
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_input("x");
+        assert!(front_dirty(&workspace, cx));
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "xSELECT 1;", "hot exit kept it");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"-- \xff SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_scratch_file_that_cannot_be_moved_aside_is_never_deleted(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+
+    store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let lock = |directory: &std::path::Path, mode| {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let (workspace, cx, path, scratch) =
+            relaunch_over_an_unreadable_scratch(workspace, cx, "stuck.sql", |directory| {
+                lock(directory, 0o555)
+            });
+        // Root renames regardless, and so the tab carries on as above.
+        if scratch.exists() {
+            cx.simulate_input("x");
+            cx.simulate_keystrokes("secondary-w");
+            settle(cx);
+            assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+            press(cx, "left");
+            press(cx, "left");
+            press(cx, "enter");
+            settle(cx);
+            assert!(!is_open(&workspace, cx, &path));
+            assert_eq!(std::fs::read(&scratch).unwrap(), b"-- \xff SELECT 1;");
+        }
+        lock(scratch.parent().unwrap(), 0o755);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn opening_a_file_already_open_brings_its_tab_up(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("once.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        assert_eq!(front_file(&workspace, cx), None);
+        let tabs = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profile()
+                    .expect("a connection in front")
+                    .session
+                    .queries
+                    .len()
+            })
+        };
+        let before = tabs(cx);
+
+        open_sql_file(&workspace, cx, &path);
+        assert_eq!(tabs(cx), before);
+        quit(workspace, cx);
+    });
+}
+
+/// The front tab's id and its scratch file's path.
+fn front_scratch(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (u64, std::path::PathBuf) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace.profile().expect("a connection in front");
+        let Tab::Query(id) = profile.session.active else {
+            panic!("a query tab is in front");
+        };
+        let scratch = store::query_directory(&profile.id)
+            .unwrap()
+            .join(format!(".scratch-{id}.sql"));
+        (id, scratch)
+    })
+}
+
+fn is_open(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    path: &std::path::Path,
+) -> bool {
+    workspace.read_with(cx, |workspace, _| workspace.tab_on_file(path).is_some())
+}
+
+/// A file opened and typed into, so its tab holds text the file does not.
+fn open_dirty_file(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    name: &str,
+) -> std::path::PathBuf {
+    let path = user_sql_file(name, "SELECT 1;");
+    open_sql_file(workspace, cx, &path);
+    cx.simulate_input("-- ");
+    assert!(front_dirty(workspace, cx));
+    path
+}
+
+#[gpui::test]
+fn closing_a_dirty_file_tab_asks_and_cancel_keeps_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "kept.sql");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "left");
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(front_file(&workspace, cx), Some(path.clone()));
+        assert!(front_dirty(&workspace, cx));
+        assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn dont_save_closes_a_dirty_file_tab_and_removes_its_scratch(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "dropped.sql");
+        let (_, scratch) = front_scratch(&workspace, cx);
+        workspace.read_with(cx, |workspace, cx| workspace.persist_buffers(cx));
+        assert!(scratch.exists(), "the unsaved text is in its scratch file");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "left");
+        press(cx, "left");
+        press(cx, "enter");
+        settle(cx);
+
+        assert!(!is_open(&workspace, cx, &path));
+        assert!(!scratch.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_in_the_close_question_writes_the_file_and_closes_its_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "written.sql");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        assert!(!is_open(&workspace, cx, &path));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn close_all_tabs_asks_once_about_every_dirty_file_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("SELECT 'untitled';");
+        let first = open_dirty_file(&workspace, cx, "first.sql");
+        let second = open_dirty_file(&workspace, cx, "second.sql");
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let asked = session.pending_discard.as_ref().expect("one question");
+            let asked = asked.tabs().collect::<Vec<_>>();
+            assert_eq!(asked.len(), 2);
+            assert_eq!(session.strip_tabs(), asked, "the rest closed unasked");
+        });
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "-- SELECT 1;");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "-- SELECT 1;");
+        assert_eq!(query_tab_count(&workspace, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn close_all_says_why_a_file_it_could_not_save_stayed_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let folder = store::home().unwrap().join("removed");
+        std::fs::create_dir(&folder).unwrap();
+        let stranded = open_dirty_file(&workspace, cx, "removed/stranded.sql");
+        let saved = open_dirty_file(&workspace, cx, "saved.sql");
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "-- SELECT 1;");
+        assert!(!is_open(&workspace, cx, &saved));
+        assert!(is_open(&workspace, cx, &stranded));
+        let notice = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.notice.clone()
+        });
+        assert!(
+            notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Could not save stranded.sql")),
+            "{notice:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// Close All Tabs over a file tab holding cell edits asks about the edits
+/// first, holding the other dirty file tab with them, and Discard leaves one
+/// Save question over both files.
+#[gpui::test]
+fn close_all_asks_about_edits_then_once_about_every_dirty_file(cx: &mut TestAppContext) {
+    use crate::result_grid::NewValue;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, BIRDS);
+        draft_by_default(&workspace, cx);
+        let edited = user_sql_file("edited.sql", "select * from birds");
+        open_sql_file(&workspace, cx, &edited);
+        cx.dispatch_action(crate::actions::RunQuery);
+        settle(cx);
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        stage(&grid, cx, 0, 1, NewValue::Value("finch".into()));
+        cx.simulate_input("-- ");
+        assert!(front_dirty(&workspace, cx));
+        let other = open_dirty_file(&workspace, cx, "other.sql");
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("discard"));
+        confirm_discard(&workspace, cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            let asked = session.pending_discard.as_ref().expect("one question");
+            assert_eq!(asked.tabs().count(), 2, "both files, in one question");
+        });
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(
+            std::fs::read_to_string(&edited).unwrap(),
+            "-- select * from birds"
+        );
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "-- SELECT 1;");
+        assert_eq!(query_tab_count(&workspace, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
+/// The tab on `path` brought back to the front.
+fn bring_back(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, path: &std::path::Path) {
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            assert!(workspace.bring_up_file(path, window, cx));
+        });
+    });
+    settle(cx);
+}
+
+fn front_conflict(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<crate::session::Conflict> {
+    query_tab(workspace, cx, |tab, _, _| tab.file.as_ref()?.conflict)
+}
+
+#[gpui::test]
+fn an_outside_write_reloads_a_clean_tab_when_it_comes_forward(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("outside.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "SELECT 22;");
+        assert!(!front_dirty(&workspace, cx));
+
+        // And when the window comes back with the tab already in front.
+        cx.deactivate_window();
+        std::fs::write(&path, "SELECT 333;").unwrap();
+        cx.update(|window, _| window.activate_window());
+        settle(cx);
+        assert_eq!(buffer(&workspace, cx), "SELECT 333;");
+        assert!(!front_dirty(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_outside_write_under_unsaved_text_raises_the_bar(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "contested.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;", "nothing is lost");
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::Asking)
+        );
+        assert!(cx.debug_bounds("file-banner: Changed on disk").is_some());
+
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.take_disk(id, false, window, cx)
+            });
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("file-banner: Changed on disk").is_none(),
+            "kept"
+        );
+        assert!(front_dirty(&workspace, cx));
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 22;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_after_an_outside_write_asks_before_overwriting_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "raced.sql");
+        std::fs::write(&path, "SELECT 22;").unwrap();
+
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 22;");
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        assert!(!front_dirty(&workspace, cx));
+        assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_file_deleted_on_disk_says_so_and_save_writes_it_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("deleted.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+
+        std::fs::remove_file(&path).unwrap();
+        bring_back(&workspace, cx, &path);
+        assert_eq!(
+            front_file(&workspace, cx),
+            Some(path.clone()),
+            "still bound"
+        );
+        assert!(front_dirty(&workspace, cx));
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_some());
+
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        assert!(!front_dirty(&workspace, cx));
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_none());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_deleted_file_written_again_says_it_changed_and_offers_reload(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "returned.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::remove_file(&path).unwrap();
+        bring_back(&workspace, cx, &path);
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_some());
+
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert!(cx.debug_bounds("file-banner: Changed on disk").is_some());
+        quit(workspace, cx);
+    });
+}
+
+/// A Save from the menu can raise Overwrite while Forget File is up, under
+/// it: `escape` takes down the one on top.
+#[gpui::test]
+fn escape_takes_down_forget_file_before_the_overwrite_under_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "under.sql");
+        let (id, _) = front_scratch(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            let session = &mut workspace.profile_mut().unwrap().session;
+            session.pending_forget = Some(path.clone());
+            session.pending_overwrite = Some(crate::session::PendingOverwrite {
+                tabs: vec![id],
+                close: false,
+            });
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("forget-file"));
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_file_gone_at_relaunch_comes_back_saying_it_was_deleted(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "vanished.sql");
+        let (id, _) = front_scratch(&workspace, cx);
+
+        close_window(workspace, cx);
+        std::fs::remove_file(&path).unwrap();
+        let (workspace, cx) = launch_again(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(Tab::Query(id), window, cx)
+            });
+        });
+        settle(cx);
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;");
+        assert!(front_dirty(&workspace, cx));
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_some());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_as_into_the_saved_queries_folder_lists_the_query(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.simulate_input("SELECT 2;");
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        let queries = workspace.read_with(cx, |workspace, _| {
+            let id = &workspace.profile().expect("a connection in front").id;
+            store::query_directory(id).unwrap()
+        });
+        std::fs::create_dir_all(&queries).unwrap();
+        cx.simulate_new_path_selection(|_| Some(queries.join("nightly")));
+        settle(cx);
+
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a connection in front").session;
+            assert!(session.saved_queries.iter().any(|name| name == "nightly"));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_after_keep_mine_recreates_a_file_deleted_since_without_asking(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "kept-then-gone.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.take_disk(id, false, window, cx)
+            });
+        });
+        settle(cx);
+
+        std::fs::remove_file(&path).unwrap();
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn save_asks_about_an_outside_edit_that_kept_the_files_stamp(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "same-stamp.sql");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "SELECT 2;").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(modified))
+            .unwrap();
+
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 2;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn closing_a_clean_tab_whose_file_was_deleted_behind_it_asks(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("only-copy.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::remove_file(&path).unwrap();
+
+        cx.simulate_keystrokes("secondary-k w");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        assert!(is_open(&workspace, cx, &path));
+        press(cx, "enter");
+        settle(cx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_bar_button_pressed_from_the_keyboard_hands_it_back_to_the_buffer(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "keyboard.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        // Tab order runs from the bar's buttons into the buffer below them.
+        cx.update(|window, cx| window.focus_prev(cx));
+        settle(cx);
+        assert!(!editor_has_keyboard(&workspace, cx), "a bar button has it");
+        press(cx, "enter");
+        settle(cx);
+
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::KeptMine)
+        );
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_relaunch_asks_about_a_change_made_while_the_app_was_closed(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "moved.sql");
+
+        close_window(workspace, cx);
+        std::fs::write(&path, "SELECT 333;").unwrap();
+        let (workspace, cx) = launch_again(cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(buffer(&workspace, cx), "-- SELECT 1;");
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::Asking)
+        );
+
+        close_window(workspace, cx);
+        let (workspace, cx) = launch_again(cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::Asking),
+            "asking until it is answered"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // CI's `PG*` would put their connection, or the form saying what they
+        // lack, in front on the relaunch.
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "kept.sql");
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.take_disk(id, false, window, cx)
+            });
+        });
+        settle(cx);
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        bring_back(&workspace, cx, &path);
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            Some(crate::session::Conflict::KeptMine)
+        );
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_keystrokes("secondary-s");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_offer_to_move_saved_queries_shows_once_and_not_after_not_now(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "daily", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_on_sqlite(cx);
+        settle(cx);
+        assert!(cx.debug_bounds("queries-notice").is_some());
+        let not_now = cx
+            .debug_bounds("queries-notice-dismiss")
+            .expect("Not Now is drawn");
+        cx.simulate_click(not_now.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.debug_bounds("queries-notice").is_none());
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        let (workspace, cx) = relaunch_closing(workspace, cx);
+        assert!(
+            cx.debug_bounds("queries-notice").is_none(),
+            "Not Now is remembered"
+        );
+        assert!(workspace.read_with(cx, |workspace, _| workspace.has_saved_queries()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_move_files_each_connections_queries_and_repoints_a_dirty_tab_on_another(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        store::write_query("b", "nightly", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile("a", "A", ""),
+                sqlite_profile("b", "B/Reports", "")
+            ),
+        );
+        let queries = crate::sql_file::canonical(&store::query_directory("b").unwrap());
+        let legacy = queries.join("nightly.sql");
+        open_sql_file(&workspace, cx, &legacy);
+        cx.simulate_input("-- ");
+        assert!(front_dirty(&workspace, cx));
+
+        let folder = store::home().unwrap().join("Moved");
+        std::fs::create_dir_all(&folder).unwrap();
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_saved_queries(&folder, cx)
+        });
+        settle(cx);
+
+        let moved = crate::sql_file::canonical(&folder.join("B-Reports").join("nightly.sql"));
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "select 1");
+        assert!(!legacy.exists());
+        assert_eq!(front_file(&workspace, cx), Some(moved.clone()));
+        assert!(
+            front_dirty(&workspace, cx),
+            "the unsaved text stays unsaved"
+        );
+        assert_eq!(buffer(&workspace, cx), "-- select 1");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.check_front_file(window, cx))
+        });
+        assert_eq!(
+            front_conflict(&workspace, cx),
+            None,
+            "the copy is no change"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let b = &workspace.profiles[1];
+            assert!(b.session.saved_queries.is_empty());
+            assert_eq!(b.recent_files, std::slice::from_ref(&moved));
+            let a = &workspace.profiles[0];
+            assert_eq!(a.recent_files, std::slice::from_ref(&moved));
+            let tree = a.session.explorer_tree.read(cx);
+            assert!(tree.index_of(&explorer::file_row(&moved).into()).is_some());
+            assert!(tree.index_of(&explorer::file_row(&legacy).into()).is_none());
+        });
+        assert!(cx.debug_bounds("queries-notice").is_some(), "the report");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_move_skips_a_name_a_tab_on_a_deleted_file_holds(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        store::write_query("a", "nightly", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_connections(cx, "", "", &sqlite_profile("a", "A", ""));
+        let folder = store::home().unwrap().join("Moved");
+        std::fs::create_dir_all(folder.join("A")).unwrap();
+        let taken = user_sql_file("Moved/A/nightly.sql", "select 2");
+        open_sql_file(&workspace, cx, &taken);
+        std::fs::remove_file(&taken).unwrap();
+        let queries = crate::sql_file::canonical(&store::query_directory("a").unwrap());
+        let legacy = queries.join("nightly.sql");
+        open_sql_file(&workspace, cx, &legacy);
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_saved_queries(&folder, cx)
+        });
+        settle(cx);
+
+        assert!(legacy.exists(), "left where it was");
+        assert!(!taken.exists());
+        assert!(is_open(&workspace, cx, &legacy));
+        assert!(is_open(&workspace, cx, &taken));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("orders.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        let row = explorer::file_row(&path);
+        explorer_row(&workspace, &row, cx);
+
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_now(Tab::Query(id), window, cx)
+            })
+        });
+        settle(cx);
+        explorer_row(&workspace, &row, cx);
+        pick_from_explorer_menu(&workspace, cx, &row, 3);
+        settle(cx);
+        let listed = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.read(cx).index_of(&row.clone().into()).is_some()
+        });
+        assert!(!listed, "the row is gone");
+        assert!(path.exists(), "and the file is not");
+        quit(workspace, cx);
+    });
+}
+
+/// A listed file opens in a file tab whatever its name, Save As having
+/// taken the one typed, and one gone since asks to leave the list.
+#[gpui::test]
+fn a_listed_file_opens_as_sql_whatever_its_extension(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.executor().allow_parking();
+        let listed = |name: &str, cx: &mut VisualTestContext| {
+            let path = user_sql_file(name, "SELECT 1;");
+            open_sql_file(&workspace, cx, &path);
+            let (id, _) = front_scratch(&workspace, cx);
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.close_now(Tab::Query(id), window, cx)
+                })
+            });
+            settle(cx);
+            path
+        };
+        let open_row = |path: &std::path::Path, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_listed_file(path.to_path_buf(), window, cx)
+                })
+            });
+        };
+        let notes = listed("notes.sql", cx);
+        let csv = notes.with_file_name("notes.csv");
+        std::fs::rename(&notes, &csv).unwrap();
+        workspace.update(cx, |workspace, cx| {
+            let profile_id = workspace.profile().unwrap().id.clone();
+            workspace.remember_file(&profile_id, &csv, cx);
+        });
+        open_row(&csv, cx);
+        for _ in 0..500 {
+            settle(cx);
+            if front_file(&workspace, cx).as_deref() == Some(csv.as_path()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_file(&workspace, cx), Some(csv));
+
+        let gone = listed("gone.sql", cx);
+        std::fs::remove_file(&gone).unwrap();
+        open_row(&gone, cx);
+        for _ in 0..500 {
+            settle(cx);
+            if front_dialog(&workspace, cx).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_dialog(&workspace, cx), Some("forget-file"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_palette_offers_the_saved_queries_move_with_no_connection_in_front(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "a", "select 1").expect("the query saves");
+        let (workspace, cx) = launch_on_sqlite(cx);
+        disconnect(cx);
+        workspace.read_with(cx, |workspace, _| assert!(workspace.profile().is_none()));
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        assert!(
+            palette_labels(&workspace, cx)
+                .iter()
+                .any(|label| label == "Move saved queries to a folder…")
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_palette_names_files_of_one_name_by_their_folders_too(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        for folder in ["reports", "billing"] {
+            std::fs::create_dir_all(store::home().unwrap().join(folder)).unwrap();
+            let path = user_sql_file(&format!("{folder}/orders.sql"), "SELECT 1;");
+            open_sql_file(&workspace, cx, &path);
+        }
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        let labels = palette_labels(&workspace, cx);
+        for label in ["orders.sql — reports", "orders.sql — billing"] {
+            assert!(labels.iter().any(|held| held == label), "{label}");
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_file_removed_from_the_list_while_open_leaves_it_as_its_tab_closes(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = user_sql_file("orders.sql", "SELECT 1;");
+        open_sql_file(&workspace, cx, &path);
+        let row = explorer::file_row(&path);
+        explorer_row(&workspace, &row, cx);
+        workspace.update(cx, |workspace, cx| workspace.forget_recent_file(&path, cx));
+        settle(cx);
+        explorer_row(&workspace, &row, cx);
+
+        let (id, _) = front_scratch(&workspace, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_now(Tab::Query(id), window, cx)
+            })
+        });
+        settle(cx);
+        let listed = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.read(cx).index_of(&row.clone().into()).is_some()
+        });
+        assert!(!listed, "the row went with the tab");
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn a_saved_query_that_links_to_another_moves_as_its_text_too(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "a", "select 1").expect("the query saves");
+        let queries = store::query_directory("e2e").unwrap();
+        std::os::unix::fs::symlink(queries.join("a.sql"), queries.join("b.sql")).unwrap();
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let folder = store::home().unwrap().join("Moved");
+        workspace.update(cx, |workspace, cx| {
+            workspace.move_saved_queries(&folder, cx)
+        });
+        settle(cx);
+
+        let moved = folder.join("E2E");
+        assert_eq!(
+            std::fs::read_to_string(moved.join("a.sql")).unwrap(),
+            "select 1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.join("b.sql")).unwrap(),
+            "select 1"
+        );
+        assert!(std::fs::symlink_metadata(queries.join("b.sql")).is_err());
         quit(workspace, cx);
     });
 }

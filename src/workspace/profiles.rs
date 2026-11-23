@@ -71,7 +71,7 @@ fn forget_what_was_read(profile: &mut Profile, window: &mut Window, cx: &mut Con
 }
 
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
-/// folders, its saved queries, then the catalog's schemas. Both trees draw
+/// folders, its files and saved queries, then the catalog's schemas. Both trees draw
 /// this, so a connection's rows are the same in either.
 pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::ExplorerTree {
     let catalog = match &profile.catalog {
@@ -85,7 +85,11 @@ pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::Exp
         &profile.shortcut_database(),
         filter,
     );
-    explorer.extend(explorer::queries(&profile.session.saved_queries, filter));
+    explorer.extend(explorer::files(
+        &profile.listed_files(),
+        &profile.session.saved_queries,
+        filter,
+    ));
     if let Some(catalog) = catalog {
         explorer.extend(build_explorer_tree(catalog, filter));
     }
@@ -187,6 +191,8 @@ impl Workspace {
             sidebar_density: Some(self.settings.density.slug().into()),
             sidebar_show_host: Some(self.settings.show_host),
             sidebar_show_sizes: Some(self.settings.show_sizes),
+            queries_move_dismissed: Some(self.settings.queries_move_dismissed)
+                .filter(|dismissed| *dismissed),
             edit_mode: (self.settings.edit_mode != EditMode::default())
                 .then(|| self.settings.edit_mode.slug().into()),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
@@ -292,6 +298,15 @@ impl Workspace {
         if let Some(message) = notice {
             session.notice = Some(message);
         }
+        let held = self
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.session.queries)
+            .filter_map(|tab| Some(tab.file.as_ref()?.path.clone()))
+            .collect();
+        if let Some(message) = session.unbind_duplicates(held, cx) {
+            session.notice.get_or_insert(message);
+        }
         let id = stored.id.clone();
         self.profiles.push(Profile {
             id: stored.id,
@@ -342,6 +357,12 @@ impl Workspace {
                 .into_iter()
                 .take(OPEN_ROWS_CAP)
                 .collect(),
+            recent_files: crate::session::restored_recent(
+                stored.recent_files,
+                &session.query_directory,
+            ),
+            missing_files: HashSet::new(),
+            recent_generation: 0,
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -408,6 +429,9 @@ impl Workspace {
             folds: BTreeMap::new(),
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
+            recent_files: Vec::new(),
+            missing_files: HashSet::new(),
+            recent_generation: 0,
             session,
         });
         if let Some(password) = password
@@ -3543,10 +3567,14 @@ fn first_buffer(name: Option<String>) -> Vec<store::StoredQueryTab> {
     vec![store::StoredQueryTab {
         id: 0,
         name,
+        path: None,
         active: true,
         queued_results: 0,
         database: None,
         schema: None,
+        saved_hash: None,
+        kept_mine: false,
+        asking: false,
     }]
 }
 
@@ -3920,10 +3948,14 @@ target = 'i-0123456789abcdef0'
         let blank = store::StoredQueryTab {
             id: 0,
             name: None,
+            path: None,
             active: true,
             queued_results: 0,
             database: None,
             schema: None,
+            saved_hash: None,
+            kept_mine: false,
+            asking: false,
         };
         // A connection just made.
         assert_eq!(first_buffer(None), std::slice::from_ref(&blank));
@@ -3944,10 +3976,14 @@ target = 'i-0123456789abcdef0'
         let open = vec![store::StoredQueryTab {
             id: 2,
             name: None,
+            path: None,
             active: false,
             queued_results: 0,
             database: None,
             schema: None,
+            saved_hash: None,
+            kept_mine: false,
+            asking: false,
         }];
         assert_eq!(stored_buffers(open.clone(), Some(3), None), open);
     }

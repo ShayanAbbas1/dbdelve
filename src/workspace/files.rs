@@ -7,18 +7,21 @@
 //! read it, on screen and the user's to change: `SELECT * FROM read_csv(…)`.
 //! The file itself is only ever read.
 //!
-//! A SQL file is the other kind: its text opens in a new query tab on the
-//! connection in front, as the user's buffer, and runs only when they run it.
+//! A SQL file is the other kind: it opens in a query tab bound to it on the
+//! connection in front, as the user's buffer, runs only when they run it, and
+//! is written only when they save it.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use gpui::{ExternalPaths, PathPromptOptions};
 
 use super::*;
 
+use crate::actions::{OpenSqlFiles, SaveQueryAs};
 use crate::connection_form::starting_mode;
 use crate::db::DUCKDB_IN_MEMORY;
+use crate::session::{Conflict, FileBinding, PendingOverwrite, Settle};
+use crate::sql_file::{self, SqlText, file_name};
 
 impl Workspace {
     /// The native file picker, then [`Workspace::open_data_files`].
@@ -30,6 +33,9 @@ impl Workspace {
     /// cannot filter by extension, so anything but a `.sql` file is refused
     /// after it is picked.
     pub(crate) fn pick_sql_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_covers() {
+            return;
+        }
         self.pick_files(
             |workspace, paths, window, cx| workspace.open_sql_files(paths, Vec::new(), window, cx),
             window,
@@ -69,14 +75,28 @@ impl Workspace {
         self.open_files(dropped.paths().to_vec(), window, cx);
     }
 
-    fn open_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_sql_files_action(
+        &mut self,
+        _: &OpenSqlFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pick_sql_files(window, cx);
+    }
+
+    pub(super) fn open_files(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (sql, data) = paths.into_iter().partition(|path| is_sql_file(path));
         self.open_sql_files(sql, data, window, cx);
     }
 
     /// `sql` read on the background executor, since a file on a stalled
     /// mount or a link to a pipe would hold the window for as long as it
-    /// waits. Then each opens in a new query tab, and only after them `data`,
+    /// waits. Then each opens in a file tab, and only after them `data`,
     /// since opening a data file brings the DuckDB profile to the front.
     fn open_sql_files(
         &mut self,
@@ -87,7 +107,9 @@ impl Workspace {
     ) {
         let front = self.profile().map(|profile| profile.id.clone());
         let read = spawn_blocking(cx.background_executor(), move || {
-            sql.iter().map(|path| read_sql_file(path)).collect()
+            sql.iter()
+                .map(|path| (sql_file::canonical(path), read_sql_file(path)))
+                .collect()
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let read: Vec<_> = read.await;
@@ -102,20 +124,46 @@ impl Workspace {
         .detach();
     }
 
-    /// Each file's text in a new query tab on `front`, the connection in
-    /// front when they were picked, and what was refused, for the caller to
-    /// say once everything has opened: every new tab clears the notice, and a
-    /// data file moves the front.
+    /// Each file in a tab bound to it on `front`, the connection in front
+    /// when they were picked, and what was refused, for the caller to say
+    /// once everything has opened: every new tab clears the notice, and a
+    /// data file moves the front. A file already open anywhere brings its own
+    /// tab up instead, after the rest have opened, since that can move the
+    /// front.
     fn open_sql_tabs(
         &mut self,
         front: Option<String>,
-        read: Vec<Result<String, String>>,
+        read: Vec<(PathBuf, Result<SqlText, String>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<String> {
         if read.is_empty() {
             return Vec::new();
         }
+        // A link and its file, picked together, are one file.
+        let mut seen = std::collections::HashSet::new();
+        let (open, read): (Vec<_>, Vec<_>) = read
+            .into_iter()
+            .filter(|(path, _)| seen.insert(path.clone()))
+            .partition(|(path, _)| self.tab_on_file(path).is_some());
+        let mut refused = Vec::new();
+        if !read.is_empty() {
+            refused = self.open_new_sql_tabs(front, read, window, cx);
+        }
+        for (path, _) in open {
+            self.bring_up_file(&path, window, cx);
+            self.remember_held_file(&path, cx);
+        }
+        refused
+    }
+
+    fn open_new_sql_tabs(
+        &mut self,
+        front: Option<String>,
+        read: Vec<(PathBuf, Result<SqlText, String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
         let Some(front) = front else {
             return vec!["Open a connection to open a SQL file in.".to_string()];
         };
@@ -131,11 +179,11 @@ impl Workspace {
             return vec!["A SQL file opens only on a connection that runs SQL.".to_string()];
         }
         let mut refused = Vec::new();
-        for text in read {
-            match text {
-                Ok(text) => {
-                    // `new_query` has said why, which is the notice to keep.
-                    if self.new_query_holding(text, window, cx).is_none() {
+        for (path, read) in read {
+            match read {
+                Ok(read) => {
+                    // `open_file_tab` has said why, which is the notice to keep.
+                    if self.open_file_tab(path, read, window, cx).is_none() {
                         return Vec::new();
                     }
                 }
@@ -143,6 +191,638 @@ impl Workspace {
             }
         }
         refused
+    }
+
+    /// The connection and tab bound to `path`, wherever it is open: one tab
+    /// per file across the whole app, so no two buffers save over each other.
+    pub(super) fn tab_on_file(&self, path: &Path) -> Option<(usize, u64)> {
+        self.profiles
+            .iter()
+            .enumerate()
+            .find_map(|(index, profile)| Some((index, profile.session.tab_on(path)?)))
+    }
+
+    /// Bring the tab bound to `path` to the front, with its connection, as a
+    /// click on its chip would. Whether there was one.
+    pub(crate) fn bring_up_file(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.tab_on_file(path) {
+            Some((index, id)) => {
+                self.activate_chip(index, Tab::Query(id), window, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A new tab in front on the connection in front, bound to `path` and
+    /// holding `read`, by its id, or `None` when none could be made. A file
+    /// open anywhere already brings its own tab up instead.
+    pub(crate) fn open_file_tab(
+        &mut self,
+        path: PathBuf,
+        read: SqlText,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let path = sql_file::canonical(&path);
+        if let Some((_, id)) = self.tab_on_file(&path) {
+            self.bring_up_file(&path, window, cx);
+            self.remember_held_file(&path, cx);
+            return Some(id);
+        }
+        if let Err(message) = self.persist_buffer(cx) {
+            self.note(message, cx);
+            return None;
+        }
+        let (engine, row_limit) = (self.engine(), self.settings.row_limit);
+        let sorting = Sorting::new(self.settings.client_sort);
+        self.sql_directory = path.parent().map(Path::to_path_buf);
+        let profile = self.profile_mut()?;
+        let id = profile.session.next_query_id;
+        profile.session.next_query_id += 1;
+        profile.session.notice = None;
+        let profile_id = profile.id.clone();
+        let file = FileBinding {
+            path: path.clone(),
+            saved: Some(read.text.clone()),
+            bom: read.bom,
+            stamp: Some(read.stamp),
+            conflict: None,
+        };
+        let tab = QueryTab::new(
+            &profile_id,
+            id,
+            read.text,
+            Some(file),
+            engine,
+            sorting,
+            row_limit,
+            window,
+            cx,
+        );
+        let profile = self.profile_mut()?;
+        profile.session.queries.push(tab);
+        profile.session.place_last(TabKey::File(path.clone()));
+        self.install_completions(&profile_id, cx);
+        self.activate_tab(Tab::Query(id), window, cx);
+        self.remember_file(&profile_id, &path, cx);
+        self.remember_profiles(cx);
+        Some(id)
+    }
+
+    /// `path`, resolved through its links, first among `profile_id`'s recent
+    /// files. A saved query's file is not one: the Files group lists it as
+    /// the query until it is moved.
+    pub(crate) fn remember_file(&mut self, profile_id: &str, path: &Path, cx: &mut Context<Self>) {
+        let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return;
+        };
+        if path.parent() == Some(profile.session.query_directory.as_path()) {
+            return;
+        }
+        profile.recent_files_changed();
+        let found = profile.missing_files.remove(path);
+        if profile.recent_files.first().map(PathBuf::as_path) == Some(path) {
+            if found {
+                cx.notify();
+            }
+            return;
+        }
+        crate::session::remember_recent(&mut profile.recent_files, path.to_path_buf());
+        self.profiles_unsaved = true;
+        self.refresh_query_library(profile_id, cx);
+    }
+
+    /// [`Self::remember_file`] on the connection whose tab holds `path`.
+    fn remember_held_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some((index, _)) = self.tab_on_file(path) {
+            let profile_id = self.profiles[index].id.clone();
+            self.remember_file(&profile_id, path, cx);
+        }
+    }
+
+    /// A row of the Files group: its tab brought up when one is open, else
+    /// the file read on the blocking pool, as any SQL file is, into a file
+    /// tab whatever its extension, since Save As binds whatever name was
+    /// typed. One gone since asks to leave the list.
+    pub(crate) fn open_listed_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.import_covers() {
+            return;
+        }
+        if self.bring_up_file(&path, window, cx) {
+            self.remember_held_file(&path, cx);
+            return;
+        }
+        let front = self.profile().map(|profile| profile.id.clone());
+        let read = spawn_blocking(cx.background_executor(), {
+            let path = path.clone();
+            move || sql_file::read(&path)
+        });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let read = read.await;
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                let read = match read {
+                    Ok(Some(read)) => Ok(read),
+                    Err(message) => Err(message),
+                    Ok(None) => {
+                        if let Some(profile) = workspace
+                            .profile_mut()
+                            .filter(|profile| Some(&profile.id) == front.as_ref())
+                        {
+                            profile.missing_files.insert(path.clone());
+                            profile.recent_files_changed();
+                            profile.session.pending_forget = Some(path);
+                            cx.notify();
+                        }
+                        return;
+                    }
+                };
+                let refused = workspace.open_sql_tabs(front, vec![(path, read)], window, cx);
+                workspace.note_refused(refused, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Remove from List: `path` leaves the front connection's recent files.
+    /// The file itself is never touched.
+    pub(crate) fn forget_recent_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        profile.recent_files.retain(|held| held != path);
+        profile.missing_files.remove(path);
+        profile.recent_files_changed();
+        let profile_id = profile.id.clone();
+        self.refresh_query_library(&profile_id, cx);
+        self.remember_profiles(cx);
+    }
+
+    /// Remove, from the question a gone file's row raised.
+    pub(crate) fn confirm_forget_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_forget.take())
+        else {
+            return;
+        };
+        self.forget_recent_file(&path, cx);
+        self.refocus_front();
+    }
+
+    pub(crate) fn cancel_forget_file(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_forget.take())
+            .is_some();
+        if cancelled {
+            self.refocus_front();
+            cx.notify();
+        }
+        cancelled
+    }
+
+    /// Which of every connection's recent files are gone, for the Files
+    /// group to grey: at launch and whenever the window comes forward. On
+    /// the blocking pool, since one on a stalled mount waits as long as it
+    /// does.
+    pub(crate) fn look_at_recent_files(&mut self, cx: &mut Context<Self>) {
+        let recent: Vec<(String, u64, Vec<PathBuf>)> = self
+            .profiles
+            .iter()
+            .filter(|profile| !profile.recent_files.is_empty())
+            .map(|profile| {
+                let generation = profile.recent_generation;
+                (profile.id.clone(), generation, profile.recent_files.clone())
+            })
+            .collect();
+        if recent.is_empty() {
+            return;
+        }
+        let looked = spawn_blocking(cx.background_executor(), move || {
+            recent
+                .into_iter()
+                .map(|(id, generation, paths)| {
+                    let gone = paths
+                        .into_iter()
+                        .filter(|path| matches!(path.try_exists(), Ok(false)))
+                        .collect::<HashSet<_>>();
+                    (id, generation, gone)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |workspace, cx| {
+            let looked = looked.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                for (id, generation, gone) in looked {
+                    if let Some(profile) = workspace.profiles.iter_mut().find(|p| p.id == id) {
+                        profile.take_missing(generation, gone);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Save the buffer in front to its file, or ask where for an untitled
+    /// one.
+    pub(crate) fn save_query(
+        &mut self,
+        _: &SaveQuery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.import_covers() {
+            return;
+        }
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(tab) = profile.session.active_query_tab() else {
+            return;
+        };
+        match &tab.file {
+            Some(_) => {
+                let id = tab.id;
+                self.save_in_place(vec![id], false, window, cx);
+            }
+            None => self.save_query_as(&SaveQueryAs, window, cx),
+        }
+    }
+
+    /// Save each of the file tabs `ids` on the connection in front to its
+    /// own file, closing it once written when `close`. One whose file
+    /// someone else wrote since is left for the Overwrite question.
+    pub(crate) fn save_in_place(
+        &mut self,
+        ids: Vec<u64>,
+        close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let profile_id = profile.id.clone();
+        let mut asking = Vec::new();
+        let mut writing = Vec::new();
+        for id in ids {
+            let Some(file) = profile
+                .session
+                .query_tab(id)
+                .and_then(|tab| tab.file.as_ref())
+            else {
+                continue;
+            };
+            // ponytail: stat on the window's thread, as the write after it
+            // is; one call, but a stalled mount holds the window for it.
+            let now = sql_file::stamp(&file.path);
+            let on_disk = || {
+                let read = sql_file::read(&file.path).ok()??;
+                Some((read.text, read.bom))
+            };
+            match file.overwrites(&now, on_disk) {
+                true => asking.push(id),
+                false => writing.push((id, file.path.clone())),
+            }
+        }
+        self.save_each(&profile_id, writing, close, window, cx);
+        if asking.is_empty() {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            profile.session.pending_overwrite = Some(PendingOverwrite {
+                tabs: asking,
+                close,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Overwrite: write each tab the question was asked about over whatever
+    /// its file holds now.
+    pub(crate) fn confirm_overwrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((profile_id, pending)) = self.profile_mut().and_then(|profile| {
+            let pending = profile.session.pending_overwrite.take()?;
+            Some((profile.id.clone(), pending))
+        }) else {
+            return;
+        };
+        let tabs = pending
+            .tabs
+            .into_iter()
+            .filter_map(|id| {
+                let tab = self.profile()?.session.query_tab(id)?;
+                Some((id, tab.file.as_ref()?.path.clone()))
+            })
+            .collect();
+        self.save_each(&profile_id, tabs, pending.close, window, cx);
+        self.refocus_front();
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_overwrite(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self
+            .profile_mut()
+            .and_then(|profile| profile.session.pending_overwrite.take())
+            .is_some();
+        if cancelled {
+            self.refocus_front();
+            cx.notify();
+        }
+        cancelled
+    }
+
+    /// Look at the front tab's file and settle what changed on disk since
+    /// the tab last read or wrote it: on the window coming forward and on
+    /// the tab coming to the front.
+    ///
+    /// ponytail: a look on focus misses an edit made in another editor
+    /// while DBDelve keeps focus, so a buffer can be stale until the next
+    /// switch; a file watcher (`notify`) is the upgrade if anyone reports
+    /// it. The stat, and a reload's read, run on the window's thread. It
+    /// trusts the stamp alone, so a same-length edit inside one tick of a
+    /// coarse clock, or by a tool that keeps timestamps, is not seen here;
+    /// Save compares the text before writing, so nothing is overwritten
+    /// unasked, and comparing on every look is the upgrade.
+    pub(crate) fn check_front_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, settle)) = self.profile().and_then(|profile| {
+            let tab = profile.session.active_query_tab()?;
+            let file = tab.file.as_ref()?;
+            let now = sql_file::stamp(&file.path).ok()?;
+            Some((tab.id, file.settle(now, tab.dirty)))
+        }) else {
+            return;
+        };
+        match settle {
+            Settle::Keep => {}
+            Settle::Reload => self.take_disk(id, true, window, cx),
+            Settle::Ask => {
+                if let Some(file) = self.front_file_mut(id) {
+                    file.conflict = Some(Conflict::Asking);
+                }
+                cx.notify();
+            }
+            Settle::Gone => self.mark_gone(id, cx),
+        }
+    }
+
+    /// Tab `id` on the connection in front takes its file as it is on disk
+    /// now: into the buffer as well when `reload`, or, for Keep Mine, as
+    /// only the text the buffer is compared with, the next Save asking.
+    pub(crate) fn take_disk(
+        &mut self,
+        id: u64,
+        reload: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.front_file_mut(id).map(|file| file.path.clone()) else {
+            return;
+        };
+        let read = match sql_file::read(&path) {
+            Ok(Some(read)) => read,
+            Ok(None) => return self.mark_gone(id, cx),
+            Err(message) => return self.note(message, cx),
+        };
+        let Some(tab) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        if reload {
+            tab.editor.update(cx, |editor, cx| {
+                let at = editor.cursor().min(read.text.len());
+                editor.set_value(read.text.clone(), window, cx);
+                editor.set_selected_range(at..at, cx);
+            });
+        }
+        if let Some(file) = &mut tab.file {
+            file.saved = Some(read.text);
+            file.bom = read.bom;
+            file.stamp = Some(read.stamp);
+            file.conflict = (!reload).then_some(Conflict::KeptMine);
+        }
+        // `set_value` emits no change, so nothing else marks the tab.
+        tab.refresh_dirty(cx);
+        self.profiles_unsaved = true;
+        cx.notify();
+    }
+
+    /// Reload or Keep Mine, from the tab's bar. The bar goes with the
+    /// answer, and a button pressed from the keyboard goes with it, so the
+    /// keyboard goes back to the buffer rather than to nothing.
+    pub(crate) fn answer_file_bar(
+        &mut self,
+        id: u64,
+        reload: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.take_disk(id, reload, window, cx);
+        self.refocus_front();
+        cx.notify();
+    }
+
+    /// Tab `id`'s file is gone: the tab keeps its text, stays bound and is
+    /// dirty, and Save writes the file again.
+    pub(super) fn mark_gone(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .profile_mut()
+            .and_then(|profile| profile.session.query_tab_mut(id))
+        else {
+            return;
+        };
+        if let Some(file) = &mut tab.file {
+            file.saved = None;
+            file.stamp = None;
+            file.conflict = None;
+        }
+        tab.refresh_dirty(cx);
+        self.profiles_unsaved = true;
+        cx.notify();
+    }
+
+    fn front_file_mut(&mut self, id: u64) -> Option<&mut FileBinding> {
+        self.profile_mut()?.session.query_tab_mut(id)?.file.as_mut()
+    }
+
+    /// Ask where to save the buffer in front, then save it there and bind
+    /// its tab to that file. A file tab's old file is left as it was.
+    pub(crate) fn save_query_as(
+        &mut self,
+        _: &SaveQueryAs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.import_covers() {
+            return;
+        }
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let Some(tab) = profile.session.active_query_tab() else {
+            return;
+        };
+        let (profile_id, id) = (profile.id.clone(), tab.id);
+        let path = tab.file.as_ref().map(|file| file.path.clone());
+        let directory = path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| self.sql_directory.clone())
+            .or_else(|| crate::store::home().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let suggested = path
+            .as_deref()
+            .map_or_else(|| "query.sql".to_string(), file_name);
+        let chosen = cx.prompt_for_new_path(&directory, Some(&suggested));
+        cx.spawn_in(window, async move |workspace, cx| {
+            let chosen = chosen.await;
+            _ = workspace.update(cx, |workspace, cx| match chosen {
+                Ok(Ok(Some(path))) => {
+                    let typed_extension = path.extension().is_some();
+                    let path = sql_file::canonical(&sql_file::with_sql_extension(path));
+                    // The panel asked about replacing the name typed, not this one.
+                    if !typed_extension && path.exists() {
+                        workspace.note(format!("{} already exists.", file_name(&path)), cx);
+                        return;
+                    }
+                    if let Err(message) = workspace.save_tab(&profile_id, id, path, cx) {
+                        workspace.note(message, cx);
+                    }
+                }
+                Ok(Err(error)) => workspace.note(error.to_string(), cx),
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
+    }
+
+    /// Save each of `tabs`, by id and path, closing each one written when
+    /// `close`. The first failure is said last, or the notices of the saves
+    /// after it would hide why its tab is still open.
+    fn save_each(
+        &mut self,
+        profile_id: &str,
+        tabs: Vec<(u64, PathBuf)>,
+        close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut failed = None;
+        for (id, path) in tabs {
+            match self.save_tab(profile_id, id, path, cx) {
+                Ok(()) if close => self.close_now(Tab::Query(id), window, cx),
+                Ok(()) => {}
+                Err(message) => _ = failed.get_or_insert(message),
+            }
+        }
+        if let Some(message) = failed {
+            self.note(message, cx);
+        }
+    }
+
+    /// Write tab `id` of `profile_id` to `path` exactly as it holds it, and
+    /// bind the tab there, or why it was not written. Its scratch file goes
+    /// once the file is written: nothing is unsaved any more.
+    ///
+    /// ponytail: written on the window's thread, so a file on a stalled mount
+    /// holds the window until the write gives up; the blocking pool is the
+    /// upgrade, with the text written kept as the saved text.
+    fn save_tab(
+        &mut self,
+        profile_id: &str,
+        id: u64,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self
+            .tab_on_file(&path)
+            .is_some_and(|(index, other)| other != id || self.profiles[index].id != profile_id)
+        {
+            return Err(format!("{} is open in another tab.", file_name(&path)));
+        }
+        let gone = || format!("{} is not open any more.", file_name(&path));
+        let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Err(gone());
+        };
+        let Some(tab) = profile.session.query_tab(id) else {
+            return Err(gone());
+        };
+        let text = tab.editor.read(cx).value().to_string();
+        let bom = tab.file.as_ref().is_some_and(|file| file.bom);
+        let scratch_unread = tab.scratch_unread;
+        let from = match &tab.file {
+            Some(file) => TabKey::File(file.path.clone()),
+            None => TabKey::Unsaved(id),
+        };
+        let stamp = sql_file::write(&path, &text, bom)?;
+        // Save As into the saved queries' folder adds one the sidebar lists.
+        let new_saved_query = from != TabKey::File(path.clone())
+            && path.parent() == Some(profile.session.query_directory.as_path());
+        profile.session.rekey(&from, TabKey::File(path.clone()));
+        if let Some(tab) = profile.session.query_tab_mut(id) {
+            tab.file = Some(FileBinding {
+                path: path.clone(),
+                saved: Some(text),
+                bom,
+                stamp: Some(stamp),
+                conflict: None,
+            });
+            tab.refresh_dirty(cx);
+        }
+        self.sql_directory = path.parent().map(Path::to_path_buf);
+        let deleted = match scratch_unread {
+            true => Ok(()),
+            false => crate::store::delete_scratch(profile_id, id),
+        };
+        let note = match deleted {
+            Ok(()) => format!("Saved {}.", file_name(&path)),
+            Err(message) => message,
+        };
+        if new_saved_query {
+            self.reload_queries_of(profile_id, cx);
+        }
+        self.remember_file(profile_id, &path, cx);
+        self.note(note, cx);
+        self.remember_profiles(cx);
+        Ok(())
+    }
+
+    /// Mark tab `id` of `profile_id` dirty or clean as its editor now reads.
+    pub(crate) fn buffer_changed(&mut self, profile_id: &str, id: u64, cx: &mut Context<Self>) {
+        let changed = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+            .and_then(|profile| profile.session.query_tab_mut(id))
+            .is_some_and(|tab| tab.refresh_dirty(cx));
+        if changed {
+            // What a quit writes for the tab (`StoredQueryTab::saved_hash`).
+            self.profiles_unsaved = true;
+            cx.notify();
+        }
     }
 
     fn note_refused(&mut self, refused: Vec<String>, cx: &mut Context<Self>) {
@@ -271,52 +951,18 @@ fn waiting_for(waiting: &mut Vec<(String, u64, String)>, profile: &str) -> Vec<(
     taken.into_iter().map(|(_, tab, sql)| (tab, sql)).collect()
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
-}
-
 fn is_sql_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
 }
 
-// ponytail: the editor holds the whole file, so a dump past this is refused
-// rather than opened into a buffer that crawls; running a file that size
-// without loading it is the upgrade.
-const MAX_SQL_FILE_BYTES: u64 = 4 << 20;
-
-/// A SQL file's text, exactly as written but for a UTF-8 byte order mark,
-/// which is the file's encoding and not the user's SQL. Text that is not
-/// UTF-8 is refused rather than read lossily, which would change statements.
-fn read_sql_file(path: &Path) -> Result<String, String> {
+/// A SQL file's text, refused when it is not a `.sql` file or is not there.
+fn read_sql_file(path: &Path) -> Result<SqlText, String> {
     let name = file_name(path);
     if !is_sql_file(path) {
         return Err(format!("{name} is not a .sql file."));
     }
-    // Bounded while reading, not by the size up front, which a file still
-    // being written or a link to a device does not keep to.
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take(MAX_SQL_FILE_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|error| format!("Could not open {name}: {error}"))?;
-    if bytes.len() as u64 > MAX_SQL_FILE_BYTES {
-        return Err(format!(
-            "{name} is more than the {} MB the editor opens.",
-            MAX_SQL_FILE_BYTES >> 20
-        ));
-    }
-    sql_text(bytes).ok_or_else(|| format!("{name} is not UTF-8 text."))
-}
-
-fn sql_text(bytes: Vec<u8>) -> Option<String> {
-    let text = String::from_utf8(bytes).ok()?;
-    Some(match text.strip_prefix('\u{feff}') {
-        Some(rest) => rest.to_string(),
-        None => text,
-    })
+    sql_file::read(path)?.ok_or_else(|| format!("{name} is not there any more."))
 }
 
 /// The statement that reads a file, by its extension, or `None` for a file
@@ -377,33 +1023,16 @@ mod tests {
     }
 
     #[test]
-    fn a_sql_file_opens_as_written_without_its_byte_order_mark() {
+    fn only_a_sql_file_opens_and_it_opens_as_written_without_its_byte_order_mark() {
         assert!(is_sql_file(Path::new("/dumps/schema.SQL")));
         assert!(!is_sql_file(Path::new("/dumps/rows.csv")));
-        assert_eq!(
-            sql_text(b"\xef\xbb\xbfSELECT 1; -- \xc3\xa9t\xc3\xa9\r\n".to_vec()).as_deref(),
-            Some("SELECT 1; -- \u{e9}t\u{e9}\r\n")
-        );
-        assert_eq!(sql_text(b"SELECT '\xe9';".to_vec()), None);
-    }
-
-    #[test]
-    fn a_sql_file_past_the_cap_is_refused_and_one_at_it_opens() {
-        let dir = std::env::temp_dir().join(format!("dbdelve-sql-file-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (at, past) = (dir.join("at.sql"), dir.join("past.sql"));
-        std::fs::write(&at, vec![b' '; MAX_SQL_FILE_BYTES as usize]).unwrap();
-        std::fs::write(&past, vec![b' '; MAX_SQL_FILE_BYTES as usize + 1]).unwrap();
-        let (at, past) = (read_sql_file(&at), read_sql_file(&past));
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert!(at.is_ok());
         assert_eq!(
             read_sql_file(Path::new("/data/people.csv")),
             Err("people.csv is not a .sql file.".to_string())
         );
         assert_eq!(
-            past,
-            Err("past.sql is more than the 4 MB the editor opens.".to_string())
+            sql_file::decoded(b"\xef\xbb\xbfSELECT 1; -- \xc3\xa9t\xc3\xa9\r\n".to_vec()),
+            Some(("SELECT 1; -- \u{e9}t\u{e9}\r\n".to_string(), true))
         );
     }
 
