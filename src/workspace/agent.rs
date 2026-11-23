@@ -1296,7 +1296,7 @@ impl Workspace {
     /// ponytail: a save that keeps the length within the file system's time
     /// resolution reads as unchanged; that resolution is nanoseconds on APFS
     /// and ext4 and 100 ns on NTFS, and a visibility flip changes the length.
-    fn adopt_saved_visibility_for_read(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn adopt_saved_visibility_for_read(&mut self, cx: &mut Context<Self>) {
         let stamp = store::profiles_stamp();
         if stamp.is_none() || stamp != self.agent.visibility_stamp {
             self.adopt_saved_visibility(cx);

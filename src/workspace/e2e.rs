@@ -17157,6 +17157,40 @@ fn an_approved_read_waiting_its_turn_is_not_run_once_the_mode_changes(cx: &mut T
 }
 
 #[gpui::test]
+fn a_read_waiting_its_turn_is_not_run_once_another_window_hid_the_profile(cx: &mut TestAppContext) {
+    use crate::agent::Status;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "");
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, _| {
+            workspace.agent.opener = Some(|executor, _, _| executor.spawn(std::future::pending()));
+        });
+        let (_, first_answers) = inject_orders_read(&workspace, cx, "SELECT 1");
+        let (second, second_answers) = inject_orders_read(&workspace, cx, "SELECT 2");
+
+        // Another window hides it; no call arrives here to read the file.
+        let mut list = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        list.profiles
+            .iter_mut()
+            .find(|profile| profile.id == "orders")
+            .expect("the profile was saved")
+            .agent_visible = false;
+        store::save_profiles(&list).expect("the other window saves");
+
+        workspace.update(cx, |workspace, _| workspace.agent.opener = None);
+        cx.executor()
+            .advance_clock(super::agent_read::CALL_DEADLINE + std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(answer_of(cx, &first_answers).status, Status::Failed);
+        let two = answer_of(cx, &second_answers);
+        assert_eq!(two.status, Status::Rejected, "{}", two.text);
+        assert_eq!(logged(&workspace, cx, second), [Status::Rejected]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_read_waiting_its_turn_is_not_run_on_another_target(cx: &mut TestAppContext) {
     use crate::agent::Status;
 

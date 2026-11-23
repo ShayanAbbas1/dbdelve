@@ -687,18 +687,25 @@ impl Workspace {
             }
             return;
         }
+        // A hide saved by another window since these reads were admitted
+        // ends the lane, as one made here does (`reject_calls_for`): the
+        // file is read again only when it changed.
+        self.adopt_saved_visibility_for_read(cx);
+        if !self.agent.lanes.contains_key(profile_id) {
+            return;
+        }
         // The one profile with this id, as `agent_profile` resolved it: a
         // repeated id is never resolved, so the lane cannot open another
-        // entry's config.
+        // entry's config. It must still be one an agent may reach.
         let Some((config, mode)) = self
             .sole_profile(profile_id)
+            .filter(|profile| profile.agent_visible)
             .map(|profile| (profile.config.clone(), profile.mode))
         else {
-            // Not expected to run: the only place a profile leaves the list is
-            // `remove_profile`, which ends this lane in the same turn through
-            // `reject_calls_for`. Kept so that if a profile ever did go with
-            // calls waiting, or its id were ever shared, each is answered and
-            // none is stranded.
+            // A hide or a removal ends the lane in the same turn through
+            // `reject_calls_for`, so this is a backstop: if a profile ever did
+            // go, or go hidden, with calls waiting, or its id were ever shared,
+            // each is answered and none is sent or stranded.
             self.end_lane(
                 profile_id,
                 Status::Rejected,
