@@ -184,7 +184,10 @@ Decided, and not to be re-litigated:
   `BEGIN TRANSACTION` batch opened the transaction from a count of zero, never
   one open before it arrived; when `XACT_ABORT` ends a transaction that
   predates the statement regardless, the error says that transaction -- not
-  dbdelve's -- was rolled back.
+  dbdelve's -- was rolled back, unless the batch may have committed it first
+  (`COMMIT; SELECT 1/0`, `sql::may_commit`), which leaves the count at zero
+  just the same: then it says the transaction ended without saying how
+  (`TRANSACTION_ENDED`).
 - **`sql_variant` and every CLR type (`geography`, `geometry`, `hierarchyid`,
   system type id 240) panic tiberius part way through a result it cannot
   decode**, which would otherwise close the session and the transaction in it.

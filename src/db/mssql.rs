@@ -3177,7 +3177,7 @@ fn transaction_outcome(
             false => "The transaction the batch began is still open.",
         }
     } else if after == 0 && before > 0 {
-        super::TRANSACTION_ROLLED_BACK
+        ended_outcome(sql, bracketed)
     } else if after > 0 && !bracketed && crate::sql::ends_transaction(Engine::SqlServer, sql) {
         // A compile error stops the batch before its `COMMIT` or `ROLLBACK`
         // runs, and `XACT_ABORT` rolls back only on a runtime one.
@@ -3193,6 +3193,17 @@ fn transaction_outcome(
     DbError {
         message: format!("{}\n\n{outcome}", error.message),
         position: error.position,
+    }
+}
+
+/// What a failed batch did to the transaction open before it, now that none
+/// is: `XACT_ABORT` rolled it back, unless the batch may have committed it
+/// first (`COMMIT; SELECT 1/0`), which leaves the depth at zero just the same.
+/// A batch dbdelve brackets commits only the level it opened.
+fn ended_outcome(sql: &str, bracketed: bool) -> &'static str {
+    match !bracketed && crate::sql::may_commit(Engine::SqlServer, sql) {
+        true => super::TRANSACTION_ENDED,
+        false => super::TRANSACTION_ROLLED_BACK,
     }
 }
 
@@ -3228,6 +3239,35 @@ mod tests {
         // server speaks TLS with a certificate signed by nobody, which `prefer`
         // encrypts to without checking.
         config_from_url(&url).expect("dbdelve_MSSQL_URL should parse")
+    }
+
+    #[test]
+    fn a_failed_batch_that_may_have_committed_never_says_it_rolled_back() {
+        for sql in [
+            "COMMIT; SELECT 1/0",
+            "COMMIT TRANSACTION; SELECT 1/0",
+            "UPDATE t SET a = 1; COMMIT; EXEC dbo.p",
+            // Text the grammar cannot read, which may still commit.
+            "COMMIT TRAN; SELECT TOP 1 x FROM t ORDER BY x OFFSET",
+        ] {
+            assert_eq!(
+                ended_outcome(sql, false),
+                crate::db::TRANSACTION_ENDED,
+                "{sql}"
+            );
+        }
+        for sql in ["SELECT 1/0; ROLLBACK", "UPDATE t SET a = 1/0"] {
+            assert_eq!(
+                ended_outcome(sql, false),
+                crate::db::TRANSACTION_ROLLED_BACK,
+                "{sql}"
+            );
+        }
+        // dbdelve's own batch commits only the level it opened.
+        assert_eq!(
+            ended_outcome("BEGIN TRANSACTION; UPDATE t SET a = 1; COMMIT", true),
+            crate::db::TRANSACTION_ROLLED_BACK
+        );
     }
 
     #[test]

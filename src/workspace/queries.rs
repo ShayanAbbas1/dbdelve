@@ -3223,7 +3223,7 @@ impl Workspace {
                             && !lost
                             && let (Some(error), Some(sent_at)) = (error, own_sent_at)
                         {
-                            if crate::db::transaction_rolled_back(error) {
+                            if crate::db::transaction_ended(error) {
                                 left_manual = profile.ended_by_server(sent_at);
                             } else if engine.failure_aborts_transaction()
                                 && profile.in_transaction

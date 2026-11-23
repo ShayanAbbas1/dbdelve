@@ -348,8 +348,8 @@ impl Profile {
     }
 
     /// The server ended the open transaction on its own while running a
-    /// statement sent at `sent_at` ([`crate::db::transaction_rolled_back`]:
-    /// SQL Server's `XACT_ABORT`). Nothing is open, and Manual gives way to
+    /// statement sent at `sent_at` ([`crate::db::transaction_ended`]: SQL
+    /// Server's `XACT_ABORT`, or a batch that may have committed first). Nothing is open, and Manual gives way to
     /// Auto: whether it did. A transaction opened since is not the one that
     /// ended.
     pub(crate) fn ended_by_server(&mut self, sent_at: u64) -> bool {

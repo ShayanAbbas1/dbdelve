@@ -217,6 +217,13 @@ pub(crate) const PING_WITHIN: Duration = match cfg!(test) {
 pub(crate) const TRANSACTION_ROLLED_BACK: &str = "The transaction that was open before this \
      statement was rolled back, and everything written in it is gone.";
 
+/// What a driver adds to an error when the transaction open before the
+/// statement is gone and it cannot tell how: the statement committed it
+/// before failing, or the server rolled it back.
+pub(crate) const TRANSACTION_ENDED: &str = "The transaction that was open before this \
+     statement has ended: committed by the statement before it failed, or rolled back by \
+     the server. Check what it wrote before running it again.";
+
 /// What a driver adds to an error when a statement that would have ended the
 /// open transaction failed short of it (SQL Server's compile error, which
 /// stops the batch before its `COMMIT`): the transaction is still open.
@@ -227,6 +234,13 @@ pub(crate) const TRANSACTION_KEPT_OPEN: &str =
 /// ([`TRANSACTION_ROLLED_BACK`]).
 pub(crate) fn transaction_rolled_back(error: &DbError) -> bool {
     error.message.ends_with(TRANSACTION_ROLLED_BACK)
+}
+
+/// Whether the driver says `error` ended the open transaction, rolled back
+/// ([`TRANSACTION_ROLLED_BACK`]) or one way or the other
+/// ([`TRANSACTION_ENDED`]).
+pub(crate) fn transaction_ended(error: &DbError) -> bool {
+    transaction_rolled_back(error) || error.message.ends_with(TRANSACTION_ENDED)
 }
 
 /// Whether the driver says the open transaction outlived `error`
