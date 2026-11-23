@@ -129,8 +129,20 @@ pub(crate) struct Listener {
 }
 
 /// Bind `path` and serve it, sending what arrives on `inbound`.
+#[cfg(test)]
 pub(crate) fn listen(path: &Path, inbound: UnboundedSender<Inbound>) -> Result<Listener, Declined> {
-    listen_with(path, inbound, FIRST_FRAME_TIMEOUT)
+    listen_if(path, inbound, || true)
+}
+
+/// Bind `path` and serve it, sending what arrives on `inbound`, only if
+/// `permitted` still holds once the serving lock is taken; see
+/// [`ipc::bind_if`].
+pub(crate) fn listen_if(
+    path: &Path,
+    inbound: UnboundedSender<Inbound>,
+    permitted: impl FnOnce() -> bool,
+) -> Result<Listener, Declined> {
+    listen_with(path, inbound, FIRST_FRAME_TIMEOUT, permitted)
 }
 
 /// [`listen`] with the first-frame wait given, so a test need not sit through
@@ -139,8 +151,9 @@ fn listen_with(
     path: &Path,
     inbound: UnboundedSender<Inbound>,
     first_frame_timeout: Duration,
+    permitted: impl FnOnce() -> bool,
 ) -> Result<Listener, Declined> {
-    let ipc::Bound { listener, lock } = ipc::bind(path)?;
+    let ipc::Bound { listener, lock } = ipc::bind_if(path, permitted)?;
     let shared = Arc::new(Shared {
         stop: AtomicBool::new(false),
         next_id: AtomicU64::new(0),
@@ -453,7 +466,7 @@ mod tests {
         fn new(first_frame_timeout: Duration) -> Self {
             let path = short_socket_path();
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-            let Ok(listener) = listen_with(&path, sender, first_frame_timeout) else {
+            let Ok(listener) = listen_with(&path, sender, first_frame_timeout, || true) else {
                 panic!("the socket binds");
             };
             let (forward, inbound) = mpsc::channel();

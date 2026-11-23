@@ -948,7 +948,7 @@ impl Workspace {
         // A refusal is shown and nothing saved changes: the choice is the
         // user's, and a window that found another one serving can be asked
         // again from the palette.
-        if listen_at_launch && let Err(text) = workspace.listen_for_agents(cx) {
+        if listen_at_launch && let Err(text) = workspace.listen_for_agents_at_launch(cx) {
             workspace.note(text, cx);
         }
 

@@ -569,6 +569,14 @@ impl std::fmt::Display for AgentLookup {
     }
 }
 
+/// What `agent_access` holds in the file right now; see
+/// [`Workspace::saved_agent_access`].
+fn saved_agent_access(plugins: &[&'static crate::db::Plugin]) -> Option<bool> {
+    store::peek_profiles(plugins)
+        .and_then(|list| list.settings)
+        .and_then(|settings| settings.agent_access)
+}
+
 /// What the visibility dialog tells the owner about this engine and mode, one
 /// entry per sentence. A pure function of the two, so opening the dialog asks
 /// no server anything: the hold is what the engine is built to do while the
@@ -1087,16 +1095,30 @@ impl Workspace {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.start_bridge_if(path, || true, cx)
+    }
+
+    /// [`Self::start_bridge_at`] only if `permitted` still holds once the
+    /// serving lock is taken. A withdrawn permission is no failure: nothing
+    /// listens, as the saved choice now says, and nothing is said.
+    fn start_bridge_if(
+        &mut self,
+        path: PathBuf,
+        permitted: impl FnOnce() -> bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if self.agent.bridge.is_some() {
             return Ok(());
         }
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let listener = crate::agent::listen(&path, sender).map_err(|declined| match declined {
-            crate::agent::Declined::ServedElsewhere => {
-                "Another DBDelve window is already serving agents.".to_string()
+        let listener = match crate::agent::listen_if(&path, sender, permitted) {
+            Ok(listener) => listener,
+            Err(crate::agent::Declined::Withdrawn) => return Ok(()),
+            Err(crate::agent::Declined::ServedElsewhere) => {
+                return Err("Another DBDelve window is already serving agents.".to_string());
             }
-            crate::agent::Declined::Failed(text) => text,
-        })?;
+            Err(crate::agent::Declined::Failed(text)) => return Err(text),
+        };
         let pump = cx.spawn(async move |workspace, cx| {
             while let Some(message) = receiver.recv().await {
                 if workspace
@@ -1120,12 +1142,26 @@ impl Workspace {
         self.start_bridge_at(crate::agent::socket_path()?, cx)
     }
 
+    /// [`Self::listen_for_agents`] for a launch that read `agent_access =
+    /// true`: the file is read again under the serving lock, and only a
+    /// `true` there binds. A kill switch saves `false` before it lets go of
+    /// the lock, so a value read at launch cannot outlive it.
+    pub(crate) fn listen_for_agents_at_launch(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let plugins = self.plugins.clone();
+        self.start_bridge_if(
+            crate::agent::socket_path()?,
+            move || saved_agent_access(&plugins) == Some(true),
+            cx,
+        )
+    }
+
     /// What `agent_access` holds in the file right now, `None` when it holds
     /// nothing or the file cannot be read, which both read as off.
     fn saved_agent_access(&self) -> Option<bool> {
-        store::peek_profiles(&self.plugins)
-            .and_then(|list| list.settings)
-            .and_then(|settings| settings.agent_access)
+        saved_agent_access(&self.plugins)
     }
 
     /// The `agent_access` the next save writes: this window's own choice when
@@ -1258,11 +1294,12 @@ impl Workspace {
     ///    call's connection: each call's writer thread sends its frame and then
     ///    closes its own socket, so a waiting client reads a whole answer and
     ///    not a bare end of file.
-    /// 2. The bridge is dropped, if there is one.
-    /// 3. `agent_access = false` is saved when this window was serving or when
+    /// 2. `agent_access = false` is saved when this window was serving or when
     ///    the file says `true`. It is the user's own action, so no later launch
     ///    of the variant listens, even if this window never did. With neither,
     ///    nothing is written.
+    /// 3. The bridge is dropped, if there is one. After the save, so the
+    ///    serving lock goes only once the file says `false`.
     /// 4. In a window that was not serving, while another window of the
     ///    variant is, the notice says that window's agents stay connected. This
     ///    window cannot reach them, because Phase 4 has no frame that tells
@@ -1278,11 +1315,14 @@ impl Workspace {
             self.end_lane(&profile_id, Status::Rejected, TURNED_OFF, cx);
         }
         let was_serving = self.agent.bridge.is_some();
-        self.drop_bridge();
+        // Saved while the bridge still holds the serving lock: a launch that
+        // takes the lock next reads `false` under it (see
+        // [`Self::listen_for_agents_at_launch`]).
         if was_serving || self.saved_agent_access() == Some(true) {
             self.agent.access_choice = Some(false);
             self.remember_profiles(cx);
         }
+        self.drop_bridge();
         if !was_serving && crate::agent::socket_is_live() {
             self.note(STILL_SERVED_ELSEWHERE.to_string(), cx);
         }

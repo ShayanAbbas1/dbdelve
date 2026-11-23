@@ -217,7 +217,17 @@ fn replace_stale(path: &Path) -> Result<UnixListener, Declined> {
 
 /// Bind the socket at `path`, in a private directory, readable and writable by
 /// this user only, under the serving lock.
+#[cfg(test)]
 pub(super) fn bind(path: &Path) -> Result<Bound, Declined> {
+    bind_if(path, || true)
+}
+
+/// [`bind`], asking `permitted` once the serving lock is held and before
+/// anything is bound. A window turning access off saves that while it still
+/// holds the lock, so a choice read here is never older than the last kill
+/// switch: a launch that read `agent_access = true` before it cannot serve
+/// after it.
+pub(super) fn bind_if(path: &Path, permitted: impl FnOnce() -> bool) -> Result<Bound, Declined> {
     let shown = path.display();
     let Some(parent) = path.parent() else {
         return Err(Declined::Failed(format!(
@@ -226,6 +236,9 @@ pub(super) fn bind(path: &Path) -> Result<Bound, Declined> {
     };
     secure_dir(parent).map_err(Declined::Failed)?;
     let lock = take_lock(path)?;
+    if !permitted() {
+        return Err(Declined::Withdrawn);
+    }
     let listener = match UnixListener::bind(path) {
         Ok(listener) => listener,
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => replace_stale(path)?,
@@ -315,6 +328,34 @@ mod tests {
         let client = UnixStream::connect(&path).expect("the new socket takes clients");
         assert!(second.listener.accept().is_ok());
         drop(client);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_choice_withdrawn_by_the_time_the_lock_is_held_binds_nothing() {
+        let path = short_socket_path();
+        let dir = path
+            .parent()
+            .expect("the path has a directory")
+            .to_path_buf();
+        // Asked under the lock: while another window holds it, never asked.
+        let first = bind(&path).unwrap_or_else(|_| panic!("the first bind succeeds"));
+        let asked = std::cell::Cell::new(false);
+        assert!(matches!(
+            bind_if(&path, || {
+                asked.set(true);
+                true
+            }),
+            Err(Declined::ServedElsewhere)
+        ));
+        assert!(!asked.get());
+        drop(first);
+        std::fs::remove_file(&path).expect("the stale socket is removable");
+
+        assert!(matches!(bind_if(&path, || false), Err(Declined::Withdrawn)));
+        assert!(!path.exists(), "nothing is bound");
+        // And the lock is let go with it.
+        assert!(bind(&path).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

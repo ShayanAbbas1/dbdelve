@@ -35,8 +35,10 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
 pub(crate) use ipc::socket_path;
+#[cfg(all(unix, test))]
+pub(crate) use server::listen;
 #[cfg(unix)]
-pub(crate) use server::{Listener, listen};
+pub(crate) use server::{Listener, listen_if};
 use tools::Tool;
 
 /// Whether another window of this variant is serving agents at this build's
@@ -167,6 +169,9 @@ pub(crate) enum Declined {
     ServedElsewhere,
     /// Something went wrong, in words that say what.
     Failed(String),
+    /// The lock was taken, and the saved choice read under it no longer said
+    /// to serve: the lock is let go and nothing is bound.
+    Withdrawn,
 }
 
 /// Said wherever the bridge is asked for on an OS it does not run on.
@@ -196,6 +201,16 @@ pub(crate) fn listen(
     _inbound: tokio::sync::mpsc::UnboundedSender<Inbound>,
 ) -> Result<Listener, Declined> {
     Err(Declined::Failed(UNAVAILABLE.to_string()))
+}
+
+/// There is no socket to listen on, whatever is permitted.
+#[cfg(not(unix))]
+pub(crate) fn listen_if(
+    path: &std::path::Path,
+    inbound: tokio::sync::mpsc::UnboundedSender<Inbound>,
+    _permitted: impl FnOnce() -> bool,
+) -> Result<Listener, Declined> {
+    listen(path, inbound)
 }
 
 #[cfg(all(test, unix))]
