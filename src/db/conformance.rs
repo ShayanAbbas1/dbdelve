@@ -1013,10 +1013,15 @@ pub(super) fn session_settings_agree_with_the_server(subject: &Subject) {
     let insert = sql_insert(engine, schema, canary, "session setting");
     let delete = sql_delete(engine, schema, canary);
     let postgres = engine == Engine::Postgres;
-    // Named for this scenario like the canary row. Queued for removal here,
-    // before the identity-change case creates it, so an interrupted run
-    // removes it and the pre-clean below removes a leftover one.
-    let identity = "dbdelve_session_971";
+    // Named for this scenario like the canary row, and for this run: a role
+    // is server-wide, so a fixed name would let one run drop the role another
+    // run is still using. Queued for removal here, before the identity-change
+    // case creates it, so a panicking run removes its own; a killed run's is
+    // left behind under a name no other run uses.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let identity = format!("dbdelve_session_971_{}_{nanos}", std::process::id());
     let unwind = if postgres {
         vec![
             "RESET ROLE".to_string(),
@@ -1138,7 +1143,7 @@ pub(super) fn session_settings_agree_with_the_server(subject: &Subject) {
         // that needs superuser or membership to assume, so the case was
         // asserting the classifier's verdict against an identity nobody
         // chose. `NOLOGIN` and granted nothing: it exists to be switched to.
-        let other = engine.quote_identifier(identity);
+        let other = engine.quote_identifier(&identity);
         run(&format!("CREATE ROLE {other} NOLOGIN"));
         for (case, statement, undo) in [
             ("a role change", format!("SET ROLE {other}"), "RESET ROLE"),
