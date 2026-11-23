@@ -782,15 +782,22 @@ impl Workspace {
             Command::TurnOnAgentAccess => self.turn_on_agent_access(cx),
             Command::DisconnectAgents => self.disconnect_agents(cx),
             Command::CopyAgentRegistration => match std::env::current_exe() {
-                Ok(executable) => {
-                    let line = crate::agent::shim::registration_line(
-                        &executable,
-                        std::env::var_os("APPIMAGE").as_deref(),
-                        std::env::var("DBDELVE_VARIANT").ok().as_deref(),
-                    );
-                    cx.write_to_clipboard(ClipboardItem::new_string(line));
-                    self.note("Copied the Claude Code registration line.".into(), cx);
-                }
+                Ok(executable) => match crate::agent::shim::registration_line(
+                    &executable,
+                    std::env::var_os("APPIMAGE").as_deref(),
+                    std::env::var("DBDELVE_VARIANT").ok().as_deref(),
+                ) {
+                    Some(line) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(line));
+                        self.note("Copied the Claude Code registration line.".into(), cx);
+                    }
+                    None => self.note(
+                        "The path of this DBDelve is not UTF-8, so no registration line can \
+                         name it; register it from a UTF-8 path."
+                            .into(),
+                        cx,
+                    ),
+                },
                 Err(error) => self.note(
                     format!("The path of this DBDelve could not be read: {error}"),
                     cx,

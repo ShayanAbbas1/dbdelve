@@ -574,14 +574,16 @@ pub(crate) fn run() -> i32 {
 /// without it would look for the release build's. The option follows the name:
 /// `-e` takes every word after it until `--`, so before the name it would take
 /// the name.
+///
+/// None when the path is not UTF-8: a lossy copy would name another file.
 pub(crate) fn registration_line(
     executable: &std::path::Path,
     appimage: Option<&std::ffi::OsStr>,
     variant: Option<&str>,
-) -> String {
+) -> Option<String> {
     let path = match appimage {
-        Some(file) if !file.is_empty() => file.to_string_lossy(),
-        _ => executable.to_string_lossy(),
+        Some(file) if !file.is_empty() => file.to_str()?,
+        _ => executable.to_str()?,
     };
     // A variant may hold a space, and the shell would split the line there.
     let word = |text: String| {
@@ -601,10 +603,10 @@ pub(crate) fn registration_line(
         ),
         None => ("dbdelve".to_string(), String::new()),
     };
-    format!(
+    Some(format!(
         "claude mcp add --scope user {name}{environment} -- {} mcp",
-        single_quoted(&path)
-    )
+        single_quoted(path)
+    ))
 }
 
 /// `text` as one shell word whose every character is literal: a single quote
@@ -1718,8 +1720,11 @@ mod tests {
         let release = Path::new("/Applications/DBDelve.app/Contents/MacOS/DBDelve");
         assert_eq!(
             registration_line(release, None, None),
-            "claude mcp add --scope user dbdelve -- \
-             '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+            Some(
+                "claude mcp add --scope user dbdelve -- \
+                 '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
         );
         // An empty variant is the release.
         assert_eq!(
@@ -1730,14 +1735,20 @@ mod tests {
         let dev = Path::new("/Users/a/DBDelve Dev.app/Contents/MacOS/DBDelve Dev");
         assert_eq!(
             registration_line(dev, None, Some("dev")),
-            "claude mcp add --scope user dbdelve-dev -e DBDELVE_VARIANT=dev -- \
-             '/Users/a/DBDelve Dev.app/Contents/MacOS/DBDelve Dev' mcp"
+            Some(
+                "claude mcp add --scope user dbdelve-dev -e DBDELVE_VARIANT=dev -- \
+                 '/Users/a/DBDelve Dev.app/Contents/MacOS/DBDelve Dev' mcp"
+                    .to_string()
+            )
         );
 
         // `$` stays literal in single quotes, and a quote closes and reopens them.
         assert_eq!(
             registration_line(Path::new("/tmp/it's $HOME/dbdelve"), None, None),
-            r"claude mcp add --scope user dbdelve -- '/tmp/it'\''s $HOME/dbdelve' mcp"
+            Some(
+                r"claude mcp add --scope user dbdelve -- '/tmp/it'\''s $HOME/dbdelve' mcp"
+                    .to_string()
+            )
         );
 
         let appimage = OsStr::new("/home/a/Apps/DBDelve.AppImage");
@@ -1747,7 +1758,10 @@ mod tests {
                 Some(appimage),
                 None
             ),
-            "claude mcp add --scope user dbdelve -- '/home/a/Apps/DBDelve.AppImage' mcp"
+            Some(
+                "claude mcp add --scope user dbdelve -- '/home/a/Apps/DBDelve.AppImage' mcp"
+                    .to_string()
+            )
         );
         assert_eq!(
             registration_line(release, Some(OsStr::new("")), None),
@@ -1757,9 +1771,21 @@ mod tests {
         // A variant with a space is one word each in the name and the option.
         assert_eq!(
             registration_line(release, None, Some("my build")),
-            "claude mcp add --scope user 'dbdelve-my build' -e 'DBDELVE_VARIANT=my build' -- \
-             '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+            Some(
+                "claude mcp add --scope user 'dbdelve-my build' -e 'DBDELVE_VARIANT=my build' -- \
+                 '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
         );
+
+        // A path that is not UTF-8 gets no line rather than one naming another file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let unreadable = OsStr::from_bytes(b"/tmp/db\xffdelve");
+            assert_eq!(registration_line(Path::new(unreadable), None, None), None);
+            assert_eq!(registration_line(release, Some(unreadable), None), None);
+        }
     }
 
     #[test]
