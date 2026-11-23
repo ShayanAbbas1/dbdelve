@@ -228,8 +228,9 @@ pub struct Reports {
     pub sessions: Vec<(String, u64)>,
 }
 
-/// A role to create.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A role to create. Its `Debug` leaves the password out, so a log or a
+/// panic message never carries it.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct NewRole {
     pub name: String,
     pub login: bool,
@@ -238,6 +239,19 @@ pub struct NewRole {
     /// `YYYY-MM-DD`.
     pub password_expires: Option<String>,
     pub member_of: Vec<String>,
+}
+
+impl std::fmt::Debug for NewRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewRole")
+            .field("name", &self.name)
+            .field("login", &self.login)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("connection_limit", &self.connection_limit)
+            .field("password_expires", &self.password_expires)
+            .field("member_of", &self.member_of)
+            .finish()
+    }
 }
 
 /// What Edit changes about a role.
@@ -807,6 +821,18 @@ mod tests {
         assert!(
             sql.ends_with(" CONNECTION LIMIT 5 VALID UNTIL '2027-01-31' IN ROLE \"reporting\";")
         );
+    }
+
+    #[test]
+    fn a_new_roles_debug_never_shows_its_password() {
+        let role = NewRole {
+            name: "ana".into(),
+            password: Some("hunter2".into()),
+            ..NewRole::default()
+        };
+        let shown = format!("{role:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("<redacted>") && shown.contains("ana"));
     }
 
     #[test]
