@@ -90,9 +90,9 @@ source: src/sql_snapshots.rs
 [postgres] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[postgres] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[postgres] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [postgres] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[postgres] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[postgres] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [postgres] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [postgres] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -219,9 +219,9 @@ source: src/sql_snapshots.rs
 [mysql] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[mysql] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
+[mysql] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
 [mysql] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
-[mysql] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
+[mysql] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
 [mysql] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mysql] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -348,9 +348,9 @@ source: src/sql_snapshots.rs
 [mariadb] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] sequence without parentheses: SELECT s.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [mariadb] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mariadb] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
+[mariadb] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
 [mariadb] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
-[mariadb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
+[mariadb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadOnly [Unreadable] gate ro=Some(RunOnce) rw=Some(RunOnce) full=Some(RunOnce)|
 [mariadb] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mariadb] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -477,9 +477,9 @@ source: src/sql_snapshots.rs
 [sqlite] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[sqlite] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[sqlite] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [sqlite] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[sqlite] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[sqlite] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [sqlite] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [sqlite] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -606,9 +606,9 @@ source: src/sql_snapshots.rs
 [turso] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[turso] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[turso] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [turso] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[turso] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[turso] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [turso] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [turso] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -735,9 +735,9 @@ source: src/sql_snapshots.rs
 [duckdb] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[duckdb] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[duckdb] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [duckdb] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[duckdb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[duckdb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [duckdb] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [duckdb] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -864,9 +864,9 @@ source: src/sql_snapshots.rs
 [snowflake] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [snowflake] sequence without parentheses: SELECT s.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [snowflake] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[snowflake] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[snowflake] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [snowflake] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[snowflake] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[snowflake] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [snowflake] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [snowflake] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [snowflake] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -993,9 +993,9 @@ source: src/sql_snapshots.rs
 [clickhouse] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[clickhouse] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[clickhouse] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[clickhouse] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadOnly [] gate ro=None rw=None full=None|
+[clickhouse] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [clickhouse] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -1122,9 +1122,9 @@ source: src/sql_snapshots.rs
 [mssql] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[mssql] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[mssql] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [mssql] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[mssql] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
+[mssql] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [mssql] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [mssql] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -1251,9 +1251,9 @@ source: src/sql_snapshots.rs
 [mongodb] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] sequence without parentheses: SELECT s.nextval => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
-[mongodb] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[mongodb] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
-[mongodb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[mongodb] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [mongodb] control qualified column: SELECT t.id FROM t => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
@@ -1380,9 +1380,9 @@ source: src/sql_snapshots.rs
 [redis] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] sequence without parentheses: SELECT s.nextval => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
-[redis] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[redis] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [redis] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
-[redis] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[redis] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [redis] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [redis] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
@@ -1509,9 +1509,9 @@ source: src/sql_snapshots.rs
 [generic] table function wrapper: SELECT * FROM TABLE(GETNEXTVAL(seq1)) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [generic] sequence without parentheses: SELECT s.nextval => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
 [generic] sequence without parentheses, qualified: SELECT db.s.nextval FROM t => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[generic] unicode-escaped name: SELECT U&"set_c\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[generic] unicode-escaped name: SELECT U&"set_c\\006fnfig"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [generic] unicode-escaped name, no escape sequence: SELECT U&"set_config"('default_transaction_read_only', 'off', false) => |classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None|
-[generic] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\006fnfig"('a', 'b', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
+[generic] unicode-escaped name, schema-qualified: SELECT pg_catalog.U&"set_c\\006fnfig"('a', 'b', false) => |classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)|
 [generic] control spaced bit-and of a quoted column: SELECT U & "x" FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [generic] control bit-and of an unquoted column: SELECT U&x FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|
 [generic] control qualified column: SELECT t.id FROM t => |classify=ReadOnly [] gate ro=None rw=None full=None|

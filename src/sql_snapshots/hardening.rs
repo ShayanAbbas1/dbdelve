@@ -4,7 +4,7 @@
 //! written, on every engine, which is what shows a call moving only where the
 //! engine lists it.
 
-use super::{check, fragment};
+use super::{check, fragment, visible};
 use crate::{
     db::Engine,
     sql::{self, Mode},
@@ -280,7 +280,14 @@ fn record(out: &mut String, engine: Engine, case: &str, sql: &str) {
         "classify={:?} {:?} gate ro={ro:?} rw={rw:?} full={full:?}",
         verdict.mode, verdict.destructive,
     );
-    fragment(out, engine, &format!("{case}: {sql}"), Some(&record));
+    // The label is escaped as the record is, so a control character or a
+    // backslash in the statement cannot break the snapshot's line.
+    fragment(
+        out,
+        engine,
+        &format!("{case}: {}", visible(sql)),
+        Some(&record),
+    );
 }
 
 #[test]
