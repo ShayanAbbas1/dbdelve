@@ -6164,6 +6164,20 @@ mod tests {
     }
 
     #[test]
+    fn an_engine_whose_requests_keep_no_session_offers_no_manual() {
+        use crate::db::Engine;
+
+        // A `BEGIN` there ends with its request, so a switch reading Manual
+        // would sit over writes that each commit on their own.
+        for engine in Engine::ALL {
+            if engine.spec().sql.stateless_requests {
+                assert_eq!(engine.begins_transaction(), None, "{engine:?}");
+            }
+        }
+        assert_eq!(Engine::Snowflake.begins_transaction(), None);
+    }
+
+    #[test]
     fn opening_a_transaction_is_not_the_same_question_as_bracketing_a_batch() {
         use crate::db::Engine;
 

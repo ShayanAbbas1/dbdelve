@@ -633,11 +633,14 @@ impl Engine {
             | Self::MariaDb
             | Self::Sqlite
             | Self::Turso
-            | Self::DuckDb
-            | Self::Snowflake => Some("BEGIN"),
+            | Self::DuckDb => Some("BEGIN"),
             // A bare `BEGIN` opens a statement block in T-SQL, not a
             // transaction, and this spelling is the one the gate reads.
             Self::SqlServer => Some("BEGIN TRANSACTION"),
+            // Each request is a session of its own (`stateless_requests`), so
+            // a `BEGIN` ends with its request and every later write commits
+            // on its own under a switch that would read Manual.
+            Self::Snowflake => None,
             // `MULTI` queues commands and rolls none of them back, and
             // MongoDB's transactions need a client session dbdelve does not
             // hold open across statements.
