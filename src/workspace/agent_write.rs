@@ -201,13 +201,23 @@ const UNKNOWN_OUTCOME: &str =
 /// - that an invalid index of that name may remain, when `sql` is a Postgres
 ///   `CREATE INDEX CONCURRENTLY`: a stopped concurrent build leaves one, no
 ///   other statement does, so no other failure says it.
+///
+/// The whole is held to [`result::RESULT_BUDGET`], as rows are, so the answer
+/// always fits its frame: the server's text is what gives way, never the note.
 fn failed_text(engine: Engine, sql: &str, server_text: &str, stopped_waiting: bool) -> String {
-    if stopped_waiting && engine.times_out_on_the_client() {
-        format!("{server_text} {UNKNOWN_OUTCOME}")
+    let note = if stopped_waiting && engine.times_out_on_the_client() {
+        Some(UNKNOWN_OUTCOME)
     } else if creates_index_concurrently(engine, sql) {
-        format!("{server_text} {INVALID_INDEX}")
+        Some(INVALID_INDEX)
     } else {
-        server_text.to_string()
+        None
+    };
+    match note {
+        Some(note) => format!(
+            "{} {note}",
+            result::clipped_to(server_text, result::RESULT_BUDGET - 1 - note.len())
+        ),
+        None => result::clipped_to(server_text, result::RESULT_BUDGET),
     }
 }
 
@@ -377,6 +387,26 @@ mod tests {
                 "boom",
                 "{engine:?} {sql}"
             );
+        }
+    }
+
+    #[test]
+    fn a_failed_writes_answer_fits_the_reply_budget_and_keeps_its_note() {
+        let huge = "e".repeat(result::RESULT_BUDGET * 3);
+        let plain = failed_text(Engine::Postgres, "UPDATE t SET a = 1", &huge, false);
+        assert!(plain.len() <= result::RESULT_BUDGET, "{}", plain.len());
+        for (engine, sql, stopped, note) in [
+            (Engine::Redis, "SET k v", true, UNKNOWN_OUTCOME),
+            (
+                Engine::Postgres,
+                "CREATE INDEX CONCURRENTLY i ON t (a)",
+                false,
+                INVALID_INDEX,
+            ),
+        ] {
+            let text = failed_text(engine, sql, &huge, stopped);
+            assert!(text.len() <= result::RESULT_BUDGET, "{}", text.len());
+            assert!(text.ends_with(note), "{text}");
         }
     }
 
