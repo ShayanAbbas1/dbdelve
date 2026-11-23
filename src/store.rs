@@ -2666,10 +2666,17 @@ pub(crate) const AGENT_AUDIT_FILE: &str = "agent-audit.jsonl";
 // passes `AUDIT_SLACK`, so a rewrite comes once per two thousand appends, and
 // the line count is read from the file once and then kept, so an append never
 // reads it. The upgrade is a size bound or rotation, if a user's audit ever
-// needs to reach further back. Two windows appending to one file would each
-// count their own appends and one's rewrite could drop the other's newest lines.
+// needs to reach further back. Two windows can append to one file (a write
+// outlives the bridge that started it), so every append and rewrite holds
+// [`AGENT_AUDIT_LOCK`], and a kept count is trusted only while the file is the
+// one it was counted on.
 #[cfg(unix)]
 pub(crate) const AUDIT_KEEP: usize = 2_000;
+/// Locked for the whole of an append and the rewrite it may make, beside the
+/// audit and not the audit itself: a rewrite replaces the audit's file, and a
+/// lock on the old one would no longer keep anyone out.
+#[cfg(unix)]
+const AGENT_AUDIT_LOCK: &str = ".agent-audit.lock";
 #[cfg(unix)]
 pub(crate) const AUDIT_SLACK: usize = 4_000;
 
@@ -2682,9 +2689,11 @@ pub(crate) const AUDIT_SLACK: usize = 4_000;
 #[derive(Default)]
 pub(crate) struct AuditLog {
     /// How many lines the file holds, read from it by the first append and
-    /// kept from then on; `None` until then, and again after a write that
-    /// failed, which may have left the end of the file cut.
-    lines: Option<usize>,
+    /// kept from then on, with the length and inode the file had when it was
+    /// last written here: a file another window has written since is counted
+    /// again. `None` until then, and again after a write that failed, which
+    /// may have left the end of the file cut.
+    lines: Option<(usize, u64, u64)>,
 }
 
 #[cfg(unix)]
@@ -2709,14 +2718,20 @@ impl AuditLog {
     /// and its decision. The upgrade is moving the cut back to the first line
     /// no earlier unmatched `started` line precedes.
     pub(crate) fn append(&mut self, line: &str) -> Result<(), String> {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         let directory = dbdelve_directory()?;
         fs::create_dir_all(&directory)
             .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+        // Held to the end of this call, the rewrite included.
+        let _locked = lock_audit(&directory.join(AGENT_AUDIT_LOCK))?;
         let path = directory.join(AGENT_AUDIT_FILE);
-        let (mut lines, cut) = match self.lines {
-            Some(lines) => (lines, false),
+        let stamp = |path: &Path| fs::metadata(path).ok().map(|meta| (meta.len(), meta.ino()));
+        let known = self
+            .lines
+            .filter(|&(_, len, ino)| stamp(&path) == Some((len, ino)));
+        let (mut lines, cut) = match known {
+            Some((lines, _, _)) => (lines, false),
             None => match fs::read(&path) {
                 Ok(bytes) => {
                     let cut = bytes.last().is_some_and(|last| *last != b'\n');
@@ -2753,8 +2768,31 @@ impl AuditLog {
         {
             lines = kept;
         }
-        self.lines = Some(lines);
+        self.lines = stamp(&path).map(|(len, ino)| (lines, len, ino));
         Ok(())
+    }
+}
+
+/// Open `path` and hold an exclusive `flock` on it until the file is dropped.
+#[cfg(unix)]
+fn lock_audit(path: &Path) -> Result<fs::File, String> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    loop {
+        // SAFETY: `file` is an open descriptor for the length of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(format!("Could not lock {}: {error}", path.display()));
+        }
     }
 }
 
@@ -3655,6 +3693,23 @@ user = ""
                     .count(),
                 3
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_counts_again_a_file_another_window_wrote() {
+        with_home(|| {
+            let (mut mine, mut other) = (AuditLog::default(), AuditLog::default());
+            mine.append(r#"{"a":1}"#).expect("a line is written");
+            for n in 0..3 {
+                other
+                    .append(&format!(r#"{{"b":{n}}}"#))
+                    .expect("a line is written");
+            }
+            mine.append(r#"{"a":2}"#).expect("a line is written");
+            assert_eq!(mine.lines.map(|(lines, _, _)| lines), Some(5));
+            assert_eq!(audit_text().lines().count(), 5);
         });
     }
 
