@@ -874,7 +874,7 @@ const EXPLAIN_SQL_KINDS: &[(&str, &str, Owed)] = &[
     (
         "writable cte",
         "WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT id FROM d",
-        Owed::NotRun,
+        Owed::Refused,
     ),
 ];
 
@@ -895,7 +895,7 @@ const EXPLAIN_MONGO_KINDS: &[(&str, &str, Owed)] = &[
     (
         "where find",
         r#"db.c.find({$where: "this.a > 1"})"#,
-        Owed::NotRun,
+        Owed::Refused,
     ),
 ];
 
