@@ -65,7 +65,14 @@ pub(crate) fn compact_within(
     max_bytes: usize,
 ) -> String {
     let raw = degenerate(plan).then_some(plan.text.as_str());
-    render(plan, analysis, raw, max_nodes, max_bytes)
+    render(
+        plan,
+        analysis,
+        raw,
+        executed(plan, analysis),
+        max_nodes,
+        max_bytes,
+    )
 }
 
 /// The compact text of a plan as the `explain_query` tool replies with it:
@@ -79,6 +86,21 @@ pub(crate) fn agent_plan(
     max_nodes: usize,
     max_bytes: usize,
 ) -> String {
+    // MySQL's and MariaDB's tabular `EXPLAIN` is known by its columns, before
+    // any cell is read: a value that starts with `->` is not a tree.
+    if mysql_table(columns) {
+        let plan = Plan {
+            nodes: vec![PlanNode::default()],
+            ..Plan::default()
+        };
+        let analysis = Analysis::new(&plan, engine);
+        // `ANALYZE` adds what each step did, which is no time to weigh it by.
+        let analyzed = columns
+            .iter()
+            .any(|name| ["r_rows", "r_filtered"].contains(&name.to_ascii_lowercase().as_str()));
+        let raw = tabular_text(columns, rows);
+        return render(&plan, &analysis, Some(&raw), analyzed, max_nodes, max_bytes);
+    }
     let plan = parse(columns, rows);
     let analysis = Analysis::new(&plan, engine);
     // A table's rows are written as pairs; flat text is the plan's own text,
@@ -86,10 +108,30 @@ pub(crate) fn agent_plan(
     match degenerate(&plan) && columns.len() > 1 {
         true => {
             let raw = tabular_text(columns, rows);
-            render(&plan, &analysis, Some(&raw), max_nodes, max_bytes)
+            let analyzed = executed(&plan, &analysis);
+            render(&plan, &analysis, Some(&raw), analyzed, max_nodes, max_bytes)
         }
         false => compact_within(&plan, &analysis, max_nodes, max_bytes),
     }
+}
+
+/// Whether `columns` are the traditional `EXPLAIN` table MySQL and MariaDB
+/// print: one row per table read, with `id`, `select_type` and `table`.
+fn mysql_table(columns: &[String]) -> bool {
+    ["id", "select_type", "table"]
+        .iter()
+        .all(|wanted| columns.iter().any(|name| name.eq_ignore_ascii_case(wanted)))
+}
+
+/// Whether the statement ran, as opposed to being planned: some node was
+/// timed, or the server reported how long the whole statement took (an
+/// `ANALYZE` whose every node was never executed still does).
+fn executed(plan: &Plan, analysis: &Analysis) -> bool {
+    analysis.basis == Basis::Measured
+        || plan
+            .summary
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Execution Time"))
 }
 
 /// Whether `plan` parsed to a shell and not a tree: one node with no figures
@@ -115,8 +157,8 @@ pub(crate) fn degenerate(plan: &Plan) -> bool {
 
 /// A result table as lines of text: one line per row, `name=value` pairs
 /// separated by two spaces, `NULL` for a missing cell. A value holding a space,
-/// an `=`, a quote or a backslash, or nothing, is written in double quotes with
-/// backslash and quote escaped.
+/// an `=`, a quote or a backslash, or nothing, or that is the text `NULL`, is
+/// written in double quotes with backslash and quote escaped.
 pub(crate) fn tabular_text(columns: &[String], rows: &[Row]) -> String {
     let mut text = String::new();
     for row in rows {
@@ -128,7 +170,8 @@ pub(crate) fn tabular_text(columns: &[String], rows: &[Row]) -> String {
                     None => "NULL".to_string(),
                     Some(cell) => {
                         let cell = one_line(cell);
-                        if cell.is_empty() || cell.contains([' ', '=', '"', '\\']) {
+                        if cell.is_empty() || cell == "NULL" || cell.contains([' ', '=', '"', '\\'])
+                        {
                             format!("\"{}\"", escaped(&cell))
                         } else {
                             cell
@@ -160,6 +203,7 @@ fn render(
     plan: &Plan,
     analysis: &Analysis,
     raw: Option<&str>,
+    analyzed: bool,
     max_nodes: usize,
     max_bytes: usize,
 ) -> String {
@@ -167,7 +211,7 @@ fn render(
     let shown = kept.iter().filter(|kept| **kept).count();
     // A raw plan is one node, so a node cap of 0 is the only way it is cut.
     let raw = raw.filter(|_| shown > 0);
-    let header = header(plan, analysis);
+    let header = header(plan, analysis, analyzed);
     let mut findings = findings_lines(plan, analysis, |index| kept[index]);
     let tree = if shown == 0 { "tree: none" } else { "tree:" };
 
@@ -441,14 +485,16 @@ fn kept(plan: &Plan, analysis: &Analysis, max_nodes: usize) -> Vec<bool> {
     kept
 }
 
-/// The `plan:` line: what the numbers are, in `key=value` pairs.
-fn header(plan: &Plan, analysis: &Analysis) -> String {
+/// The `plan:` line: what the numbers are, in `key=value` pairs. `analyzed`
+/// is whether the statement ran, which a plan can say without any node being
+/// timed, so it is not read from the basis.
+fn header(plan: &Plan, analysis: &Analysis, analyzed: bool) -> String {
     let words = analysis.engine.plan_basis();
     let measured = analysis.basis == Basis::Measured;
     let mut line = format!(
         "plan: engine={} analyzed={} basis={} time_unit={} cost_unit={} total={}",
         analysis.engine.as_str(),
-        if measured { "yes" } else { "no" },
+        if analyzed { "yes" } else { "no" },
         match analysis.basis {
             Basis::Measured => "measured",
             Basis::PlannerCost => "planner-cost",
@@ -541,6 +587,9 @@ fn node_line(plan: &Plan, analysis: &Analysis, index: usize) -> String {
     line.push_str(&one_line(&node.label));
     if let Some(value) = reading.value {
         line.push_str(&format!(" {}", weight(analysis, value)));
+    } else if node.shares_cte {
+        // Timed, but its time and its sibling scans' share the CTE's unsplit.
+        line.push_str(" self=unsplit-cte");
     }
     if let Some(share) = reading.share {
         line.push_str(&format!(" {}", percent_text(share)));
@@ -587,9 +636,6 @@ fn detail_lines(plan: &Plan, index: usize) -> Vec<String> {
         .map(|detail| {
             let mut line = format!("{}  | {}", indent(node.depth), one_line(detail));
             let removed = detail
-    } else if node.shares_cte {
-        // Timed, but its time and its sibling scans' share the CTE's unsplit.
-        line.push_str(" self=unsplit-cte");
                 .split_once(": ")
                 .filter(|(key, _)| key.starts_with("Rows Removed by "))
                 .and_then(|(_, value)| value.trim().parse::<f64>().ok());
@@ -883,9 +929,13 @@ mod tests {
 
     #[test]
     fn a_planner_cost_or_structure_plan_says_so_in_its_header() {
-        // The same plan as `EXPLAIN` without `ANALYZE` prints it.
+        // The same plan as `EXPLAIN` without `ANALYZE` prints it, which
+        // reports no execution time either.
         let mut plain = String::new();
         for line in PARALLEL.lines() {
+            if line.starts_with("Execution Time") {
+                continue;
+            }
             match line.find(" (actual ") {
                 Some(at) => plain.push_str(&line[..at]),
                 None => plain.push_str(line),
@@ -1292,6 +1342,62 @@ mod tests {
         assert_eq!(
             tabular_text(&columns, &rows),
             "a=\"x y\"  b=NULL  c=\"\"  d=\"p=\\\"q\\\\\"\n"
+        );
+    }
+
+    #[test]
+    fn a_cell_that_reads_null_is_told_apart_from_a_null() {
+        let columns = ["a", "b"].map(String::from);
+        let rows = [Row::new([Some("NULL"), None]).expect("the row fits")];
+        assert_eq!(tabular_text(&columns, &rows), "a=\"NULL\"  b=NULL\n");
+    }
+
+    #[test]
+    fn a_mysql_table_is_known_by_its_columns_whatever_its_cells_say() {
+        let (columns, mut rows) = read_fixture(MYSQL);
+        // A table named like a tree marker would otherwise draw a tree.
+        rows[0] = Row::new(
+            rows[0]
+                .iter()
+                .enumerate()
+                .map(|(at, cell)| if at == 2 { Some("-> x") } else { cell }),
+        )
+        .expect("the row fits");
+        let out = agent_plan(&columns, &rows, Engine::MySql, NODE_CAP, usize::MAX);
+        let tree: Vec<&str> = out
+            .lines()
+            .skip_while(|line| *line != "tree:")
+            .skip(1)
+            .collect();
+        assert_eq!(tree.len(), rows.len());
+        assert!(tree[0].starts_with("  | id=1  select_type=SIMPLE  table=\"-> x\""));
+    }
+
+    #[test]
+    fn analyzed_says_whether_the_statement_ran_not_whether_it_was_timed() {
+        let header = |fixture: &str, engine: Engine| {
+            let (columns, rows) = read_fixture(fixture);
+            let out = agent_plan(&columns, &rows, engine, NODE_CAP, usize::MAX);
+            out.lines().nth(1).unwrap().to_string()
+        };
+        // MariaDB's `ANALYZE` counts rows but times nothing.
+        let analyzed = header(MARIADB_ANALYZE, Engine::MariaDb);
+        assert!(
+            analyzed.contains(" analyzed=yes basis=structure-only "),
+            "{analyzed}"
+        );
+        let planned = header(MARIADB, Engine::MariaDb);
+        assert!(
+            planned.contains(" analyzed=no basis=structure-only "),
+            "{planned}"
+        );
+        // An `ANALYZE` whose nodes never ran still reports its time.
+        let never = whole(&one_column(
+            "Result  (cost=0.00..1.00 rows=1 width=4) (never executed)\nExecution Time: 0.010 ms",
+        ));
+        assert!(
+            never.contains(" analyzed=yes basis=planner-cost "),
+            "{never}"
         );
     }
 
