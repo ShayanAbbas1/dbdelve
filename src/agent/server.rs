@@ -404,17 +404,62 @@ fn watch_for_hangup(
 /// The stream stays blocking and is never read here: the hangup reader holds a
 /// handle on the same open file description, so changing how this one blocks
 /// would change that read too, and it would return at once and read as a
-/// hangup. A send timeout is the socket's own and leaves reads alone; a write
-/// that outlasts `within` is one that did not arrive.
+/// hangup. Each send is made non-blocking by its own flag instead
+/// ([`write_before`]); an answer that has not all gone within `within` is one
+/// that did not arrive.
 fn deliver(stream: &UnixStream, reply: &Reply, gone: &AtomicBool, within: Duration) -> bool {
     if gone.load(Ordering::Acquire) {
         return false;
     }
-    if stream.set_write_timeout(Some(within)).is_err() {
-        return false;
+    write_before(
+        stream,
+        wire::encode(reply).as_bytes(),
+        Instant::now() + within,
+    )
+}
+
+/// Write all of `bytes` by `deadline`, whatever pace the caller reads at.
+///
+/// Not a send timeout: that bounds each wait for buffer space, and a caller
+/// reading a little at a time ends every such wait, so one blocking write
+/// could last for ever. Each send here is `MSG_DONTWAIT`, which leaves the
+/// descriptor's own mode, and so the hangup reader, alone, and the only wait
+/// is a `poll` for room given what is left of the one deadline.
+fn write_before(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let mut room = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = left.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+        // SAFETY: one valid `pollfd`, alive for the call.
+        if unsafe { libc::poll(&mut room, 1, millis) } < 0
+            && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+        {
+            return false;
+        }
+        // SAFETY: `rest` is valid for `rest.len()` bytes for the call.
+        let sent = unsafe { libc::send(fd, rest.as_ptr().cast(), rest.len(), libc::MSG_DONTWAIT) };
+        match usize::try_from(sent) {
+            Ok(0) => return false,
+            Ok(sent) => rest = &rest[sent..],
+            // No room yet, or a signal: the deadline is checked again first.
+            Err(_) => match io::Error::last_os_error().kind() {
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {}
+                _ => return false,
+            },
+        }
     }
-    let mut writer = stream;
-    writer.write_all(wire::encode(reply).as_bytes()).is_ok()
+    true
 }
 
 /// A refusal written before the call was ever handed to the window, so there is
@@ -748,6 +793,25 @@ mod tests {
             Duration::from_millis(200)
         ));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_answer_read_a_little_at_a_time_still_gives_up_at_its_deadline() {
+        let (server, mut trickle) = UnixStream::pair().expect("a pair of sockets");
+        thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            // Every write makes some progress, well inside any one timeout.
+            while trickle.read(&mut chunk).is_ok_and(|read| read > 0) {
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let started = Instant::now();
+        assert!(!write_before(
+            &server,
+            &vec![b'a'; 64 * 1024 * 1024],
+            started + Duration::from_millis(300)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
