@@ -6264,12 +6264,16 @@ mod tests {
                 Fetch::default(),
             )
             .unwrap();
+        // A parse error, not a name one: an unknown column is caught only
+        // when the statement compiles as it runs, which `XACT_ABORT` reads as
+        // a runtime error and rolls back. `LIMIT` parses for sqlparser, which
+        // must see the `COMMIT`, and stops the whole batch on the server.
         let error = connection
             .query(
-                "INSERT INTO #work (no_such_column) VALUES (2); COMMIT",
+                "INSERT INTO #work VALUES (2); SELECT 1 LIMIT 1; COMMIT",
                 Fetch::default(),
             )
-            .expect_err("the column does not exist");
+            .expect_err("SQL Server has no LIMIT");
         assert!(
             crate::db::transaction_kept_open(&error),
             "{}",
