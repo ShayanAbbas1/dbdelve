@@ -866,8 +866,13 @@ fn render_object(
             .cached(gpui::StyleRefinement::default().size_full())
             .into_any_element();
     }
+    // Drawn again only when it changes, as the diagram is: not on every
+    // frame of the window around it.
     if let ObjectBody::Users { view, .. } = &tab.body {
-        return view.clone().into_any_element();
+        return view
+            .clone()
+            .cached(gpui::StyleRefinement::default().size_full())
+            .into_any_element();
     }
     if let ObjectBody::Structure {
         structure, grid, ..

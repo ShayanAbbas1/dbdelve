@@ -48,6 +48,9 @@ pub struct UsersView {
     /// The connection and its database, under the title.
     server: SharedString,
     roles: Loaded<Arc<Roles>>,
+    /// The list's rows, built once when the roles land rather than on every
+    /// frame: each role, in the order drawn, with what it is a member of.
+    listing: Vec<Listed>,
     selected: Option<String>,
     reach: Option<Loaded<Reach>>,
     /// The last read of what a row reaches and of the Reports: an older
@@ -173,6 +176,37 @@ pub fn reach_sentence(role: &Role, reach: &Reach) -> String {
     }
 }
 
+/// One row of the list, as [`listing`] builds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Listed {
+    role: Role,
+    /// The roles it belongs to, in name order and joined, or `—`.
+    member_of: String,
+}
+
+/// The list's rows: [`ordered`], each with what it is a member of, the
+/// memberships gone through once rather than once per row.
+fn listing(roles: &Roles) -> Vec<Listed> {
+    let mut of: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for (member, role) in &roles.memberships {
+        of.entry(member.as_str()).or_default().push(role.as_str());
+    }
+    ordered(roles)
+        .into_iter()
+        .map(|role| {
+            let mut member_of = of.remove(role.name.as_str()).unwrap_or_default();
+            member_of.sort_unstable();
+            Listed {
+                role: role.clone(),
+                member_of: match member_of.is_empty() {
+                    true => "—".to_string(),
+                    false => member_of.join(", "),
+                },
+            }
+        })
+        .collect()
+}
+
 /// The two letters of the avatar: the first of each of the first two words
 /// of the name, or its first two letters.
 fn initials(name: &str) -> String {
@@ -197,6 +231,7 @@ impl UsersView {
         Self {
             server: server.into(),
             roles: Loaded::Loading,
+            listing: Vec::new(),
             selected: None,
             reach: None,
             reach_request: 0,
@@ -232,6 +267,10 @@ impl UsersView {
             // What a role can reach may have changed with it.
             self.reports = None;
         }
+        self.listing = match &roles {
+            Loaded::Ready(read) => listing(read),
+            _ => Vec::new(),
+        };
         // Each read opens a side connection: asked once the roles have landed,
         // not again for the Loading before them.
         let ready = matches!(roles, Loaded::Ready(_));
@@ -411,14 +450,10 @@ impl UsersView {
             .child(cell(2, head("Member of").into_any_element()))
             .child(cell(3, head("Last login").into_any_element()))
             .child(cell(4, head("Status").into_any_element()));
-        let rows = ordered(roles).into_iter().map(|role| {
+        let rows = self.listing.iter().map(|Listed { role, member_of }| {
             let status = Status::of(role, roles);
             let selected = self.selected.as_deref() == Some(role.name.as_str());
-            let member_of = roles.member_of(&role.name);
-            let member_of = match member_of.is_empty() {
-                true => "—".to_string(),
-                false => member_of.join(", "),
-            };
+            let member_of = member_of.clone();
             let login = role.last_login.clone().unwrap_or_else(|| "—".into());
             let name = role.name.clone();
             let pick = cx.listener(move |view, _, _, cx| view.select(&name, cx));
@@ -1165,6 +1200,34 @@ mod tests {
             view.set_reports(view.reports_request, Loaded::Ready(Reports::default()), cx);
             assert!(view.reports().is_some());
         });
+    }
+
+    #[test]
+    fn the_list_is_built_in_its_order_with_what_each_row_belongs_to() {
+        let roles = Roles {
+            roles: vec![
+                role("reporting", false),
+                role("bo", true),
+                role("ana", true),
+            ],
+            memberships: vec![
+                ("ana".into(), "reporting".into()),
+                ("ana".into(), "billing".into()),
+            ],
+            ..Roles::default()
+        };
+        let listed = listing(&roles);
+        let rows: Vec<(&str, &str)> = (listed.iter())
+            .map(|row| (row.role.name.as_str(), row.member_of.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("ana", "billing, reporting"),
+                ("bo", "—"),
+                ("reporting", "—")
+            ]
+        );
     }
 
     #[test]
