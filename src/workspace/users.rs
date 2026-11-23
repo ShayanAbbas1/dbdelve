@@ -110,8 +110,9 @@ fn limit_in(text: &str) -> Result<Option<i64>, String> {
     if text.is_empty() {
         return Ok(None);
     }
-    match text.parse::<i64>() {
-        Ok(limit) if limit >= 0 => Ok(Some(limit)),
+    // An int4 on the server: a larger number would pass here and fail there.
+    match text.parse::<i32>() {
+        Ok(limit) if limit >= 0 => Ok(Some(limit.into())),
         _ => Err("Connection limit takes a whole number, or nothing for no limit.".into()),
     }
 }
@@ -492,6 +493,27 @@ impl Workspace {
             kind,
             error: None,
         };
+        // Enter in any field is Review…, as a form's default button is: the
+        // dialog's ring passes over a form with fields of its own.
+        for input in [
+            &form.name,
+            &form.password,
+            &form.confirm,
+            &form.limit,
+            &form.expires,
+            &form.member_of,
+        ] {
+            cx.subscribe_in(
+                input,
+                window,
+                |workspace, _, event: &gpui_component::input::InputEvent, window, cx| {
+                    if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
+                        workspace.submit_role_form(window, cx);
+                    }
+                },
+            )
+            .detach();
+        }
         let first = match form.kind {
             RoleFormKind::New { .. } => form.name.clone(),
             RoleFormKind::Edit(_) => form.limit.clone(),
@@ -907,5 +929,7 @@ mod tests {
         assert_eq!(limit_in("5"), Ok(Some(5)));
         assert_eq!(limit_in(" "), Ok(None));
         assert!(limit_in("-1").is_err());
+        assert_eq!(limit_in("2147483647"), Ok(Some(2147483647)));
+        assert!(limit_in("99999999999").is_err(), "past an int4");
     }
 }

@@ -6359,6 +6359,22 @@ fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestA
         });
         assert_eq!(typed, "ana", "the name field took the keystrokes");
 
+        // Enter in a field is Review…: refused here by the gate, which reads
+        // no role change on SQLite, so the form says so and stays up.
+        press(cx, "enter");
+        let error = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .role_form
+                .as_ref()
+                .and_then(|form| form.error.clone())
+        });
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("not a role change")),
+            "{error:?}"
+        );
+
         press(cx, "escape");
         assert_eq!(front_dialog(&workspace, cx), None);
         assert!(workspace.read_with(cx, |workspace, _| workspace.role_form.is_none()));
