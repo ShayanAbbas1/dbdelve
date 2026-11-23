@@ -673,7 +673,11 @@ mod tests {
                 format!("{}\n", frame(r#""kind":"call","tool":"list_connections""#)).as_bytes(),
             )
             .expect("the frame is sent");
-        let Ok(Inbound::Call { id, gone, .. }) = rig.inbound.recv_timeout(Duration::from_secs(5))
+        // The reply is held: dropping it ends the call and closes the stream,
+        // which would set the flag without the caller leaving.
+        let Ok(Inbound::Call {
+            id, gone, reply, ..
+        }) = rig.inbound.recv_timeout(Duration::from_secs(5))
         else {
             panic!("the call reaches the window");
         };
@@ -689,6 +693,7 @@ mod tests {
             gone.load(Ordering::Acquire),
             "the window's own copy of the flag says the caller left"
         );
+        drop(reply);
     }
 
     #[test]
