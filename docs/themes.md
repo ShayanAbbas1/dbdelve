@@ -5,11 +5,14 @@ yourself.
 
 ## Matching the system
 
-Turn on **Match system appearance** in Settings, under Appearance, and DBDelve
-switches between a light and a dark theme as the system does. The one Theme
-row becomes two, **Light theme** and **Dark theme**, and each lists only the
-themes of its side. Moving through either list previews each theme, whichever
-side the system is on.
+**Match system appearance** is on by default when there is no saved theme
+or match preference. DBDelve switches between a light and a dark theme as the
+system does. In Settings under Appearance, **Light theme** and **Dark theme**
+each list only the themes of their side. Moving through either list previews
+each theme, whichever side the system is on.
+
+DBDelve keeps your saved match preference. If your settings only have a
+saved theme, DBDelve keeps using that theme until you turn matching on.
 
 Turning it on keeps the theme on screen as the theme for its own side.
 While it is on, Select Theme lists the themes of the side the system is on now

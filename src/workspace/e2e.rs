@@ -321,6 +321,68 @@ fn raise_run_once_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestConte
     });
 }
 
+fn assert_startup_theme(
+    cx: &mut TestAppContext,
+    settings: &str,
+    matching: bool,
+    expected_theme: impl FnOnce(theme::Appearance) -> &'static str,
+) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!("[settings]\ncheck_for_updates = false\n{settings}"),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            let system = theme::Appearance::of_system(window.appearance());
+            assert_eq!(
+                workspace.read(cx).settings.match_system_appearance,
+                matching
+            );
+            assert_eq!(theme::theme(cx).name, expected_theme(system));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn startup_follows_system_appearance_without_a_saved_choice(cx: &mut TestAppContext) {
+    assert_startup_theme(cx, "", true, |system| theme::starting_theme(system).name);
+}
+
+#[gpui::test]
+fn startup_preserves_a_legacy_fixed_theme(cx: &mut TestAppContext) {
+    assert_startup_theme(cx, "theme = \"Dracula\"\n", false, |_| "Dracula");
+}
+
+#[gpui::test]
+fn startup_preserves_a_saved_system_appearance_opt_out(cx: &mut TestAppContext) {
+    assert_startup_theme(
+        cx,
+        "theme = \"Dracula\"\nmatch_system_appearance = false\n",
+        false,
+        |_| "Dracula",
+    );
+}
+
+#[gpui::test]
+fn startup_honors_a_saved_system_appearance_opt_in(cx: &mut TestAppContext) {
+    assert_startup_theme(
+        cx,
+        "theme = \"GitHub Dark\"\nmatch_system_appearance = true\n\
+         light_theme = \"GitHub Light\"\ndark_theme = \"Dracula\"\n",
+        true,
+        |system| match system {
+            theme::Appearance::Light => "GitHub Light",
+            theme::Appearance::Dark => "Dracula",
+        },
+    );
+}
+
 #[gpui::test]
 fn a_query_typed_and_run_from_the_keyboard_lands_its_rows(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

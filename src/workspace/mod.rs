@@ -134,7 +134,7 @@ impl Default for Settings {
             row_limit: Some(PREVIEW_ROW_LIMIT),
             opacity: theme::OPACITY_DEFAULT,
             theme_opacity: HashMap::new(),
-            match_system_appearance: false,
+            match_system_appearance: true,
             light_theme: theme::starting_theme(theme::Appearance::Light)
                 .name
                 .to_string(),
@@ -646,8 +646,12 @@ impl Workspace {
                     .map(|(name, opacity)| (name.clone(), restored_opacity(Some(*opacity))))
                     .collect();
                 let system = theme::Appearance::of_system(window.appearance());
+                // Older settings could save a fixed theme before the toggle existed.
                 workspace.settings.match_system_appearance =
-                    stored_settings.match_system_appearance.unwrap_or(false);
+                    stored_settings.match_system_appearance.unwrap_or(
+                        workspace.settings.match_system_appearance
+                            && stored_settings.theme.is_none(),
+                    );
                 // Through the list, so a theme gone since is named as the one
                 // it falls back to rather than as nothing at all.
                 for (side, stored) in [
@@ -3309,19 +3313,22 @@ mod tests {
         let mut settings = Settings::default();
         settings.set_theme_for(Light, "GitHub Light");
         settings.set_theme_for(Dark, "Dracula");
-        assert!(settings.system_theme(Dark).is_none());
-        settings.match_system_appearance = true;
         let worn = |settings: &Settings, side| settings.system_theme(side).map(|theme| theme.name);
         assert_eq!(worn(&settings, Light), Some("GitHub Light"));
         assert_eq!(worn(&settings, Dark), Some("Dracula"));
         settings.set_theme_for(Dark, "Deleted Since");
         assert_eq!(worn(&settings, Dark), Some("DBDelve Black"));
+        settings.match_system_appearance = false;
+        assert!(settings.system_theme(Dark).is_none());
     }
 
     #[test]
     fn a_list_that_outlived_a_change_to_matching_still_takes_effect() {
         use theme::Appearance::{Dark, Light};
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            match_system_appearance: false,
+            ..Settings::default()
+        };
         assert_eq!(settings.list_side(Some(Dark), Light), None);
         assert_eq!(settings.pick_target(Some(Dark), Light), (Some(Dark), true));
         assert_eq!(settings.pick_target(None, Light), (None, true));

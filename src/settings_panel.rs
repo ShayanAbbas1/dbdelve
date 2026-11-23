@@ -1443,7 +1443,10 @@ mod tests {
 
     #[test]
     fn matching_the_system_trades_the_theme_row_for_its_two_sides() {
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            match_system_appearance: false,
+            ..Settings::default()
+        };
         let offered = |settings: &Settings| -> Vec<SettingId> {
             setting_rows()
                 .into_iter()
