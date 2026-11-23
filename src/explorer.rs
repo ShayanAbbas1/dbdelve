@@ -138,9 +138,11 @@ pub fn query_row(name: &str) -> String {
 }
 
 /// The row id of a file the Files group lists. Matched against the listed
-/// paths rather than parsed back, since a path need not be UTF-8.
+/// paths rather than parsed back, since a path need not be UTF-8. Spelled by
+/// `Debug`, which escapes the bytes that are not, where `display` would make
+/// two such paths one row.
 pub fn file_row(path: &Path) -> String {
-    format!("{FILE_ROW}{}", path.display())
+    format!("{FILE_ROW}{path:?}")
 }
 
 pub fn is_file_row(id: &str) -> bool {
@@ -1828,9 +1830,9 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("file:/work/reports/orders.sql", "orders.sql — reports"),
-                ("file:/work/billing/orders.sql", "orders.sql — billing"),
-                ("file:/work/daily.sql", "daily.sql"),
+                (r#"file:"/work/reports/orders.sql""#, "orders.sql — reports"),
+                (r#"file:"/work/billing/orders.sql""#, "orders.sql — billing"),
+                (r#"file:"/work/daily.sql""#, "daily.sql"),
                 ("query:nightly", "nightly"),
             ]
         );
@@ -1838,6 +1840,18 @@ mod tests {
         assert_eq!(listed.items[0].label.as_ref(), "Files");
         let narrowed = files(&files_listed, &["nightly".to_string()], "dai");
         assert_eq!(narrowed.items[0].children.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_whose_names_are_not_utf8_keep_rows_of_their_own() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = |bytes: &[u8]| Path::new(std::ffi::OsStr::from_bytes(bytes)).to_path_buf();
+        assert_ne!(
+            file_row(&path(b"/work/q\x80.sql")),
+            file_row(&path(b"/work/q\x81.sql"))
+        );
     }
 
     #[test]
