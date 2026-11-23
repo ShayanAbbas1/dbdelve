@@ -2759,8 +2759,11 @@ impl Workspace {
         // database shares. An edit of dbdelve's is refused while one is open
         // (`Profile::bound_write_refusal`), and the user's statements go on
         // running as typed; the upgrade is a session of the tab's own.
-        let ends_transaction =
-            binding.is_some() && sql::leaves(engine, &sql).transaction == Some(false);
+        // Not a MySQL statement that commits implicitly, which moves the
+        // session as freely as anything else and must run where it is bound.
+        let ends_transaction = binding.is_some()
+            && sql::leaves(engine, &sql).transaction == Some(false)
+            && (!sql::implicitly_commits(engine) || sql::ends_transaction(engine, &sql));
         let bound_db = binding.as_ref().map(|binding| binding.database.clone());
         // A `USE` or `SET` in a bound tab is undone, not rewritten: the
         // binding stays what the tab was opened for, and the next run puts the

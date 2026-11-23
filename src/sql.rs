@@ -5275,11 +5275,57 @@ impl Leaves {
                     self.transaction = Some(open);
                 }
             }
+            // MySQL and MariaDB commit the open transaction before these
+            // run, and `LOCK TABLES` and `UNLOCK TABLES` do as well.
+            Statement::LockTables { .. } | Statement::UnlockTables
+                if implicitly_commits(engine) =>
+            {
+                self.settings = true;
+                self.transaction = Some(false);
+            }
             Statement::Use(_)
             | Statement::LockTables { .. }
             | Statement::Pragma { is_eq: true, .. } => self.settings = true,
             Statement::CreateTable(table) => {
                 self.settings |= table.temporary || table.name.to_string().starts_with('#');
+                if !table.temporary && implicitly_commits(engine) {
+                    self.transaction = Some(false);
+                }
+            }
+            Statement::Drop { temporary, .. } if !temporary && implicitly_commits(engine) => {
+                self.transaction = Some(false)
+            }
+            Statement::CreateView(_)
+            | Statement::CreateIndex(_)
+            | Statement::CreateRole(_)
+            | Statement::CreateSchema { .. }
+            | Statement::CreateDatabase { .. }
+            | Statement::CreateFunction(_)
+            | Statement::CreateProcedure { .. }
+            | Statement::CreateTrigger(_)
+            | Statement::CreateServer(_)
+            | Statement::CreateUser(_)
+            | Statement::CreateSequence { .. }
+            | Statement::AlterTable(_)
+            | Statement::AlterSchema(_)
+            | Statement::AlterIndex { .. }
+            | Statement::AlterView { .. }
+            | Statement::AlterFunction(_)
+            | Statement::AlterRole { .. }
+            | Statement::AlterUser(_)
+            | Statement::DropFunction(_)
+            | Statement::DropProcedure { .. }
+            | Statement::DropTrigger(_)
+            | Statement::RenameTable(_)
+            | Statement::Truncate(_)
+            | Statement::Grant(_)
+            | Statement::Revoke(_)
+            | Statement::Analyze(_)
+            | Statement::OptimizeTable { .. }
+            | Statement::Flush { .. }
+                if implicitly_commits(engine) =>
+            {
+                self.transaction = Some(false)
             }
             Statement::Query(query) => {
                 if let SetExpr::Select(select) = query.body.as_ref()
@@ -5295,6 +5341,13 @@ impl Leaves {
             _ => {}
         }
     }
+}
+
+/// Whether `engine` commits the open transaction at a data definition
+/// statement, a table lock or an account statement: MySQL and MariaDB do,
+/// so the transaction a Manual switch is holding ends with one.
+pub(crate) fn implicitly_commits(engine: Engine) -> bool {
+    matches!(engine, Engine::MySql | Engine::MariaDb)
 }
 
 /// What a `SET` does to the session's transaction, read off its text:
@@ -6170,6 +6223,50 @@ mod tests {
                 assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
             }
         }
+    }
+
+    #[test]
+    fn mysql_reads_a_statement_that_commits_implicitly_as_ending_the_transaction() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                "CREATE TABLE u (id INT)",
+                "ALTER TABLE t ADD COLUMN b INT",
+                "DROP TABLE t",
+                "TRUNCATE TABLE t",
+                "CREATE INDEX i ON t (a)",
+                "RENAME TABLE t TO u",
+                "LOCK TABLES t WRITE",
+                "UNLOCK TABLES",
+                "GRANT SELECT ON d.* TO 'ana'@'%'",
+                "INSERT INTO t VALUES (1); CREATE TABLE u (id INT)",
+            ] {
+                assert_eq!(
+                    leaves(engine, sql).transaction,
+                    Some(false),
+                    "{engine:?}: {sql}"
+                );
+            }
+            for sql in [
+                "CREATE TEMPORARY TABLE u (id INT)",
+                "DROP TEMPORARY TABLE u",
+                "INSERT INTO t VALUES (1)",
+                "SELECT 1",
+            ] {
+                assert_eq!(leaves(engine, sql).transaction, None, "{engine:?}: {sql}");
+            }
+            // One that opens the next transaction after it leaves one open.
+            assert_eq!(
+                leaves(engine, "CREATE TABLE u (id INT); BEGIN").transaction,
+                Some(true)
+            );
+        }
+        // Postgres runs DDL inside the transaction.
+        assert_eq!(
+            leaves(Engine::Postgres, "CREATE TABLE u (id INT)").transaction,
+            None
+        );
     }
 
     #[test]
@@ -12019,7 +12116,7 @@ mod tests {
             (Engine::Postgres, "EXPLAIN SELECT 1"),
             (Engine::Postgres, "SELEC 1"),
             (Engine::Postgres, "INSERT INTO t VALUES (1)"),
-            (Engine::MySql, "CREATE TABLE t (a int)"),
+            (Engine::Postgres, "CREATE TABLE t (a int)"),
             (Engine::Postgres, "SELECT * INTO t2 FROM t"),
             (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
             (Engine::Sqlite, "PRAGMA table_info(t)"),
