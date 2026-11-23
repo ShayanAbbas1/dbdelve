@@ -13232,7 +13232,7 @@ fn an_outside_write_under_unsaved_text_raises_the_bar(cx: &mut TestAppContext) {
             front_conflict(&workspace, cx),
             Some(crate::session::Conflict::Asking)
         );
-        assert!(cx.debug_bounds("file-banner").is_some());
+        assert!(cx.debug_bounds("file-banner: Changed on disk").is_some());
 
         let (id, _) = front_scratch(&workspace, cx);
         cx.update(|window, cx| {
@@ -13241,7 +13241,7 @@ fn an_outside_write_under_unsaved_text_raises_the_bar(cx: &mut TestAppContext) {
             });
         });
         settle(cx);
-        assert!(cx.debug_bounds("file-banner").is_none(), "kept");
+        assert!(cx.debug_bounds("file-banner: Changed on disk").is_none(), "kept");
         assert!(front_dirty(&workspace, cx));
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
@@ -13290,13 +13290,33 @@ fn a_file_deleted_on_disk_says_so_and_save_writes_it_again(cx: &mut TestAppConte
             "still bound"
         );
         assert!(front_dirty(&workspace, cx));
-        assert!(cx.debug_bounds("file-banner").is_some());
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_some());
 
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
         assert!(!front_dirty(&workspace, cx));
-        assert!(cx.debug_bounds("file-banner").is_none());
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_none());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_deleted_file_written_again_says_it_changed_and_offers_reload(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let path = open_dirty_file(&workspace, cx, "returned.sql");
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::remove_file(&path).unwrap();
+        bring_back(&workspace, cx, &path);
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_some());
+
+        cx.simulate_keystrokes("secondary-t");
+        settle(cx);
+        std::fs::write(&path, "SELECT 22;").unwrap();
+        bring_back(&workspace, cx, &path);
+        assert!(cx.debug_bounds("file-banner: Changed on disk").is_some());
         quit(workspace, cx);
     });
 }
@@ -13320,7 +13340,7 @@ fn a_file_gone_at_relaunch_comes_back_saying_it_was_deleted(cx: &mut TestAppCont
         assert_eq!(front_file(&workspace, cx), Some(path));
         assert_eq!(buffer(&workspace, cx), "-- SELECT 1;");
         assert!(front_dirty(&workspace, cx));
-        assert!(cx.debug_bounds("file-banner").is_some());
+        assert!(cx.debug_bounds("file-banner: Deleted on disk").is_some());
         quit(workspace, cx);
     });
 }

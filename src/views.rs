@@ -438,16 +438,18 @@ fn render_file_banner(
 ) -> Option<AnyElement> {
     let t = *theme(cx);
     let asking = file.conflict == Some(Conflict::Asking);
+    // Asking first: a file deleted and then written again is still `None`
+    // in `saved`, but it is there to reload.
     let label = match () {
-        _ if file.saved.is_none() => "Deleted on disk",
         _ if asking => "Changed on disk",
+        _ if file.saved.is_none() => "Deleted on disk",
         _ => return None,
     };
     let reload = cx.entity().downgrade();
     let keep = reload.clone();
     Some(
         control_row()
-            .debug_selector(|| "file-banner".into())
+            .debug_selector(move || format!("file-banner: {label}"))
             .gap(px(layout::SPACE_SM))
             .border_b_1()
             .border_color(t.border)
