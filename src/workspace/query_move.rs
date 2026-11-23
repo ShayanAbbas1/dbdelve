@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use gpui::PathPromptOptions;
-use gpui_component::button::Button;
 
 use super::*;
 
@@ -252,27 +251,10 @@ impl Workspace {
             ),
         };
         let offer = matches!(self.queries_notice, Some(QueriesNotice::Offer));
-        let framed = |button: Button| {
-            div()
-                .rounded(px(layout::RADIUS_CONTROL))
-                .border_1()
-                .border_color(t.border)
-                .bg(t.element_active)
-                .child(button)
-        };
-        let button = |id: &'static str, label: &'static str| {
-            ui::button(id, label, Tone::Primary, Control::Compact, t)
+        let quiet = |id: &'static str, label: &'static str| {
+            ui::button(id, label, Tone::Quiet, Control::Compact, t)
                 .debug_selector(move || id.to_string())
         };
-        let action =
-            |id,
-             label,
-             act: fn(&mut Self, &mut Window, &mut Context<Self>),
-             cx: &mut Context<Self>| {
-                framed(button(id, label).on_click(
-                    cx.listener(move |workspace, _, window, cx| act(workspace, window, cx)),
-                ))
-            };
         let dismiss = if offer { "Not Now" } else { "Dismiss" };
         Some(
             div()
@@ -280,33 +262,52 @@ impl Workspace {
                 .w_full()
                 .px(px(layout::SPACE_MD))
                 .py(px(layout::SPACE_SM))
+                // The accent, not the chrome the cleanup notice wears: in
+                // chrome this line went unseen.
+                .bg(t.accent.alpha(layout::ACCENT_WASH))
                 .border_b_1()
-                .border_color(t.border)
+                .border_color(t.accent.alpha(layout::ACCENT_EDGE))
                 .flex()
                 .flex_wrap()
                 .items_center()
                 .gap(px(layout::SPACE_SM))
                 .text_size(px(layout::chrome(layout::TEXT_SM)))
-                .text_color(t.text_muted)
-                .child(div().debug_selector(|| "queries-notice".into()).child(line))
+                .child(
+                    icon(icon::SAVED_QUERY)
+                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                        .text_color(t.accent),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "queries-notice".into())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.text)
+                        .child(line),
+                )
                 .when(offer, |row| {
-                    row.child(action(
-                        "queries-notice-move",
-                        "Move to Folder…",
-                        |workspace, window, cx| workspace.pick_queries_folder(window, cx),
-                        cx,
-                    ))
+                    row.child(
+                        ui::accent_button(
+                            "queries-notice-move",
+                            "Move to Folder…",
+                            Control::Compact,
+                            t,
+                            cx,
+                        )
+                        .debug_selector(|| "queries-notice-move".into())
+                        .on_click(cx.listener(
+                            |workspace, _, window, cx| workspace.pick_queries_folder(window, cx),
+                        )),
+                    )
                 })
-                .child(framed(
-                    button("queries-notice-reveal", "Reveal")
+                .child(
+                    quiet("queries-notice-reveal", "Reveal")
                         .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
-                ))
-                .child(action(
-                    "queries-notice-dismiss",
-                    dismiss,
-                    Self::dismiss_queries_notice,
-                    cx,
-                )),
+                )
+                .child(
+                    quiet("queries-notice-dismiss", dismiss).on_click(cx.listener(
+                        |workspace, _, window, cx| workspace.dismiss_queries_notice(window, cx),
+                    )),
+                ),
         )
     }
 }

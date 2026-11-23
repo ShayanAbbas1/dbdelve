@@ -881,7 +881,7 @@ impl Workspace {
                     .on_click(cx.listener(|workspace, _, _, cx| workspace.close_form(cx))),
             )
             .child(
-                ui::accent_button("connect", commit, t, cx)
+                ui::accent_button("connect", commit, Control::Standard, t, cx)
                     .children(
                         ui::chord_for("submit_connection", &self.settings.custom_keybindings)
                             .map(|chord| ui::keycaps_on_accent(&chord, t)),

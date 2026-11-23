@@ -900,7 +900,8 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   with the full path beside each.
 - **The saved queries move to a folder only when asked.** A launch where a
   connection has saved queries left shows one line under the titlebar ("Your
-  N saved queries are now files.") with Move to Folder…, Reveal and Not Now,
+  N saved queries are now files."), washed in the accent so it is not missed,
+  with Move to Folder… (the accent button), Reveal and Not Now,
   until it is turned down or the move is made (`queries_move_dismissed` in
   `[settings]`); "Move saved queries to a folder…" stays in the palette
   while any are left, with or without a connection in front. The move asks for the folder with the system picker,
