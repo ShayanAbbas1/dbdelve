@@ -12660,6 +12660,31 @@ fn the_save_chord_in_the_editor_writes_the_bound_file_as_the_buffer_holds_it(
 }
 
 #[gpui::test]
+fn the_open_chord_in_the_editor_binds_the_picked_file_to_a_tab(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.executor().allow_parking();
+        let path = user_sql_file("picked.sql", "SELECT 1;");
+        assert!(editor_has_keyboard(&workspace, cx));
+        cx.simulate_keystrokes("secondary-o");
+        settle(cx);
+        assert!(cx.did_prompt_for_paths());
+        let picked = path.clone();
+        cx.simulate_path_prompt_response(|_| Some(vec![picked]));
+        for _ in 0..500 {
+            settle(cx);
+            if front_file(&workspace, cx).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(front_file(&workspace, cx), Some(path));
+        assert_eq!(buffer(&workspace, cx), "SELECT 1;");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn save_as_binds_an_untitled_tab_to_the_file_it_writes(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite(cx);
