@@ -12089,12 +12089,14 @@ fn audit_lines() -> Vec<serde_json::Value> {
     let path = store::dbdelve_directory()
         .expect("the test home has a data directory")
         .join(store::AGENT_AUDIT_FILE);
-    match std::fs::read_to_string(path) {
+    match std::fs::read_to_string(&path) {
         Ok(text) => text
             .lines()
             .map(|line| serde_json::from_str(line).expect("a line of the audit is JSON"))
             .collect(),
-        Err(_) => Vec::new(),
+        // Nothing recorded yet. Any other failure is not an empty audit.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("the audit at {} could not be read: {error}", path.display()),
     }
 }
 
