@@ -13098,7 +13098,11 @@ fn copy_results_formats_work_from_menu_and_palette_and_restore_focus(cx: &mut Te
                     "Escape returns a live dispatch path"
                 );
             });
-            // The existing copy action still defaults to TSV after a table format was used.
+            // The existing copy action still defaults to TSV after a table format
+            // was used. Copy Results has no default chord, so it is dispatched
+            // once the chord has moved the keyboard to the results; a sentinel
+            // first, so a copy that did nothing cannot pass on an earlier one.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("before copy".into()));
             cx.simulate_keystrokes("secondary-k r");
             settle(cx);
             cx.update(|window, cx| {
