@@ -265,8 +265,10 @@ fn ident(name: &str) -> String {
     Engine::Postgres.quote_identifier(name)
 }
 
+/// Read alike whatever `standard_conforming_strings` is: a role name is
+/// anyone's to pick, and a catalog read quoting one runs as the viewer.
 fn literal(value: &str) -> String {
-    Engine::Postgres.quote_literal(value)
+    super::postgres_literal(value)
 }
 
 /// What the server stores for `password`, computed here so the statement,
@@ -718,6 +720,18 @@ mod tests {
             ..edit
         };
         assert!(clears_limit(&before, &cleared));
+    }
+
+    #[test]
+    fn a_role_name_cannot_end_its_literal_whatever_standard_conforming_strings_is() {
+        let name = r"x\' OR public.pwn() --";
+        let sql = reach_sql(name, true);
+        assert!(
+            sql.contains(r"rolname = E'x\\'' OR public.pwn() --'"),
+            "{sql}"
+        );
+        assert!(role_grants_sql(name, false).contains(r"E'x\\''"));
+        assert!(owns_sql("plain", true).contains("rolname = 'plain'"));
     }
 
     #[test]

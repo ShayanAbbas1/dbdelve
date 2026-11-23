@@ -4889,6 +4889,18 @@ pub(super) fn structure_sql(
     schema: &str,
     relation: &str,
 ) -> String {
+    structure_sql_quoted(template, schema, relation, |value| {
+        engine.quote_literal(value)
+    })
+}
+
+/// [`structure_sql`] with each name written by `quote`.
+pub(super) fn structure_sql_quoted(
+    template: &str,
+    schema: &str,
+    relation: &str,
+    quote: impl Fn(&str) -> String,
+) -> String {
     let mut sql = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find('{') {
@@ -4903,11 +4915,25 @@ pub(super) fn structure_sql(
             rest = &rest[1..];
             continue;
         };
-        sql.push_str(&engine.quote_literal(value));
+        sql.push_str(&quote(value));
         rest = &rest[placeholder.len()..];
     }
     sql.push_str(rest);
     sql
+}
+
+/// `value` as a Postgres string literal that reads the same whatever
+/// `standard_conforming_strings` is. With it off, a backslash in a plain
+/// `'…'` escapes the quote after it, so a name such as `x\' OR f() --` would
+/// end the literal early; one holding a backslash is written `E'…'`, where a
+/// backslash always escapes and is doubled. One without stays plain, which
+/// both settings read alike.
+pub(super) fn postgres_literal(value: &str) -> String {
+    let quoted = value.replace('\'', "''");
+    match value.contains('\\') {
+        true => format!("E'{}'", quoted.replace('\\', r"\\")),
+        false => format!("'{quoted}'"),
+    }
 }
 
 /// What an apply says when the server reports a transaction already open on

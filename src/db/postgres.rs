@@ -2851,8 +2851,9 @@ fn outside_bounds(value: &str, minimum: &str, maximum: &str) -> bool {
     }
 }
 
+/// Under either `standard_conforming_strings` ([`super::postgres_literal`]).
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
-    super::structure_sql(super::Engine::Postgres, template, schema, relation)
+    super::structure_sql_quoted(template, schema, relation, super::postgres_literal)
 }
 
 /// What `pg_sequences` says of a sequence's definition, each as text.
@@ -4225,6 +4226,47 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_name_with_a_backslash_reads_as_itself_with_standard_conforming_strings_off() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let role = r"dbdelve_probe_q\' OR pg_catalog.pg_sleep(0) IS NULL --";
+        let reset = format!(
+            "DROP SCHEMA IF EXISTS dbdelve_scs_probe CASCADE; DROP ROLE IF EXISTS {}",
+            Engine::Postgres.quote_identifier(role)
+        );
+        plain
+            .query(&reset, Fetch::default())
+            .expect("an earlier run's probe should drop");
+        plain
+            .query(
+                &format!(
+                    "CREATE SCHEMA dbdelve_scs_probe; \
+                     CREATE TABLE dbdelve_scs_probe.\"odd\\'t\" (id int); \
+                     CREATE ROLE {}; \
+                     SET standard_conforming_strings = off",
+                    Engine::Postgres.quote_identifier(role)
+                ),
+                Fetch::default(),
+            )
+            .expect("the probe should be created");
+
+        let reach = plain.role_reach(role);
+        let held = plain.role_grants(role);
+        let grants = plain.object_grants("dbdelve_scs_probe", r"odd\'t");
+
+        plain
+            .query(
+                &format!("SET standard_conforming_strings = on; {reset}"),
+                Fetch::default(),
+            )
+            .expect("the probe should drop");
+        reach.expect("the name is read whole, not run");
+        held.expect("the name is read whole, not run");
+        let grants = grants.expect("the relation is found by its own name");
+        assert!(!grants.privileges.is_empty());
+    }
+
+    #[test]
     #[ignore = "requires a local Postgres server configured through PG*"]
     fn live_an_active_schema_keeps_the_roles_own_search_path_after_it() {
         let admin = Connection::open(&live_config()).expect("connection should open");
@@ -4774,6 +4816,15 @@ mod tests {
             sql,
             "WHERE namespace.nspname = 'public' AND class.relname = 'odd''name'"
         );
+    }
+
+    #[test]
+    fn structure_sql_reads_alike_whatever_standard_conforming_strings_is() {
+        // With the setting off, a plain literal's backslash would escape the
+        // quote after it and end the name early.
+        let sql = structure_sql("x = {relation}", "public", r"x\' OR public.pwn() --");
+
+        assert_eq!(sql, r"x = E'x\\'' OR public.pwn() --'");
     }
 
     #[test]
