@@ -743,6 +743,57 @@ fn connection_string(server: &ServerConfig) -> String {
     parts.join(" ")
 }
 
+/// What the session reports for the two settings [`connection_string`] sends
+/// as startup options, the timeout in milliseconds.
+const STARTUP_SETTINGS: &str = "SELECT pg_catalog.current_setting('default_transaction_read_only'), \
+     (SELECT setting FROM pg_catalog.pg_settings WHERE name = 'statement_timeout')";
+
+/// Said when a session does not carry the read-only hold or the statement
+/// timeout it was opened with. Something between DBDelve and the server, such
+/// as a connection pooler, can drop the startup options without an error.
+const STARTUP_OPTIONS_DROPPED: &str = "The server did not apply the read-only setting or the \
+     statement timeout this connection asked for, so it was not used. A connection pooler \
+     between DBDelve and the server may be dropping startup options.";
+
+/// Whether a session reporting `read_only` and `timeout_ms` for
+/// [`STARTUP_SETTINGS`] carries what `server` asked for. Only what was asked is
+/// compared: a profile with no timeout sends none, and the server's own stands.
+fn startup_options_held(
+    server: &ServerConfig,
+    read_only: Option<&str>,
+    timeout_ms: Option<&str>,
+) -> bool {
+    let held = !server.read_only || read_only == Some("on");
+    let timed = server.statement_timeout == 0
+        || timeout_ms.and_then(|ms| ms.trim().parse::<u64>().ok())
+            == Some(u64::from(server.statement_timeout) * 1_000);
+    held && timed
+}
+
+/// Read back the startup options a session was opened with and refuse the
+/// session when they did not take, so neither the hold nor the timeout is
+/// assumed. Every session of a connection, the side one included, is opened
+/// through here.
+fn verify_startup_options(client: &mut Client, server: &ServerConfig) -> Result<(), DbError> {
+    if !server.read_only && server.statement_timeout == 0 {
+        return Ok(());
+    }
+    let Client { client, driver, .. } = client;
+    let messages = driver
+        .block_on(client.simple_query(STARTUP_SETTINGS))
+        .and_then(|done| done)
+        .map_err(|error| query_error(&error, STARTUP_SETTINGS))?;
+    let row = messages.iter().find_map(|message| match message {
+        SimpleQueryMessage::Row(row) => Some(row),
+        _ => None,
+    });
+    let cell = |at: usize| row.and_then(|row| row.get(at));
+    match startup_options_held(server, cell(0), cell(1)) {
+        true => Ok(()),
+        false => Err(plain_error(STARTUP_OPTIONS_DROPPED.into())),
+    }
+}
+
 /// `schema` ahead of the session's default `search_path`, as the role,
 /// database or server set it, so `"$user"` and extension schemas stay on it;
 /// that default alone where there is no `schema`, as `RESET` would put back.
@@ -1314,6 +1365,7 @@ impl Connection {
                 });
         let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
         let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
+        verify_startup_options(&mut client, server)?;
         // Before the pick and the script, so a zone the script sets wins. A
         // `SET` after connecting, not a startup option, as the pick is.
         if let Some(statement) = server
@@ -3873,6 +3925,33 @@ mod tests {
             "{}",
             connection_string(&config)
         );
+    }
+
+    #[test]
+    fn a_session_is_refused_when_its_startup_options_did_not_take() {
+        let asked = |read_only, statement_timeout| ServerConfig {
+            read_only,
+            statement_timeout,
+            ..config()
+        };
+        let held = asked(true, 30);
+        assert!(startup_options_held(&held, Some("on"), Some("30000")));
+        // Dropped on the way, the server's own defaults answer instead.
+        assert!(!startup_options_held(&held, Some("off"), Some("30000")));
+        assert!(!startup_options_held(&held, Some("on"), Some("0")));
+        assert!(!startup_options_held(&held, None, None));
+        // What was not asked for is the server's to set.
+        assert!(startup_options_held(
+            &asked(false, 30),
+            Some("off"),
+            Some("30000")
+        ));
+        assert!(startup_options_held(
+            &asked(true, 0),
+            Some("on"),
+            Some("5000")
+        ));
+        assert!(startup_options_held(&asked(false, 0), None, None));
     }
 
     #[test]
