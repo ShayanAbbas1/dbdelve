@@ -1874,6 +1874,18 @@ impl Workspace {
                 });
             }
         }
+        // A grant was given for the database the dialog named, and the lane
+        // follows the profile's config, so it ends here as an edited target's
+        // does in `save_profile`.
+        let id = profile.id.clone();
+        let hidden = profile.agent_visible.then(|| profile.name.clone());
+        self.withdraw_agent_visibility(&id, cx);
+        if let Some(name) = hidden {
+            self.note(
+                format!("{name} is hidden from agents because its database changed."),
+                cx,
+            );
+        }
         self.remember_profiles(cx);
         match in_session {
             true => self.use_database(index, left, cx),

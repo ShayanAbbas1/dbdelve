@@ -11383,6 +11383,61 @@ fn a_new_target_hides_a_grant_this_window_had_not_taken_on_yet(cx: &mut TestAppC
     });
 }
 
+#[gpui::test]
+fn switching_the_database_hides_the_profile_from_agents(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        // Snowflake, as in `an_unedited_save_keeps_visibility_and_a_new_host_hides`:
+        // its connect fails on the missing key before it reaches the network.
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            "[[profiles]]\nid = \"warehouse\"\nname = \"Warehouse\"\n\
+             host = \"dev.example.invalid\"\ndatabase = \"ANALYTICS\"\nuser = \"TIM\"\n\
+             engine = \"snowflake\"\naccount = \"myorg-myaccount\"\n\
+             private_key = \"/no-such-dir/dbdelve-e2e.p8\"\nagent_visible = true\n",
+        );
+        workspace.update(cx, |workspace, cx| workspace.activate(0, cx));
+        cx.run_until_parked();
+        assert!(agent_visible(&workspace, cx, "warehouse"));
+
+        // Asking for the database it is on already changes nothing.
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.set_database("ANALYTICS".into(), window, cx));
+        });
+        assert!(agent_visible(&workspace, cx, "warehouse"));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.set_database("FINANCE".into(), window, cx));
+        });
+        assert!(!agent_visible(&workspace, cx, "warehouse"));
+        assert!(!saved_visible("warehouse"));
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .profile()
+                    .and_then(|profile| profile.session.notice.as_deref()),
+                Some("Warehouse is hidden from agents because its database changed.")
+            );
+        });
+
+        // A grant no save has written yet, so the file has no say in it, is
+        // dropped by the switch all the same.
+        let path = store::dbdelve_directory().unwrap().join("profiles.toml");
+        std::fs::remove_file(&path).expect("the file is removable");
+        std::fs::create_dir(&path).expect("the directory is creatable");
+        workspace.update(cx, |workspace, cx| {
+            workspace.agent_visibility_prompt = Some("warehouse".into());
+            workspace.set_agent_visible("warehouse", true, cx);
+        });
+        assert!(agent_visible(&workspace, cx, "warehouse"));
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.set_database("ANALYTICS".into(), window, cx));
+        });
+        assert!(!agent_visible(&workspace, cx, "warehouse"));
+        std::fs::remove_dir(&path).expect("the directory is removable");
+        quit(workspace, cx);
+    });
+}
+
 fn visibility_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
     workspace.read_with(cx, |workspace, _| workspace.agent_visibility_prompt.clone())
 }
