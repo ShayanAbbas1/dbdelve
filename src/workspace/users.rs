@@ -6,7 +6,9 @@
 //! Every change is a statement `db::roles` writes, passed through
 //! [`sql::is_generated_role_change`], shown whole in the apply review, and
 //! run by `execute_and_then`, so the connection's mode decides whether it
-//! runs; a role change needs Full.
+//! runs; a role change needs Full. It runs on a side connection too
+//! ([`crate::db::Connection::generated_apart`]): a transaction open on the
+//! connection, Manual's included, never holds it.
 
 use std::io::Write as _;
 
@@ -17,11 +19,6 @@ use crate::sidebar::RolesListing;
 use crate::users_view::{Loaded, UsersEvent, UsersView, reports_csv};
 
 use super::exports::{choose_path, could_not_write, write_replacing};
-
-/// Refuses a role change while a transaction is open on its connection: run
-/// inside it, the change would be undone by its rollback.
-pub(super) const ROLE_CHANGE_IN_TRANSACTION: &str =
-    "A transaction is open on this connection. A role change would run inside it.";
 
 /// What the role form is for.
 #[derive(Clone)]
@@ -638,13 +635,6 @@ impl Workspace {
                     .into(),
                 cx,
             );
-            return;
-        }
-        // Run in a transaction the user has open, the change would be undone
-        // by its rollback while the tab, reading on a side connection, never
-        // showed it.
-        if self.profile().is_some_and(|profile| profile.in_transaction) {
-            self.note(ROLE_CHANGE_IN_TRANSACTION.into(), cx);
             return;
         }
         self.activate_tab(Tab::Object(tab), window, cx);

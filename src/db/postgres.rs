@@ -4227,6 +4227,42 @@ mod tests {
 
     #[test]
     #[ignore = "requires the compose databases"]
+    fn live_a_role_change_apart_is_not_held_by_the_users_open_transaction() {
+        let connection =
+            crate::db::Connection::open(crate::db::ConnectionConfig::Postgres(PostgresConfig {
+                server: live_config(),
+                service: None,
+            }))
+            .expect("connection should open");
+        let drop = "DROP ROLE IF EXISTS dbdelve_probe_apart";
+        connection
+            .query(drop, &CancelToken::default(), Fetch::default())
+            .expect("an earlier run's role should drop");
+        connection
+            .query("BEGIN", &CancelToken::default(), Fetch::default())
+            .expect("the user's transaction opens");
+
+        let made = connection.generated_apart(
+            "CREATE ROLE dbdelve_probe_apart NOLOGIN;",
+            &CancelToken::alongside(),
+        );
+        connection
+            .query("ROLLBACK", &CancelToken::default(), Fetch::default())
+            .expect("the user's transaction rolls back");
+        let listed = connection
+            .apart()
+            .and_then(|side| side.roles())
+            .map(|roles| roles.role("dbdelve_probe_apart").is_some());
+        connection
+            .query(drop, &CancelToken::default(), Fetch::default())
+            .expect("the probe role should drop");
+
+        made.expect("the change runs on a session of its own");
+        assert_eq!(listed, Ok(true), "the user's rollback did not undo it");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
     fn live_a_name_with_a_backslash_reads_as_itself_with_standard_conforming_strings_off() {
         let plain = Connection::open(&live_config()).expect("connection should open");
         let role = r"dbdelve_probe_q\' OR pg_catalog.pg_sleep(0) IS NULL --";

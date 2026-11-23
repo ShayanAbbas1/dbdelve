@@ -2186,14 +2186,11 @@ impl Workspace {
             .as_ref()
             .filter(|_| refusal_applies)
             .and_then(|binding| profile.bound_write_refusal(binding));
-        // Asked again as it runs, not only when it was put up for review: a
-        // transaction opened since would hold the change, and a rollback
-        // would undo what the tab reported as applied. A run resumed from the
-        // gate's prompt comes through here too.
-        if matches!(refresh, Some(Refresh::Roles)) && profile.in_transaction {
-            self.note(super::users::ROLE_CHANGE_IN_TRANSACTION.into(), cx);
-            return;
-        }
+        // A role change runs on a session of its own (`generated_apart`):
+        // roles are the server's, and on the shared session a transaction
+        // open there, or one a `BEGIN` of another tab opens before the change
+        // takes the session, would hold it, and its rollback undo it.
+        let role_change = matches!(refresh, Some(Refresh::Roles));
         // A write dbdelve generated for the grid: an Apply edits batch, an
         // Insert, a Delete row or a Row send.
         let edit = matches!(
@@ -2375,7 +2372,7 @@ impl Workspace {
         // Cancel stops what that session is running only while it is running
         // this tab's statement (`Connection::query_bound`).
         let cancel = match (&lane, &binding) {
-            (None, None) => CancelToken::default(),
+            (None, None) if !role_change => CancelToken::default(),
             _ => CancelToken::alongside(),
         };
         let started = std::time::Instant::now();
@@ -2854,6 +2851,7 @@ impl Workspace {
                     fed.as_ref(),
                     preview_limit,
                 ),
+                (None, true, _, None) if role_change => connection.generated_apart(&sql, &cancel),
                 (None, true, ..) => {
                     connection.generated(&sql, &cancel, fed.as_ref(), preview_limit)
                 }

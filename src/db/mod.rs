@@ -2207,6 +2207,19 @@ impl Connection {
         }
     }
 
+    /// [`Self::generated`] on a session of its own ([`Self::apart`]), for a
+    /// statement that must not run inside a transaction open on this one: a
+    /// role change, which is the server's and not the database's. It fails
+    /// rather than fall back to this session. Run under a
+    /// [`CancelToken::alongside`], a Cancel stops it there.
+    pub fn generated_apart(&self, sql: &str, cancel: &CancelToken) -> Result<QueryResult, DbError> {
+        let side = self.apart()?;
+        running_on(cancel, &side, |hold, _| match hold() {
+            true => side.generated(sql, cancel, None, None),
+            false => Err(plain_error("Cancelled before it was sent.".into())),
+        })
+    }
+
     /// [`Self::apart`] for reading what a file will run elsewhere: on Postgres
     /// its `search_path` is empty, so the catalog's text names every schema
     /// ([`postgres::Connection::alongside_unpathed`]). Every other
