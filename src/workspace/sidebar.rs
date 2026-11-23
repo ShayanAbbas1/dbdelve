@@ -1031,11 +1031,7 @@ impl Workspace {
                         ListItem::new(index).text_color(t.text),
                     )
                 }
-                Some(Node::Role { .. }) => (
-                    highlighted(label, matched, t),
-                    ListItem::new(index).text_color(t.text),
-                ),
-                Some(Node::RoleGroup { .. }) => (
+                Some(Node::Role { .. } | Node::RoleGroup { .. }) => (
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
                 ),
