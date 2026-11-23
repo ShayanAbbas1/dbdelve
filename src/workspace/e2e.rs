@@ -13039,7 +13039,9 @@ fn a_scratch_file_that_will_not_read_back_is_set_aside_and_the_tab_carries_on(
             assert!(notice.is_some_and(|notice| notice.contains(".unread-1.sql")));
         });
 
+        assert!(editor_has_keyboard(&workspace, cx));
         cx.simulate_input("x");
+        assert!(front_dirty(&workspace, cx));
         cx.simulate_keystrokes("secondary-w");
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
@@ -13687,6 +13689,7 @@ fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
             front_conflict(&workspace, cx),
             Some(crate::session::Conflict::KeptMine)
         );
+        assert!(editor_has_keyboard(&workspace, cx));
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
