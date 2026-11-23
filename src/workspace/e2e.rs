@@ -12819,11 +12819,21 @@ fn renaming_or_deleting_a_saved_query_reaches_its_tab_on_another_connection(
                     .collect::<Vec<_>>()
             })
         };
+        // A lists the file by its tab alone.
+        workspace.update(cx, |workspace, cx| {
+            workspace.forget_recent_file(&queries.join("nightly.sql"), cx)
+        });
         workspace.update(cx, |workspace, cx| workspace.activate(1, cx));
         settle(cx);
 
         rename_query(&workspace, cx, "nightly", "weekly");
         assert_eq!(on_a(&workspace, cx), [queries.join("weekly.sql")]);
+        let listed_on_a = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profiles[0].session.explorer_tree.clone();
+            let row = explorer::file_row(&queries.join("weekly.sql"));
+            tree.read(cx).index_of(&row.into()).is_some()
+        });
+        assert!(listed_on_a, "A's list follows its tab");
 
         cx.update(|window, cx| {
             workspace.update(cx, |workspace, cx| {

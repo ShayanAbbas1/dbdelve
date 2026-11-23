@@ -1810,6 +1810,12 @@ impl Workspace {
             {
                 file.path = renamed_to;
             }
+            // The front's list is rebuilt below; another lists the file by
+            // its tab, under the old path until it is rebuilt too.
+            if self.active != Some(index) {
+                let holder_profile = self.profiles[index].id.clone();
+                self.refresh_query_library(&holder_profile, cx);
+            }
         }
         if let Some(profile) = self.profile_mut() {
             profile.session.notice = Some(format!("Renamed {previous} to {typed}."));
