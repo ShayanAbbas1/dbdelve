@@ -1484,6 +1484,9 @@ impl Connection {
     /// [`Connection::is_lost`] counts it. `idle` is asked once the session is
     /// held, and a `false` skips it too: a `BEGIN` that landed since the
     /// round was set has a transaction open, whose snapshot a ping would take.
+    /// One with no answer within [`super::PING_WITHIN`] closes the
+    /// connection before letting go of it, so the next statement finds it
+    /// lost rather than waiting behind the ping on a socket gone quiet.
     pub fn ping(&self, idle: &dyn Fn() -> bool) -> Result<(), DbError> {
         let mut client = match self.client.try_lock() {
             Ok(client) => client,
@@ -1497,11 +1500,23 @@ impl Connection {
         }
         let ping = "SELECT 1";
         let Client { client, driver, .. } = &mut *client;
-        driver
-            .block_on(client.simple_query(ping))
-            .and_then(|done| done)
-            .map(|_| ())
-            .map_err(|error| query_error(&error, ping))
+        // The timer is made inside the runtime, which has the clock it reads.
+        let answered = driver.block_on(async {
+            tokio::time::timeout(super::PING_WITHIN, client.simple_query(ping)).await
+        });
+        match answered {
+            Ok(Ok(done)) => done.map(|_| ()).map_err(|error| query_error(&error, ping)),
+            Ok(Err(_)) => {
+                // Dropping the connection closes the client with it.
+                driver.connection = None;
+                Err(plain_error(format!(
+                    "The server did not answer a keep-alive within {} seconds, so the \
+                     connection was closed.",
+                    super::PING_WITHIN.as_secs()
+                )))
+            }
+            Err(error) => Err(query_error(&error, ping)),
+        }
     }
 
     /// Cancellation is advisory and racy by the driver's own admission: the
