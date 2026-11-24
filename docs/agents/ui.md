@@ -135,6 +135,20 @@ the agent's own catalog read is not part of it).
   only offered themes of its own appearance and the theme picked is the theme
   shown. A change that lands while a theme list is previewing goes into
   `theme_before_preview` and the palette's fallback, never over the preview.
+- **User themes reload**: `Workspace::reload_themes` polls
+  `store::theme_directory` every second (`theme::user::reload`): a read and a
+  hash per file, and a parse only for a file whose bytes moved; metadata is
+  not trusted, since a replace can keep size and times. A file that no longer
+  parses keeps the themes it last parsed to, and one that does not read is
+  read again next pass. Each change moves `theme::user::revision`, and a
+  window wears it when that differs from the last it applied, so a reread
+  another path ran first (an import's) is never lost. `reinstall_user_theme`
+  installs the theme on screen with its opacity, or hands it to
+  `theme_before_preview` and re-previews the list's row; a list row and its
+  confirmation are looked up again by name, case-blind
+  (`theme::user::current`), so a list opened before a write never installs the
+  old colours. Nothing is saved. Names are interned (`theme::user::intern`),
+  so rereads leak nothing new.
 
 ## Painting by hand: the ER diagram
 

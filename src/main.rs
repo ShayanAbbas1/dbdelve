@@ -242,7 +242,7 @@ fn main() {
             // theme is applied through them, and `apply_to_components` reads the
             // global rather than naming a family itself.
             cx.set_global(Fonts::default());
-            theme::user::load();
+            theme::user::reload();
             let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
             theme.apply_to_components(cx);
             cx.set_global(theme);

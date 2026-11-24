@@ -815,7 +815,24 @@ impl Workspace {
             Command::SetSchema(name) => _ = self.set_schema(name, cx),
             Command::PickSchemaToExport => self.pick_schema_to_export(window, cx),
             Command::ExportSchema(name) => self.open_schema_export(name, cx),
-            Command::SetTheme(side, theme) => self.set_theme(side, *theme, window, cx),
+            // The row holds the theme as the list opened on it; a file
+            // rewritten since must not be put back on screen and kept there.
+            Command::SetTheme(side, theme) => {
+                let theme = theme::user::current(*theme);
+                match side.filter(|side| theme.appearance != *side) {
+                    // Its file changed side since the list opened: filed
+                    // under this one it would be worn on the wrong side.
+                    Some(side) => self.note(
+                        format!(
+                            "{} is no longer a {}.",
+                            theme.name,
+                            side.theme_label().to_lowercase()
+                        ),
+                        cx,
+                    ),
+                    None => self.set_theme(side, theme, window, cx),
+                }
+            }
             Command::BrowseThemes(source, side) => {
                 self.open_palette(PaletteMode::ImportTheme(source, side), window, cx)
             }

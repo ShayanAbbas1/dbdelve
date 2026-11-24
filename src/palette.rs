@@ -1668,7 +1668,9 @@ impl Palette {
             _ => None,
         };
         let previewed = match command {
-            Some(Command::SetTheme(_, candidate)) => Some(**candidate),
+            Some(Command::SetTheme(side, candidate)) => Some(user::current(**candidate))
+                .filter(|candidate| on_side(*side, candidate))
+                .or(Some(unpreviewed)),
             Some(Command::ImportTheme(source, index, _)) => source.theme(*index),
             _ => Some(unpreviewed),
         };
