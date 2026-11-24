@@ -8160,6 +8160,58 @@ fn ssm_form_reopens_with_the_same_route(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_url_fills_the_client_certificate_only_where_its_engine_takes_one(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        let fill = |cx: &mut VisualTestContext, url: &str| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let form = workspace.form.as_ref().unwrap();
+                    form.url
+                        .update(cx, |input, cx| input.set_value(url, window, cx));
+                    workspace.fill_from_url(window, cx);
+                })
+            });
+        };
+        let client = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let form = workspace.read(cx).form.as_ref().unwrap();
+                (
+                    form.client_certificate.read(cx).value().to_string(),
+                    form.client_key.read(cx).value().to_string(),
+                )
+            })
+        };
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_ref().unwrap();
+                form.client_certificate
+                    .update(cx, |input, cx| input.set_value("/typed.crt", window, cx));
+                form.client_key
+                    .update(cx, |input, cx| input.set_value("/typed.key", window, cx));
+            })
+        });
+
+        fill(cx, "mysql://ada@db.example.test/orders");
+        assert_eq!(client(cx), ("/typed.crt".into(), "/typed.key".into()));
+
+        fill(
+            cx,
+            "postgresql://ada@db.example.test/orders?sslmode=require&sslcert=/url.crt",
+        );
+        assert_eq!(client(cx), ("/url.crt".into(), String::new()));
+
+        fill(
+            cx,
+            "postgresql://ada@db.example.test/orders?sslmode=require&sslkey=/url.key",
+        );
+        assert_eq!(client(cx), (String::new(), "/url.key".into()));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn ssm_setup_checks_missing_tools_and_discards_edited_paths(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch(cx);
