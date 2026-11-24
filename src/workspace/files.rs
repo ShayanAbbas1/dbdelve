@@ -303,7 +303,16 @@ impl Workspace {
             path.to_path_buf(),
         );
         self.profiles_unsaved = true;
-        self.refresh_query_library(profile_id, cx);
+        // Rebuilt only once the event in hand is done: a click on the file's
+        // row brings it up, and the tree then selects the row it drew under
+        // the pointer by its index, which the reorder has given another file.
+        let workspace = cx.entity().downgrade();
+        let profile_id = profile_id.to_string();
+        cx.defer(move |cx| {
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.refresh_query_library(&profile_id, cx)
+            });
+        });
     }
 
     /// [`Self::remember_file`] on the connection whose tab holds `path`.
