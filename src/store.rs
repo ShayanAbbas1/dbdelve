@@ -371,7 +371,8 @@ pub struct StoredShortcut {
 pub struct StoredQueryTab {
     pub id: u64,
     /// A saved query's name, as a build before file tabs wrote it. Read once,
-    /// into [`Self::path`], and never written.
+    /// into [`Self::path`], kept on the restored tab to tell its scratch from
+    /// an older build's, and never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The file this tab is bound to, or absent for an untitled one.

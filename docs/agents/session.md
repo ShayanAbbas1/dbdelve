@@ -1071,9 +1071,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   reads, is not the tab's: a build before file tabs ignores `path`, shows
   the tab untitled and empty, and writes that buffer on quit, and taken as
   unsaved text it would come back dirty and a Save would empty the file. The
-  tab comes back clean from its file; that scratch is deleted when empty and
-  otherwise set aside to an `.unread-<n>.sql` name with a notice, as one
-  that will not read is. A tab's path is `StoredQueryTab::path`, left out
+  tab comes back clean from its file; that scratch is deleted when empty or
+  the file's own text, and otherwise set aside to an `.unread-<n>.sql` name
+  with a notice, as one that will not read is. A tab adopted from `name` is
+  not one: that build showed it holding the saved query, so its scratch is
+  its buffer, and the adopted tab keeps `name` for the check. A tab's path is `StoredQueryTab::path`, left out
   for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
   writes, timers or retries. A crash or forced termination can lose edits

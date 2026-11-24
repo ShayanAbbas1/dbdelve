@@ -4216,7 +4216,8 @@ pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, added: &mut Vec<PathBuf
 
 /// The stored tabs, each holding a saved query by name as a build before file
 /// tabs wrote it, bound to that query's file instead. Nothing moves: the next
-/// Save writes the file where it is.
+/// Save writes the file where it is. The name stays, to tell the tab's
+/// scratch from one an older build left beside a file tab.
 fn adopted(
     stored: Vec<store::StoredQueryTab>,
     query_directory: &Path,
@@ -4224,7 +4225,7 @@ fn adopted(
     stored
         .into_iter()
         .map(|mut stored| {
-            if let Some(name) = stored.name.take() {
+            if let Some(name) = &stored.name {
                 stored.path = stored.path.or_else(|| {
                     Some(sql_file::canonical(
                         &query_directory.join(format!("{name}.sql")),
@@ -4290,12 +4291,21 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             // Every file tab left dirty is stored with its `saved_hash`, so a
             // scratch beside one stored without it was written by a build
             // before file tabs, which showed it untitled and empty; taken as
-            // unsaved text, a Save would put it over the file. Over a file
-            // gone, the scratch is all the tab can hold, whoever wrote it.
+            // unsaved text, a Save would put it over the file. A tab adopted
+            // from a saved query's name is the exception: that build showed
+            // it holding the query, and its scratch is the buffer. Over a
+            // file gone, the scratch is all the tab can hold, whoever wrote it.
             let (scratch, notice, scratch_unread) = match scratch {
-                Some(foreign) if saved.is_some() && stored.saved_hash.is_none() => {
-                    let (notice, scratch_unread) =
-                        put_aside_foreign_scratch(profile_id, stored.id, &foreign, &path);
+                Some(foreign)
+                    if saved.is_some() && stored.saved_hash.is_none() && stored.name.is_none() =>
+                {
+                    let (notice, scratch_unread) = put_aside_foreign_scratch(
+                        profile_id,
+                        stored.id,
+                        &foreign,
+                        saved.as_deref(),
+                        &path,
+                    );
                     (None, notice, scratch_unread)
                 }
                 scratch => (scratch, notice, scratch_unread),
@@ -4326,16 +4336,18 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
     }
 }
 
-/// An older build's scratch for the file tab on `path`: deleted when empty,
-/// and otherwise moved aside as one that will not read is, since it may hold
-/// text typed there. The notice to show, and whether it had to stay put.
+/// An older build's scratch for the file tab on `path`: deleted when empty
+/// or what the file holds, and otherwise moved aside as one that will not
+/// read is, since it may hold text typed there. The notice to show, and
+/// whether it had to stay put.
 fn put_aside_foreign_scratch(
     profile_id: &str,
     id: u64,
     text: &str,
+    saved: Option<&str>,
     path: &Path,
 ) -> (Option<String>, bool) {
-    if text.is_empty() {
+    if text.is_empty() || saved == Some(text) {
         return (store::delete_scratch(profile_id, id).err(), false);
     }
     match store::set_aside_scratch(profile_id, id) {
@@ -6063,7 +6075,7 @@ mod tests {
             [
                 store::StoredQueryTab {
                     path: Some(daily),
-                    ..tab(None, None)
+                    ..tab(Some("daily"), None)
                 },
                 tab(None, None),
                 tab(None, Some("/q/a.sql")),
@@ -6094,7 +6106,7 @@ mod tests {
             };
 
             let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
-            assert_eq!(adopted, [stored(None, Some(target.clone()))]);
+            assert_eq!(adopted, [stored(Some("daily"), Some(target.clone()))]);
             let restored = stored_text("dev", &stored(None, Some(queries.join("daily.sql"))));
             assert_eq!(restored.file.map(|file| file.path), Some(target));
         });
@@ -6177,6 +6189,11 @@ mod tests {
             assert_eq!(notice, None);
             assert!(!scratch.exists());
 
+            store::write_scratch("dev", 3, "SELECT 1").unwrap();
+            let StoredText { text, notice, .. } = stored_text("dev", &stored);
+            assert_eq!((text.as_str(), notice), ("SELECT 1", None));
+            assert!(!scratch.exists());
+
             store::write_scratch("dev", 3, "SELECT 2").unwrap();
             let StoredText {
                 file, text, notice, ..
@@ -6186,6 +6203,44 @@ mod tests {
             let aside = scratch.with_file_name(".scratch-3.unread-1.sql");
             assert_eq!(std::fs::read_to_string(&aside).unwrap(), "SELECT 2");
             assert!(notice.is_some_and(|notice| notice.contains(".unread-1.sql")));
+        });
+    }
+
+    /// A build before file tabs held this tab as the saved query "daily",
+    /// and its scratch is that buffer's text, edited since the last Save.
+    #[test]
+    fn a_saved_query_tab_an_older_build_left_comes_back_holding_its_scratch() {
+        store::tests::with_home(|| {
+            let queries = store::query_directory("dev").unwrap();
+            std::fs::create_dir_all(&queries).unwrap();
+            let daily = sql_file::canonical(&queries.join("daily.sql"));
+            std::fs::write(&daily, "SELECT 1").unwrap();
+            store::write_scratch("dev", 3, "SELECT 2").unwrap();
+            let stored = store::StoredQueryTab {
+                id: 3,
+                name: Some("daily".into()),
+                path: None,
+                active: true,
+                queued_results: 0,
+                database: None,
+                schema: None,
+                saved_hash: None,
+                kept_mine: false,
+                asking: false,
+            };
+
+            let [stored] = adopted(vec![stored], &sql_file::canonical(&queries))
+                .try_into()
+                .unwrap();
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 2");
+            assert_eq!(file.as_ref().map(|file| file.path.clone()), Some(daily));
+            assert!(is_dirty(file.as_ref(), &text));
+            assert_eq!(notice, None);
+            assert!(queries.join(".scratch-3.sql").exists());
+            assert!(!queries.join(".scratch-3.unread-1.sql").exists());
         });
     }
 
