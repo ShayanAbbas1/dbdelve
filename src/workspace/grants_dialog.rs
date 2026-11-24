@@ -1,6 +1,6 @@
 //! Drawing the Show Grants dialog and the role form.
 
-use gpui::{SharedString, relative};
+use gpui::{SharedString, relative, uniform_list};
 use gpui_component::Icon;
 
 use super::*;
@@ -16,6 +16,9 @@ const GRANTS_WIDTH: f32 = 840.;
 /// and a relation's in one row of columns.
 const ROLE_GRANTS_WIDTH: f32 = 1040.;
 const GRANTS_HEIGHT: f32 = 600.;
+/// How tall a row of the table is. The list draws only the rows in view and
+/// needs them all the same height, notes included.
+const GRANTS_ROW_HEIGHT: f32 = 36.;
 /// How wide a privilege's column is.
 const PRIVILEGE_COLUMN: f32 = 74.;
 /// How far in each level of a role's access is drawn.
@@ -198,17 +201,46 @@ impl Workspace {
                     (true, GrantsOf::Object(_)) => "Nobody holds anything on it.".to_string(),
                 })
                 .into_any_element(),
-            Loaded::Ready(_) => div()
-                .id("show-grants-rows")
-                .debug_selector(|| "show-grants-rows".into())
-                .flex_1()
-                .overflow_y_scroll()
-                .child(table_head)
-                .children(
-                    rows.iter()
-                        .map(|row| grants_row(row, columns, t, mono.clone())),
-                )
-                .into_any_element(),
+            Loaded::Ready(_) => {
+                let (row_theme, row_font) = (t, mono.clone());
+                div()
+                    .debug_selector(|| "show-grants-rows".into())
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(table_head)
+                    .child(
+                        uniform_list(
+                            "show-grants-rows",
+                            rows.len(),
+                            // Only the rows in view are built: a login with
+                            // thousands of grants would otherwise build them
+                            // all on every frame.
+                            cx.processor(move |workspace, range: std::ops::Range<usize>, _, _| {
+                                let Some(view) = workspace.grants_view_in_front() else {
+                                    return Vec::new();
+                                };
+                                let matrix = &view.matrix;
+                                range
+                                    .filter_map(|ix| matrix.rows.get(ix))
+                                    .map(|row| {
+                                        grants_row(
+                                            row,
+                                            &matrix.columns,
+                                            row_theme,
+                                            row_font.clone(),
+                                        )
+                                    })
+                                    .collect()
+                            }),
+                        )
+                        .track_scroll(&view.scroll)
+                        .flex_1()
+                        .min_h_0(),
+                    )
+                    .into_any_element()
+            }
         };
         let legend = |mark: AnyElement, label: &'static str| {
             // Each label wraps at a width of its own, two lines at most, as
@@ -475,9 +507,11 @@ fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString)
                 let key = row.key.clone();
                 move || format!("show-grants-note-{key}")
             })
+            .flex()
+            .items_center()
+            .h(px(GRANTS_ROW_HEIGHT))
             .pl(px(18. + f32::from(row.depth) * ROLE_INDENT + 22.))
             .pr(px(18.))
-            .py(px(4.))
             .text_size(px(layout::chrome(layout::TEXT_XS)))
             .text_color(t.text_faint)
             .child(row.name.clone())
@@ -492,7 +526,7 @@ fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString)
     div()
         .flex()
         .items_center()
-        .h(px(36.))
+        .h(px(GRANTS_ROW_HEIGHT))
         .border_t_1()
         .border_color(t.border)
         .when(row.member || header, |line| line.bg(t.surface))

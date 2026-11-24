@@ -143,6 +143,8 @@ pub(crate) struct GrantsView {
     /// The table drawn: built when the grants land, the filter's text
     /// changes or members are turned on or off, never on a frame.
     pub(crate) matrix: GrantsMatrix,
+    /// The rows' scroll position, kept here so a frame does not lose it.
+    pub(crate) scroll: gpui::UniformListScrollHandle,
 }
 
 /// What the Show Grants dialog draws, with what it was built under.
@@ -184,6 +186,10 @@ impl GrantsView {
             filter,
             with_members: self.with_members,
         };
+        if !landed {
+            // A different table starts at its top.
+            self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        }
     }
 }
 
@@ -1231,6 +1237,7 @@ impl Workspace {
             with_members: of_object,
             filter,
             matrix: GrantsMatrix::default(),
+            scroll: gpui::UniformListScrollHandle::new(),
         });
         cx.notify();
         request

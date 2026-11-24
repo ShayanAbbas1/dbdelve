@@ -6764,6 +6764,101 @@ fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut Te
     });
 }
 
+/// The grants of a table that thousands of roles hold SELECT on.
+fn crowded_grants(roles: usize) -> crate::db::roles::ObjectGrants {
+    use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
+    let names = (0..roles).map(|ix| format!("role{ix:05}"));
+    ObjectGrants {
+        owner: "role00000".into(),
+        privileges: vec!["SELECT".into(), "INSERT".into()],
+        grants: (names.clone())
+            .map(|grantee| Grant {
+                grantee: Some(grantee),
+                privilege: "SELECT".into(),
+                grantable: false,
+            })
+            .collect(),
+        roles: Roles {
+            roles: names
+                .map(|name| Role {
+                    name,
+                    login: true,
+                    superuser: false,
+                    password_expires: None,
+                    expired: false,
+                    connection_limit: None,
+                    has_password: None,
+                    last_login: None,
+                })
+                .collect(),
+            ..Roles::default()
+        },
+    }
+}
+
+fn open_crowded_grants(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, roles: usize) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile().expect("a connection is in front");
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let request = workspace.open_grants_view(
+            &id,
+            "Grants on birds".into(),
+            "table · main".into(),
+            true,
+            window,
+            cx,
+        );
+        let grants = super::GrantsOf::Object(crowded_grants(roles));
+        workspace.land_grants(&id, generation, request, Ok(grants), cx);
+    });
+    settle(cx);
+    settle(cx);
+}
+
+#[gpui::test]
+fn show_grants_draws_only_the_rows_in_view_and_keeps_its_scroll(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_crowded_grants(&workspace, cx, 5_000);
+        let total = workspace.read_with(cx, |workspace, _| {
+            workspace.grants_view.as_ref().unwrap().matrix.rows.len()
+        });
+        assert!(total >= 5_000, "{total} rows are listed");
+        // Selectors are `&'static str`, so each probe's name is leaked: a
+        // few thousand short strings, in a test.
+        let drawn = |cx: &mut VisualTestContext| {
+            (0..total)
+                .filter(|ix| {
+                    let name = format!("show-grants-row-role{ix:05}");
+                    cx.debug_bounds(Box::leak(name.into_boxed_str())).is_some()
+                })
+                .count()
+        };
+        let first = drawn(cx);
+        assert!(first > 0, "the rows in view are drawn");
+        assert!(first < 60, "{first} of {total} rows were drawn");
+        assert!(cx.debug_bounds("show-grants-row-role04999").is_none());
+
+        // Scrolled down, a window of rows is still all that is drawn, and a
+        // frame does not send the list back to the top.
+        workspace.update(cx, |workspace, cx| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            view.scroll.scroll_to_item(2_500, gpui::ScrollStrategy::Top);
+            cx.notify();
+        });
+        settle(cx);
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-role00010").is_none());
+        let scrolled = drawn(cx);
+        assert!(scrolled > 0 && scrolled < 60, "{scrolled} rows were drawn");
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-role00010").is_none());
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
 /// A Users and roles tab put behind the editor, which SQLite never opens
 /// itself, and its id.
 fn users_tab_on(
