@@ -201,10 +201,10 @@ impl GrantsView {
         let (columns, rows) = match &self.data {
             Loaded::Ready(GrantsOf::Object(grants)) => (
                 grants.privileges.clone(),
-                crate::grants::object_rows(grants, self.with_members, &filter),
+                crate::grants::object_rows(grants, self.with_members, &filter, None, &[]),
             ),
             Loaded::Ready(GrantsOf::Role(view)) => {
-                let columns = crate::grants::role_columns(view);
+                let columns = crate::grants::role_columns(view, false);
                 let rows = crate::grants::role_rows(view, &columns, &filter);
                 (columns, rows)
             }
@@ -1129,8 +1129,8 @@ impl Workspace {
         // What the database filter lets through, as it stands as the answer
         // lands.
         let shown = profile.shown();
-        let planned =
-            result.map(|access| RoleView::plan(access, |name| shown.shows_database(name)));
+        let planned = result
+            .map(|access| RoleView::plan(role.clone(), access, |name| shown.shows_database(name)));
         let pending = planned.as_ref().map(RoleView::pending).unwrap_or_default();
         self.land_grants(id, generation, request, planned.map(GrantsOf::Role), cx);
         if !pending.is_empty() {

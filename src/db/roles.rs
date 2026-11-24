@@ -520,7 +520,6 @@ fn ident(name: &str) -> String {
 
 /// What a grant is on. A relation says whether it is a sequence because
 /// Postgres refuses `USAGE` through the `TABLE` form.
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GrantObject {
     Database(String),
@@ -532,7 +531,6 @@ pub enum GrantObject {
     },
 }
 
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GrantAction {
     Grant,
@@ -545,7 +543,6 @@ pub enum GrantAction {
 /// OPTION`, and a revoke of a direct grant takes its grant option with it,
 /// as Postgres does. A revoke never says `CASCADE`, so a grant others
 /// re-granted fails with the server's own error, which is shown.
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GrantChange {
     /// The database whose session runs it; `None` for the connection's own.
@@ -584,7 +581,6 @@ pub const PRIVILEGE_ORDER: [&str; 11] = [
 /// Whether `privilege` is one a grant on `object` may name. This is the set
 /// `sql::is_generated_grant_change` admits, and no other: never `ALL`, and
 /// not `MAINTAIN`, which sqlparser 0.63 cannot read.
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub fn grant_applies(object: &GrantObject, privilege: &str) -> bool {
     let takes: &[&str] = match object {
         GrantObject::Database(_) => &["CONNECT", "TEMPORARY", "CREATE"],

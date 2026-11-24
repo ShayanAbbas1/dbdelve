@@ -2,11 +2,11 @@
 //! four marks, built from what the server listed and nothing else. Pure, so
 //! the reading of the catalog is tested apart from the window.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::db::roles::{
-    DatabaseAccess, HeldGrant, ObjectGrants, PRIVILEGE_ORDER, Right, RoleAccess, RoleGrants, Roles,
-    SchemaAccess, Source,
+    DatabaseAccess, GrantAction, GrantChange, GrantObject, HeldGrant, ObjectGrants,
+    PRIVILEGE_ORDER, Right, RoleAccess, RoleGrants, Roles, SchemaAccess, Source, grant_applies,
 };
 use crate::fuzzy::{Fuzzy, Query};
 
@@ -81,6 +81,49 @@ impl Who {
     }
 }
 
+/// What a click on one cell of a row does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub(crate) enum Edit {
+    /// Not a privilege this object has (a SELECT on a database).
+    Inapplicable,
+    /// Held by a grant to the row's role itself: a click stages its revoke.
+    Revoke,
+    /// Not held by a direct grant: a click stages one. `Some` says how it is
+    /// held already (through a role, PUBLIC, a predefined role), for the
+    /// tooltip: that hold is not changed here.
+    Grant(Option<String>),
+    /// Cannot be changed from this row, and why.
+    Fixed(String),
+}
+
+/// What a row's cells change when edited: the object, the role, and the
+/// database whose session runs the statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub(crate) struct EditTarget {
+    /// `None` for the connection's own database, which is where database
+    /// privileges live whatever database they are on. The editor resolves a
+    /// name equal to the connection's own to its own session.
+    pub(crate) database: Option<String>,
+    pub(crate) object: GrantObject,
+    pub(crate) grantee: String,
+}
+
+/// Which object the grants of an object view are of, which the grants read
+/// does not say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub(crate) struct EditObject {
+    pub(crate) database: Option<String>,
+    pub(crate) schema: String,
+    pub(crate) name: String,
+}
+
+const SUPERUSER_FIXED: &str = "A superuser holds every privilege.";
+const OWNER_FIXED: &str = "The owner holds every privilege on what it owns.";
+const PUBLIC_FIXED: &str = "PUBLIC is not edited here.";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MatrixRow {
     /// What tells it from every other row of the matrix, for its element
@@ -99,6 +142,21 @@ pub(crate) struct MatrixRow {
     /// Whether members are listed under it, for the chevron.
     pub(crate) opened: bool,
     pub(crate) marks: Vec<Mark>,
+    /// `None` for a note and a row that cannot be edited at all.
+    #[allow(dead_code)] // read by the Show Grants editor, next commit
+    pub(crate) target: Option<EditTarget>,
+    /// One per column; empty for a note, and for every row of an object view
+    /// built without its [`EditObject`].
+    #[allow(dead_code)] // read by the Show Grants editor, next commit
+    pub(crate) edits: Vec<Edit>,
+}
+
+impl MatrixRow {
+    /// A row nothing on it can be edited.
+    fn fixed(mut self, why: &str, columns: usize) -> Self {
+        self.edits = vec![Edit::Fixed(why.into()); columns];
+        self
+    }
 }
 
 /// Whether `row` is drawn under `parent`, and goes with it when it is
@@ -226,10 +284,16 @@ impl<'a> Members<'a> {
 /// with members, every role that belongs to it, at any depth. `filter`
 /// keeps rows whose name it matches, through the one fuzzy matcher, with
 /// the roles they are listed under.
+///
+/// `edit` says which object this is, which the rows need to be editable;
+/// without it none is. `added` are roles picked to be granted something, listed
+/// with nothing held after the roles that hold some, unless already listed.
 pub(crate) fn object_rows(
     grants: &ObjectGrants,
     with_members: bool,
     filter: &str,
+    edit: Option<&EditObject>,
+    added: &[String],
 ) -> Vec<MatrixRow> {
     let roles = &grants.roles;
     let members = Members::of(roles);
@@ -250,18 +314,29 @@ pub(crate) fn object_rows(
             .collect()
     };
     let everything = vec![Mark::Grantable; grants.privileges.len()];
+    // A row nothing on it changes, said so on each cell once the object is
+    // known.
+    let fixed = |row: MatrixRow, why: &str| match edit {
+        Some(_) => row.fixed(why, grants.privileges.len()),
+        None => row,
+    };
     let mut top: Vec<MatrixRow> = Vec::new();
     for role in roles.roles.iter().filter(|role| role.superuser) {
-        top.push(MatrixRow {
-            key: role.name.clone(),
-            name: role.name.clone(),
-            via: "superuser · bypasses grants".into(),
-            who: Who::Superuser,
-            depth: 0,
-            member: false,
-            opened: false,
-            marks: everything.clone(),
-        });
+        top.push(fixed(
+            MatrixRow {
+                key: role.name.clone(),
+                name: role.name.clone(),
+                via: "superuser · bypasses grants".into(),
+                who: Who::Superuser,
+                depth: 0,
+                member: false,
+                opened: false,
+                marks: everything.clone(),
+                target: None,
+                edits: Vec::new(),
+            },
+            SUPERUSER_FIXED,
+        ));
     }
     let superuser = |name: &str| roles.role(name).is_some_and(|role| role.superuser);
     let mut grantees: Vec<&str> = (grants.grants.iter())
@@ -271,7 +346,19 @@ pub(crate) fn object_rows(
     grantees.sort_unstable();
     grantees.dedup();
     let owner = (!superuser(&grants.owner)).then_some(grants.owner.as_str());
-    for name in owner.into_iter().chain(grantees) {
+    let mut picked: Vec<&str> = Vec::new();
+    for name in added.iter().map(String::as_str) {
+        let listed = name == grants.owner || superuser(name) || grantees.contains(&name);
+        if !listed && !picked.contains(&name) {
+            picked.push(name);
+        }
+    }
+    let listed = owner
+        .into_iter()
+        .chain(grantees)
+        .map(|name| (name, false))
+        .chain(picked.into_iter().map(|name| (name, true)));
+    for (name, picked) in listed {
         let count = members.of_role(name).len();
         let via = if name == grants.owner {
             "owner".to_string()
@@ -279,6 +366,7 @@ pub(crate) fn object_rows(
             match (who(roles, name), count) {
                 (Who::NoLogin, 0) => "role, cannot log in".into(),
                 (Who::NoLogin, n) => format!("role, cannot log in · {}", plural(n, "member")),
+                _ if picked => "login · nothing granted yet".into(),
                 _ => "login · direct".into(),
             }
         };
@@ -292,7 +380,8 @@ pub(crate) fn object_rows(
                 }
             }
         }
-        top.push(MatrixRow {
+        let (target, edits) = object_edits(grants, edit, name, None, &marks);
+        let row = MatrixRow {
             key: name.to_string(),
             name: name.to_string(),
             via,
@@ -301,19 +390,36 @@ pub(crate) fn object_rows(
             member: false,
             opened: false,
             marks,
+            target,
+            edits,
+        };
+        top.push(match name == grants.owner {
+            true => fixed(
+                MatrixRow {
+                    target: None,
+                    ..row
+                },
+                OWNER_FIXED,
+            ),
+            false => row,
         });
     }
-    top.push(MatrixRow {
-        // No role's name: PUBLIC is a keyword, never one.
-        key: "\u{1f}PUBLIC".into(),
-        name: "PUBLIC".into(),
-        via: "every role".into(),
-        who: Who::Public,
-        depth: 0,
-        member: false,
-        opened: false,
-        marks: marks_of(None),
-    });
+    top.push(fixed(
+        MatrixRow {
+            // No role's name: PUBLIC is a keyword, never one.
+            key: "\u{1f}PUBLIC".into(),
+            name: "PUBLIC".into(),
+            via: "every role".into(),
+            who: Who::Public,
+            depth: 0,
+            member: false,
+            opened: false,
+            marks: marks_of(None),
+            target: None,
+            edits: Vec::new(),
+        },
+        PUBLIC_FIXED,
+    ));
 
     let query = Query::new(filter);
     let mut fuzzy = Fuzzy::new();
@@ -321,7 +427,9 @@ pub(crate) fn object_rows(
     let mut rows = Vec::new();
     for mut row in top {
         let listed = match (with_members, row.who) {
-            (true, Who::Login | Who::NoLogin) => members_of(roles, &members, &row.name, &row.marks),
+            (true, Who::Login | Who::NoLogin) => {
+                members_of(grants, edit, &members, &row.name, &row.marks)
+            }
             _ => Vec::new(),
         };
         let kept = matches(&row.name);
@@ -342,12 +450,60 @@ pub(crate) fn object_rows(
     rows
 }
 
+/// What a click on each cell of `grantee`'s row of an object view does. A cell
+/// a member holds through `through` is one grant short of holding it itself.
+fn object_edits(
+    grants: &ObjectGrants,
+    edit: Option<&EditObject>,
+    grantee: &str,
+    through: Option<&str>,
+    marks: &[Mark],
+) -> (Option<EditTarget>, Vec<Edit>) {
+    let Some(edit) = edit else {
+        return (None, Vec::new());
+    };
+    let object = GrantObject::Relation {
+        schema: edit.schema.clone(),
+        name: edit.name.clone(),
+        sequence: grants.sequence,
+    };
+    let edits = (grants.privileges.iter().zip(marks))
+        .map(|(privilege, mark)| {
+            let direct = (grants.grants.iter()).any(|grant| {
+                grant.grantee.as_deref() == Some(grantee) && grant.privilege == *privilege
+            });
+            match (grant_applies(&object, privilege), direct) {
+                (false, _) => Edit::Inapplicable,
+                (true, true) => Edit::Revoke,
+                (true, false) => Edit::Grant(
+                    through
+                        .filter(|_| *mark == Mark::Through)
+                        .map(|role| format!("through {role}")),
+                ),
+            }
+        })
+        .collect();
+    let target = EditTarget {
+        database: edit.database.clone(),
+        object,
+        grantee: grantee.to_string(),
+    };
+    (Some(target), edits)
+}
+
 /// Every role that belongs to `role`, depth first, each named by the role
 /// it is listed under and the one it came through. A member holds what the
 /// role holds only where every membership on its way inherits; one reached
 /// by several paths holds it if any of them does, and is said to come
 /// through that one.
-fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> Vec<MatrixRow> {
+fn members_of(
+    grants: &ObjectGrants,
+    edit: Option<&EditObject>,
+    members: &Members,
+    role: &str,
+    marks: &[Mark],
+) -> Vec<MatrixRow> {
+    let roles = &grants.roles;
     let through_marks = |inherits: bool| -> Vec<Mark> {
         (marks.iter())
             .map(|mark| match (mark, inherits) {
@@ -383,10 +539,13 @@ fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> V
             Some((at, already)) => {
                 *already = true;
                 rows[*at].marks = through_marks(true);
+                rows[*at].edits = object_edits(grants, edit, name, Some(role), &rows[*at].marks).1;
                 rows[*at].via = via(name, through);
             }
             None => {
                 placed.insert(name.to_string(), (rows.len(), inherits));
+                let marks = through_marks(inherits);
+                let (target, edits) = object_edits(grants, edit, name, Some(role), &marks);
                 rows.push(MatrixRow {
                     key: format!("{role}\u{1f}{name}"),
                     name: name.to_string(),
@@ -395,7 +554,9 @@ fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> V
                     depth: 0,
                     member: true,
                     opened: false,
-                    marks: through_marks(inherits),
+                    marks,
+                    target,
+                    edits,
                 });
             }
         }
@@ -450,13 +611,17 @@ pub(crate) struct DatabaseSection {
 /// holds on it, and what has been read inside each so far.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RoleView {
+    /// The role whose grants are shown: the grantee of every change staged.
+    pub(crate) role: String,
+    /// A superuser holds everything and has nothing to grant.
+    superuser: bool,
     pub(crate) sections: Vec<DatabaseSection>,
 }
 
 impl RoleView {
     /// Decide which databases are read: those it can connect to that the
     /// database filter (`shows`) lets through, up to [`MAX_DATABASES_READ`].
-    pub(crate) fn plan(access: RoleAccess, shows: impl Fn(&str) -> bool) -> Self {
+    pub(crate) fn plan(role: String, access: RoleAccess, shows: impl Fn(&str) -> bool) -> Self {
         let mut pending = 0;
         let sections = access
             .databases
@@ -480,7 +645,11 @@ impl RoleView {
                 }
             })
             .collect();
-        Self { sections }
+        Self {
+            role,
+            superuser: access.superuser,
+            sections,
+        }
     }
 
     /// The databases still to read, in the order they are listed.
@@ -505,9 +674,13 @@ impl RoleView {
 }
 
 /// The columns of a role's access: the privileges it holds anywhere in the
-/// view, in [`PRIVILEGE_ORDER`], then any other.
-pub(crate) fn role_columns(view: &RoleView) -> Vec<String> {
-    let mut held: Vec<&str> = Vec::new();
+/// view, in [`PRIVILEGE_ORDER`], then any other. When `editing`, every
+/// privilege of it, so one nothing holds yet can be granted.
+pub(crate) fn role_columns(view: &RoleView, editing: bool) -> Vec<String> {
+    let mut held: Vec<&str> = match editing {
+        true => PRIVILEGE_ORDER.to_vec(),
+        false => Vec::new(),
+    };
     for section in &view.sections {
         held.extend(section.access.rights.iter().map(|r| r.privilege.as_str()));
         if let Read::Done(grants) = &section.read {
@@ -550,6 +723,38 @@ fn rights_marks(rights: &[Right], columns: &[String]) -> Vec<Mark> {
         .collect()
 }
 
+/// What a click on each column of a database's or a schema's row does, from
+/// how the role holds each privilege now.
+fn rights_edits(
+    view: &RoleView,
+    object: &GrantObject,
+    rights: &[Right],
+    columns: &[String],
+) -> Vec<Edit> {
+    (columns.iter())
+        .map(|column| {
+            if !grant_applies(object, column) {
+                return Edit::Inapplicable;
+            }
+            let sources = (rights.iter())
+                .find(|right| right.privilege == *column)
+                .map_or(&[][..], |right| right.sources.as_slice());
+            if view.superuser || sources.contains(&Source::Superuser) {
+                Edit::Fixed(SUPERUSER_FIXED.into())
+            } else if sources.contains(&Source::Direct) {
+                Edit::Revoke
+            } else if sources
+                .iter()
+                .any(|source| matches!(source, Source::Owner(_)))
+            {
+                Edit::Fixed(OWNER_FIXED.into())
+            } else {
+                Edit::Grant(sources.first().map(Source::label))
+            }
+        })
+        .collect()
+}
+
 /// `connect PUBLIC · create owner`: each right, with where it comes from.
 fn rights_text(rights: &[Right]) -> String {
     (rights.iter())
@@ -563,8 +768,9 @@ fn rights_text(rights: &[Right]) -> String {
 
 /// A database's row: what the role holds on the database itself, and
 /// whether and why what is inside it is listed.
-fn database_row(section: &DatabaseSection, columns: &[String]) -> MatrixRow {
+fn database_row(view: &RoleView, section: &DatabaseSection, columns: &[String]) -> MatrixRow {
     let access = &section.access;
+    let object = GrantObject::Database(access.name.clone());
     let rights = rights_text(&access.rights);
     let status = match &section.read {
         Read::Pending => Some("reading…".to_string()),
@@ -597,10 +803,24 @@ fn database_row(section: &DatabaseSection, columns: &[String]) -> MatrixRow {
             true => vec![Mark::None; columns.len()],
             false => rights_marks(&access.rights, columns),
         },
+        edits: rights_edits(view, &object, &access.rights, columns),
+        // Database privileges live in the catalog every database shares, so
+        // the connection's own session writes them.
+        target: Some(EditTarget {
+            database: None,
+            object,
+            grantee: view.role.clone(),
+        }),
     }
 }
 
-fn schema_row(database: &str, schema: &SchemaAccess, columns: &[String]) -> MatrixRow {
+fn schema_row(
+    view: &RoleView,
+    database: &str,
+    schema: &SchemaAccess,
+    columns: &[String],
+) -> MatrixRow {
+    let object = GrantObject::Schema(schema.name.clone());
     let owns =
         (schema.owns > 0).then(|| format!("owns {}", plural(schema.owns as usize, "relation")));
     let rights = rights_text(&schema.rights);
@@ -621,6 +841,12 @@ fn schema_row(database: &str, schema: &SchemaAccess, columns: &[String]) -> Matr
         member: false,
         opened: false,
         marks: rights_marks(&schema.rights, columns),
+        edits: rights_edits(view, &object, &schema.rights, columns),
+        target: Some(EditTarget {
+            database: Some(database.to_string()),
+            object,
+            grantee: view.role.clone(),
+        }),
     }
 }
 
@@ -634,6 +860,8 @@ fn note(database: &str, index: usize, text: String) -> MatrixRow {
         member: false,
         opened: false,
         marks: Vec::new(),
+        target: None,
+        edits: Vec::new(),
     }
 }
 
@@ -680,7 +908,7 @@ pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Ve
     let filtering = !filter.trim().is_empty();
     let mut rows = Vec::new();
     for section in &view.sections {
-        let header = database_row(section, columns);
+        let header = database_row(view, section, columns);
         let Read::Done(grants) = &section.read else {
             if matches(&header.name) {
                 rows.push(header);
@@ -707,10 +935,10 @@ pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Ve
                 left_out += 1;
                 continue;
             }
-            let kept = relation_rows(database, &relations, columns, &mut matches);
+            let kept = relation_rows(&view.role, database, &relations, columns, &mut matches);
             let mut row = access
-                .map(|schema| schema_row(database, schema, columns))
-                .unwrap_or_else(|| schema_row(database, &closed(name), columns));
+                .map(|schema| schema_row(view, database, schema, columns))
+                .unwrap_or_else(|| schema_row(view, database, &closed(name), columns));
             if !kept.is_empty() || matches(&row.name) {
                 row.opened = !kept.is_empty();
                 inside.push(row);
@@ -742,6 +970,7 @@ fn closed(name: &str) -> SchemaAccess {
 
 /// The rows of one schema's relations.
 fn relation_rows(
+    role: &str,
     database: &str,
     held: &[&HeldGrant],
     columns: &[String],
@@ -770,6 +999,16 @@ fn relation_rows(
                     member: false,
                     opened: false,
                     marks: vec![Mark::None; columns.len()],
+                    target: Some(EditTarget {
+                        database: Some(database.to_string()),
+                        object: GrantObject::Relation {
+                            schema: grant.schema.clone(),
+                            name: grant.relation.clone(),
+                            sequence: grant.sequence,
+                        },
+                        grantee: role.to_string(),
+                    }),
+                    edits: Vec::new(),
                 });
                 through_of.push(Vec::new());
                 usable.push(grant.usable);
@@ -796,6 +1035,7 @@ fn relation_rows(
         *cell = cell.merge(mark);
     }
     for ((row, through), usable) in rows.iter_mut().zip(through_of).zip(usable) {
+        row.edits = relation_edits(held, row, columns);
         let direct = row
             .marks
             .iter()
@@ -821,8 +1061,147 @@ fn relation_rows(
     rows
 }
 
+/// What a click on each column of a relation's row does: a grant of its own
+/// is revoked, one held through a role or PUBLIC is one grant short of its
+/// own.
+fn relation_edits(held: &[&HeldGrant], row: &MatrixRow, columns: &[String]) -> Vec<Edit> {
+    let Some(EditTarget {
+        object: object @ GrantObject::Relation { schema, name, .. },
+        ..
+    }) = &row.target
+    else {
+        return Vec::new();
+    };
+    let of = |privilege: &str| {
+        (held.iter())
+            .filter(move |grant| {
+                grant.schema == *schema && grant.relation == *name && grant.privilege == privilege
+            })
+            .collect::<Vec<_>>()
+    };
+    (columns.iter())
+        .map(|column| {
+            let grants = of(column);
+            match (
+                grant_applies(object, column),
+                grants.iter().any(|g| g.through.is_none()),
+            ) {
+                (false, _) => Edit::Inapplicable,
+                (true, true) => Edit::Revoke,
+                (true, false) => Edit::Grant(grants.first().and_then(|grant| {
+                    grant.through.as_deref().map(|role| match role {
+                        "PUBLIC" => "PUBLIC".to_string(),
+                        _ => format!("through {role}"),
+                    })
+                })),
+            }
+        })
+        .collect()
+}
+
 fn held_schema<'a>(held: &[&'a HeldGrant]) -> &'a str {
     held.first().map_or("", |grant| grant.schema.as_str())
+}
+
+/// The changes the user has staged and not yet applied. Keyed by the change
+/// itself, so a role listed in two places (a member under two roles) shows
+/// the same staged cell in both.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub(crate) struct Staged(BTreeSet<GrantChange>);
+
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+impl Staged {
+    /// Stage the click on `row`'s `column`, or unstage it when already
+    /// staged. `Err` says why that cell cannot change.
+    pub(crate) fn toggle(
+        &mut self,
+        row: &MatrixRow,
+        columns: &[String],
+        column: usize,
+    ) -> Result<(), String> {
+        let (Some(privilege), Some(edit)) = (columns.get(column), row.edits.get(column)) else {
+            return Err("This row cannot be changed.".into());
+        };
+        let action = match edit {
+            Edit::Inapplicable => return Err("This object does not take that privilege.".into()),
+            Edit::Fixed(why) => return Err(why.clone()),
+            Edit::Revoke => GrantAction::Revoke,
+            Edit::Grant(_) => GrantAction::Grant,
+        };
+        let Some(target) = &row.target else {
+            return Err("This row cannot be changed.".into());
+        };
+        let change = GrantChange {
+            database: target.database.clone(),
+            object: target.object.clone(),
+            grantee: target.grantee.clone(),
+            privilege: privilege.clone(),
+            action,
+        };
+        if !self.0.remove(&change) {
+            self.0.insert(change);
+        }
+        Ok(())
+    }
+
+    /// What is staged for `row`'s `privilege`, for the cell to show.
+    pub(crate) fn pending(&self, row: &MatrixRow, privilege: &str) -> Option<GrantAction> {
+        let target = row.target.as_ref()?;
+        [GrantAction::Grant, GrantAction::Revoke]
+            .into_iter()
+            .find(|action| {
+                self.0.contains(&GrantChange {
+                    database: target.database.clone(),
+                    object: target.object.clone(),
+                    grantee: target.grantee.clone(),
+                    privilege: privilege.to_string(),
+                    action: *action,
+                })
+            })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(crate) fn changes(&self) -> Vec<GrantChange> {
+        self.0.iter().cloned().collect()
+    }
+
+    /// After a re-read, keep only what still changes something: a grant whose
+    /// cell is still not a direct grant, a revoke whose cell still is. A
+    /// change no row names any more goes too. `rows` must be built
+    /// unfiltered (an empty filter, the added roles included), and with every
+    /// database read, since a row not there cannot say.
+    pub(crate) fn prune(&mut self, rows: &[MatrixRow], columns: &[String]) {
+        self.0.retain(|change| {
+            let Some(column) = columns.iter().position(|name| *name == change.privilege) else {
+                return false;
+            };
+            rows.iter().any(|row| {
+                let named = row.target.as_ref().is_some_and(|target| {
+                    target.database == change.database
+                        && target.object == change.object
+                        && target.grantee == change.grantee
+                });
+                named
+                    && matches!(
+                        (row.edits.get(column), change.action),
+                        (Some(Edit::Revoke), GrantAction::Revoke)
+                            | (Some(Edit::Grant(_)), GrantAction::Grant)
+                    )
+            })
+        });
+    }
 }
 
 #[cfg(test)]
@@ -839,6 +1218,8 @@ mod tests {
             member,
             opened,
             marks: Vec::new(),
+            target: None,
+            edits: Vec::new(),
         }
     }
 
@@ -977,7 +1358,7 @@ mod tests {
 
     #[test]
     fn rows_run_superusers_owner_grantees_then_public() {
-        let rows = object_rows(&orders(), false, "");
+        let rows = object_rows(&orders(), false, "", None, &[]);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(names, ["postgres", "app_owner", "reporting", "PUBLIC"]);
         assert_eq!(rows[0].marks, [Mark::Grantable, Mark::Grantable]);
@@ -988,7 +1369,7 @@ mod tests {
 
     #[test]
     fn members_hold_through_their_role_only_where_every_step_inherits() {
-        let rows = object_rows(&orders(), true, "");
+        let rows = object_rows(&orders(), true, "", None, &[]);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1014,7 +1395,7 @@ mod tests {
 
     #[test]
     fn a_filter_keeps_a_member_with_the_role_it_is_listed_under() {
-        let rows = object_rows(&orders(), true, "ANA");
+        let rows = object_rows(&orders(), true, "ANA", None, &[]);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(names, ["reporting", "ana", "analytics_team"]);
     }
@@ -1044,7 +1425,7 @@ mod tests {
                 records_logins: false,
             },
         };
-        let rows = object_rows(&grants, true, "");
+        let rows = object_rows(&grants, true, "", None, &[]);
         let row = |name: &str| {
             (rows.iter())
                 .find(|row| row.member && row.name == name)
@@ -1063,7 +1444,7 @@ mod tests {
         let mut grants = orders();
         // ana holds a grant of its own and is listed under reporting too.
         grants.grants.push(grant(Some("ana"), "INSERT", false));
-        let rows = object_rows(&grants, true, "");
+        let rows = object_rows(&grants, true, "", None, &[]);
         assert!(rows.iter().filter(|row| row.name == "ana").count() > 1);
         let mut keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
         keys.sort_unstable();
@@ -1108,6 +1489,7 @@ mod tests {
     /// One database, "d", read, holding `grants`.
     fn view_of(grants: RoleGrants) -> RoleView {
         let mut view = RoleView::plan(
+            "ana".into(),
             RoleAccess {
                 superuser: false,
                 databases: vec![database("d", Some(Source::Public))],
@@ -1120,7 +1502,7 @@ mod tests {
 
     /// The relation rows alone.
     fn relations(view: &RoleView, filter: &str) -> Vec<MatrixRow> {
-        role_rows(view, &role_columns(view), filter)
+        role_rows(view, &role_columns(view, false), filter)
             .into_iter()
             .filter(|row| row.who == Who::Object)
             .collect()
@@ -1148,7 +1530,7 @@ mod tests {
         object
             .grants
             .insert(0, grant(Some("reporting"), "SELECT", true));
-        let rows = object_rows(&object, false, "");
+        let rows = object_rows(&object, false, "", None, &[]);
         let reporting = rows.iter().find(|row| row.name == "reporting").unwrap();
         assert_eq!(reporting.marks[0], Mark::Grantable);
     }
@@ -1158,7 +1540,10 @@ mod tests {
         let names = |rows: Vec<MatrixRow>| -> Vec<String> {
             rows.into_iter().map(|row| row.name).collect()
         };
-        assert_eq!(names(object_rows(&orders(), false, "rptg")), ["reporting"]);
+        assert_eq!(
+            names(object_rows(&orders(), false, "rptg", None, &[])),
+            ["reporting"]
+        );
         let view = view_of(RoleGrants {
             held: vec![HeldGrant {
                 schema: "sales".into(),
@@ -1168,9 +1553,9 @@ mod tests {
         });
         assert_eq!(names(relations(&view, "slsord")), ["orders"]);
         // The schema and database stay with the relation that matched.
-        let kept = names(role_rows(&view, &role_columns(&view), "slsord"));
+        let kept = names(role_rows(&view, &role_columns(&view, false), "slsord"));
         assert_eq!(kept, ["d", "sales", "orders"]);
-        assert!(role_rows(&view, &role_columns(&view), "zzz").is_empty());
+        assert!(role_rows(&view, &role_columns(&view, false), "zzz").is_empty());
     }
 
     #[test]
@@ -1183,7 +1568,7 @@ mod tests {
             ],
             ..RoleGrants::default()
         });
-        let columns = role_columns(&view);
+        let columns = role_columns(&view, false);
         assert_eq!(columns, ["CONNECT", "SELECT", "UPDATE"]);
         let rows = relations(&view, "");
         assert_eq!(rows[0].marks, [Mark::None, Mark::Granted, Mark::Through]);
@@ -1218,14 +1603,14 @@ mod tests {
                 database("shop", Some(Source::Via("team".into()))),
             ],
         };
-        let view = RoleView::plan(access, |name| name != "hidden");
+        let view = RoleView::plan("ana".into(), access, |name| name != "hidden");
         assert_eq!(view.pending(), ["app", "shop"]);
         let reads: Vec<&Read> = view.sections.iter().map(|section| &section.read).collect();
         assert_eq!(reads[1], &Read::Skipped(Skipped::NoConnect));
         assert_eq!(reads[2], &Read::Skipped(Skipped::Hidden));
         assert_eq!(reads[3], &Read::Skipped(Skipped::NoConnect));
         // Every one is listed, said why not read, none dropped.
-        let rows = role_rows(&view, &role_columns(&view), "");
+        let rows = role_rows(&view, &role_columns(&view, false), "");
         let via = |name: &str| {
             rows.iter()
                 .find(|row| row.name == name)
@@ -1248,7 +1633,7 @@ mod tests {
                 database("b", Some(Source::Direct)),
             ],
         };
-        let view = RoleView::plan(access, |_| true);
+        let view = RoleView::plan("ana".into(), access, |_| true);
         assert!(view.pending().is_empty());
         assert!(
             view.sections
@@ -1265,7 +1650,7 @@ mod tests {
                 .map(|n| database(&format!("db{n:02}"), Some(Source::Public)))
                 .collect(),
         };
-        let view = RoleView::plan(access, |_| true);
+        let view = RoleView::plan("ana".into(), access, |_| true);
         assert_eq!(view.pending().len(), MAX_DATABASES_READ);
         assert_eq!(
             view.sections.last().map(|section| &section.read),
@@ -1282,12 +1667,12 @@ mod tests {
                 database("b", Some(Source::Public)),
             ],
         };
-        let mut view = RoleView::plan(access, |_| true);
+        let mut view = RoleView::plan("ana".into(), access, |_| true);
         view.land("a", Err("connection refused".into()));
         view.land("b", Ok(RoleGrants::default()));
         // A late answer for a database already answered changes nothing.
         view.land("b", Err("late".into()));
-        let rows = role_rows(&view, &role_columns(&view), "");
+        let rows = role_rows(&view, &role_columns(&view, false), "");
         assert_eq!(
             rows[0].via,
             "could not read: connection refused · connect PUBLIC"
@@ -1313,6 +1698,7 @@ mod tests {
     #[test]
     fn a_grant_in_a_schema_without_usage_is_blocked_and_says_so() {
         let mut view = RoleView::plan(
+            "ana".into(),
             RoleAccess {
                 superuser: false,
                 databases: vec![database("shop", Some(Source::Public))],
@@ -1342,7 +1728,7 @@ mod tests {
                 ..RoleGrants::default()
             }),
         );
-        let columns = role_columns(&view);
+        let columns = role_columns(&view, false);
         assert_eq!(columns, ["CONNECT", "USAGE", "SELECT"]);
         let rows = role_rows(&view, &columns, "");
         let row = |name: &str| rows.iter().find(|row| row.name == name).unwrap();
@@ -1371,6 +1757,7 @@ mod tests {
     fn what_a_role_owns_and_inherits_is_said_where_no_grant_shows_it() {
         use crate::db::roles::Beyond;
         let mut view = RoleView::plan(
+            "ana".into(),
             RoleAccess {
                 superuser: false,
                 databases: vec![database("shop", Some(Source::Owner(None)))],
@@ -1393,7 +1780,7 @@ mod tests {
                 ..RoleGrants::default()
             }),
         );
-        let rows = role_rows(&view, &role_columns(&view), "");
+        let rows = role_rows(&view, &role_columns(&view, false), "");
         let public = rows.iter().find(|row| row.name == "public").unwrap();
         assert_eq!(public.via, "usage owner, as owners · owns 3 relations");
         let notes: Vec<&str> = (rows.iter())
@@ -1409,9 +1796,395 @@ mod tests {
         );
         // Filtering names rows, and a note is none.
         assert!(
-            role_rows(&view, &role_columns(&view), "public")
+            role_rows(&view, &role_columns(&view, false), "public")
                 .iter()
                 .all(|row| row.who != Who::Note)
+        );
+    }
+
+    fn orders_edit() -> EditObject {
+        EditObject {
+            database: Some("shop".into()),
+            schema: "sales".into(),
+            name: "orders".into(),
+        }
+    }
+
+    fn orders_rows(grants: &ObjectGrants, members: bool, added: &[&str]) -> Vec<MatrixRow> {
+        let added: Vec<String> = added.iter().map(|name| name.to_string()).collect();
+        object_rows(grants, members, "", Some(&orders_edit()), &added)
+    }
+
+    fn row_of<'a>(rows: &'a [MatrixRow], name: &str) -> &'a MatrixRow {
+        rows.iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+    }
+
+    #[test]
+    fn an_object_views_cells_say_what_a_click_does() {
+        let rows = orders_rows(&orders(), true, &[]);
+        let fixed = |why: &str| vec![Edit::Fixed(why.into()); 2];
+        assert_eq!(row_of(&rows, "postgres").edits, fixed(SUPERUSER_FIXED));
+        assert_eq!(row_of(&rows, "app_owner").edits, fixed(OWNER_FIXED));
+        let public = row_of(&rows, "PUBLIC");
+        assert_eq!(public.edits, fixed(PUBLIC_FIXED));
+        assert!(public.target.is_none());
+        let reporting = row_of(&rows, "reporting");
+        assert_eq!(reporting.edits, [Edit::Revoke, Edit::Grant(None)]);
+        assert_eq!(
+            reporting.target,
+            Some(EditTarget {
+                database: Some("shop".into()),
+                object: GrantObject::Relation {
+                    schema: "sales".into(),
+                    name: "orders".into(),
+                    sequence: false,
+                },
+                grantee: "reporting".into(),
+            })
+        );
+        // ana holds SELECT through reporting: not changed by granting it.
+        let ana = row_of(&rows, "ana");
+        assert_eq!(
+            ana.edits,
+            [
+                Edit::Grant(Some("through reporting".into())),
+                Edit::Grant(None)
+            ]
+        );
+        assert_eq!(
+            row_of(&rows, "bi").edits,
+            [Edit::Grant(None), Edit::Grant(None)]
+        );
+    }
+
+    #[test]
+    fn an_object_view_without_its_identity_edits_nothing() {
+        for row in object_rows(&orders(), true, "", None, &[]) {
+            assert!(row.target.is_none() && row.edits.is_empty(), "{}", row.name);
+        }
+    }
+
+    #[test]
+    fn a_privilege_the_object_does_not_take_is_inapplicable() {
+        let mut grants = orders();
+        grants.privileges.push("MAINTAIN".into());
+        let reporting = &orders_rows(&grants, false, &[])[2];
+        assert_eq!(reporting.edits[2], Edit::Inapplicable);
+        grants.sequence = true;
+        let reporting = &orders_rows(&grants, false, &[])[2];
+        assert_eq!(
+            reporting.edits[1],
+            Edit::Inapplicable,
+            "INSERT on a sequence"
+        );
+    }
+
+    #[test]
+    fn an_added_role_is_listed_once_with_nothing_held() {
+        let rows = orders_rows(
+            &orders(),
+            false,
+            &["ana", "reporting", "ana", "carol", "postgres"],
+        );
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "postgres",
+                "app_owner",
+                "reporting",
+                "ana",
+                "carol",
+                "PUBLIC"
+            ]
+        );
+        for name in ["ana", "carol"] {
+            let row = row_of(&rows, name);
+            assert_eq!(row.marks, [Mark::None, Mark::None]);
+            assert_eq!(row.edits, [Edit::Grant(None), Edit::Grant(None)]);
+            assert!(row.target.is_some());
+        }
+    }
+
+    #[test]
+    fn a_click_stages_its_change_and_a_second_one_takes_it_back() {
+        let rows = orders_rows(&orders(), false, &[]);
+        let columns = orders().privileges;
+        let reporting = row_of(&rows, "reporting");
+        let mut staged = Staged::default();
+        staged.toggle(reporting, &columns, 0).unwrap();
+        staged.toggle(reporting, &columns, 1).unwrap();
+        assert_eq!(staged.len(), 2);
+        assert_eq!(
+            staged.pending(reporting, "SELECT"),
+            Some(GrantAction::Revoke)
+        );
+        assert_eq!(
+            staged.pending(reporting, "INSERT"),
+            Some(GrantAction::Grant)
+        );
+        assert_eq!(staged.pending(reporting, "DELETE"), None);
+        let changes = staged.changes();
+        assert_eq!(changes[0].database.as_deref(), Some("shop"));
+        staged.toggle(reporting, &columns, 0).unwrap();
+        assert_eq!(staged.pending(reporting, "SELECT"), None);
+        assert_eq!(staged.len(), 1);
+        staged.clear();
+        assert!(staged.is_empty());
+    }
+
+    #[test]
+    fn a_cell_that_cannot_change_stages_nothing() {
+        let mut grants = orders();
+        grants.privileges.push("MAINTAIN".into());
+        let rows = orders_rows(&grants, false, &[]);
+        let columns = grants.privileges.clone();
+        let mut staged = Staged::default();
+        for (name, column, why) in [
+            ("postgres", 0, SUPERUSER_FIXED),
+            ("app_owner", 1, OWNER_FIXED),
+            ("PUBLIC", 0, PUBLIC_FIXED),
+        ] {
+            let refused = staged.toggle(row_of(&rows, name), &columns, column);
+            assert_eq!(refused, Err(why.to_string()), "{name}");
+        }
+        assert!(
+            staged
+                .toggle(row_of(&rows, "reporting"), &columns, 2)
+                .is_err()
+        );
+        assert!(
+            staged
+                .toggle(row_of(&rows, "reporting"), &columns, 9)
+                .is_err()
+        );
+        assert!(staged.is_empty());
+    }
+
+    #[test]
+    fn a_role_listed_twice_shows_one_staged_cell_in_both_places() {
+        let mut grants = orders();
+        grants.grants.push(grant(Some("ana"), "INSERT", false));
+        let rows = orders_rows(&grants, true, &[]);
+        let columns = grants.privileges.clone();
+        let listed: Vec<&MatrixRow> = rows.iter().filter(|row| row.name == "ana").collect();
+        assert_eq!(listed.len(), 2);
+        let mut staged = Staged::default();
+        staged.toggle(listed[0], &columns, 1).unwrap();
+        assert_eq!(
+            staged.pending(listed[1], "INSERT"),
+            Some(GrantAction::Revoke)
+        );
+    }
+
+    #[test]
+    fn a_re_read_keeps_only_what_still_changes_something() {
+        let rows = orders_rows(&orders(), false, &["ana"]);
+        let columns = orders().privileges;
+        let mut staged = Staged::default();
+        staged
+            .toggle(row_of(&rows, "reporting"), &columns, 0)
+            .unwrap(); // revoke SELECT
+        staged
+            .toggle(row_of(&rows, "reporting"), &columns, 1)
+            .unwrap(); // grant INSERT
+        staged.toggle(row_of(&rows, "ana"), &columns, 1).unwrap(); // grant INSERT
+        // Meanwhile: reporting gained INSERT and lost SELECT. ana is untouched.
+        let mut after = orders();
+        after
+            .grants
+            .retain(|g| g.grantee.as_deref() != Some("reporting"));
+        after.grants.push(grant(Some("reporting"), "INSERT", false));
+        let mut pruned = staged.clone();
+        pruned.prune(&orders_rows(&after, false, &["ana"]), &columns);
+        let kept: Vec<_> = pruned
+            .changes()
+            .into_iter()
+            .map(|c| (c.grantee, c.privilege, c.action))
+            .collect();
+        assert_eq!(
+            kept,
+            [("ana".to_string(), "INSERT".to_string(), GrantAction::Grant)]
+        );
+        // A role with nothing left to revoke is not listed at all.
+        let mut gone = orders();
+        gone.grants
+            .retain(|g| g.grantee.as_deref() != Some("reporting"));
+        let mut revoke_only = Staged::default();
+        revoke_only
+            .toggle(row_of(&rows, "reporting"), &columns, 0)
+            .unwrap();
+        revoke_only.prune(&orders_rows(&gone, false, &[]), &columns);
+        assert!(revoke_only.is_empty());
+        // Unchanged, everything stays.
+        let mut same = staged.clone();
+        same.prune(&rows, &columns);
+        assert_eq!(same, staged);
+    }
+
+    /// One database "d" the role connects to, with the schema "public" read.
+    fn editable_view() -> RoleView {
+        let right = |privilege: &str, sources: Vec<Source>| Right {
+            privilege: privilege.into(),
+            sources,
+        };
+        let mut view = RoleView::plan(
+            "ana".into(),
+            RoleAccess {
+                superuser: false,
+                databases: vec![DatabaseAccess {
+                    name: "d".into(),
+                    allows_connections: true,
+                    rights: vec![
+                        right("CONNECT", vec![Source::Direct, Source::Public]),
+                        right("TEMPORARY", vec![Source::Public]),
+                        right("CREATE", vec![Source::Owner(None)]),
+                    ],
+                }],
+            },
+            |_| true,
+        );
+        let sequence = |privilege: &str, through: Option<&str>| HeldGrant {
+            relation: "q".into(),
+            sequence: true,
+            ..grant_on("q", privilege, through)
+        };
+        view.land(
+            "d",
+            Ok(RoleGrants {
+                database: "d".into(),
+                schemas: vec![SchemaAccess {
+                    name: "public".into(),
+                    rights: vec![right("USAGE", vec![Source::Via("team".into())])],
+                    owns: 0,
+                }],
+                held: vec![
+                    grant_on("t", "SELECT", None),
+                    grant_on("t", "INSERT", Some("team")),
+                    grant_on("t", "UPDATE", Some("PUBLIC")),
+                    sequence("USAGE", None),
+                ],
+                ..RoleGrants::default()
+            }),
+        );
+        view
+    }
+
+    #[test]
+    fn a_role_views_cells_say_what_a_click_does() {
+        let view = editable_view();
+        let columns = role_columns(&view, true);
+        assert_eq!(columns, PRIVILEGE_ORDER);
+        let rows = role_rows(&view, &columns, "");
+        let edits = |name: &str| row_of(&rows, name).edits.clone();
+        let (inapplicable, revoke) = (Edit::Inapplicable, Edit::Revoke);
+        let grant = |how: Option<&str>| Edit::Grant(how.map(str::to_string));
+        assert_eq!(
+            edits("d"),
+            [
+                revoke.clone(),                  // CONNECT, direct
+                grant(Some("PUBLIC")),           // TEMPORARY
+                inapplicable.clone(),            // USAGE
+                Edit::Fixed(OWNER_FIXED.into()), // CREATE, owner
+                inapplicable.clone(),            // SELECT ...
+                inapplicable.clone(),
+                inapplicable.clone(),
+                inapplicable.clone(),
+                inapplicable.clone(),
+                inapplicable.clone(),
+                inapplicable.clone(),
+            ]
+        );
+        assert_eq!(row_of(&rows, "d").target.as_ref().unwrap().database, None);
+        let schema = row_of(&rows, "public");
+        assert_eq!(schema.edits[2], grant(Some("through team")));
+        assert_eq!(schema.edits[3], grant(None));
+        assert_eq!(schema.edits[4], inapplicable);
+        assert_eq!(
+            schema.target.as_ref().unwrap().database.as_deref(),
+            Some("d")
+        );
+        let table = row_of(&rows, "t");
+        assert_eq!(table.edits[2], inapplicable, "USAGE on a table");
+        assert_eq!(table.edits[4], revoke);
+        assert_eq!(table.edits[5], grant(Some("through team")));
+        assert_eq!(table.edits[6], grant(Some("PUBLIC")));
+        assert_eq!(table.edits[7], grant(None));
+        let sequence = row_of(&rows, "q");
+        assert_eq!(sequence.edits[2], revoke);
+        assert_eq!(sequence.edits[4], grant(None));
+        assert_eq!(sequence.edits[5], inapplicable, "INSERT on a sequence");
+        let Some(EditTarget {
+            object, grantee, ..
+        }) = &sequence.target
+        else {
+            panic!("a sequence is editable");
+        };
+        assert!(matches!(
+            object,
+            GrantObject::Relation { sequence: true, .. }
+        ));
+        assert_eq!(grantee, "ana");
+        for row in rows.iter().filter(|row| row.who == Who::Note) {
+            assert!(row.target.is_none() && row.edits.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_role_view_lists_every_privilege_only_while_editing() {
+        let view = editable_view();
+        assert_eq!(
+            role_columns(&view, false),
+            [
+                "CONNECT",
+                "TEMPORARY",
+                "USAGE",
+                "CREATE",
+                "SELECT",
+                "INSERT",
+                "UPDATE"
+            ]
+        );
+        assert_eq!(role_columns(&view, true).len(), PRIVILEGE_ORDER.len());
+    }
+
+    #[test]
+    fn a_superusers_cells_are_fixed() {
+        let view = RoleView::plan(
+            "root".into(),
+            RoleAccess {
+                superuser: true,
+                databases: vec![database("d", Some(Source::Superuser))],
+            },
+            |_| true,
+        );
+        let columns = role_columns(&view, true);
+        let rows = role_rows(&view, &columns, "");
+        assert_eq!(rows[0].edits[0], Edit::Fixed(SUPERUSER_FIXED.into()));
+        assert_eq!(rows[0].edits[4], Edit::Inapplicable);
+    }
+
+    #[test]
+    fn a_role_views_clicks_stage_against_the_role() {
+        let view = editable_view();
+        let columns = role_columns(&view, true);
+        let rows = role_rows(&view, &columns, "");
+        let mut staged = Staged::default();
+        staged.toggle(row_of(&rows, "d"), &columns, 0).unwrap();
+        staged.toggle(row_of(&rows, "t"), &columns, 7).unwrap();
+        assert!(staged.toggle(row_of(&rows, "d"), &columns, 3).is_err());
+        let changes = staged.changes();
+        assert!(changes.iter().all(|change| change.grantee == "ana"));
+        assert_eq!(changes.len(), 2);
+        let sql = crate::db::roles::grant_statements(&changes);
+        assert_eq!(sql.len(), 2);
+        assert_eq!(sql[0].database, None);
+        assert_eq!(sql[0].sql, "REVOKE CONNECT ON DATABASE \"d\" FROM \"ana\";");
+        assert_eq!(
+            sql[1].sql,
+            "GRANT DELETE ON TABLE \"public\".\"t\" TO \"ana\";"
         );
     }
 }
