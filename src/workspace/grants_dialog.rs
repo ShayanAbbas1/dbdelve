@@ -528,7 +528,8 @@ impl Workspace {
             return div().into_any_element();
         };
         let staged = view.staged.len();
-        let discard_workspace = cx.entity().downgrade();
+        let (discard_workspace, review_workspace) =
+            (cx.entity().downgrade(), cx.entity().downgrade());
         let key = |chip: AnyElement, label: &'static str| {
             div()
                 .flex_none()
@@ -593,6 +594,26 @@ impl Workspace {
                 .on_click(move |_, _, cx| {
                     _ = discard_workspace
                         .update(cx, |workspace, cx| workspace.discard_grant_changes(cx));
+                }),
+            )
+            .child(
+                button(
+                    "grants-review",
+                    "Review changes…",
+                    if staged == 0 {
+                        Tone::Quiet
+                    } else {
+                        Tone::Primary
+                    },
+                    Control::Compact,
+                    t,
+                )
+                .debug_selector(|| "show-grants-review".into())
+                .disabled(staged == 0)
+                .on_click(move |_, window, cx| {
+                    _ = review_workspace.update(cx, |workspace, cx| {
+                        workspace.review_grant_changes(window, cx)
+                    });
                 }),
             )
             .into_any_element()

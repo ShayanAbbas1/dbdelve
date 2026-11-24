@@ -3122,17 +3122,25 @@ impl Workspace {
         // (`ApplyReview::error`); a target that clears the grid ends the tab in
         // `Failed`, and the batch is the only thing this tab can have run while
         // the panel is open, so that failure is this batch's.
+        //
+        // A grant review runs on sessions of its own and never through the
+        // tab: what that tab's own statement came to is not its failure, nor
+        // is its running the review's.
+        let grants = review.grants.as_ref();
         let error = review
             .error
             .clone()
             .or_else(|| match profile.session.active_query() {
-                Some(QueryState::Failed(error)) => Some(error.message.clone()),
+                Some(QueryState::Failed(error)) if grants.is_none() => Some(error.message.clone()),
                 _ => None,
             });
-        let running = matches!(
-            profile.session.active_query(),
-            Some(QueryState::Running { .. })
-        );
+        let running = match grants {
+            Some(run) => run.running.is_some(),
+            None => matches!(
+                profile.session.active_query(),
+                Some(QueryState::Running { .. })
+            ),
+        };
         let lines = code_lines(
             &review.sql,
             profile.config.engine().syntax(),
@@ -3220,7 +3228,11 @@ impl Workspace {
                                         0,
                                         button(
                                             "run-apply",
-                                            "Run",
+                                            if running && grants.is_some() {
+                                                "Running…"
+                                            } else {
+                                                "Run"
+                                            },
                                             if running { Tone::Quiet } else { Tone::Primary },
                                             Control::Standard,
                                             t,

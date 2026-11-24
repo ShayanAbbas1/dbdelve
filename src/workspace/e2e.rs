@@ -7249,6 +7249,89 @@ fn show_grants_of_a_role_lists_every_privilege_in_edit_mode(cx: &mut TestAppCont
     });
 }
 
+#[gpui::test]
+fn show_grants_reviews_every_statement_and_sends_nothing_before_run(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        click_selector(cx, "show-grants-edit");
+        click_grant_cell(cx, "watchers", "SELECT");
+        click_grant_cell(cx, "watchers\u{1f}ana", "INSERT");
+        let history = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.history.len()
+        });
+
+        click_selector(cx, "show-grants-review");
+        assert_eq!(front_dialog(&workspace, cx), Some("apply-review"));
+        let shown = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                let review = session.apply_review.as_ref().expect("the review is up");
+                (
+                    review.title,
+                    review.sql.clone(),
+                    review.error.clone(),
+                    review.grants.as_ref().map(|run| run.running.is_some()),
+                )
+            })
+        };
+        // Every statement, exactly as it runs: one database, so no heading.
+        let (title, sql, error, running) = shown(&workspace, cx);
+        assert_eq!(title, "Change grants");
+        assert_eq!(
+            sql,
+            "REVOKE SELECT ON TABLE \"main\".\"birds\" FROM \"watchers\";\n\
+             GRANT INSERT ON TABLE \"main\".\"birds\" TO \"ana\";"
+        );
+        assert_eq!((error, running), (None, Some(false)));
+        let unsent = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                assert_eq!(session.history.len(), history, "nothing was run");
+                assert!(!matches!(
+                    session.active_query(),
+                    Some(QueryState::Running { .. })
+                ));
+                assert_eq!(workspace.grants_view.as_ref().unwrap().staged.len(), 2);
+            })
+        };
+        unsent(&workspace, cx);
+
+        // Read-write may not grant: Run asks for Full and sends nothing.
+        click_selector(cx, "apply-review-0");
+        assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+        unsent(&workspace, cx);
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), Some("apply-review"));
+
+        // In Full it runs, on SQLite, which reads no GRANT: the server's
+        // error stays in the review, with what was staged.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        settle(cx);
+        click_selector(cx, "apply-review-0");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("apply-review"));
+        let (_, _, error, running) = shown(&workspace, cx);
+        let error = error.expect("the failure is said in the review");
+        assert!(
+            error.starts_with("Nothing was applied. In main, "),
+            "{error}"
+        );
+        assert!(error.contains("syntax error"), "{error}");
+        assert_eq!(running, Some(false));
+        assert!(cx.debug_bounds("apply-review-error").is_some());
+        unsent(&workspace, cx);
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), Some("show-grants"));
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
 /// A Users and roles tab put behind the editor, which SQLite never opens
 /// itself, and its id.
 fn users_tab_on(

@@ -555,7 +555,6 @@ pub struct GrantChange {
 }
 
 /// The statements of one database, run on that database's session.
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrantBatch {
     pub database: Option<String>,
@@ -604,7 +603,6 @@ pub fn grant_applies(object: &GrantObject, privilege: &str) -> bool {
 /// action, its privileges in [`PRIVILEGE_ORDER`]. Revokes come before grants.
 /// A privilege its object cannot take is dropped, never written, and a
 /// grantee is always a role's name, never `PUBLIC`.
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub fn grant_statements(changes: &[GrantChange]) -> Vec<GrantBatch> {
     use std::collections::BTreeMap;
     let mut grouped: BTreeMap<_, Vec<&str>> = BTreeMap::new();

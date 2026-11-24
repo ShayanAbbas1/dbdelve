@@ -1379,6 +1379,23 @@ pub(crate) struct ApplyReview {
     /// then commit on its own, and a failure part way would leave some of
     /// the edits applied.
     pub(crate) joining: bool,
+    /// The Show Grants editor's changes: run batch by batch on sessions of
+    /// their own, each database's on that database's, never through the tab
+    /// the review is drawn over.
+    pub(crate) grants: Option<GrantRun>,
+}
+
+/// A grant review's statements and where its run stands.
+pub(crate) struct GrantRun {
+    /// One per database, in the order they run; each passed
+    /// `sql::is_generated_grant_change` as it was written.
+    pub(crate) batches: Vec<crate::db::roles::GrantBatch>,
+    /// The Show Grants dialog it was written from, read again once it ran.
+    pub(crate) request: u64,
+    /// The run out, by its Cancel, while one is: a second Run waits for it.
+    pub(crate) running: Option<crate::db::CancelToken>,
+    /// A Cancel was sent to it.
+    pub(crate) cancelling: bool,
 }
 
 /// The rows a reviewed draft was written from, as they were fetched: one step
@@ -5532,6 +5549,7 @@ mod tests {
             verify: None,
             ran_on: None,
             joining: false,
+            grants: None,
         }
     }
 

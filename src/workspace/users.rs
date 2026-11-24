@@ -254,6 +254,29 @@ impl GrantsView {
 }
 
 impl GrantsView {
+    /// Once every read of the dialog has landed, drop each staged change the
+    /// grants as read no longer leave to make: what a run applied, or what
+    /// changed meanwhile. Built unfiltered, members and every privilege
+    /// listed, as [`Staged::prune`] needs. A database whose read failed has
+    /// no rows, so what was staged in it goes too.
+    pub(super) fn prune_staged(&mut self) {
+        if self.staged.is_empty() {
+            return;
+        }
+        match &self.data {
+            Loaded::Ready(GrantsOf::Object(grants)) => {
+                let rows = crate::grants::object_rows(grants, true, "", self.object.as_ref(), &[]);
+                self.staged.prune(&rows, &grants.privileges);
+            }
+            Loaded::Ready(GrantsOf::Role(view)) if view.pending().is_empty() => {
+                let columns = crate::grants::role_columns(view, true);
+                let rows = crate::grants::role_rows(view, &columns, "");
+                self.staged.prune(&rows, &columns);
+            }
+            _ => {}
+        }
+    }
+
     /// Fold the row keyed `key` shut, or open it again: only the rows drawn
     /// change, from the rows already built.
     pub(crate) fn toggle_fold(&mut self, key: &str) {
@@ -1001,6 +1024,7 @@ impl Workspace {
                 verify: None,
                 ran_on: None,
                 joining: false,
+                grants: None,
             });
             cx.notify();
         }
@@ -1046,13 +1070,10 @@ impl Workspace {
             node.database.clone(),
             node.name.clone(),
         );
-        if !self.make_front(profile, cx) {
+        if !self.make_front(profile, cx) || self.route_in(profile, database.clone()).is_none() {
             return;
         }
-        let Some((profile_id, generation, routed)) = self.route_in(profile, database.clone())
-        else {
-            return;
-        };
+        let profile_id = profile.to_string();
         let elsewhere = self.elsewhere(database);
         let shown_database = elsewhere
             .clone()
@@ -1064,23 +1085,38 @@ impl Workspace {
             .join(" · ");
         let object = EditObject {
             database: elsewhere,
-            schema: schema.clone(),
+            schema,
             name: name.clone(),
         };
-        let (asked_schema, asked) = (schema.clone(), name.clone());
-        let task = self.run_routed(
-            &profile_id,
-            generation,
-            routed,
-            move |connection| connection.apart()?.object_grants(&asked_schema, &asked),
-            cx,
-        );
         let request = self.open_grants_view(
             &profile_id,
             format!("Grants on {name}"),
             subtitle,
-            Some(object),
+            Some(object.clone()),
             window,
+            cx,
+        );
+        self.read_object_grants(&profile_id, object, request, cx);
+    }
+
+    /// Read who holds what on `object`, over the connection of its database,
+    /// for the dialog's `request`.
+    pub(super) fn read_object_grants(
+        &mut self,
+        id: &str,
+        object: EditObject,
+        request: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((profile_id, generation, routed)) = self.route_in(id, object.database) else {
+            return;
+        };
+        let (schema, name) = (object.schema, object.name);
+        let task = self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| connection.apart()?.object_grants(&schema, &name),
             cx,
         );
         cx.spawn(async move |workspace, cx| {
@@ -1110,6 +1146,37 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if (self.profiles.iter())
+            .find(|profile| profile.id == id)
+            .and_then(Profile::connection)
+            .is_none()
+        {
+            return;
+        }
+        let kind = match self.role_of(id, &name) {
+            Some(role) if crate::users_view::is_login(&role) => "login",
+            _ => "role",
+        };
+        let request = self.open_grants_view(
+            id,
+            format!("Grants of {name}"),
+            format!("{kind} · every database it can connect to"),
+            None,
+            window,
+            cx,
+        );
+        self.read_role_access(id, name, request, cx);
+    }
+
+    /// Read the databases `name` can reach, for the dialog's `request`, then
+    /// what it holds inside each ([`Self::land_role_access`]).
+    pub(super) fn read_role_access(
+        &mut self,
+        id: &str,
+        name: String,
+        request: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -1124,18 +1191,6 @@ impl Workspace {
                 side.role_access(&asked)
             })
         });
-        let kind = match self.role_of(id, &name) {
-            Some(role) if crate::users_view::is_login(&role) => "login",
-            _ => "role",
-        };
-        let request = self.open_grants_view(
-            id,
-            format!("Grants of {name}"),
-            format!("{kind} · every database it can connect to"),
-            None,
-            window,
-            cx,
-        );
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
             let result = read.await;
@@ -1274,6 +1329,7 @@ impl Workspace {
         if let Loaded::Ready(GrantsOf::Role(roles)) = &mut view.data {
             roles.land(database, result.map_err(|error| error.message));
             view.rebuild(true, cx);
+            view.prune_staged();
             cx.notify();
         }
         true
@@ -1350,13 +1406,22 @@ impl Workspace {
             return;
         };
         if let Ok(GrantsOf::Object(grants)) = &result {
-            view.subtitle = format!("{} · owner {}", view.subtitle, grants.owner);
+            // Read again after a run: the owner said once.
+            let base = match &view.data {
+                Loaded::Ready(GrantsOf::Object(read)) => (view.subtitle)
+                    .strip_suffix(&format!(" · owner {}", read.owner))
+                    .map(str::to_string),
+                _ => None,
+            };
+            let base = base.unwrap_or_else(|| view.subtitle.clone());
+            view.subtitle = format!("{base} · owner {}", grants.owner);
         }
         view.data = match result {
             Ok(grants) => Loaded::Ready(grants),
             Err(error) => Loaded::Failed(format!("Could not read the grants: {}", error.message)),
         };
         view.rebuild(true, cx);
+        view.prune_staged();
         cx.notify();
     }
 

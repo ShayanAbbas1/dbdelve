@@ -1241,7 +1241,6 @@ pub fn is_generated_role_change(engine: Engine, sql: &str) -> bool {
 /// table or sequence to one role, in the shapes `db::roles::grant_statements`
 /// writes and no other. Never `ALL`, `PUBLIC`, a grant option, `CASCADE`, a
 /// column list, a bulk `ALL TABLES IN SCHEMA`, nor a role's membership.
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub fn is_generated_grant_change(engine: Engine, sql: &str) -> bool {
     let spec = &engine.spec().sql;
     if engine.syntax() != Syntax::Sql || spec.parser_dialect != ParserDialect::PostgreSql {

@@ -370,6 +370,7 @@ impl Workspace {
                 verify,
                 ran_on: None,
                 joining: false,
+                grants: None,
             });
         }
         cx.notify();
@@ -1580,6 +1581,7 @@ impl Workspace {
                 verify,
                 ran_on: None,
                 joining: false,
+                grants: None,
             });
         }
         cx.notify();
@@ -2591,6 +2593,7 @@ impl Workspace {
                         verify,
                         ran_on: None,
                         joining,
+                        grants: None,
                     });
                     cx.notify();
                 }
@@ -2688,6 +2691,7 @@ impl Workspace {
                 verify,
                 ran_on: None,
                 joining: false,
+                grants: None,
             });
             cx.notify();
         }
@@ -2740,6 +2744,12 @@ impl Workspace {
         let Some(review) = &profile.session.apply_review else {
             return;
         };
+        // Grant changes run batch by batch on sessions of their own, not
+        // through the tab the review is drawn over.
+        if review.grants.is_some() {
+            self.run_grant_review(cx);
+            return;
+        }
         let (tab, sql) = (review.tab, review.sql.clone());
         // Cloned, never taken: a refusal leaves the review open and the next
         // Run reads the rows again.
@@ -2793,6 +2803,9 @@ impl Workspace {
         };
         if !profile.session.apply_review_covers(profile.session.active) {
             return false;
+        }
+        if (profile.session.apply_review.as_ref()).is_some_and(|review| review.grants.is_some()) {
+            return self.close_grant_review(cx);
         }
         // While its batch runs, Cancel and Esc stop it first, and close the
         // review only once a cancel is out or a reconnect has moved the

@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::db::roles::{
-    DatabaseAccess, GrantAction, GrantChange, GrantObject, HeldGrant, ObjectGrants,
+    DatabaseAccess, GrantAction, GrantBatch, GrantChange, GrantObject, HeldGrant, ObjectGrants,
     PRIVILEGE_ORDER, Right, RoleAccess, RoleGrants, Roles, SchemaAccess, Source, grant_applies,
 };
 use crate::fuzzy::{Fuzzy, Query};
@@ -1152,7 +1152,6 @@ fn held_schema<'a>(held: &[&'a HeldGrant]) -> &'a str {
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Staged(BTreeSet<GrantChange>);
 
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 impl Staged {
     /// Stage the click on `row`'s `column`, or unstage it when already
     /// staged. `Err` says why that cell cannot change.
@@ -1244,6 +1243,71 @@ impl Staged {
             })
         });
     }
+}
+
+/// `changes` with the connection's own database, where a role view names it,
+/// as `None`: its statements run on the connection's own session, in one
+/// batch with the database privileges that are written there.
+pub(crate) fn on_own_session(changes: Vec<GrantChange>, own: Option<&str>) -> Vec<GrantChange> {
+    (changes.into_iter())
+        .map(|change| GrantChange {
+            database: change
+                .database
+                .filter(|database| Some(database.as_str()) != own),
+            ..change
+        })
+        .collect()
+}
+
+/// What a batch's database is called where the review and its outcome name
+/// it: `None` is the connection's own. On one line, since it goes in a
+/// comment.
+pub(crate) fn database_name(database: Option<&str>, own: Option<&str>) -> String {
+    match database.or(own) {
+        Some(name) => name.replace(['\n', '\r'], " "),
+        None => "the connection's database".into(),
+    }
+}
+
+/// The text the review shows of `batches`: each database's statements under
+/// a comment naming it, when more than one database runs some or the one
+/// that does is not the connection's own. The comment is the only difference
+/// from what runs, which is each batch as it is, gated on its own.
+pub(crate) fn review_text(batches: &[GrantBatch], own: Option<&str>) -> String {
+    let headed = batches.len() > 1 || batches.iter().any(|batch| batch.database.is_some());
+    (batches.iter())
+        .map(|batch| match headed {
+            true => format!(
+                "-- in database {}\n{}",
+                database_name(batch.database.as_deref(), own),
+                batch.sql
+            ),
+            false => batch.sql.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// What a grant run that stopped at the database `failed` says: which ran
+/// their statements, that the failing one applied none of its own (its
+/// batch is one submission, one transaction), and which were never sent.
+pub(crate) fn run_failure(
+    applied: &[String],
+    failed: &str,
+    error: &str,
+    unsent: &[String],
+) -> String {
+    let mut said = match applied {
+        [] => "Nothing was applied.".to_string(),
+        _ => format!("Applied in {}.", applied.join(", ")),
+    };
+    said.push_str(&format!(
+        " In {failed}, none of its statements applied: {error}"
+    ));
+    if !unsent.is_empty() {
+        said.push_str(&format!(" Not sent to {}.", unsent.join(", ")));
+    }
+    said
 }
 
 #[cfg(test)]
@@ -2261,6 +2325,53 @@ mod tests {
                 Some(&table)
             ),
             "CONNECT does not apply to a table."
+        );
+    }
+
+    #[test]
+    fn the_own_database_runs_in_the_batch_of_the_connections_session() {
+        let change = |database: Option<&str>, object: GrantObject| GrantChange {
+            database: database.map(str::to_string),
+            object,
+            grantee: "ana".into(),
+            privilege: "USAGE".into(),
+            action: GrantAction::Grant,
+        };
+        let changes = on_own_session(
+            vec![
+                change(None, GrantObject::Database("main".into())),
+                change(Some("main"), GrantObject::Schema("app".into())),
+                change(Some("other"), GrantObject::Schema("app".into())),
+            ],
+            Some("main"),
+        );
+        let databases: Vec<_> = changes.iter().map(|c| c.database.as_deref()).collect();
+        assert_eq!(databases, [None, None, Some("other")]);
+        let batches = crate::db::roles::grant_statements(&changes);
+        assert_eq!(batches.len(), 2, "{batches:?}");
+        assert_eq!(
+            review_text(&batches, Some("main")),
+            format!(
+                "-- in database main\n{}\n\n-- in database other\n{}",
+                batches[0].sql, batches[1].sql
+            )
+        );
+        // One batch of the connection's own needs no heading.
+        assert_eq!(review_text(&batches[..1], Some("main")), batches[0].sql);
+        // A name cannot end the comment it is put in.
+        assert_eq!(database_name(Some("a\nGRANT"), None), "a GRANT");
+    }
+
+    #[test]
+    fn a_failed_run_says_what_applied_and_what_was_never_sent() {
+        assert_eq!(
+            run_failure(&[], "main", "permission denied", &["other".into()]),
+            "Nothing was applied. In main, none of its statements applied: permission denied \
+             Not sent to other."
+        );
+        assert_eq!(
+            run_failure(&["main".into()], "other", "boom", &[]),
+            "Applied in main. In other, none of its statements applied: boom"
         );
     }
 }
