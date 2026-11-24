@@ -86,7 +86,7 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   agent keeps its own lanes and reaches none of them.
 - **A profile keeps one include list per filtered level** (`Profile::include`,
   `db::Include`; `include_databases` and `include_schemas` in `profiles.toml`,
-  each left out when empty). An entry is an exact name or a `*`/`?` glob,
+  each left out when empty, and `[[profiles.include_tables]]`, below). An entry is an exact name or a `*`/`?` glob,
   matched in Rust ignoring case (`db::include::matches`) and never sent as
   `LIKE`; empty means everything. `Target::levels` says which list a target
   uses, and a list its level does not use is kept and ignored. The
@@ -113,6 +113,26 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   (`Connection::catalog_databases`: on MySQL and MariaDB every database but
   the system ones, as the catalog draws them; on ClickHouse the databases
   holding a relation), so shown plus hidden is the unfiltered count.
+  `include_tables` is one list per schema (`db::TableFilter`: `database`,
+  `schema`, `tables`, left out when none): the relations of that schema the
+  tree shows, matched like the other lists. Its key is the database that
+  holds the schema where the tree draws databases over schemas
+  (`DatabaseThenSchema`, `DatabaseHoldsObjects`: the real database name and
+  the schema's), and no database where it does not (`Flat`: the schema;
+  `DatabaseIsSchema`, MySQL, MariaDB and ClickHouse: the database's name as
+  the schema). On a keyed shape whose own database is unknown no list
+  applies. It covers every relation kind the tree lists under a schema,
+  because the sidebar lists them all there; routines and sequences are never
+  filtered, and a partition follows its parent. Narrowing drops the unlisted
+  relations and keeps their names in `Catalog::hidden_relations`, the
+  deliberate exception to "nothing stores an unnarrowed answer": a schema's
+  relations are read whole on every engine anyway, so the names cost no read,
+  and the filter picker lists them so a hidden table can be ticked again
+  without a second one. They live apart from `schemas`, so nothing that
+  offers objects can see them: the tree, completion, Go to Object and the
+  diagrams all read the narrowed catalog. A tab, a pin or a saved query on a
+  hidden table survives as for a hidden schema (`Shown::lists_object` takes
+  the relation).
 - **A profile's `introspection_depth` chooses which connect-time loads run**
   (`Profile::behaviour.depth`, `session::Depth`; `relations`, `routines` or
   `sizes`, left out at the default `sizes`, which is every load): relations

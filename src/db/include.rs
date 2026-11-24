@@ -422,10 +422,12 @@ impl Shown {
     /// were read, and how many that was added to `left_out`, so a count a
     /// read already made is kept.
     ///
-    /// ponytail: the whole catalog is read and the schemas dropped after. The
-    /// ceiling is a very large single database, which still reads every
-    /// schema; the upgrade is a per-engine schema-names read pushed into the
-    /// catalog SQL.
+    /// ponytail: the whole catalog is read and the schemas dropped after, and
+    /// the relations of a shown schema are read whole too, its table list
+    /// dropping the unlisted names after. The ceiling is a very large single
+    /// database, which still reads every schema, and a schema with very many
+    /// relations, which still reads each; the upgrade is a per-engine
+    /// schema-names read pushed into the catalog SQL, and a name list in it.
     ///
     /// The relations a schema's table list leaves out are dropped from it too,
     /// and their names and kinds kept in [`Catalog::hidden_relations`].
