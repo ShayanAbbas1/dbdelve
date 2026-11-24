@@ -13945,6 +13945,30 @@ fn an_opened_file_is_listed_under_files_and_remove_from_list_leaves_it(cx: &mut 
     });
 }
 
+#[gpui::test]
+fn clicking_a_listed_files_open_tab_selects_that_files_row(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let query = user_sql_file("query.sql", "SELECT 1;");
+        let reports = user_sql_file("Reports.sql", "SELECT 2;");
+        open_sql_file(&workspace, cx, &query);
+        open_sql_file(&workspace, cx, &reports);
+
+        let row = explorer_row(&workspace, &explorer::file_row(&query), cx).center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_file(&workspace, cx), Some(query.clone()));
+        let selected = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.read(cx)
+                .selected_item()
+                .map(|item| item.id.to_string())
+        });
+        assert_eq!(selected, Some(explorer::file_row(&query)));
+        quit(workspace, cx);
+    });
+}
+
 /// A listed file opens in a file tab whatever its name, Save As having
 /// taken the one typed, and one gone since asks to leave the list.
 #[gpui::test]
