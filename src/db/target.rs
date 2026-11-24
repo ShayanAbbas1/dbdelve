@@ -114,6 +114,12 @@ impl Target {
         self.driver == Driver::BuiltIn && self.engine.takes_service()
     }
 
+    /// Whether a profile can present a client certificate in its TLS
+    /// handshake: only where DBDelve builds that handshake itself.
+    pub fn takes_client_certificate(self) -> bool {
+        self.driver == Driver::BuiltIn && self.engine == Engine::Postgres
+    }
+
     /// Whether a profile can have a command print its password at each login.
     /// Every server login DBDelve performs itself, except MongoDB's: its driver
     /// redials with the credentials it parsed at connect, so a token would go

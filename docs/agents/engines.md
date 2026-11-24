@@ -275,6 +275,15 @@ Decided, and not to be re-litigated:
   its service or `PGSSLMODE` sets. libpq checks a root certificate on any
   encrypted connection, so `require` with one reads as `verify-ca`, which the
   line under Require says too, and `prefer` with one is refused.
+- **A Postgres profile can present a client certificate** (`sslcert` and
+  `sslkey` in a URL or a service, the form's Client certificate and Client key,
+  `PGSSLCERT` and `PGSSLKEY`), both or neither once resolved, which
+  `tls::connector` hands rustls as its client auth on every mode but `disable`,
+  where one is refused rather than dropped. Beside a service the form keeps a
+  lone certificate or key, since the service may name the other half; the
+  connector checks the pair that results. Only `Target::takes_client_certificate` targets show the
+  fields: every other engine's TLS is its driver's. PEM files only, the key
+  unencrypted: libpq's DER keys and `sslpassword` are not read.
 - **A password command is run at every login, inside `src/db/`**
   (`ServerConfig::login_password`, `password_command.rs`), never once at
   connect: an IAM token lasts minutes, and a side session, MySQL's `KILL QUERY`

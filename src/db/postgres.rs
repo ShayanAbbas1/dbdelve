@@ -591,6 +591,8 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
     // know.
     let mut sslmode = tls::SslMode::default();
     let mut root_certificate = None;
+    let mut client_certificate = None;
+    let mut client_key = None;
     let mut service = None;
     let mut passed_through = Vec::new();
     for (key, value) in url_parts.query_pairs() {
@@ -602,6 +604,10 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             "sslrootcert" => {
                 root_certificate = Some(value.trim().to_string()).filter(|p| !p.is_empty());
             }
+            "sslcert" => {
+                client_certificate = Some(value.trim().to_string()).filter(|p| !p.is_empty());
+            }
+            "sslkey" => client_key = Some(value.trim().to_string()).filter(|p| !p.is_empty()),
             _ => passed_through.push((key.into_owned(), value.into_owned())),
         }
     }
@@ -667,6 +673,8 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             password_command: None,
             sslmode,
             root_certificate,
+            client_certificate,
+            client_key,
             // A URL has nowhere to say it; the form is where it is set.
             statement_timeout: 0,
             ssm: None,
@@ -1092,11 +1100,16 @@ impl Connection {
     }
 
     fn sign_in(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
-        let connector = tls::connector(server.sslmode, server.root_certificate.as_deref())
-            .map_err(|message| DbError {
-                message,
-                position: None,
-            })?;
+        let connector = tls::connector(
+            server.sslmode,
+            server.root_certificate.as_deref(),
+            server.client_certificate.as_deref(),
+            server.client_key.as_deref(),
+        )
+        .map_err(|message| DbError {
+            message,
+            position: None,
+        })?;
         let password_file = password_file(server);
         // Only for this connect: the profile keeps its blank password, so the
         // file is read again by the next one and never reaches the Keychain.
@@ -3017,6 +3030,8 @@ mod tests {
             password_command: None,
             sslmode: SslMode::default(),
             root_certificate: None,
+            client_certificate: None,
+            client_key: None,
             statement_timeout: 0,
             ssm: None,
             ssh: None,
@@ -3060,6 +3075,8 @@ mod tests {
             password_command: None,
             sslmode: SslMode::Disable,
             root_certificate: None,
+            client_certificate: None,
+            client_key: None,
             statement_timeout: 0,
             ssm: None,
             ssh: None,
@@ -3843,6 +3860,8 @@ mod tests {
                     password_command: None,
                     sslmode: SslMode::default(),
                     root_certificate: None,
+                    client_certificate: None,
+                    client_key: None,
                     statement_timeout: 0,
                     ssm: None,
                     ssh: None,
@@ -3887,14 +3906,15 @@ mod tests {
     }
 
     #[test]
-    fn the_two_keys_dbdelve_owns_are_kept_away_from_the_drivers_parser() {
-        // The driver knows neither `verify-full` nor `sslrootcert` and refuses
-        // the whole string for either, naming nothing useful. Both have to be
-        // taken out of the URL before it reaches that parser, and everything
-        // else has to survive the round trip.
+    fn the_tls_keys_dbdelve_owns_are_kept_away_from_the_drivers_parser() {
+        // The driver knows none of `verify-full`, `sslrootcert`, `sslcert` and
+        // `sslkey` and refuses the whole string for any, naming nothing
+        // useful. They have to be taken out of the URL before it reaches that
+        // parser, and everything else has to survive the round trip.
         let config = config_from_url(
             "postgresql://someone@db.example.test:5433/dbdelve_test\
-             ?sslmode=verify-full&sslrootcert=/tmp/rds.pem&application_name=dbdelve",
+             ?sslmode=verify-full&sslrootcert=/tmp/rds.pem&sslcert=/tmp/me.crt\
+             &sslkey=/tmp/me.key&application_name=dbdelve",
         )
         .unwrap();
 
@@ -3903,6 +3923,11 @@ mod tests {
             config.server.root_certificate.as_deref(),
             Some("/tmp/rds.pem")
         );
+        assert_eq!(
+            config.server.client_certificate.as_deref(),
+            Some("/tmp/me.crt")
+        );
+        assert_eq!(config.server.client_key.as_deref(), Some("/tmp/me.key"));
         assert_eq!(config.server.port, Some(5433));
         assert_eq!(config.server.user, "someone");
     }

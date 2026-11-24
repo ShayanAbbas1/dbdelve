@@ -583,6 +583,8 @@ impl Profile {
                 .unwrap_or_default(),
             sslmode: server.map(|server| server.sslmode.as_str().to_string()),
             root_certificate: server.and_then(|server| server.root_certificate.clone()),
+            client_certificate: server.and_then(|server| server.client_certificate.clone()),
+            client_key: server.and_then(|server| server.client_key.clone()),
             service: self.config.service().map(str::to_string),
             // A plugin profile's engine is the plugin, and its dialect is
             // `speaks`: `engine()` answers with the dialect.

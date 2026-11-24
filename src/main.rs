@@ -177,9 +177,11 @@ fn connection_config_from(
         Some(sslmode) => SslMode::parse(&sslmode)?,
         None => SslMode::default(),
     };
-    let root_certificate = variable("PGSSLROOTCERT")
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty());
+    let path = |name: &str| {
+        variable(name)
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+    };
 
     let port = port
         .map(|port| {
@@ -199,7 +201,9 @@ fn connection_config_from(
         password: variable("PGPASSWORD").unwrap_or_default(),
         password_command: None,
         sslmode,
-        root_certificate,
+        root_certificate: path("PGSSLROOTCERT"),
+        client_certificate: path("PGSSLCERT"),
+        client_key: path("PGSSLKEY"),
         // No `PG*` variable means it, and dbdelve is not inventing one.
         statement_timeout: 0,
         ssm: None,

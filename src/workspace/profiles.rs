@@ -556,21 +556,36 @@ impl Workspace {
             | ConnectionConfig::SqlServer(server)
             | ConnectionConfig::ClickHouse(server)
             | ConnectionConfig::Redis(server)
-            | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
-                (&form.name, default_profile_name(&config)),
-                (&form.host, server.host.clone()),
-                (
-                    &form.port,
-                    server.port.map(|port| port.to_string()).unwrap_or_default(),
-                ),
-                (&form.database, server.database.clone()),
-                (&form.user, server.user.clone()),
-                (&form.password, server.password.clone()),
-                (
-                    &form.root_certificate,
-                    server.root_certificate.clone().unwrap_or_default(),
-                ),
-            ],
+            | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => {
+                let mut fields = vec![
+                    (&form.name, default_profile_name(&config)),
+                    (&form.host, server.host.clone()),
+                    (
+                        &form.port,
+                        server.port.map(|port| port.to_string()).unwrap_or_default(),
+                    ),
+                    (&form.database, server.database.clone()),
+                    (&form.user, server.user.clone()),
+                    (&form.password, server.password.clone()),
+                    (
+                        &form.root_certificate,
+                        server.root_certificate.clone().unwrap_or_default(),
+                    ),
+                ];
+                if config.target().takes_client_certificate() {
+                    fields.extend([
+                        (
+                            &form.client_certificate,
+                            server.client_certificate.clone().unwrap_or_default(),
+                        ),
+                        (
+                            &form.client_key,
+                            server.client_key.clone().unwrap_or_default(),
+                        ),
+                    ]);
+                }
+                fields
+            }
             // `from_url` refuses the scheme, so no URL arrives as one.
             ConnectionConfig::Snowflake(_) | ConnectionConfig::External(_) => Vec::new(),
         };
@@ -3422,6 +3437,8 @@ fn stored_config(
                 password_command: stored_password_command(stored, engine),
                 sslmode,
                 root_certificate: stored.root_certificate.clone(),
+                client_certificate: stored.client_certificate.clone(),
+                client_key: stored.client_key.clone(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
                 ssm: stored.ssm.clone(),
                 ssh: stored.ssh.clone(),

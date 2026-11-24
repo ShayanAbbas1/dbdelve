@@ -125,6 +125,8 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         password_command: None,
         sslmode,
         root_certificate,
+        client_certificate: None,
+        client_key: None,
         // A URL has nowhere to say either; the form is where they are set.
         statement_timeout: 0,
         ssm: None,
