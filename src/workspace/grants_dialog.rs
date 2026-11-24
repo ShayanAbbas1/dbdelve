@@ -6,15 +6,20 @@ use gpui_component::Icon;
 use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
 
-use crate::grants::{Mark, MatrixRow, Who, column_label, role_grants_empty};
+use crate::grants::{Mark, MatrixRow, Who, column_label};
 use crate::theme::ConnectionColor;
 use crate::users_view::Loaded;
 
 /// The Show Grants dialog's size, as drawn on the design canvas.
 const GRANTS_WIDTH: f32 = 840.;
+/// A role's access lists up to eleven privileges, a database's, a schema's
+/// and a relation's in one row of columns.
+const ROLE_GRANTS_WIDTH: f32 = 1040.;
 const GRANTS_HEIGHT: f32 = 600.;
 /// How wide a privilege's column is.
 const PRIVILEGE_COLUMN: f32 = 74.;
+/// How far in each level of a role's access is drawn.
+const ROLE_INDENT: f32 = 18.;
 
 impl Workspace {
     pub(crate) fn render_show_grants(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -143,7 +148,7 @@ impl Workspace {
                 }),
             );
 
-        let first_column = if view.of_object { "Role" } else { "Object" };
+        let first_column = if view.of_object { "Role" } else { "Database" };
         let head = |label: String| {
             div()
                 .text_size(px(layout::chrome(layout::TEXT_XS)))
@@ -189,7 +194,7 @@ impl Workspace {
                 .text_color(t.text_muted)
                 .child(match (filter.trim().is_empty(), grants) {
                     (false, _) => "Nothing matches the filter.".to_string(),
-                    (true, GrantsOf::Role(grants)) => role_grants_empty(grants),
+                    (true, GrantsOf::Role(_)) => "The server lists no database.".to_string(),
                     (true, GrantsOf::Object(_)) => "Nobody holds anything on it.".to_string(),
                 })
                 .into_any_element(),
@@ -254,9 +259,20 @@ impl Workspace {
                 mark_chip(Mark::Through, 18., t, mono.clone()),
                 "through a role it belongs to",
             ))
+            .when(!view.of_object, |footer| {
+                footer
+                    .child(legend(
+                        mark_chip(Mark::Public, 18., t, mono.clone()),
+                        "granted to PUBLIC",
+                    ))
+                    .child(legend(
+                        mark_chip(Mark::Blocked, 18., t, mono.clone()),
+                        "granted, but the schema is closed",
+                    ))
+            })
             .child(div().flex_1().min_w(px(160.)).line_height(px(layout::chrome(15.))).child(match view.of_object {
                 true => "Members listed where the engine has role membership. Nothing here runs.",
-                false => "Nothing here runs.",
+                false => "Effective access, as the server answers for it. Nothing here runs.",
             }))
             .child(
                 self.choice(
@@ -290,7 +306,10 @@ impl Workspace {
                     div()
                         .occlude()
                         .debug_selector(|| "show-grants".into())
-                        .w(px(GRANTS_WIDTH))
+                        .w(px(match view.of_object {
+                            true => GRANTS_WIDTH,
+                            false => ROLE_GRANTS_WIDTH,
+                        }))
                         .max_w(relative(0.96))
                         .h(px(GRANTS_HEIGHT))
                         .max_h(relative(0.92))
@@ -449,24 +468,34 @@ impl Workspace {
 }
 
 /// One row of the grants table.
-fn grants_row(
-    row: &MatrixRow,
-    columns: &[String],
-    t: Theme,
-    mono: SharedString,
-) -> impl IntoElement {
+fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString) -> AnyElement {
+    if row.who == Who::Note {
+        return div()
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("show-grants-note-{key}")
+            })
+            .pl(px(18. + f32::from(row.depth) * ROLE_INDENT + 22.))
+            .pr(px(18.))
+            .py(px(4.))
+            .text_size(px(layout::chrome(layout::TEXT_XS)))
+            .text_color(t.text_faint)
+            .child(row.name.clone())
+            .into_any_element();
+    }
     let label = if row.member {
         div().text_color(t.text_muted)
     } else {
         div().text_color(t.text)
     };
+    let header = row.who == Who::Database;
     div()
         .flex()
         .items_center()
         .h(px(36.))
         .border_t_1()
         .border_color(t.border)
-        .when(row.member, |line| line.bg(t.surface))
+        .when(row.member || header, |line| line.bg(t.surface))
         .debug_selector({
             let name = row.name.clone();
             move || format!("show-grants-row-{name}")
@@ -478,7 +507,10 @@ fn grants_row(
                 .flex()
                 .items_center()
                 .gap(px(layout::SPACE_SM))
-                .pl(px(if row.member { 46. } else { 18. }))
+                .pl(px(match row.member {
+                    true => 46.,
+                    false => 18. + f32::from(row.depth) * ROLE_INDENT,
+                }))
                 .pr(px(18.))
                 .child(
                     Icon::default()
@@ -518,6 +550,8 @@ fn grants_row(
                                     .line_height(px(layout::chrome(14.)))
                                     .text_color(t.text_faint)
                                     .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
                                     .child(row.via.clone()),
                             )
                         }),
@@ -529,6 +563,8 @@ fn grants_row(
                 Mark::Granted => "granted",
                 Mark::Grantable => "granted, can grant to others",
                 Mark::Through => "through a role it belongs to",
+                Mark::Public => "granted to PUBLIC",
+                Mark::Blocked => "granted, but the schema is closed to it: out of reach",
                 Mark::None => "not granted",
             };
             div()
@@ -543,6 +579,7 @@ fn grants_row(
                 })
                 .child(mark_chip(*mark, 22., t, SharedString::default()))
         }))
+        .into_any_element()
 }
 
 /// A cell's mark, drawn `size` square.
@@ -555,6 +592,14 @@ fn mark_chip(mark: Mark, size: f32, t: Theme, mono: SharedString) -> AnyElement 
         Mark::Through => (
             Some(ConnectionColor::Blue.fill()),
             ConnectionColor::Blue.ink(t),
+        ),
+        Mark::Public => (
+            Some(ConnectionColor::Purple.fill()),
+            ConnectionColor::Purple.ink(t),
+        ),
+        Mark::Blocked => (
+            Some(ConnectionColor::Orange.fill()),
+            ConnectionColor::Orange.ink(t),
         ),
         Mark::None => (None, t.text_faint),
     };
@@ -583,6 +628,8 @@ fn mark_chip(mark: Mark, size: f32, t: Theme, mono: SharedString) -> AnyElement 
             .child(glyph(icon::CHECK))
             .child(div().line_height(px(size * 0.5)).child("+")),
         Mark::Through => chip.child(glyph(icon::THROUGH)),
+        Mark::Public => chip.child(glyph(icon::PUBLIC)),
+        Mark::Blocked => chip.child(glyph(icon::LOCK)),
         Mark::None => chip.child("·"),
     }
     .into_any_element()
@@ -596,6 +643,9 @@ fn who_icon(who: Who, row: &str, size: f32, t: Theme) -> impl IntoElement {
         Who::Superuser => (icon::SHIELD, ConnectionColor::Yellow.ink(t)),
         Who::Public => (icon::PUBLIC, t.text_muted),
         Who::Object => (icon::TABLE, t.text_muted),
+        Who::Database => (icon::DATABASE, t.text_muted),
+        Who::Schema => (icon::SCHEMA, t.text_muted),
+        Who::Note => (icon::TABLE, t.text_faint),
     };
     div()
         .id(SharedString::from(format!("who-{}-{row}", who.label())))

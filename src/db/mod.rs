@@ -2750,7 +2750,16 @@ impl Connection {
         }
     }
 
-    /// Every privilege the role `name` holds on a relation of the
+    /// What the role `name` holds on every database of the server, read in
+    /// the connection's own: the catalogs it reads are shared.
+    pub fn role_access(&self, name: &str) -> Result<roles::RoleAccess, DbError> {
+        match self {
+            Self::Postgres(connection) => connection.role_access(name),
+            _ => Err(plain_error("This connection lists no grants.".into())),
+        }
+    }
+
+    /// What the role `name` holds on the schemas and relations of the
     /// connection's database.
     pub fn role_grants(&self, name: &str) -> Result<roles::RoleGrants, DbError> {
         match self {

@@ -2126,11 +2126,19 @@ impl Connection {
     }
 
     pub fn role_grants(&self, name: &str) -> Result<super::roles::RoleGrants, DbError> {
-        use super::roles::{assemble_role_grants, owns_sql, role_grants_sql};
+        use super::roles::{assemble_role_grants, owns_sql, role_grants_sql, schema_access_sql};
         let (_, per_membership) = self.role_catalog()?;
         let held = self.internal_query(&role_grants_sql(name, per_membership))?;
+        let schemas = self.internal_query(&schema_access_sql(name, per_membership))?;
         let owns = self.internal_query(&owns_sql(name, per_membership))?;
-        assemble_role_grants(&held, &owns)
+        assemble_role_grants(&held, &schemas, &owns)
+    }
+
+    /// What the role `name` holds on every database of the server.
+    pub fn role_access(&self, name: &str) -> Result<super::roles::RoleAccess, DbError> {
+        use super::roles::{assemble_role_access, database_access_sql};
+        let (_, per_membership) = self.role_catalog()?;
+        assemble_role_access(&self.internal_query(&database_access_sql(name, per_membership))?)
     }
 
     pub fn role_reports(
@@ -4426,6 +4434,98 @@ mod tests {
         assert_eq!(listed, Ok(true), "the user's rollback did not undo it");
     }
 
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_roles_access_is_read_in_every_database_with_public_roles_and_closed_schemas() {
+        use super::super::roles::Source;
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let reset = "DROP DATABASE IF EXISTS dbdelve_probe_gdb; \
+                     DROP ROLE IF EXISTS dbdelve_probe_gana; \
+                     DROP ROLE IF EXISTS dbdelve_probe_gteam";
+        let run = |connection: &Connection, sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message));
+        };
+        // One statement each: CREATE DATABASE refuses to run with others.
+        for statement in reset.split(';') {
+            run(&plain, statement);
+        }
+        run(&plain, "CREATE ROLE dbdelve_probe_gteam NOLOGIN");
+        run(
+            &plain,
+            "CREATE ROLE dbdelve_probe_gana LOGIN IN ROLE dbdelve_probe_gteam",
+        );
+        run(&plain, "CREATE DATABASE dbdelve_probe_gdb");
+        // CONNECT is taken from PUBLIC there and given to the team only.
+        run(
+            &plain,
+            "REVOKE CONNECT ON DATABASE dbdelve_probe_gdb FROM PUBLIC",
+        );
+        run(
+            &plain,
+            "GRANT CONNECT ON DATABASE dbdelve_probe_gdb TO dbdelve_probe_gteam",
+        );
+        let second = Connection::open(&ServerConfig {
+            database: "dbdelve_probe_gdb".into(),
+            ..live_config()
+        })
+        .expect("the second database should open");
+        run(
+            &second,
+            "CREATE SCHEMA s_open; CREATE SCHEMA s_closed; \
+             CREATE TABLE s_open.shared (id int); CREATE TABLE s_closed.hidden (id int); \
+             GRANT USAGE ON SCHEMA s_open TO PUBLIC; \
+             GRANT SELECT ON s_open.shared TO PUBLIC; \
+             GRANT SELECT ON s_open.shared TO dbdelve_probe_gteam; \
+             GRANT SELECT ON s_closed.hidden TO dbdelve_probe_gana",
+        );
+
+        let access = plain.role_access("dbdelve_probe_gana");
+        let held = second.role_grants("dbdelve_probe_gana");
+        drop(second);
+        for statement in reset.split(';') {
+            run(&plain, statement);
+        }
+
+        let access = access.expect("the access should read");
+        let found = |name: &str| access.databases.iter().find(|db| db.name == name);
+        let own = found(&live_config().database).expect("the connected database is listed");
+        assert!(
+            own.connects(),
+            "PUBLIC's default CONNECT reaches every role"
+        );
+        assert_eq!(own.rights[0].sources, [Source::Public]);
+        let gdb = found("dbdelve_probe_gdb").expect("the second database is listed");
+        let connect = (gdb.rights.iter())
+            .find(|right| right.privilege == "CONNECT")
+            .expect("it connects through its team");
+        assert_eq!(connect.sources, [Source::Via("dbdelve_probe_gteam".into())]);
+
+        let held = held.expect("the second database's grants should read");
+        assert_eq!(held.database, "dbdelve_probe_gdb");
+        let schema = |name: &str| held.schemas.iter().find(|schema| schema.name == name);
+        assert!(schema("s_open").is_some_and(|schema| schema.usable()));
+        assert!(schema("s_closed").is_some_and(|schema| !schema.usable()));
+        let grant = |relation: &str| {
+            (held.held.iter())
+                .filter(|grant| grant.relation == relation)
+                .map(|grant| (grant.through.as_deref(), grant.usable))
+                .collect::<Vec<_>>()
+        };
+        let mut shared = grant("shared");
+        shared.sort_unstable();
+        assert_eq!(
+            shared,
+            [(Some("PUBLIC"), true), (Some("dbdelve_probe_gteam"), true)],
+            "a grant to PUBLIC and one to the team, in a schema it can use"
+        );
+        assert_eq!(
+            grant("hidden"),
+            [(None, false)],
+            "a direct grant in a schema it holds no USAGE on"
+        );
+    }
     #[test]
     #[ignore = "requires the compose databases"]
     fn live_a_name_with_a_backslash_reads_as_itself_with_standard_conforming_strings_off() {

@@ -6607,6 +6607,62 @@ fn birds_grants() -> crate::db::roles::ObjectGrants {
 }
 
 #[gpui::test]
+fn show_grants_of_a_role_lists_each_database_and_a_failed_read_stays_in_its_own(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let database = |name: String, connects: bool| DatabaseAccess {
+            name,
+            allows_connections: true,
+            rights: connects
+                .then(|| Right {
+                    privilege: "CONNECT".into(),
+                    sources: vec![Source::Public],
+                })
+                .into_iter()
+                .collect(),
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().expect("a connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let request = workspace.open_grants_view(
+                &id,
+                "Grants of ana".into(),
+                "login".into(),
+                false,
+                window,
+                cx,
+            );
+            let access = RoleAccess {
+                superuser: false,
+                databases: vec![
+                    database("main".into(), true),
+                    database("locked".into(), false),
+                ],
+            };
+            workspace.land_role_access(&id, generation, request, "ana".into(), Ok(access), cx);
+        });
+        settle(cx);
+        settle(cx);
+        // SQLite lists no grants, so the one read fails: said in its own
+        // row, with the database it cannot connect to listed beside it.
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            assert!(matches!(view.data, crate::users_view::Loaded::Ready(_)));
+            let rows = &view.matrix.rows;
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert!(rows[0].via.starts_with("could not read"), "{rows:?}");
+            assert_eq!(rows[1].via, "no CONNECT: not read");
+        });
+        assert!(cx.debug_bounds("show-grants-row-locked").is_some());
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");

@@ -157,11 +157,118 @@ pub struct ObjectGrants {
     pub roles: Roles,
 }
 
-/// Every privilege one role holds on a relation of the connection's
-/// database, itself or through a role it belongs to.
+/// Where a privilege a role holds comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The role is a superuser, which bypasses every check.
+    Superuser,
+    /// It owns the object, itself (`None`) or as a member of the owner it
+    /// inherits from.
+    Owner(Option<String>),
+    /// A grant to the role itself.
+    Direct,
+    /// A grant to a role it inherits from: the grantee, not every role on
+    /// the way to it.
+    Via(String),
+    Public,
+    /// A predefined role it holds (`pg_read_all_data`), which reaches past
+    /// the object's own list.
+    Predefined(String),
+    /// Held, though no grant on the object says so: the owner of the
+    /// database, which Postgres 14 and later make owner of `public`, or a
+    /// predefined role.
+    Implicit,
+}
+
+impl Source {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Superuser => "superuser".into(),
+            Self::Owner(None) => "owner".into(),
+            Self::Owner(Some(role)) => format!("owner, as {role}"),
+            Self::Direct => "direct".into(),
+            Self::Via(role) => format!("through {role}"),
+            Self::Public => "PUBLIC".into(),
+            Self::Predefined(roles) => roles.clone(),
+            Self::Implicit => "database owner or a predefined role".into(),
+        }
+    }
+
+    /// Strongest first: what a role holds of its own before what it inherits,
+    /// and PUBLIC, which every role holds, last.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Superuser => 0,
+            Self::Owner(_) => 1,
+            Self::Direct => 2,
+            Self::Via(_) => 3,
+            Self::Predefined(_) => 4,
+            Self::Public => 5,
+            Self::Implicit => 6,
+        }
+    }
+}
+
+/// A privilege the role holds on a database or a schema, with where each
+/// way of holding it comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Right {
+    /// As the server spells it: `CONNECT`, `USAGE`, `CREATE`, `TEMPORARY`.
+    pub privilege: String,
+    pub sources: Vec<Source>,
+}
+
+/// What a role can do to one database of the server, from the catalogs every
+/// database shares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseAccess {
+    pub name: String,
+    /// `datallowconn`: a database that takes no connections cannot be
+    /// connected to whatever is granted on it.
+    pub allows_connections: bool,
+    /// The database privileges the role holds, effective ones only.
+    pub rights: Vec<Right>,
+}
+
+impl DatabaseAccess {
+    /// Whether the role can connect to it, which is what lets anything
+    /// inside it be reached.
+    pub fn connects(&self) -> bool {
+        self.allows_connections && self.rights.iter().any(|right| right.privilege == "CONNECT")
+    }
+}
+
+/// A role's access to every database of the server, read in the connected
+/// one: `pg_database` and the role catalogs are shared by all of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoleAccess {
+    pub superuser: bool,
+    pub databases: Vec<DatabaseAccess>,
+}
+
+/// What a role holds on one schema of a database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaAccess {
+    pub name: String,
+    /// `USAGE` and `CREATE`, effective ones only.
+    pub rights: Vec<Right>,
+    /// How many of its relations the role owns, itself or through a role it
+    /// inherits.
+    pub owns: u64,
+}
+
+impl SchemaAccess {
+    pub fn usable(&self) -> bool {
+        self.rights.iter().any(|right| right.privilege == "USAGE")
+    }
+}
+
+/// Every privilege one role holds in one database, itself or through a role
+/// it belongs to or PUBLIC: on the database's schemas and relations.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoleGrants {
     pub database: String,
+    pub schemas: Vec<SchemaAccess>,
     pub held: Vec<HeldGrant>,
     /// What reaches past the grants listed, for a list that is empty or
     /// short: a superuser bypasses them, an owner holds everything on what
@@ -177,6 +284,10 @@ pub struct Beyond {
     pub owns: u64,
     /// The predefined roles it holds (`pg_read_all_data` and the like).
     pub predefined: Vec<String>,
+    /// How many default-privilege rules of the database (`ALTER DEFAULT
+    /// PRIVILEGES`) it sets or is granted by, which decide what its future
+    /// objects hold and which no grant listed shows.
+    pub defaults: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,8 +297,12 @@ pub struct HeldGrant {
     /// As the server spells it, `SELECT`.
     pub privilege: String,
     pub grantable: bool,
-    /// The role it is held through; `None` for the role's own grant.
+    /// The role it is held through; `None` for the role's own grant,
+    /// `PUBLIC` for a grant to every role.
     pub through: Option<String>,
+    /// Whether the role holds `USAGE` on the schema: without it nothing in
+    /// the schema is reached, whatever is granted on it.
+    pub usable: bool,
 }
 
 /// What one role can reach in the connection's database, for the detail
@@ -570,13 +685,140 @@ pub(super) fn reach_sql(name: &str, per_membership: bool) -> String {
     )
 }
 
-/// Owned relations are left out: an owner holds everything on its own.
-pub(super) fn role_grants_sql(name: &str, per_membership: bool) -> String {
+/// What names a holder's way of holding a privilege in an aggregated cell:
+/// `direct`, `public` or `via:` and the role the grant is on.
+const SOURCE_TOKEN: &str = "CASE WHEN holder.oid = 0 THEN 'public' \
+     WHEN holder.via IS NULL THEN 'direct' ELSE 'via:' || holder.via END";
+
+/// The ways the role holds `privilege` on an object whose list is `acl`
+/// (`acldefault` of its `owner` where there is none, which is what a NULL
+/// list means): each holder's token, the owner's own entry left to
+/// [`owner_sql`].
+fn sources_sql(kind: char, acl: &str, owner: &str, privilege: &str) -> String {
+    format!(
+        "(SELECT pg_catalog.string_agg(DISTINCT {SOURCE_TOKEN}, E'\\x1f')
+          FROM pg_catalog.aclexplode(
+              COALESCE({acl}, pg_catalog.acldefault('{kind}', {owner}))) AS a
+          JOIN holder ON holder.oid = a.grantee
+          WHERE a.privilege_type = '{privilege}' AND a.grantee <> {owner})"
+    )
+}
+
+/// Whether the role owns the object, itself or through a role it inherits.
+fn owner_sql(owner: &str) -> String {
+    format!(
+        "(SELECT CASE WHEN held.via IS NULL THEN 'direct' ELSE 'via:' || held.via END
+          FROM held WHERE held.oid = {owner} ORDER BY held.via NULLS FIRST LIMIT 1)"
+    )
+}
+
+/// What the role holds of `privileges` on an object, as the columns
+/// [`assemble_rights`] reads: whether each is effective (the server's own
+/// `has_*_privilege`, which counts inheritance, PUBLIC, ownership, a
+/// superuser and the predefined roles) and the grants that explain it.
+fn rights_sql(
+    name: &str,
+    function: &str,
+    object: &str,
+    kind: char,
+    acl: &str,
+    owner: &str,
+    privileges: &[&str],
+) -> String {
+    let mut columns: Vec<String> = privileges
+        .iter()
+        .flat_map(|privilege| {
+            let column = privilege.to_lowercase();
+            [
+                format!(
+                    "CASE WHEN pg_catalog.{function}({}, {object}, '{privilege}')
+                     THEN 'y' ELSE 'n' END AS {column}",
+                    literal(name)
+                ),
+                format!(
+                    "{} AS {column}_via",
+                    sources_sql(kind, acl, owner, privilege)
+                ),
+            ]
+        })
+        .collect();
+    columns.push(format!("{} AS owner", owner_sql(owner)));
+    columns.join(",\n             ")
+}
+
+const DATABASE_PRIVILEGES: [&str; 3] = ["CONNECT", "CREATE", "TEMPORARY"];
+const SCHEMA_PRIVILEGES: [&str; 2] = ["USAGE", "CREATE"];
+
+/// Every database of the server and what the role holds on it. The catalogs
+/// it reads are shared, so any database answers for all of them.
+pub(super) fn database_access_sql(name: &str, per_membership: bool) -> String {
     format!(
         "{}
+         SELECT d.datname AS database,
+             CASE WHEN d.datallowconn THEN 'y' ELSE 'n' END AS allows,
+             (SELECT CASE WHEN r.rolsuper THEN 'y' ELSE 'n' END
+              FROM pg_catalog.pg_roles AS r WHERE r.rolname = {}) AS superuser,
+             {}
+         FROM pg_catalog.pg_database AS d
+         ORDER BY d.datname",
+        held(name, per_membership),
+        literal(name),
+        rights_sql(
+            name,
+            "has_database_privilege",
+            "d.oid",
+            'd',
+            "d.datacl",
+            "d.datdba",
+            &DATABASE_PRIVILEGES
+        )
+    )
+}
+
+/// The schemas of the connected database and what the role holds on each.
+pub(super) fn schema_access_sql(name: &str, per_membership: bool) -> String {
+    format!(
+        "{}
+         SELECT n.nspname AS schema,
+             {},
+             (SELECT pg_catalog.count(*)
+              FROM pg_catalog.pg_class AS c
+              WHERE c.relnamespace = n.oid
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+                AND c.relowner IN (SELECT oid FROM held))::text AS owns
+         FROM pg_catalog.pg_namespace AS n
+         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND n.nspname !~ '^pg_toast' AND n.nspname !~ '^pg_temp_'
+         ORDER BY n.nspname",
+        held(name, per_membership),
+        rights_sql(
+            name,
+            "has_schema_privilege",
+            "n.oid",
+            'n',
+            "n.nspacl",
+            "n.nspowner",
+            &SCHEMA_PRIVILEGES
+        )
+    )
+}
+
+/// Owned relations are left out: an owner holds everything on its own. A
+/// relation in a schema the role cannot use is listed all the same, `usable`
+/// saying it, because the grant is on it and a user looking for why a table
+/// fails to open needs to see the grant is not the problem.
+pub(super) fn role_grants_sql(name: &str, per_membership: bool) -> String {
+    let usable = format!(
+        "CASE WHEN pg_catalog.has_schema_privilege({}, n.oid, 'USAGE')
+         THEN 'y' ELSE 'n' END",
+        literal(name)
+    );
+    format!(
+        "{held}
          SELECT n.nspname AS schema, c.relname AS relation, a.privilege_type AS privilege,
              CASE WHEN a.is_grantable THEN 'y' ELSE 'n' END AS grantable,
-             holder.via AS through, pg_catalog.current_database() AS database
+             holder.via AS through, pg_catalog.current_database() AS database,
+             {usable} AS usable
          FROM pg_catalog.pg_class AS c
          JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
          CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
@@ -584,21 +826,53 @@ pub(super) fn role_grants_sql(name: &str, per_membership: bool) -> String {
          WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
            AND c.relowner NOT IN (SELECT oid FROM held)
-         ORDER BY 1, 2, holder.via NULLS FIRST",
-        held(name, per_membership)
+         UNION ALL
+         SELECT n.nspname, c.relname, a.privilege_type || ' (columns)',
+             CASE WHEN a.is_grantable THEN 'y' ELSE 'n' END,
+             holder.via, pg_catalog.current_database(), {usable}
+         FROM pg_catalog.pg_attribute AS att
+         JOIN pg_catalog.pg_class AS c ON c.oid = att.attrelid
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+         CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) AS a
+         JOIN holder ON holder.oid = a.grantee
+         WHERE att.attnum > 0 AND NOT att.attisdropped
+           AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+           AND c.relowner NOT IN (SELECT oid FROM held)
+         ORDER BY 1, 2, 5 NULLS FIRST, 3",
+        held = held(name, per_membership)
     )
 }
 
 pub(super) fn assemble_role_grants(
     result: &QueryResult,
+    schemas: &QueryResult,
     owns: &QueryResult,
 ) -> Result<RoleGrants, DbError> {
     let (database, beyond) = assemble_beyond(owns)?;
     let mut grants = RoleGrants {
         database,
+        schemas: Vec::new(),
         held: Vec::new(),
         beyond,
     };
+    for row in &schemas.rows {
+        let owns = required_cell(schemas, row, "owns")?;
+        let rights = assemble_rights(
+            schemas,
+            row,
+            &SCHEMA_PRIVILEGES,
+            grants.beyond.superuser,
+            &grants.beyond.predefined,
+        )?;
+        grants.schemas.push(SchemaAccess {
+            name: required_cell(schemas, row, "schema")?.to_string(),
+            rights,
+            owns: owns
+                .parse()
+                .map_err(|_| super::unexpected_catalog_value("count", owns))?,
+        });
+    }
     for row in &result.rows {
         grants.held.push(HeldGrant {
             schema: required_cell(result, row, "schema")?.to_string(),
@@ -606,9 +880,82 @@ pub(super) fn assemble_role_grants(
             privilege: required_cell(result, row, "privilege")?.to_string(),
             grantable: yes(result, row, "grantable")?,
             through: optional_cell(result, row, "through").map(str::to_string),
+            usable: yes(result, row, "usable")?,
         });
     }
     Ok(grants)
+}
+
+pub(super) fn assemble_role_access(access: &QueryResult) -> Result<RoleAccess, DbError> {
+    let mut assembled = RoleAccess::default();
+    for row in &access.rows {
+        assembled.superuser = yes(access, row, "superuser")?;
+        assembled.databases.push(DatabaseAccess {
+            name: required_cell(access, row, "database")?.to_string(),
+            allows_connections: yes(access, row, "allows")?,
+            rights: assemble_rights(access, row, &DATABASE_PRIVILEGES, assembled.superuser, &[])?,
+        });
+    }
+    Ok(assembled)
+}
+
+/// The rights [`rights_sql`] read from `row`: each privilege that is
+/// effective, with the sources that explain it. A superuser holds them all
+/// and says only so. One no grant explains is the database owner's or a
+/// predefined role's, `predefined` naming the ones the role holds.
+fn assemble_rights(
+    result: &QueryResult,
+    row: &super::Row,
+    privileges: &[&str],
+    superuser: bool,
+    predefined: &[String],
+) -> Result<Vec<Right>, DbError> {
+    let mut rights = Vec::new();
+    for privilege in privileges {
+        let column = privilege.to_lowercase();
+        if !yes(result, row, &column)? {
+            continue;
+        }
+        let mut sources = Vec::new();
+        if superuser {
+            sources.push(Source::Superuser);
+        } else {
+            if let Some(owner) = optional_cell(result, row, "owner") {
+                sources.push(Source::Owner(match source_token(owner)? {
+                    Source::Via(role) => Some(role),
+                    _ => None,
+                }));
+            }
+            let via = optional_cell(result, row, &format!("{column}_via")).unwrap_or_default();
+            for token in via.split(SEPARATOR).filter(|token| !token.is_empty()) {
+                sources.push(source_token(token)?);
+            }
+            if sources.is_empty() {
+                sources.push(match predefined.is_empty() {
+                    true => Source::Implicit,
+                    false => Source::Predefined(predefined.join(", ")),
+                });
+            }
+            sources.sort_by_key(Source::rank);
+        }
+        rights.push(Right {
+            privilege: privilege.to_string(),
+            sources,
+        });
+    }
+    Ok(rights)
+}
+
+/// A [`SOURCE_TOKEN`], read back.
+fn source_token(token: &str) -> Result<Source, DbError> {
+    match token {
+        "direct" => Ok(Source::Direct),
+        "public" => Ok(Source::Public),
+        _ => token
+            .strip_prefix("via:")
+            .map(|role| Source::Via(role.to_string()))
+            .ok_or_else(|| super::unexpected_catalog_value("grant source", token)),
+    }
 }
 
 pub(super) fn owns_sql(name: &str, per_membership: bool) -> String {
@@ -625,6 +972,12 @@ pub(super) fn owns_sql(name: &str, per_membership: bool) -> String {
              (SELECT pg_catalog.string_agg(r.rolname::text, E'\\x1f' ORDER BY r.rolname)
               FROM held JOIN pg_catalog.pg_roles AS r ON r.oid = held.oid
               WHERE r.rolname ~ '^pg_') AS predefined,
+             (SELECT pg_catalog.count(*)
+              FROM pg_catalog.pg_default_acl AS d
+              WHERE d.defaclrole IN (SELECT oid FROM held)
+                 OR EXISTS (SELECT 1
+                            FROM pg_catalog.aclexplode(d.defaclacl) AS a
+                            JOIN holder ON holder.oid = a.grantee))::text AS defaults,
              pg_catalog.current_database() AS database",
         held(name, per_membership),
         literal(name)
@@ -796,6 +1149,12 @@ fn assemble_beyond(owns: &QueryResult) -> Result<(String, Beyond), DbError> {
             predefined: optional_cell(owns, row, "predefined")
                 .map(|names| names.split(SEPARATOR).map(str::to_string).collect())
                 .unwrap_or_default(),
+            defaults: {
+                let count = required_cell(owns, row, "defaults")?;
+                count
+                    .parse()
+                    .map_err(|_| super::unexpected_catalog_value("count", count))?
+            },
         },
     ))
 }
@@ -1069,5 +1428,341 @@ mod tests {
         assert!(
             reset_password("a\"b", "pw").starts_with("ALTER ROLE \"a\"\"b\" WITH PASSWORD 'SCRAM")
         );
+    }
+
+    fn table(columns: &[&str], rows: &[&[Option<&str>]]) -> QueryResult {
+        QueryResult {
+            columns: columns
+                .iter()
+                .map(|name| super::super::Column {
+                    name: name.to_string(),
+                    data_type: None,
+                })
+                .collect(),
+            rows: rows
+                .iter()
+                .map(|cells| super::super::Row::new(cells.iter().copied()).unwrap())
+                .collect(),
+            ..QueryResult::default()
+        }
+    }
+
+    const ACCESS_COLUMNS: [&str; 10] = [
+        "database",
+        "allows",
+        "superuser",
+        "connect",
+        "connect_via",
+        "create",
+        "create_via",
+        "temporary",
+        "temporary_via",
+        "owner",
+    ];
+
+    #[test]
+    fn the_server_wide_read_asks_every_database_with_ownership_and_public_in_it() {
+        let sql = database_access_sql("o'neil", true);
+        assert!(sql.contains("rolname = 'o''neil'"), "{sql}");
+        assert!(
+            sql.contains("has_database_privilege('o''neil', d.oid, 'CONNECT')"),
+            "{sql}"
+        );
+        // A database with no list of its own is read as the default one,
+        // which gives PUBLIC its CONNECT and TEMPORARY.
+        assert!(
+            sql.contains("COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba))"),
+            "{sql}"
+        );
+        assert!(sql.contains("UNION ALL SELECT 0, 'PUBLIC'"), "{sql}");
+        assert!(sql.contains("m.inherit_option"), "{sql}");
+        assert!(database_access_sql("x", false).contains("member.rolinherit"));
+        // One read, not one per database, and nothing that writes.
+        assert!(!sql.to_uppercase().contains("INSERT"), "{sql}");
+        assert_eq!(sql.matches("pg_database").count(), 1, "{sql}");
+    }
+
+    #[test]
+    fn the_per_database_reads_are_scoped_to_the_schema_and_say_whether_it_is_usable() {
+        let schemas = schema_access_sql("ana", true);
+        assert!(schemas.contains("has_schema_privilege('ana', n.oid, 'USAGE')"));
+        assert!(schemas.contains("COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))"));
+        assert!(!schemas.contains("pg_database"), "{schemas}");
+        let relations = role_grants_sql("ana", true);
+        assert!(relations.contains("has_schema_privilege('ana', n.oid, 'USAGE')"));
+        assert!(
+            relations.contains("pg_catalog.aclexplode(att.attacl)"),
+            "columns"
+        );
+        assert!(
+            relations.contains("JOIN holder ON holder.oid = a.grantee"),
+            "PUBLIC"
+        );
+        assert!(owns_sql("ana", true).contains("pg_catalog.pg_default_acl"));
+    }
+
+    #[test]
+    fn a_database_a_role_reaches_by_public_a_role_and_ownership_says_which() {
+        let access = table(
+            &ACCESS_COLUMNS,
+            &[
+                // PUBLIC's default CONNECT and TEMPORARY, and a role's CREATE.
+                &[
+                    Some("app"),
+                    Some("y"),
+                    Some("n"),
+                    Some("y"),
+                    Some("public"),
+                    Some("y"),
+                    Some("via:builders"),
+                    Some("y"),
+                    Some("public"),
+                    None,
+                ],
+                // Owned through a role.
+                &[
+                    Some("mine"),
+                    Some("y"),
+                    Some("n"),
+                    Some("y"),
+                    None,
+                    Some("y"),
+                    None,
+                    Some("y"),
+                    None,
+                    Some("via:owners"),
+                ],
+                // Connect revoked from PUBLIC, granted to the role itself
+                // and, as well, through a role.
+                &[
+                    Some("private"),
+                    Some("y"),
+                    Some("n"),
+                    Some("y"),
+                    Some("direct\u{1f}via:team"),
+                    Some("n"),
+                    None,
+                    Some("n"),
+                    None,
+                    None,
+                ],
+                &[
+                    Some("closed"),
+                    Some("n"),
+                    Some("n"),
+                    Some("n"),
+                    None,
+                    Some("n"),
+                    None,
+                    Some("n"),
+                    None,
+                    None,
+                ],
+            ],
+        );
+        let access = assemble_role_access(&access).unwrap();
+        let by_name = |name: &str| access.databases.iter().find(|d| d.name == name).unwrap();
+        let sources = |name: &str, privilege: &str| {
+            (by_name(name).rights.iter())
+                .find(|right| right.privilege == privilege)
+                .map(|right| right.sources.clone())
+        };
+        assert_eq!(sources("app", "CONNECT"), Some(vec![Source::Public]));
+        assert_eq!(
+            sources("app", "CREATE"),
+            Some(vec![Source::Via("builders".into())])
+        );
+        assert_eq!(
+            sources("mine", "CONNECT"),
+            Some(vec![Source::Owner(Some("owners".into()))])
+        );
+        assert_eq!(
+            sources("private", "CONNECT"),
+            Some(vec![Source::Direct, Source::Via("team".into())])
+        );
+        assert_eq!(sources("private", "TEMPORARY"), None);
+        assert!(by_name("private").connects());
+        assert!(!by_name("closed").connects());
+        // Connect granted, but the database takes no connections.
+        let mut shut = by_name("app").clone();
+        shut.allows_connections = false;
+        assert!(!shut.connects());
+    }
+
+    #[test]
+    fn a_superuser_holds_every_privilege_and_says_only_that() {
+        let access = assemble_role_access(&table(
+            &ACCESS_COLUMNS,
+            &[&[
+                Some("app"),
+                Some("y"),
+                Some("y"),
+                Some("y"),
+                Some("public"),
+                Some("y"),
+                None,
+                Some("y"),
+                None,
+                None,
+            ]],
+        ))
+        .unwrap();
+        assert!(access.superuser);
+        assert!(
+            access.databases[0]
+                .rights
+                .iter()
+                .all(|right| right.sources == [Source::Superuser])
+        );
+    }
+
+    #[test]
+    fn a_privilege_no_grant_explains_is_the_database_owners_or_a_predefined_roles() {
+        let schemas = table(
+            &[
+                "schema",
+                "usage",
+                "usage_via",
+                "create",
+                "create_via",
+                "owner",
+                "owns",
+            ],
+            &[
+                &[
+                    Some("public"),
+                    Some("y"),
+                    Some("public"),
+                    Some("y"),
+                    None,
+                    None,
+                    Some("0"),
+                ],
+                &[
+                    Some("data"),
+                    Some("y"),
+                    None,
+                    Some("n"),
+                    None,
+                    None,
+                    Some("2"),
+                ],
+            ],
+        );
+        let owns = |predefined: Option<&str>| {
+            table(
+                &["owns", "superuser", "predefined", "defaults", "database"],
+                &[&[Some("2"), Some("n"), predefined, Some("1"), Some("shop")]],
+            )
+        };
+        let none = table(
+            &[
+                "schema",
+                "relation",
+                "privilege",
+                "grantable",
+                "through",
+                "database",
+                "usable",
+            ],
+            &[],
+        );
+        let plain = assemble_role_grants(&none, &schemas, &owns(None)).unwrap();
+        assert_eq!(plain.database, "shop");
+        assert_eq!(plain.beyond.defaults, 1);
+        assert_eq!(
+            plain.schemas[0].rights[1].sources,
+            [Source::Implicit],
+            "CREATE on public held by the database owner, nothing says so"
+        );
+        assert_eq!(plain.schemas[1].owns, 2);
+        let read = assemble_role_grants(&none, &schemas, &owns(Some("pg_read_all_data"))).unwrap();
+        assert_eq!(
+            read.schemas[1].rights[0].sources,
+            [Source::Predefined("pg_read_all_data".into())]
+        );
+        assert!(read.schemas[1].usable());
+    }
+
+    #[test]
+    fn a_relation_grant_keeps_where_it_came_from_and_whether_its_schema_opens() {
+        let held = table(
+            &[
+                "schema",
+                "relation",
+                "privilege",
+                "grantable",
+                "through",
+                "database",
+                "usable",
+            ],
+            &[
+                &[
+                    Some("sales"),
+                    Some("orders"),
+                    Some("SELECT"),
+                    Some("n"),
+                    Some("PUBLIC"),
+                    Some("shop"),
+                    Some("y"),
+                ],
+                &[
+                    Some("sales"),
+                    Some("orders"),
+                    Some("SELECT (columns)"),
+                    Some("y"),
+                    None,
+                    Some("shop"),
+                    Some("n"),
+                ],
+            ],
+        );
+        let schemas = table(
+            &[
+                "schema",
+                "usage",
+                "usage_via",
+                "create",
+                "create_via",
+                "owner",
+                "owns",
+            ],
+            &[],
+        );
+        let owns = table(
+            &["owns", "superuser", "predefined", "defaults", "database"],
+            &[&[Some("0"), Some("n"), None, Some("0"), Some("shop")]],
+        );
+        let grants = assemble_role_grants(&held, &schemas, &owns).unwrap();
+        assert_eq!(grants.held[0].through.as_deref(), Some("PUBLIC"));
+        assert!(grants.held[0].usable && !grants.held[1].usable);
+        assert!(grants.held[1].grantable && grants.held[1].through.is_none());
+        let bad = table(
+            &[
+                "database",
+                "allows",
+                "superuser",
+                "connect",
+                "connect_via",
+                "create",
+                "create_via",
+                "temporary",
+                "temporary_via",
+                "owner",
+            ],
+            &[&[
+                Some("x"),
+                Some("y"),
+                Some("n"),
+                Some("y"),
+                Some("sideways"),
+                Some("n"),
+                None,
+                Some("n"),
+                None,
+                None,
+            ]],
+        );
+        assert!(assemble_role_access(&bad).is_err());
     }
 }

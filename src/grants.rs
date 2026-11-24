@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use crate::db::roles::{ObjectGrants, RoleGrants, Roles};
+use crate::db::roles::{
+    DatabaseAccess, HeldGrant, ObjectGrants, Right, RoleAccess, RoleGrants, Roles, SchemaAccess,
+    Source,
+};
 use crate::fuzzy::{Fuzzy, Query};
 
 /// One cell.
@@ -15,6 +18,11 @@ pub(crate) enum Mark {
     Grantable,
     /// Held through a role the row's role belongs to.
     Through,
+    /// Held because every role holds it.
+    Public,
+    /// Granted on a relation in a schema the role has no `USAGE` on, so it
+    /// reaches nothing.
+    Blocked,
     None,
 }
 
@@ -25,9 +33,11 @@ impl Mark {
     /// whatever order the server listed them in.
     fn rank(self) -> u8 {
         match self {
-            Mark::Grantable => 3,
-            Mark::Granted => 2,
-            Mark::Through => 1,
+            Mark::Grantable => 5,
+            Mark::Granted => 4,
+            Mark::Through => 3,
+            Mark::Public => 2,
+            Mark::Blocked => 1,
             Mark::None => 0,
         }
     }
@@ -49,6 +59,11 @@ pub(crate) enum Who {
     Public,
     /// A relation, in a role's own grants.
     Object,
+    /// A database a role's access is listed for.
+    Database,
+    Schema,
+    /// A line of text under a database: what its rows leave out.
+    Note,
 }
 
 impl Who {
@@ -59,6 +74,9 @@ impl Who {
             Who::Superuser => "Superuser",
             Who::Public => "Every role",
             Who::Object => "Relation",
+            Who::Database => "Database",
+            Who::Schema => "Schema",
+            Who::Note => "Note",
         }
     }
 }
@@ -73,6 +91,9 @@ pub(crate) struct MatrixRow {
     /// The line under the name: what the row is and how it holds them.
     pub(crate) via: String,
     pub(crate) who: Who,
+    /// How far in it is drawn: a schema under its database, a relation under
+    /// its schema.
+    pub(crate) depth: u8,
     /// A member listed under the role it belongs to.
     pub(crate) member: bool,
     /// Whether members are listed under it, for the chevron.
@@ -82,6 +103,12 @@ pub(crate) struct MatrixRow {
 
 /// What a column header says of a privilege the server spells `SELECT`.
 pub(crate) fn column_label(privilege: &str) -> String {
+    // The column is as wide as the longest of the others.
+    let privilege = if privilege == "TEMPORARY" {
+        "TEMP"
+    } else {
+        privilege
+    };
     let mut label = privilege.to_lowercase();
     if let Some(first) = label.get_mut(..1) {
         first.make_ascii_uppercase();
@@ -172,6 +199,7 @@ pub(crate) fn object_rows(
             name: role.name.clone(),
             via: "superuser · bypasses grants".into(),
             who: Who::Superuser,
+            depth: 0,
             member: false,
             opened: false,
             marks: everything.clone(),
@@ -211,6 +239,7 @@ pub(crate) fn object_rows(
             name: name.to_string(),
             via,
             who: who(roles, name),
+            depth: 0,
             member: false,
             opened: false,
             marks,
@@ -222,6 +251,7 @@ pub(crate) fn object_rows(
         name: "PUBLIC".into(),
         via: "every role".into(),
         who: Who::Public,
+        depth: 0,
         member: false,
         opened: false,
         marks: marks_of(None),
@@ -304,6 +334,7 @@ fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> V
                     name: name.to_string(),
                     via: via(name, through),
                     who: who(roles, name),
+                    depth: 0,
                     member: true,
                     opened: false,
                     marks: through_marks(inherits),
@@ -317,108 +348,404 @@ fn members_of(roles: &Roles, members: &Members, role: &str, marks: &[Mark]) -> V
     rows
 }
 
-/// What Show Grants of a role says when it lists no relation: why it may
-/// still reach them, as a superuser, an owner or through a predefined role,
-/// before saying it holds nothing.
-pub(crate) fn role_grants_empty(grants: &RoleGrants) -> String {
-    let beyond = &grants.beyond;
-    if beyond.superuser {
-        return "Superuser: it bypasses every grant, so it reaches every relation.".into();
-    }
-    let mut said = Vec::new();
-    if beyond.owns > 0 {
-        said.push(format!(
-            "Owns {}, and holds everything on them.",
-            plural(beyond.owns as usize, "relation")
-        ));
-    }
-    if !beyond.predefined.is_empty() {
-        said.push(format!(
-            "Holds {}, which reaches further than any grant.",
-            beyond.predefined.join(", ")
-        ));
-    }
-    said.push(format!(
-        "It holds no grant on {} relation of {}.",
-        match said.is_empty() {
-            true => "any",
-            false => "any other",
-        },
-        grants.database
-    ));
-    said.join(" ")
+/// How many databases Show Grants of a role reads at most, one session each
+/// ([`crate::workspace::Workspace::run_routed`] keeps them open). The rest are
+/// listed and said not to be read.
+///
+/// ponytail: a flat cap. The upgrade is reading a database when its section
+/// is opened, once the dialog has collapsible sections.
+pub(crate) const MAX_DATABASES_READ: usize = 20;
+
+/// Why a database of a role's access was not read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Skipped {
+    /// It cannot connect: nothing inside is reached, so nothing is read.
+    NoConnect,
+    /// It connects, but the profile's database filter hides it: a hidden
+    /// database is never read.
+    Hidden,
+    /// A superuser holds everything in it, which a list of grants would
+    /// only understate.
+    Superuser,
+    /// Past [`MAX_DATABASES_READ`].
+    Limit,
 }
 
-/// The columns of a role's own grants: the privileges it holds anywhere, in
-/// the order a table's are listed, then any other.
-pub(crate) fn role_columns(grants: &RoleGrants) -> Vec<String> {
-    const ORDER: [&str; 8] = [
-        "SELECT",
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "TRUNCATE",
-        "REFERENCES",
-        "TRIGGER",
-        "USAGE",
-    ];
-    let mut columns: Vec<String> = ORDER
+/// Where the read of one database stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Read {
+    /// Still to be read, or being read.
+    Pending,
+    Done(RoleGrants),
+    /// The read failed; the others are not affected.
+    Failed(String),
+    Skipped(Skipped),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DatabaseSection {
+    pub(crate) access: DatabaseAccess,
+    pub(crate) read: Read,
+}
+
+/// Show Grants of a role: every database of the server with what the role
+/// holds on it, and what has been read inside each so far.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RoleView {
+    pub(crate) sections: Vec<DatabaseSection>,
+}
+
+impl RoleView {
+    /// Decide which databases are read: those it can connect to that the
+    /// database filter (`shows`) lets through, up to [`MAX_DATABASES_READ`].
+    pub(crate) fn plan(access: RoleAccess, shows: impl Fn(&str) -> bool) -> Self {
+        let mut pending = 0;
+        let sections = access
+            .databases
+            .into_iter()
+            .map(|database| {
+                let read = if !database.connects() {
+                    Read::Skipped(Skipped::NoConnect)
+                } else if !shows(&database.name) {
+                    Read::Skipped(Skipped::Hidden)
+                } else if access.superuser {
+                    Read::Skipped(Skipped::Superuser)
+                } else if pending >= MAX_DATABASES_READ {
+                    Read::Skipped(Skipped::Limit)
+                } else {
+                    pending += 1;
+                    Read::Pending
+                };
+                DatabaseSection {
+                    access: database,
+                    read,
+                }
+            })
+            .collect();
+        Self { sections }
+    }
+
+    /// The databases still to read, in the order they are listed.
+    pub(crate) fn pending(&self) -> Vec<String> {
+        (self.sections.iter())
+            .filter(|section| section.read == Read::Pending)
+            .map(|section| section.access.name.clone())
+            .collect()
+    }
+
+    /// What reading `database` answered. Nothing else changes.
+    pub(crate) fn land(&mut self, database: &str, result: Result<RoleGrants, String>) {
+        if let Some(section) = (self.sections.iter_mut())
+            .find(|section| section.access.name == database && section.read == Read::Pending)
+        {
+            section.read = match result {
+                Ok(grants) => Read::Done(grants),
+                Err(message) => Read::Failed(message),
+            };
+        }
+    }
+}
+
+/// The order a table's privileges are listed in, those of a database and a
+/// schema before them.
+const PRIVILEGE_ORDER: [&str; 11] = [
+    "CONNECT",
+    "TEMPORARY",
+    "USAGE",
+    "CREATE",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+];
+
+/// The columns of a role's access: the privileges it holds anywhere in the
+/// view, in [`PRIVILEGE_ORDER`], then any other.
+pub(crate) fn role_columns(view: &RoleView) -> Vec<String> {
+    let mut held: Vec<&str> = Vec::new();
+    for section in &view.sections {
+        held.extend(section.access.rights.iter().map(|r| r.privilege.as_str()));
+        if let Read::Done(grants) = &section.read {
+            for schema in &grants.schemas {
+                held.extend(schema.rights.iter().map(|r| r.privilege.as_str()));
+            }
+            held.extend(grants.held.iter().map(|grant| grant.privilege.as_str()));
+        }
+    }
+    let mut columns: Vec<String> = PRIVILEGE_ORDER
         .iter()
-        .filter(|privilege| grants.held.iter().any(|held| held.privilege == **privilege))
+        .filter(|privilege| held.contains(privilege))
         .map(|privilege| privilege.to_string())
         .collect();
-    for held in &grants.held {
-        if !columns.contains(&held.privilege) {
-            columns.push(held.privilege.clone());
+    for privilege in held {
+        if !columns.iter().any(|column| column == privilege) {
+            columns.push(privilege.to_string());
         }
     }
     columns
 }
 
-/// A role's own grants, a row per relation it holds anything on, told
-/// apart by schema and name and not by their spelling joined: `"a.b".c` and
-/// `a."b.c"` are two rows. Each cell takes the strongest of its marks
-/// ([`Mark::merge`]), so a grant of its own wins over the same one held
-/// through a role, and one a grantor made grantable over one another did
-/// not.
-pub(crate) fn role_rows(grants: &RoleGrants, columns: &[String], filter: &str) -> Vec<MatrixRow> {
+/// What one way of holding a privilege shows as: the strongest source's.
+fn source_mark(sources: &[Source]) -> Mark {
+    match sources.first() {
+        Some(Source::Superuser | Source::Owner(_) | Source::Direct) => Mark::Granted,
+        Some(Source::Via(_) | Source::Predefined(_) | Source::Implicit) => Mark::Through,
+        Some(Source::Public) => Mark::Public,
+        None => Mark::None,
+    }
+}
+
+fn rights_marks(rights: &[Right], columns: &[String]) -> Vec<Mark> {
+    (columns.iter())
+        .map(|column| {
+            (rights.iter())
+                .find(|right| right.privilege == *column)
+                .map_or(Mark::None, |right| source_mark(&right.sources))
+        })
+        .collect()
+}
+
+/// `connect PUBLIC · create owner`: each right, with where it comes from.
+fn rights_text(rights: &[Right]) -> String {
+    (rights.iter())
+        .map(|right| {
+            let sources: Vec<String> = right.sources.iter().map(Source::label).collect();
+            format!("{} {}", right.privilege.to_lowercase(), sources.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A database's row: what the role holds on the database itself, and
+/// whether and why what is inside it is listed.
+fn database_row(section: &DatabaseSection, columns: &[String]) -> MatrixRow {
+    let access = &section.access;
+    let rights = rights_text(&access.rights);
+    let status = match &section.read {
+        Read::Pending => Some("reading…".to_string()),
+        Read::Failed(message) => Some(format!("could not read: {message}")),
+        Read::Done(_) => None,
+        Read::Skipped(Skipped::NoConnect) if !access.allows_connections => {
+            Some("takes no connections: not read".into())
+        }
+        Read::Skipped(Skipped::NoConnect) => Some("no CONNECT: not read".into()),
+        Read::Skipped(Skipped::Hidden) => Some("hidden by the filter: not read".into()),
+        Read::Skipped(Skipped::Superuser) => Some("superuser: holds everything, not read".into()),
+        Read::Skipped(Skipped::Limit) => Some(format!(
+            "not read: only the first {MAX_DATABASES_READ} databases are, narrow Filter Databases"
+        )),
+    };
+    let blocked = matches!(section.read, Read::Skipped(Skipped::NoConnect));
+    MatrixRow {
+        key: format!("{}\u{1f}", access.name),
+        name: access.name.clone(),
+        via: [status, (!blocked && !rights.is_empty()).then_some(rights)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+        who: Who::Database,
+        depth: 0,
+        member: false,
+        opened: matches!(section.read, Read::Done(_)),
+        marks: match blocked {
+            true => vec![Mark::None; columns.len()],
+            false => rights_marks(&access.rights, columns),
+        },
+    }
+}
+
+fn schema_row(database: &str, schema: &SchemaAccess, columns: &[String]) -> MatrixRow {
+    let owns =
+        (schema.owns > 0).then(|| format!("owns {}", plural(schema.owns as usize, "relation")));
+    let rights = rights_text(&schema.rights);
+    MatrixRow {
+        key: format!("{database}\u{1f}{}\u{1f}", schema.name),
+        name: schema.name.clone(),
+        via: [
+            Some(rights).filter(|rights| !rights.is_empty()),
+            owns,
+            (!schema.usable()).then(|| "no USAGE".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · "),
+        who: Who::Schema,
+        depth: 1,
+        member: false,
+        opened: false,
+        marks: rights_marks(&schema.rights, columns),
+    }
+}
+
+fn note(database: &str, index: usize, text: String) -> MatrixRow {
+    MatrixRow {
+        key: format!("{database}\u{1f}\u{1f}note{index}"),
+        name: text,
+        via: String::new(),
+        who: Who::Note,
+        depth: 1,
+        member: false,
+        opened: false,
+        marks: Vec::new(),
+    }
+}
+
+/// What a database's rows leave out, for the lines under it: shown only
+/// while nothing is filtered, since they name no row.
+fn notes(grants: &RoleGrants, left_out: usize) -> Vec<String> {
+    let beyond = &grants.beyond;
+    let mut notes = Vec::new();
+    if !beyond.predefined.is_empty() {
+        notes.push(format!(
+            "Holds {}, which reach past any grant listed.",
+            beyond.predefined.join(", ")
+        ));
+    }
+    if beyond.defaults > 0 {
+        notes.push(format!(
+            "{} of ALTER DEFAULT PRIVILEGES name it: they decide what its future objects hold.",
+            plural(beyond.defaults as usize, "rule")
+        ));
+    }
+    if left_out > 0 {
+        notes.push(format!(
+            "{} it holds nothing on left out.",
+            plural(left_out, "schema")
+        ));
+    }
+    notes
+}
+
+/// A role's access, a row per database it can reach, with under each read
+/// one for each schema it holds something on and each relation granted to it.
+/// A relation is told apart by schema and name and not by their spelling
+/// joined: `"a.b".c` and `a."b.c"` are two rows. Each cell takes the
+/// strongest of its marks ([`Mark::merge`]), so a grant of its own wins over
+/// the same one held through a role, and one a grantor made grantable over
+/// one another did not. A relation in a schema without `USAGE` is marked
+/// blocked, whoever granted it. `filter` keeps the rows whose name it
+/// matches, through the one fuzzy matcher, with the database and schema
+/// they are listed under.
+pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Vec<MatrixRow> {
     let query = Query::new(filter);
     let mut fuzzy = Fuzzy::new();
+    let mut matches = |name: &str| fuzzy.matches(&query, name);
+    let filtering = !filter.trim().is_empty();
+    let mut rows = Vec::new();
+    for section in &view.sections {
+        let header = database_row(section, columns);
+        let Read::Done(grants) = &section.read else {
+            if matches(&header.name) {
+                rows.push(header);
+            }
+            continue;
+        };
+        let database = section.access.name.as_str();
+        let mut inside: Vec<MatrixRow> = Vec::new();
+        let mut left_out = 0;
+        let mut schemas: Vec<&str> = grants.schemas.iter().map(|s| s.name.as_str()).collect();
+        for held in &grants.held {
+            if !schemas.contains(&held.schema.as_str()) {
+                schemas.push(&held.schema);
+            }
+        }
+        for name in schemas {
+            let relations: Vec<&HeldGrant> = (grants.held.iter())
+                .filter(|held| held.schema == name)
+                .collect();
+            let access = grants.schemas.iter().find(|schema| schema.name == name);
+            if relations.is_empty()
+                && access.is_none_or(|schema| schema.rights.is_empty() && schema.owns == 0)
+            {
+                left_out += 1;
+                continue;
+            }
+            let kept = relation_rows(database, &relations, columns, &mut matches);
+            let mut row = access
+                .map(|schema| schema_row(database, schema, columns))
+                .unwrap_or_else(|| schema_row(database, &closed(name), columns));
+            if !kept.is_empty() || matches(&row.name) {
+                row.opened = !kept.is_empty();
+                inside.push(row);
+                inside.extend(kept);
+            }
+        }
+        if !filtering {
+            let lines = notes(grants, left_out);
+            inside.extend(
+                (lines.into_iter().enumerate()).map(|(index, line)| note(database, index, line)),
+            );
+        }
+        if matches(&header.name) || !inside.is_empty() {
+            rows.push(header);
+            rows.extend(inside);
+        }
+    }
+    rows
+}
+
+/// A schema a grant names that the schema read did not list.
+fn closed(name: &str) -> SchemaAccess {
+    SchemaAccess {
+        name: name.to_string(),
+        rights: Vec::new(),
+        owns: 0,
+    }
+}
+
+/// The rows of one schema's relations.
+fn relation_rows(
+    database: &str,
+    held: &[&HeldGrant],
+    columns: &[String],
+    matches: &mut impl FnMut(&str) -> bool,
+) -> Vec<MatrixRow> {
     let mut rows: Vec<MatrixRow> = Vec::new();
     let mut through_of: Vec<Vec<String>> = Vec::new();
+    let mut usable: Vec<bool> = Vec::new();
     let mut placed: HashMap<(&str, &str), usize> = HashMap::new();
-    for held in &grants.held {
-        let key = (held.schema.as_str(), held.relation.as_str());
+    for grant in held {
+        let key = (grant.schema.as_str(), grant.relation.as_str());
         let at = match placed.get(&key) {
             Some(at) => *at,
             None => {
-                let name = format!("{}.{}", held.schema, held.relation);
-                if !fuzzy.matches(&query, &name) {
+                let full = format!("{}.{}", grant.schema, grant.relation);
+                if !matches(&full) {
                     continue;
                 }
                 placed.insert(key, rows.len());
                 rows.push(MatrixRow {
-                    key: format!("{}\u{1f}{}", held.schema, held.relation),
-                    name,
+                    key: format!("{database}\u{1f}{}\u{1f}{}", grant.schema, grant.relation),
+                    name: grant.relation.clone(),
                     via: String::new(),
                     who: Who::Object,
+                    depth: 2,
                     member: false,
                     opened: false,
                     marks: vec![Mark::None; columns.len()],
                 });
                 through_of.push(Vec::new());
+                usable.push(grant.usable);
                 rows.len() - 1
             }
         };
-        let Some(column) = columns.iter().position(|column| *column == held.privilege) else {
+        let Some(column) = columns.iter().position(|column| *column == grant.privilege) else {
             continue;
         };
-        let mark = match (&held.through, held.grantable) {
+        let mark = match (grant.through.as_deref(), grant.grantable) {
             (Some(role), _) => {
-                if !through_of[at].contains(role) {
-                    through_of[at].push(role.clone());
+                if !through_of[at].iter().any(|through| through == role) {
+                    through_of[at].push(role.to_string());
                 }
-                Mark::Through
+                match role {
+                    "PUBLIC" => Mark::Public,
+                    _ => Mark::Through,
+                }
             }
             (None, true) => Mark::Grantable,
             (None, false) => Mark::Granted,
@@ -426,19 +753,34 @@ pub(crate) fn role_rows(grants: &RoleGrants, columns: &[String], filter: &str) -
         let cell = &mut rows[at].marks[column];
         *cell = cell.merge(mark);
     }
-    for (row, through) in rows.iter_mut().zip(through_of) {
+    for ((row, through), usable) in rows.iter_mut().zip(through_of).zip(usable) {
         let direct = row
             .marks
             .iter()
             .any(|mark| matches!(mark, Mark::Granted | Mark::Grantable));
-        row.via = match (direct, through.is_empty()) {
-            (true, true) => "direct".into(),
+        let mut via = match (direct, through.is_empty()) {
+            (true, true) => "direct".to_string(),
             (false, false) => format!("through {}", through.join(", ")),
             (true, false) => format!("direct, and through {}", through.join(", ")),
             (false, true) => String::new(),
         };
+        if !usable {
+            // The grant is real and reaches nothing: say which of the two it
+            // is, not just that a mark is missing.
+            via = format!("{via} · no USAGE on {}, so out of reach", held_schema(held));
+            for mark in &mut row.marks {
+                if *mark != Mark::None {
+                    *mark = Mark::Blocked;
+                }
+            }
+        }
+        row.via = via;
     }
     rows
+}
+
+fn held_schema<'a>(held: &[&'a HeldGrant]) -> &'a str {
+    held.first().map_or("", |grant| grant.schema.as_str())
 }
 
 #[cfg(test)]
@@ -600,34 +942,67 @@ mod tests {
             privilege: "SELECT".into(),
             grantable: false,
             through: None,
+            usable: true,
         };
-        let grants = RoleGrants {
+        let view = view_of(RoleGrants {
             database: "d".into(),
-            beyond: Default::default(),
             held: vec![held("a.b", "c"), held("a", "b.c")],
-        };
-        let rows = role_rows(&grants, &role_columns(&grants), "");
+            ..RoleGrants::default()
+        });
+        let rows = relations(&view, "");
         assert_eq!(rows.len(), 2);
         assert_ne!(rows[0].key, rows[1].key);
+    }
+
+    fn grant_on(relation: &str, privilege: &str, through: Option<&str>) -> HeldGrant {
+        HeldGrant {
+            schema: "public".into(),
+            relation: relation.into(),
+            privilege: privilege.into(),
+            grantable: false,
+            through: through.map(str::to_string),
+            usable: true,
+        }
+    }
+
+    /// One database, "d", read, holding `grants`.
+    fn view_of(grants: RoleGrants) -> RoleView {
+        let mut view = RoleView::plan(
+            RoleAccess {
+                superuser: false,
+                databases: vec![database("d", Some(Source::Public))],
+            },
+            |_| true,
+        );
+        view.land("d", Ok(grants));
+        view
+    }
+
+    /// The relation rows alone.
+    fn relations(view: &RoleView, filter: &str) -> Vec<MatrixRow> {
+        role_rows(view, &role_columns(view), filter)
+            .into_iter()
+            .filter(|row| row.who == Who::Object)
+            .collect()
     }
 
     #[test]
     fn a_privilege_from_two_grantors_shows_the_stronger_mark_in_either_order() {
         let held = |grantable: bool| HeldGrant {
-            schema: "public".into(),
-            relation: "orders".into(),
-            privilege: "SELECT".into(),
+            usable: true,
             grantable,
-            through: None,
+            ..grant_on("orders", "SELECT", None)
         };
         for order in [[false, true], [true, false]] {
-            let grants = RoleGrants {
-                database: "d".into(),
-                beyond: Default::default(),
+            let view = view_of(RoleGrants {
                 held: order.into_iter().map(held).collect(),
-            };
-            let rows = role_rows(&grants, &role_columns(&grants), "");
-            assert_eq!(rows[0].marks, [Mark::Grantable], "{order:?}");
+                ..RoleGrants::default()
+            });
+            assert_eq!(
+                relations(&view, "")[0].marks,
+                [Mark::None, Mark::Grantable],
+                "{order:?}"
+            );
         }
         let mut object = orders();
         object
@@ -644,75 +1019,259 @@ mod tests {
             rows.into_iter().map(|row| row.name).collect()
         };
         assert_eq!(names(object_rows(&orders(), false, "rptg")), ["reporting"]);
-        let grants = RoleGrants {
-            database: "d".into(),
-            beyond: Default::default(),
+        let view = view_of(RoleGrants {
             held: vec![HeldGrant {
                 schema: "sales".into(),
-                relation: "orders".into(),
-                privilege: "SELECT".into(),
-                grantable: false,
-                through: None,
+                ..grant_on("orders", "SELECT", None)
             }],
-        };
-        assert_eq!(
-            names(role_rows(&grants, &role_columns(&grants), "slsord")),
-            ["sales.orders"]
-        );
-    }
-
-    #[test]
-    fn an_empty_list_of_a_roles_grants_says_what_reaches_past_them() {
-        use crate::db::roles::Beyond;
-        let grants = |beyond: Beyond| RoleGrants {
-            database: "shop".into(),
-            held: Vec::new(),
-            beyond,
-        };
-        assert_eq!(
-            role_grants_empty(&grants(Beyond::default())),
-            "It holds no grant on any relation of shop."
-        );
-        assert!(
-            role_grants_empty(&grants(Beyond {
-                superuser: true,
-                ..Beyond::default()
-            }))
-            .starts_with("Superuser")
-        );
-        assert_eq!(
-            role_grants_empty(&grants(Beyond {
-                owns: 3,
-                predefined: vec!["pg_read_all_data".into()],
-                ..Beyond::default()
-            })),
-            "Owns 3 relations, and holds everything on them. Holds pg_read_all_data, which \
-             reaches further than any grant. It holds no grant on any other relation of shop."
-        );
+            ..RoleGrants::default()
+        });
+        assert_eq!(names(relations(&view, "slsord")), ["orders"]);
+        // The schema and database stay with the relation that matched.
+        let kept = names(role_rows(&view, &role_columns(&view), "slsord"));
+        assert_eq!(kept, ["d", "sales", "orders"]);
+        assert!(role_rows(&view, &role_columns(&view), "zzz").is_empty());
     }
 
     #[test]
     fn a_roles_own_grant_wins_over_one_held_through_a_role() {
-        let held = |relation: &str, privilege: &str, through: Option<&str>| HeldGrant {
-            schema: "public".into(),
-            relation: relation.into(),
-            privilege: privilege.into(),
-            grantable: false,
-            through: through.map(str::to_string),
-        };
-        let grants = RoleGrants {
-            database: "d".into(),
-            beyond: Default::default(),
+        let view = view_of(RoleGrants {
             held: vec![
-                held("orders", "SELECT", None),
-                held("orders", "SELECT", Some("reporting")),
-                held("orders", "UPDATE", Some("app_rw")),
+                grant_on("orders", "SELECT", None),
+                grant_on("orders", "SELECT", Some("reporting")),
+                grant_on("orders", "UPDATE", Some("app_rw")),
+            ],
+            ..RoleGrants::default()
+        });
+        let columns = role_columns(&view);
+        assert_eq!(columns, ["CONNECT", "SELECT", "UPDATE"]);
+        let rows = relations(&view, "");
+        assert_eq!(rows[0].marks, [Mark::None, Mark::Granted, Mark::Through]);
+        assert_eq!(rows[0].via, "direct, and through reporting, app_rw");
+    }
+
+    fn database(name: &str, connect: Option<Source>) -> DatabaseAccess {
+        DatabaseAccess {
+            name: name.into(),
+            allows_connections: true,
+            rights: connect
+                .into_iter()
+                .map(|source| Right {
+                    privilege: "CONNECT".into(),
+                    sources: vec![source],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn only_databases_it_can_connect_to_and_the_filter_shows_are_read() {
+        let mut closed = database("closed", Some(Source::Public));
+        closed.allows_connections = false;
+        let access = RoleAccess {
+            superuser: false,
+            databases: vec![
+                database("app", Some(Source::Direct)),
+                database("audit", None),
+                database("hidden", Some(Source::Public)),
+                closed,
+                database("shop", Some(Source::Via("team".into()))),
             ],
         };
-        let columns = role_columns(&grants);
-        assert_eq!(columns, ["SELECT", "UPDATE"]);
-        let rows = role_rows(&grants, &columns, "");
-        assert_eq!(rows[0].marks, [Mark::Granted, Mark::Through]);
-        assert_eq!(rows[0].via, "direct, and through reporting, app_rw");
+        let view = RoleView::plan(access, |name| name != "hidden");
+        assert_eq!(view.pending(), ["app", "shop"]);
+        let reads: Vec<&Read> = view.sections.iter().map(|section| &section.read).collect();
+        assert_eq!(reads[1], &Read::Skipped(Skipped::NoConnect));
+        assert_eq!(reads[2], &Read::Skipped(Skipped::Hidden));
+        assert_eq!(reads[3], &Read::Skipped(Skipped::NoConnect));
+        // Every one is listed, said why not read, none dropped.
+        let rows = role_rows(&view, &role_columns(&view), "");
+        let via = |name: &str| {
+            rows.iter()
+                .find(|row| row.name == name)
+                .unwrap()
+                .via
+                .clone()
+        };
+        assert_eq!(via("audit"), "no CONNECT: not read");
+        assert_eq!(via("closed"), "takes no connections: not read");
+        assert!(via("hidden").starts_with("hidden by the filter: not read"));
+        assert_eq!(via("app"), "reading… · connect direct");
+    }
+
+    #[test]
+    fn a_superuser_is_listed_everywhere_it_connects_and_read_nowhere() {
+        let access = RoleAccess {
+            superuser: true,
+            databases: vec![
+                database("a", Some(Source::Direct)),
+                database("b", Some(Source::Direct)),
+            ],
+        };
+        let view = RoleView::plan(access, |_| true);
+        assert!(view.pending().is_empty());
+        assert!(
+            view.sections
+                .iter()
+                .all(|section| section.read == Read::Skipped(Skipped::Superuser))
+        );
+    }
+
+    #[test]
+    fn no_more_than_the_limit_is_read() {
+        let access = RoleAccess {
+            superuser: false,
+            databases: (0..MAX_DATABASES_READ + 3)
+                .map(|n| database(&format!("db{n:02}"), Some(Source::Public)))
+                .collect(),
+        };
+        let view = RoleView::plan(access, |_| true);
+        assert_eq!(view.pending().len(), MAX_DATABASES_READ);
+        assert_eq!(
+            view.sections.last().map(|section| &section.read),
+            Some(&Read::Skipped(Skipped::Limit))
+        );
+    }
+
+    #[test]
+    fn a_failed_database_is_its_own_row_and_the_others_still_land() {
+        let access = RoleAccess {
+            superuser: false,
+            databases: vec![
+                database("a", Some(Source::Public)),
+                database("b", Some(Source::Public)),
+            ],
+        };
+        let mut view = RoleView::plan(access, |_| true);
+        view.land("a", Err("connection refused".into()));
+        view.land("b", Ok(RoleGrants::default()));
+        // A late answer for a database already answered changes nothing.
+        view.land("b", Err("late".into()));
+        let rows = role_rows(&view, &role_columns(&view), "");
+        assert_eq!(
+            rows[0].via,
+            "could not read: connection refused · connect PUBLIC"
+        );
+        assert_eq!(rows[1].via, "connect PUBLIC");
+        assert!(view.pending().is_empty());
+    }
+
+    fn schema(name: &str, rights: &[(&str, Source)], owns: u64) -> SchemaAccess {
+        SchemaAccess {
+            name: name.into(),
+            rights: rights
+                .iter()
+                .map(|(privilege, source)| Right {
+                    privilege: privilege.to_string(),
+                    sources: vec![source.clone()],
+                })
+                .collect(),
+            owns,
+        }
+    }
+
+    #[test]
+    fn a_grant_in_a_schema_without_usage_is_blocked_and_says_so() {
+        let mut view = RoleView::plan(
+            RoleAccess {
+                superuser: false,
+                databases: vec![database("shop", Some(Source::Public))],
+            },
+            |_| true,
+        );
+        view.land(
+            "shop",
+            Ok(RoleGrants {
+                database: "shop".into(),
+                schemas: vec![
+                    schema("sales", &[], 0),
+                    schema("open", &[("USAGE", Source::Public)], 0),
+                    schema("empty", &[], 0),
+                ],
+                held: vec![
+                    HeldGrant {
+                        schema: "sales".into(),
+                        usable: false,
+                        ..grant_on("orders", "SELECT", None)
+                    },
+                    HeldGrant {
+                        schema: "open".into(),
+                        ..grant_on("items", "SELECT", Some("PUBLIC"))
+                    },
+                ],
+                ..RoleGrants::default()
+            }),
+        );
+        let columns = role_columns(&view);
+        assert_eq!(columns, ["CONNECT", "USAGE", "SELECT"]);
+        let rows = role_rows(&view, &columns, "");
+        let row = |name: &str| rows.iter().find(|row| row.name == name).unwrap();
+        assert_eq!(row("orders").marks, [Mark::None, Mark::None, Mark::Blocked]);
+        assert_eq!(
+            row("orders").via,
+            "direct · no USAGE on sales, so out of reach"
+        );
+        assert_eq!(row("items").marks, [Mark::None, Mark::None, Mark::Public]);
+        assert_eq!(row("open").marks, [Mark::None, Mark::Public, Mark::None]);
+        assert_eq!(row("sales").via, "no USAGE");
+        assert_eq!(row("shop").marks, [Mark::Public, Mark::None, Mark::None]);
+        // A schema it holds nothing on is counted, not listed.
+        assert!(rows.iter().all(|row| row.name != "empty"));
+        assert!(rows.iter().any(
+            |row| row.who == Who::Note && row.name == "1 schema it holds nothing on left out."
+        ));
+        let mut keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before, "{keys:?}");
+    }
+
+    #[test]
+    fn what_a_role_owns_and_inherits_is_said_where_no_grant_shows_it() {
+        use crate::db::roles::Beyond;
+        let mut view = RoleView::plan(
+            RoleAccess {
+                superuser: false,
+                databases: vec![database("shop", Some(Source::Owner(None)))],
+            },
+            |_| true,
+        );
+        view.land(
+            "shop",
+            Ok(RoleGrants {
+                schemas: vec![schema(
+                    "public",
+                    &[("USAGE", Source::Owner(Some("owners".into())))],
+                    3,
+                )],
+                beyond: Beyond {
+                    predefined: vec!["pg_read_all_data".into()],
+                    defaults: 2,
+                    ..Beyond::default()
+                },
+                ..RoleGrants::default()
+            }),
+        );
+        let rows = role_rows(&view, &role_columns(&view), "");
+        let public = rows.iter().find(|row| row.name == "public").unwrap();
+        assert_eq!(public.via, "usage owner, as owners · owns 3 relations");
+        let notes: Vec<&str> = (rows.iter())
+            .filter(|row| row.who == Who::Note)
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                "Holds pg_read_all_data, which reach past any grant listed.",
+                "2 rules of ALTER DEFAULT PRIVILEGES name it: they decide what its future objects hold."
+            ]
+        );
+        // Filtering names rows, and a note is none.
+        assert!(
+            role_rows(&view, &role_columns(&view), "public")
+                .iter()
+                .all(|row| row.who != Who::Note)
+        );
     }
 }

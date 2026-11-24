@@ -19,6 +19,7 @@ use gpui::WeakEntity;
 use super::*;
 
 use crate::db::roles::{self, NewRole, ObjectGrants, Role, RoleEdit, RoleGrants};
+use crate::grants::RoleView;
 use crate::sidebar::RolesListing;
 use crate::users_view::{Loaded, RoleAction, UsersEvent, UsersView, reports_csv};
 
@@ -122,7 +123,7 @@ impl RoleForm {
 /// Whose grants the Show Grants dialog lists.
 pub(crate) enum GrantsOf {
     Object(ObjectGrants),
-    Role(RoleGrants),
+    Role(RoleView),
 }
 
 /// The Show Grants dialog: read-only, its answer landing only while it
@@ -169,9 +170,9 @@ impl GrantsView {
                 grants.privileges.clone(),
                 crate::grants::object_rows(grants, self.with_members, &filter),
             ),
-            Loaded::Ready(GrantsOf::Role(grants)) => {
-                let columns = crate::grants::role_columns(grants);
-                let rows = crate::grants::role_rows(grants, &columns, &filter);
+            Loaded::Ready(GrantsOf::Role(view)) => {
+                let columns = crate::grants::role_columns(view);
+                let rows = crate::grants::role_rows(view, &columns, &filter);
                 (columns, rows)
             }
             _ => (Vec::new(), Vec::new()),
@@ -1014,7 +1015,11 @@ impl Workspace {
         .detach();
     }
 
-    /// Show Grants of one role: every relation it holds anything on.
+    /// Show Grants of one role: what it holds in every database of the server
+    /// it can connect to. The databases and the privileges on them are
+    /// catalogs every database shares, read first on the tab's side session;
+    /// what is inside each database (schemas, relations) is read there, one
+    /// database after another, as [`Self::read_role_databases`] says.
     fn show_role_grants(
         &mut self,
         id: &str,
@@ -1029,14 +1034,11 @@ impl Workspace {
             return;
         };
         let generation = profile.generation;
-        let database = profile
-            .active_database()
-            .unwrap_or_else(|| profile.name.clone());
         let asked = name.clone();
         let side = self.roles_side(id);
         let read = spawn_blocking(cx.background_executor(), move || {
             on_side(side, &connection, generation, |side| {
-                side.role_grants(&asked)
+                side.role_access(&asked)
             })
         });
         let kind = match self.role_of(id, &name) {
@@ -1046,7 +1048,7 @@ impl Workspace {
         let request = self.open_grants_view(
             id,
             format!("Grants of {name}"),
-            format!("{kind} · {database}"),
+            format!("{kind} · every database it can connect to"),
             false,
             window,
             cx,
@@ -1055,10 +1057,143 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             let result = read.await;
             _ = workspace.update(cx, |workspace, cx| {
-                workspace.land_grants(&id, generation, request, result.map(GrantsOf::Role), cx)
+                workspace.land_role_access(&id, generation, request, name, result, cx)
             });
         })
         .detach();
+    }
+
+    /// The databases of a role's access landed: plan which are read, and
+    /// start reading them.
+    pub(super) fn land_role_access(
+        &mut self,
+        id: &str,
+        generation: u64,
+        request: u64,
+        role: String,
+        result: Result<roles::RoleAccess, DbError>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        // What the database filter lets through, as it stands as the answer
+        // lands.
+        let shown = profile.shown();
+        let planned =
+            result.map(|access| RoleView::plan(access, |name| shown.shows_database(name)));
+        let pending = planned.as_ref().map(RoleView::pending).unwrap_or_default();
+        self.land_grants(id, generation, request, planned.map(GrantsOf::Role), cx);
+        if !pending.is_empty() {
+            self.read_role_databases(id, generation, request, role, pending, cx);
+        }
+    }
+
+    /// Read what `role` holds inside each of `databases`, one after the
+    /// other, each landing in its own section as it arrives. A database that
+    /// fails is said so in its section and the rest are still read; one
+    /// answer landing after the dialog was closed or asked again is dropped,
+    /// and ends the reading.
+    ///
+    /// The connection's own database is read on the tab's side session. Any
+    /// other goes over its bound session, the one the connections tree reads
+    /// that database's catalog on ([`Self::route_in`], [`Self::run_routed`]),
+    /// opened first where none is, on a connection of its own for the read
+    /// (`apart`) so a failed read cannot touch what a tab has open.
+    fn read_role_databases(
+        &mut self,
+        id: &str,
+        generation: u64,
+        request: u64,
+        role: String,
+        databases: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let id = id.to_string();
+        cx.spawn(async move |workspace, cx| {
+            for database in databases {
+                let Ok(Some(read)) = workspace.update(cx, |workspace, cx| {
+                    workspace.start_role_read(&id, generation, request, &role, &database, cx)
+                }) else {
+                    return;
+                };
+                let result = read.await;
+                let current = workspace.update(cx, |workspace, cx| {
+                    workspace.land_role_database(&id, generation, request, &database, result, cx)
+                });
+                if !current.unwrap_or(false) {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Start reading `role`'s grants inside `database`; `None` where the
+    /// dialog no longer asks for them.
+    fn start_role_read(
+        &mut self,
+        id: &str,
+        generation: u64,
+        request: u64,
+        role: &str,
+        database: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<Result<RoleGrants, DbError>>> {
+        self.grants_view
+            .as_ref()
+            .filter(|view| view.request == request)?;
+        let profile = self.profiles.iter().find(|found| found.id == id)?;
+        if profile.generation != generation {
+            return None;
+        }
+        let asked = role.to_string();
+        if profile.active_database().as_deref() == Some(database) {
+            let connection = profile.connection()?;
+            let side = self.roles_side(id);
+            return Some(spawn_blocking(cx.background_executor(), move || {
+                on_side(side, &connection, generation, |side| {
+                    side.role_grants(&asked)
+                })
+            }));
+        }
+        let (profile_id, generation, routed) = self.route_in(id, Some(database.to_string()))?;
+        Some(self.run_routed(
+            &profile_id,
+            generation,
+            routed,
+            move |connection| connection.apart()?.role_grants(&asked),
+            cx,
+        ))
+    }
+
+    /// What reading `database` answered. Whether the dialog still asks for
+    /// the reads that follow.
+    fn land_role_database(
+        &mut self,
+        id: &str,
+        generation: u64,
+        request: u64,
+        database: &str,
+        result: Result<RoleGrants, DbError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.issued_to(id, generation).is_none() {
+            return false;
+        }
+        let Some(view) = self
+            .grants_view
+            .as_mut()
+            .filter(|view| view.request == request)
+        else {
+            return false;
+        };
+        if let Loaded::Ready(GrantsOf::Role(roles)) = &mut view.data {
+            roles.land(database, result.map_err(|error| error.message));
+            view.rebuild(true, cx);
+            cx.notify();
+        }
+        true
     }
 
     pub(super) fn open_grants_view(
