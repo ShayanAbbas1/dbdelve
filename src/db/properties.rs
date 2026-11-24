@@ -28,9 +28,9 @@ impl Property {
     }
 }
 
-/// The longest an application name may be. Postgres truncates at 63 bytes and
-/// shows the rest nowhere, so a longer one only misleads.
-const APPLICATION_NAME_CAP: usize = 64;
+/// The longest an application name may be, in bytes. Postgres truncates at 63
+/// bytes and shows the rest nowhere, so a longer one only misleads.
+const APPLICATION_NAME_CAP: usize = 63;
 
 /// What a profile's driver properties say, typed. Part of the connection: a
 /// change reconnects, and every session opened from it carries them as it
@@ -71,9 +71,9 @@ impl Properties {
             }
             match property {
                 Property::ApplicationName => {
-                    if value.chars().count() > APPLICATION_NAME_CAP {
+                    if value.len() > APPLICATION_NAME_CAP {
                         return Err(format!(
-                            "Driver property `{key}` is longer than {APPLICATION_NAME_CAP} characters."
+                            "Driver property `{key}` is longer than {APPLICATION_NAME_CAP} bytes."
                         ));
                     }
                     if value.chars().any(char::is_control) {
@@ -236,14 +236,15 @@ mod tests {
                 Properties::parse(Engine::MySql, &pair("connect_timeout", good.0)).expect(good.0);
             assert_eq!(parsed.connect_timeout, Some(good.1));
         }
-        let long = "a".repeat(65);
-        for bad in [long.as_str(), "a\nb"] {
+        let long = "a".repeat(64);
+        let wide = "é".repeat(32);
+        for bad in [long.as_str(), wide.as_str(), "a\nb"] {
             let message =
                 Properties::parse(Engine::Postgres, &pair("application_name", bad)).expect_err(bad);
             assert!(message.contains("`application_name`"), "{message}");
         }
         assert!(
-            Properties::parse(Engine::Postgres, &pair("application_name", &"a".repeat(64))).is_ok()
+            Properties::parse(Engine::Postgres, &pair("application_name", &"a".repeat(63))).is_ok()
         );
 
         let twice = vec![
