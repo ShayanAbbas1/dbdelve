@@ -1236,6 +1236,117 @@ pub fn is_generated_role_change(engine: Engine, sql: &str) -> bool {
     !statements.is_empty() && statements.iter().all(role_change)
 }
 
+/// The gate every grant change DBDelve writes passes before it is shown for
+/// review: `GRANT` and `REVOKE` of named privileges on one database, schema,
+/// table or sequence to one role, in the shapes `db::roles::grant_statements`
+/// writes and no other. Never `ALL`, `PUBLIC`, a grant option, `CASCADE`, a
+/// column list, a bulk `ALL TABLES IN SCHEMA`, nor a role's membership.
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub fn is_generated_grant_change(engine: Engine, sql: &str) -> bool {
+    let spec = &engine.spec().sql;
+    if engine.syntax() != Syntax::Sql || spec.parser_dialect != ParserDialect::PostgreSql {
+        return false;
+    }
+    let dialect = parser(spec.parser_dialect);
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    !statements.is_empty()
+        && statements.iter().all(|statement| match statement {
+            Statement::Grant(grant) => {
+                !grant.with_grant_option
+                    && grant.as_grantor.is_none()
+                    && grant.granted_by.is_none()
+                    && grant.current_grants.is_none()
+                    && grant_shape(&grant.privileges, grant.objects.as_ref(), &grant.grantees)
+            }
+            Statement::Revoke(revoke) => {
+                !revoke.grant_option_for
+                    && revoke.granted_by.is_none()
+                    && revoke.cascade.is_none()
+                    && grant_shape(
+                        &revoke.privileges,
+                        revoke.objects.as_ref(),
+                        &revoke.grantees,
+                    )
+            }
+            _ => false,
+        })
+}
+
+/// The part `GRANT` and `REVOKE` share: named privileges the object takes
+/// (`db::roles::grant_applies`, so the builder and the gate cannot drift),
+/// one object, one plain role.
+fn grant_shape(
+    privileges: &sqlparser::ast::Privileges,
+    objects: Option<&sqlparser::ast::GrantObjects>,
+    grantees: &[sqlparser::ast::Grantee],
+) -> bool {
+    use crate::db::roles::{GrantObject, grant_applies};
+    use sqlparser::ast::{Action, GrantObjects, GranteeName, GranteesType, Privileges};
+    let single = |names: &[sqlparser::ast::ObjectName], parts: usize| -> Option<Vec<String>> {
+        let [name] = names else { return None };
+        let idents: Vec<String> = name
+            .0
+            .iter()
+            .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+            .collect::<Option<_>>()?;
+        (idents.len() == parts).then_some(idents)
+    };
+    let object = match objects {
+        Some(GrantObjects::Databases(names)) => {
+            single(names, 1).map(|n| GrantObject::Database(n[0].clone()))
+        }
+        Some(GrantObjects::Schemas(names)) => {
+            single(names, 1).map(|n| GrantObject::Schema(n[0].clone()))
+        }
+        Some(GrantObjects::Tables(names)) => single(names, 2).map(|n| GrantObject::Relation {
+            schema: n[0].clone(),
+            name: n[1].clone(),
+            sequence: false,
+        }),
+        Some(GrantObjects::Sequences(names)) => single(names, 2).map(|n| GrantObject::Relation {
+            schema: n[0].clone(),
+            name: n[1].clone(),
+            sequence: true,
+        }),
+        _ => None,
+    };
+    let Some(object) = object else { return false };
+    let Privileges::Actions(actions) = privileges else {
+        return false;
+    };
+    let named = |action: &Action| match action {
+        Action::Connect => Some("CONNECT"),
+        Action::Temporary => Some("TEMPORARY"),
+        Action::Create { obj_type: None } => Some("CREATE"),
+        Action::Usage => Some("USAGE"),
+        Action::Select { columns: None } => Some("SELECT"),
+        Action::Insert { columns: None } => Some("INSERT"),
+        Action::Update { columns: None } => Some("UPDATE"),
+        Action::Delete => Some("DELETE"),
+        Action::Truncate => Some("TRUNCATE"),
+        Action::References { columns: None } => Some("REFERENCES"),
+        Action::Trigger => Some("TRIGGER"),
+        _ => None,
+    };
+    let [grantee] = grantees else { return false };
+    // `TO "r"` reads as a bare name; `TO PUBLIC` as the PUBLIC type, and a
+    // role named `public` is refused too: `TO public` is the keyword.
+    let plain_role = grantee.grantee_type == GranteesType::None
+        && matches!(
+            &grantee.name,
+            Some(GranteeName::ObjectName(name))
+                if matches!(name.0.as_slice(), [part]
+                    if part.as_ident().is_some_and(|ident| !ident.value.eq_ignore_ascii_case("public")))
+        );
+    plain_role
+        && !actions.is_empty()
+        && actions
+            .iter()
+            .all(|action| named(action).is_some_and(|privilege| grant_applies(&object, privilege)))
+}
+
 /// Whether `text` is a SCRAM-SHA-256 verifier the server takes as one,
 /// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`: an
 /// iteration count above 0, a salt that is base64, and two keys that are
@@ -6300,6 +6411,130 @@ mod tests {
             Engine::MySql,
             "CREATE ROLE app_rw NOLOGIN;"
         ));
+    }
+
+    #[test]
+    fn the_grant_gate_admits_what_db_roles_writes() {
+        use crate::db::roles::{
+            GrantAction, GrantChange, GrantObject, PRIVILEGE_ORDER, grant_applies, grant_statements,
+        };
+        let pg = Engine::Postgres;
+        let objects = [
+            GrantObject::Database("shop".into()),
+            GrantObject::Schema("sa\"les".into()),
+            GrantObject::Relation {
+                schema: "Sales".into(),
+                name: "or ders".into(),
+                sequence: false,
+            },
+            GrantObject::Relation {
+                schema: "sales".into(),
+                name: "orders_id_seq".into(),
+                sequence: true,
+            },
+        ];
+        // Every privilege on every kind, applicable or not: the gate admits
+        // exactly the ones the builder writes, so the two cannot drift.
+        let mut written = 0;
+        for object in &objects {
+            for privilege in PRIVILEGE_ORDER {
+                for action in [GrantAction::Grant, GrantAction::Revoke] {
+                    let change = GrantChange {
+                        database: None,
+                        object: object.clone(),
+                        grantee: "An\"a".into(),
+                        privilege: privilege.into(),
+                        action,
+                    };
+                    let batches = grant_statements(&[change]);
+                    let applies = grant_applies(object, privilege);
+                    assert_eq!(batches.len(), usize::from(applies));
+                    for batch in batches {
+                        written += 1;
+                        assert!(is_generated_grant_change(pg, &batch.sql), "{}", batch.sql);
+                    }
+                }
+            }
+        }
+        assert!(written > 0);
+        let both = grant_statements(&[
+            GrantChange {
+                database: None,
+                object: objects[2].clone(),
+                grantee: "ana".into(),
+                privilege: "INSERT".into(),
+                action: GrantAction::Grant,
+            },
+            GrantChange {
+                database: None,
+                object: objects[2].clone(),
+                grantee: "ana".into(),
+                privilege: "SELECT".into(),
+                action: GrantAction::Revoke,
+            },
+        ]);
+        assert!(
+            is_generated_grant_change(pg, &both[0].sql),
+            "{}",
+            both[0].sql
+        );
+        assert!(is_generated_grant_change(
+            pg,
+            "GRANT SELECT, INSERT ON TABLE \"s\".\"t\" TO \"r\"; REVOKE USAGE ON SEQUENCE \"s\".\"q\" FROM \"r\";"
+        ));
+    }
+
+    #[test]
+    fn the_grant_gate_refuses_everything_else() {
+        let pg = Engine::Postgres;
+        for sql in [
+            "DROP TABLE \"s\".\"t\";",
+            "ALTER ROLE \"r\" WITH LOGIN;",
+            "SELECT 1;",
+            "GRANT ALL ON TABLE \"s\".\"t\" TO \"r\";",
+            "GRANT ALL PRIVILEGES ON TABLE \"s\".\"t\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO PUBLIC;",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"public\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO public;",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\" WITH GRANT OPTION;",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\" CASCADE;",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\" RESTRICT;",
+            "REVOKE GRANT OPTION FOR SELECT ON TABLE \"s\".\"t\" FROM \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\" GRANTED BY \"o\";",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\" GRANTED BY \"o\";",
+            "GRANT SELECT ON ALL TABLES IN SCHEMA \"s\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\", \"q\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\", \"s\".\"u\" TO \"r\";",
+            "GRANT SELECT (\"c\") ON TABLE \"s\".\"t\" TO \"r\";",
+            "GRANT USAGE ON DATABASE \"d\" TO \"r\";",
+            "GRANT SELECT ON SCHEMA \"s\" TO \"r\";",
+            "GRANT INSERT ON SEQUENCE \"s\".\"q\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"t\" TO \"r\";",
+            "GRANT CONNECT ON DATABASE \"a\".\"d\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO GROUP \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\"@\"h\";",
+            "GRANT EXECUTE ON FUNCTION f() TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\"; DROP TABLE x;",
+            "GRANT reporting TO ana;",
+            "",
+        ] {
+            assert!(!is_generated_grant_change(pg, sql), "{sql}");
+        }
+        assert!(!is_generated_grant_change(
+            Engine::MySql,
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\";"
+        ));
+    }
+
+    #[test]
+    fn a_generated_grant_is_never_read_as_a_read() {
+        for sql in [
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\";",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\";",
+        ] {
+            assert!(is_generated_grant_change(Engine::Postgres, sql));
+            assert_eq!(classify(Engine::Postgres, sql).mode, Mode::Full, "{sql}");
+        }
     }
 
     #[test]

@@ -406,6 +406,41 @@ instead of asking for Full: changing a role's membership (`GRANT role TO
 member`; membership is set only at creation, `IN ROLE`), and clearing a
 connection limit (`CONNECTION LIMIT -1`). Edit refuses the second by name.
 
+**Grant changes have their own gate.** The Show Grants editor writes `GRANT` and
+`REVOKE` (`db::roles::grant_statements`), and every batch passes
+`sql::is_generated_grant_change` before it is shown for review. It reads the
+sqlparser tree, Postgres only, and admits one shape per statement: named
+privileges on one database, schema, table or sequence (`DATABASE d`, `SCHEMA s`,
+`TABLE s.t`, `SEQUENCE s.q`) to or from one plain role. The privileges are the
+ones the object takes, asked of `db::roles::grant_applies`, the same function
+the builder uses, so the two cannot drift: `CONNECT`, `TEMPORARY`, `CREATE` on a
+database; `USAGE`, `CREATE` on a schema; `USAGE`, `SELECT`, `UPDATE` on a
+sequence (`USAGE` is refused through the `TABLE` form, so the statement says
+which); `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`,
+`TRIGGER` on a table or view. `MAINTAIN` is left out: sqlparser 0.63 cannot read it.
+
+Refused, and why:
+
+- `ALL` and `ALL PRIVILEGES`, and `ALL TABLES IN SCHEMA` or any other bulk
+  form: what they reach is not what the user ticked.
+- `PUBLIC`, by keyword or by the name `public`, and a grantee of any other
+  kind (`GROUP`, `user@host`): a grantee is a role's name, and PUBLIC is not
+  edited here.
+- `WITH GRANT OPTION`, `GRANT OPTION FOR`, `GRANTED BY`, `AS`: grant option is
+  out of scope. A revoke of a direct grant takes its grant option with it, as
+  Postgres does.
+- `CASCADE` and `RESTRICT`: a revoke never cascades, so a grant others
+  re-granted fails with the server's error, which is shown.
+- Column privileges (`SELECT (c)`): the matrix has no column to put them in.
+- `ALTER DEFAULT PRIVILEGES` and role membership (`GRANT role TO member`): not
+  edited here, and sqlparser reads the second as unreadable.
+- Anything else in the batch: a `DROP` after the `GRANT` fails the whole batch.
+
+A batch runs on the session of its database (`GrantBatch::database`; `None`
+is the connection's own), since a table's privileges live in its database's
+catalog. `sql::classify` reads every `GRANT` and `REVOKE` as Full, so the mode
+decides.
+
 Show Grants and everything else the tab reads are catalog reads on a side
 connection (`Connection::apart`), never a statement of the user's.
 

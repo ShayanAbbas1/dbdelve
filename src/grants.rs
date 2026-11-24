@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::db::roles::{
-    DatabaseAccess, HeldGrant, ObjectGrants, Right, RoleAccess, RoleGrants, Roles, SchemaAccess,
-    Source,
+    DatabaseAccess, HeldGrant, ObjectGrants, PRIVILEGE_ORDER, Right, RoleAccess, RoleGrants, Roles,
+    SchemaAccess, Source,
 };
 use crate::fuzzy::{Fuzzy, Query};
 
@@ -503,22 +503,6 @@ impl RoleView {
         }
     }
 }
-
-/// The order a table's privileges are listed in, those of a database and a
-/// schema before them.
-const PRIVILEGE_ORDER: [&str; 11] = [
-    "CONNECT",
-    "TEMPORARY",
-    "USAGE",
-    "CREATE",
-    "SELECT",
-    "INSERT",
-    "UPDATE",
-    "DELETE",
-    "TRUNCATE",
-    "REFERENCES",
-    "TRIGGER",
-];
 
 /// The columns of a role's access: the privileges it holds anywhere in the
 /// view, in [`PRIVILEGE_ORDER`], then any other.

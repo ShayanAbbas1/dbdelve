@@ -518,6 +518,152 @@ fn ident(name: &str) -> String {
     Engine::Postgres.quote_identifier(name)
 }
 
+/// What a grant is on. A relation says whether it is a sequence because
+/// Postgres refuses `USAGE` through the `TABLE` form.
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GrantObject {
+    Database(String),
+    Schema(String),
+    Relation {
+        schema: String,
+        name: String,
+        sequence: bool,
+    },
+}
+
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GrantAction {
+    Grant,
+    Revoke,
+}
+
+/// One privilege to grant to or revoke from one role on one object.
+///
+/// Grant option is out of scope: a grant is written without `WITH GRANT
+/// OPTION`, and a revoke of a direct grant takes its grant option with it,
+/// as Postgres does. A revoke never says `CASCADE`, so a grant others
+/// re-granted fails with the server's own error, which is shown.
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GrantChange {
+    /// The database whose session runs it; `None` for the connection's own.
+    pub database: Option<String>,
+    pub object: GrantObject,
+    pub grantee: String,
+    /// As the server spells it: `SELECT`, `TEMPORARY`, ...
+    pub privilege: String,
+    pub action: GrantAction,
+}
+
+/// The statements of one database, run on that database's session.
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantBatch {
+    pub database: Option<String>,
+    pub sql: String,
+}
+
+/// The order a table's privileges are listed in, those of a database and a
+/// schema before them. Statements spell them in it too.
+pub const PRIVILEGE_ORDER: [&str; 11] = [
+    "CONNECT",
+    "TEMPORARY",
+    "USAGE",
+    "CREATE",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+];
+
+/// Whether `privilege` is one a grant on `object` may name. This is the set
+/// `sql::is_generated_grant_change` admits, and no other: never `ALL`, and
+/// not `MAINTAIN`, which sqlparser 0.63 cannot read.
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub fn grant_applies(object: &GrantObject, privilege: &str) -> bool {
+    let takes: &[&str] = match object {
+        GrantObject::Database(_) => &["CONNECT", "TEMPORARY", "CREATE"],
+        GrantObject::Schema(_) => &["USAGE", "CREATE"],
+        GrantObject::Relation { sequence: true, .. } => &["USAGE", "SELECT", "UPDATE"],
+        GrantObject::Relation { .. } => &[
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+        ],
+    };
+    takes.contains(&privilege)
+}
+
+/// The statements for `changes`, one batch per database (the connection's
+/// own first), each statement on its own line: one per object, role and
+/// action, its privileges in [`PRIVILEGE_ORDER`]. Revokes come before grants.
+/// A privilege its object cannot take is dropped, never written, and a
+/// grantee is always a role's name, never `PUBLIC`.
+#[allow(dead_code)] // read by the Show Grants editor, next commit
+pub fn grant_statements(changes: &[GrantChange]) -> Vec<GrantBatch> {
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<_, Vec<&str>> = BTreeMap::new();
+    for change in changes {
+        if !grant_applies(&change.object, &change.privilege) {
+            continue;
+        }
+        let key = (
+            &change.database,
+            change.action == GrantAction::Grant,
+            &change.object,
+            &change.grantee,
+            change.action,
+        );
+        grouped.entry(key).or_default().push(&change.privilege);
+    }
+    let mut batches: Vec<GrantBatch> = Vec::new();
+    for ((database, _, object, grantee, action), mut privileges) in grouped {
+        privileges
+            .sort_by_key(|privilege| PRIVILEGE_ORDER.iter().position(|known| known == privilege));
+        privileges.dedup();
+        let target = match object {
+            GrantObject::Database(name) => format!("DATABASE {}", ident(name)),
+            GrantObject::Schema(name) => format!("SCHEMA {}", ident(name)),
+            GrantObject::Relation {
+                schema,
+                name,
+                sequence,
+            } => format!(
+                "{} {}.{}",
+                if *sequence { "SEQUENCE" } else { "TABLE" },
+                ident(schema),
+                ident(name)
+            ),
+        };
+        let privileges = privileges.join(", ");
+        let grantee = ident(grantee);
+        let statement = match action {
+            GrantAction::Grant => format!("GRANT {privileges} ON {target} TO {grantee};"),
+            GrantAction::Revoke => format!("REVOKE {privileges} ON {target} FROM {grantee};"),
+        };
+        match batches.last_mut() {
+            Some(batch) if batch.database == *database => {
+                batch.sql.push('\n');
+                batch.sql.push_str(&statement);
+            }
+            _ => batches.push(GrantBatch {
+                database: database.clone(),
+                sql: statement,
+            }),
+        }
+    }
+    batches
+}
+
 /// Read alike whatever `standard_conforming_strings` is: a role name is
 /// anyone's to pick, and a catalog read quoting one runs as the viewer.
 fn literal(value: &str) -> String {
@@ -1777,5 +1923,115 @@ mod tests {
             ]],
         );
         assert!(assemble_role_access(&bad).is_err());
+    }
+
+    fn change(
+        database: Option<&str>,
+        object: GrantObject,
+        grantee: &str,
+        privilege: &str,
+        action: GrantAction,
+    ) -> GrantChange {
+        GrantChange {
+            database: database.map(str::to_string),
+            object,
+            grantee: grantee.into(),
+            privilege: privilege.into(),
+            action,
+        }
+    }
+
+    fn on_table(schema: &str, name: &str) -> GrantObject {
+        GrantObject::Relation {
+            schema: schema.into(),
+            name: name.into(),
+            sequence: false,
+        }
+    }
+
+    #[test]
+    fn grants_and_revokes_are_spelled_per_object_in_the_dialogs_order() {
+        use GrantAction::{Grant, Revoke};
+        let sequence = GrantObject::Relation {
+            schema: "s".into(),
+            name: "q".into(),
+            sequence: true,
+        };
+        let batches = grant_statements(&[
+            change(None, on_table("s", "t"), "r", "INSERT", Grant),
+            change(None, on_table("s", "t"), "r", "SELECT", Grant),
+            change(None, on_table("s", "t"), "r", "SELECT", Grant),
+            change(None, sequence, "r", "USAGE", Revoke),
+            change(None, GrantObject::Schema("s".into()), "r", "USAGE", Grant),
+            change(
+                None,
+                GrantObject::Database("d".into()),
+                "r",
+                "CONNECT",
+                Grant,
+            ),
+        ]);
+        assert_eq!(
+            batches,
+            [GrantBatch {
+                database: None,
+                sql: "REVOKE USAGE ON SEQUENCE \"s\".\"q\" FROM \"r\";\n\
+                      GRANT CONNECT ON DATABASE \"d\" TO \"r\";\n\
+                      GRANT USAGE ON SCHEMA \"s\" TO \"r\";\n\
+                      GRANT SELECT, INSERT ON TABLE \"s\".\"t\" TO \"r\";"
+                    .into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_grant_quotes_every_name() {
+        let batches = grant_statements(&[change(
+            None,
+            on_table("Sa\"les", "Or ders"),
+            "An\"a",
+            "SELECT",
+            GrantAction::Grant,
+        )]);
+        assert_eq!(
+            batches[0].sql,
+            "GRANT SELECT ON TABLE \"Sa\"\"les\".\"Or ders\" TO \"An\"\"a\";"
+        );
+    }
+
+    #[test]
+    fn changes_group_by_database_the_connections_own_first() {
+        use GrantAction::Grant;
+        let batches = grant_statements(&[
+            change(Some("zeta"), on_table("s", "t"), "r", "SELECT", Grant),
+            change(Some("alpha"), on_table("s", "t"), "r", "SELECT", Grant),
+            change(
+                None,
+                GrantObject::Database("d".into()),
+                "r",
+                "CONNECT",
+                Grant,
+            ),
+            change(Some("zeta"), on_table("s", "u"), "r", "SELECT", Grant),
+        ]);
+        let databases: Vec<_> = batches.iter().map(|b| b.database.as_deref()).collect();
+        assert_eq!(databases, [None, Some("alpha"), Some("zeta")]);
+        assert_eq!(batches[2].sql.lines().count(), 2);
+    }
+
+    #[test]
+    fn a_privilege_the_object_cannot_take_is_never_written() {
+        use GrantAction::Grant;
+        let database = GrantObject::Database("d".into());
+        assert!(grant_applies(&database, "TEMPORARY"));
+        assert!(!grant_applies(&database, "SELECT"));
+        assert!(!grant_applies(&on_table("s", "t"), "USAGE"));
+        assert!(!grant_applies(&on_table("s", "t"), "ALL"));
+        let batches = grant_statements(&[
+            change(None, database.clone(), "r", "ALL", Grant),
+            change(None, on_table("s", "t"), "r", "USAGE", Grant),
+            change(None, database, "r", "SELECT", Grant),
+        ]);
+        assert!(batches.is_empty());
     }
 }
