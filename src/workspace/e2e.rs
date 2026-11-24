@@ -6971,9 +6971,17 @@ fn show_grants_pins_the_role_in_view_until_the_pin_is_turned_off(cx: &mut TestAp
         });
         settle(cx);
         settle(cx);
+        // Drawn at the top of the list in view, not where the top of its
+        // scrolled content is.
+        let list = cx
+            .debug_bounds("show-grants-rows")
+            .expect("the list is drawn");
+        let pinned = cx
+            .debug_bounds("show-grants-pinned-crowd")
+            .expect("scrolled into its members, the role stays over them");
         assert!(
-            cx.debug_bounds("show-grants-pinned-crowd").is_some(),
-            "scrolled into its members, the role stays over them"
+            pinned.origin.y >= list.origin.y && pinned.bottom() <= list.bottom(),
+            "{pinned:?} sits inside {list:?}"
         );
 
         click_selector(cx, "show-grants-sticky");

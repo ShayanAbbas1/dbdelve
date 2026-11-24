@@ -709,14 +709,17 @@ impl gpui::UniformListDecoration for StickyParents {
         &self,
         visible_range: std::ops::Range<usize>,
         _bounds: gpui::Bounds<Pixels>,
-        _scroll_offset: gpui::Point<Pixels>,
+        scroll_offset: gpui::Point<Pixels>,
         _item_height: Pixels,
         _item_count: usize,
         _window: &mut Window,
         _cx: &mut App,
     ) -> AnyElement {
         let pinned = crate::grants::sticky_parents(&self.rows, visible_range.start);
-        div()
+        // The list places a decoration where the top of its scrolled content
+        // is, made for marks that scroll with the rows; padded down by as far
+        // as the rows have scrolled, the pinned ones stay at the list's top.
+        let stack = div()
             .debug_selector(|| "show-grants-sticky-rows".into())
             .w_full()
             .flex()
@@ -750,7 +753,11 @@ impl gpui::UniformListDecoration for StickyParents {
                         self.t,
                         self.mono.clone(),
                     ))
-            }))
+            }));
+        div()
+            .w_full()
+            .pt(-scroll_offset.y)
+            .child(stack)
             .into_any_element()
     }
 }
