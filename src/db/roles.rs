@@ -155,6 +155,8 @@ pub struct ObjectGrants {
     pub privileges: Vec<String>,
     pub grants: Vec<Grant>,
     pub roles: Roles,
+    /// A sequence, which a grant names `ON SEQUENCE`.
+    pub sequence: bool,
 }
 
 /// Where a privilege a role holds comes from.
@@ -303,6 +305,9 @@ pub struct HeldGrant {
     /// Whether the role holds `USAGE` on the schema: without it nothing in
     /// the schema is reached, whatever is granted on it.
     pub usable: bool,
+    /// A sequence, which a grant names `ON SEQUENCE`: the `TABLE` form is
+    /// refused for `USAGE`.
+    pub sequence: bool,
 }
 
 /// What one role can reach in the connection's database, for the detail
@@ -818,7 +823,8 @@ pub(super) fn role_grants_sql(name: &str, per_membership: bool) -> String {
          SELECT n.nspname AS schema, c.relname AS relation, a.privilege_type AS privilege,
              CASE WHEN a.is_grantable THEN 'y' ELSE 'n' END AS grantable,
              holder.via AS through, pg_catalog.current_database() AS database,
-             {usable} AS usable
+             {usable} AS usable,
+             CASE WHEN c.relkind = 'S' THEN 'y' ELSE 'n' END AS sequence
          FROM pg_catalog.pg_class AS c
          JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
          CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
@@ -829,7 +835,7 @@ pub(super) fn role_grants_sql(name: &str, per_membership: bool) -> String {
          UNION ALL
          SELECT n.nspname, c.relname, a.privilege_type || ' (columns)',
              CASE WHEN a.is_grantable THEN 'y' ELSE 'n' END,
-             holder.via, pg_catalog.current_database(), {usable}
+             holder.via, pg_catalog.current_database(), {usable}, 'n'
          FROM pg_catalog.pg_attribute AS att
          JOIN pg_catalog.pg_class AS c ON c.oid = att.attrelid
          JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
@@ -881,6 +887,7 @@ pub(super) fn assemble_role_grants(
             grantable: yes(result, row, "grantable")?,
             through: optional_cell(result, row, "through").map(str::to_string),
             usable: yes(result, row, "usable")?,
+            sequence: yes(result, row, "sequence")?,
         });
     }
     Ok(grants)
@@ -1105,6 +1112,7 @@ pub(super) fn assemble_grants(result: &QueryResult, roles: Roles) -> Result<Obje
         privileges,
         grants,
         roles,
+        sequence: kind == "S",
     })
 }
 
@@ -1664,6 +1672,7 @@ mod tests {
                 "through",
                 "database",
                 "usable",
+                "sequence",
             ],
             &[],
         );
@@ -1695,6 +1704,7 @@ mod tests {
                 "through",
                 "database",
                 "usable",
+                "sequence",
             ],
             &[
                 &[
@@ -1705,15 +1715,17 @@ mod tests {
                     Some("PUBLIC"),
                     Some("shop"),
                     Some("y"),
+                    Some("n"),
                 ],
                 &[
                     Some("sales"),
-                    Some("orders"),
-                    Some("SELECT (columns)"),
+                    Some("orders_id_seq"),
+                    Some("USAGE"),
                     Some("y"),
                     None,
                     Some("shop"),
                     Some("n"),
+                    Some("y"),
                 ],
             ],
         );
@@ -1737,6 +1749,7 @@ mod tests {
         assert_eq!(grants.held[0].through.as_deref(), Some("PUBLIC"));
         assert!(grants.held[0].usable && !grants.held[1].usable);
         assert!(grants.held[1].grantable && grants.held[1].through.is_none());
+        assert!(!grants.held[0].sequence && grants.held[1].sequence);
         let bad = table(
             &[
                 "database",

@@ -964,6 +964,7 @@ mod tests {
     fn orders() -> ObjectGrants {
         ObjectGrants {
             owner: "app_owner".into(),
+            sequence: false,
             privileges: vec!["SELECT".into(), "INSERT".into()],
             grants: vec![
                 grant(Some("app_owner"), "SELECT", true),
@@ -1040,6 +1041,7 @@ mod tests {
         // belongs to both and is reached through A first; Y belongs to X.
         let grants = ObjectGrants {
             owner: "owner".into(),
+            sequence: false,
             privileges: vec!["SELECT".into()],
             grants: vec![grant(Some("r"), "SELECT", false)],
             roles: Roles {
@@ -1095,6 +1097,7 @@ mod tests {
             grantable: false,
             through: None,
             usable: true,
+            sequence: false,
         };
         let view = view_of(RoleGrants {
             database: "d".into(),
@@ -1114,6 +1117,7 @@ mod tests {
             grantable: false,
             through: through.map(str::to_string),
             usable: true,
+            sequence: false,
         }
     }
 

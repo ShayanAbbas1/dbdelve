@@ -6581,6 +6581,7 @@ fn birds_grants() -> crate::db::roles::ObjectGrants {
     };
     ObjectGrants {
         owner: "keeper".into(),
+        sequence: false,
         privileges: vec!["SELECT".into(), "INSERT".into()],
         grants: vec![
             Grant {
@@ -6770,6 +6771,7 @@ fn crowded_grants(roles: usize) -> crate::db::roles::ObjectGrants {
     let names = (0..roles).map(|ix| format!("role{ix:05}"));
     ObjectGrants {
         owner: "role00000".into(),
+        sequence: false,
         privileges: vec!["SELECT".into(), "INSERT".into()],
         grants: (names.clone())
             .map(|grantee| Grant {
@@ -6889,6 +6891,7 @@ fn open_role_with_members(
     let names: Vec<String> = (0..members).map(|ix| format!("m{ix:04}")).collect();
     let grants = ObjectGrants {
         owner: "keeper".into(),
+        sequence: false,
         privileges: vec!["SELECT".into()],
         grants: vec![Grant {
             grantee: Some("crowd".into()),
