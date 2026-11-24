@@ -23115,3 +23115,379 @@ fn a_tab_switch_over_typed_panel_text_is_not_asked_about(cx: &mut TestAppContext
         quit(workspace, cx);
     });
 }
+
+#[gpui::test]
+fn editing_connection_fields_clears_completed_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                workspace.form.as_mut().unwrap().test =
+                    Some(crate::connection_form::ConnectionTest::Passed(None));
+            });
+        });
+        settle(cx);
+
+        // Real keyboard input on a visible connection field clears Passed.
+        let host = cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().host.clone());
+        cx.update(|window, cx| host.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("db.example.com");
+        settle(cx);
+        assert!(
+            workspace.read_with(cx, |workspace, _| {
+                workspace.form.as_ref().unwrap().test.is_none()
+            }),
+            "changing host must invalidate a passed connection test"
+        );
+
+        // Every connection-relevant input clears both Passed and Failed results.
+        type Field = fn(&ConnectionForm) -> &Entity<InputState>;
+        let fields: [(&str, Field); 28] = [
+            ("path", |f| &f.path),
+            ("connection", |f| &f.connection),
+            ("host", |f| &f.host),
+            ("port", |f| &f.port),
+            ("database", |f| &f.database),
+            ("user", |f| &f.user),
+            ("password", |f| &f.password),
+            ("password_command", |f| &f.password_command),
+            ("password_expires", |f| &f.password_expires),
+            ("root_certificate", |f| &f.root_certificate),
+            ("ssm_target", |f| &f.ssm_target),
+            ("ssm_profile", |f| &f.ssm_profile),
+            ("ssm_region", |f| &f.ssm_region),
+            ("ssm_aws_cli", |f| &f.ssm_aws_cli),
+            ("ssm_plugin", |f| &f.ssm_plugin),
+            ("ssh_host", |f| &f.ssh_host),
+            ("ssh_port", |f| &f.ssh_port),
+            ("ssh_user", |f| &f.ssh_user),
+            ("ssh_identity_file", |f| &f.ssh_identity_file),
+            ("ssh_passphrase", |f| &f.ssh_passphrase),
+            ("ssh_run_as", |f| &f.ssh_run_as),
+            ("account", |f| &f.account),
+            ("private_key", |f| &f.private_key),
+            ("warehouse", |f| &f.warehouse),
+            ("role", |f| &f.role),
+            ("options", |f| &f.options),
+            ("service", |f| &f.service),
+            ("statement_timeout", |f| &f.statement_timeout),
+        ];
+        for (label, pick) in fields {
+            for (kind, state) in [
+                (
+                    "passed",
+                    crate::connection_form::ConnectionTest::Passed(None),
+                ),
+                (
+                    "failed",
+                    crate::connection_form::ConnectionTest::Failed("timed out".into()),
+                ),
+            ] {
+                let input = cx.update(|_, cx| {
+                    let mut state = Some(state);
+                    workspace.update(cx, |workspace, _| {
+                        workspace.form.as_mut().unwrap().test = state.take();
+                    });
+                    pick(workspace.read(cx).form.as_ref().unwrap()).clone()
+                });
+                cx.update(|window, cx| {
+                    input.update(cx, |input, cx| input.insert("1", window, cx));
+                });
+                settle(cx);
+                assert!(
+                    workspace.read_with(cx, |workspace, _| {
+                        workspace.form.as_ref().unwrap().test.is_none()
+                    }),
+                    "editing {label} must clear {kind} connection test result"
+                );
+            }
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn changing_sslmode_invalidates_connection_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.test = Some(crate::connection_form::ConnectionTest::Passed(None));
+                // Re-selecting the current mode leaves a valid test intact.
+                let current = form.sslmode;
+                form.set_sslmode(current);
+                assert!(form.test.is_some());
+
+                form.set_sslmode(crate::db::SslMode::VerifyFull);
+                assert_eq!(form.sslmode, crate::db::SslMode::VerifyFull);
+                assert!(form.test.is_none());
+
+                form.test = Some(crate::connection_form::ConnectionTest::Failed(
+                    "certificate verify failed".into(),
+                ));
+                form.set_sslmode(crate::db::SslMode::Require);
+                assert_eq!(form.sslmode, crate::db::SslMode::Require);
+                assert!(form.test.is_none());
+                assert_eq!(form.needs_focus.as_ref(), Some(&form.password));
+            });
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn editing_form_cancels_in_flight_connection_test(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let executor = cx.background_executor().clone();
+                let task = cx.spawn(async move |workspace, cx| {
+                    executor.timer(std::time::Duration::from_millis(50)).await;
+                    _ = workspace.update(cx, |workspace, cx| {
+                        if let Some(form) = &mut workspace.form {
+                            form.test = Some(crate::connection_form::ConnectionTest::Passed(None));
+                            cx.notify();
+                        }
+                    });
+                });
+                workspace.form.as_mut().unwrap().test = Some(
+                    crate::connection_form::ConnectionTest::Running(task, attempt.guard()),
+                );
+            });
+        });
+        settle(cx);
+        assert!(!attempt.is_cancelled());
+
+        let host = cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().host.clone());
+        cx.update(|window, cx| host.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("edited.example.com");
+        settle(cx);
+
+        assert!(attempt.is_cancelled());
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.form.as_ref().unwrap().test.is_none()
+        }));
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(
+            workspace.read_with(cx, |workspace, _| {
+                workspace.form.as_ref().unwrap().test.is_none()
+            }),
+            "cancelled in-flight test must not restore stale result after edit"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn editing_display_metadata_preserves_connection_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                workspace.form.as_mut().unwrap().test =
+                    Some(crate::connection_form::ConnectionTest::Passed(None));
+            });
+        });
+        settle(cx);
+
+        let name = cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().name.clone());
+        cx.update(|window, cx| name.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("Production Primary");
+        settle(cx);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let form = workspace.form.as_mut().unwrap();
+                form.color = Some(crate::theme::ConnectionColor::Blue);
+                form.project = Some("Analytics".into());
+                form.project_name
+                    .update(cx, |input, cx| input.insert("Team", window, cx));
+            });
+        });
+        settle(cx);
+
+        assert!(workspace.read_with(cx, |workspace, _| {
+            matches!(
+                workspace.form.as_ref().unwrap().test,
+                Some(crate::connection_form::ConnectionTest::Passed(None))
+            )
+        }));
+
+        // Failed results are also preserved when only the display name changes.
+        cx.update(|_, cx| {
+            workspace.update(cx, |workspace, _| {
+                workspace.form.as_mut().unwrap().test = Some(
+                    crate::connection_form::ConnectionTest::Failed("auth failed".into()),
+                );
+            });
+        });
+        cx.simulate_input(" (staging)");
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            matches!(
+                workspace.form.as_ref().unwrap().test,
+                Some(crate::connection_form::ConnectionTest::Failed(_))
+            )
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn closing_or_replacing_form_cancels_in_flight_connection_test(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        let attach_running = |cx: &mut VisualTestContext| {
+            let attempt = crate::db::ConnectAttempt::default();
+            let guard = attempt.guard();
+            cx.update(|_, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let executor = cx.background_executor().clone();
+                    let task = cx.spawn(async move |workspace, cx| {
+                        executor.timer(std::time::Duration::from_millis(50)).await;
+                        _ = workspace.update(cx, |workspace, cx| {
+                            if let Some(form) = &mut workspace.form {
+                                form.test =
+                                    Some(crate::connection_form::ConnectionTest::Passed(None));
+                                cx.notify();
+                            }
+                        });
+                    });
+                    workspace.form.as_mut().unwrap().test =
+                        Some(crate::connection_form::ConnectionTest::Running(task, guard));
+                });
+            });
+            attempt
+        };
+
+        // Closing the form cancels its in-flight test.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        let attempt = attach_running(cx);
+        settle(cx);
+        cx.update(|_, cx| {
+            workspace.update(cx, |workspace, cx| workspace.close_form(cx));
+        });
+        settle(cx);
+        assert!(attempt.is_cancelled());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.form.is_none()));
+
+        // Replacing the form cancels the old test and keeps the new form clean.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        let attempt = attach_running(cx);
+        settle(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        assert!(attempt.is_cancelled());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(
+            workspace.read_with(cx, |workspace, _| {
+                workspace.form.as_ref().unwrap().test.is_none()
+            }),
+            "replaced form must not receive an older form's test result"
+        );
+
+        // Programmatic input edits on a separate ConnectionForm instance never
+        // invalidate the currently open form's test result.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.form.as_mut().unwrap().test =
+                    Some(crate::connection_form::ConnectionTest::Passed(None));
+                let other = ConnectionForm::new(None, window, cx);
+                other
+                    .host
+                    .update(cx, |input, cx| input.insert("other.host", window, cx));
+            });
+        });
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            matches!(
+                workspace.form.as_ref().unwrap().test,
+                Some(crate::connection_form::ConnectionTest::Passed(None))
+            )
+        }));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn url_import_and_engine_switch_clear_connection_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                workspace.form.as_mut().unwrap().test =
+                    Some(crate::connection_form::ConnectionTest::Passed(None));
+            });
+        });
+        settle(cx);
+
+        // URL import for the same engine clears the prior result and fills fields.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let url = workspace.form.as_ref().unwrap().url.clone();
+                url.update(cx, |input, cx| {
+                    input.set_value(
+                        "postgresql://ada:secret@db.internal:5433/app?sslmode=require",
+                        window,
+                        cx,
+                    );
+                });
+                workspace.fill_from_url(window, cx);
+            });
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, cx| {
+            let form = workspace.form.as_ref().unwrap();
+            assert!(form.test.is_none());
+            assert_eq!(form.engine, Engine::Postgres);
+            assert_eq!(form.host.read(cx).value(), "db.internal");
+            assert_eq!(form.port.read(cx).value(), "5433");
+            assert_eq!(form.database.read(cx).value(), "app");
+            assert_eq!(form.sslmode, crate::db::SslMode::Require);
+        });
+
+        // Switching engine clears the test result and updates target/focus.
+        cx.update(|_, cx| {
+            workspace.update(cx, |workspace, _| {
+                let form = workspace.form.as_mut().unwrap();
+                form.test = Some(crate::connection_form::ConnectionTest::Passed(None));
+                form.set_target(crate::db::Target::built_in(Engine::Sqlite));
+                assert!(form.test.is_none());
+                assert_eq!(form.engine, Engine::Sqlite);
+                assert_eq!(form.needs_focus.as_ref(), Some(&form.path));
+            });
+        });
+        quit(workspace, cx);
+    });
+}

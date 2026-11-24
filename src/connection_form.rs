@@ -195,6 +195,19 @@ impl ConnectionForm {
         self.test = None;
     }
 
+    pub(crate) fn set_sslmode(&mut self, mode: SslMode) {
+        if self.sslmode == mode {
+            return;
+        }
+        // Stepping down from a verifying mode unmounts the certificate field,
+        // which may be the one holding focus.
+        if self.sslmode.checks_certificate() && !mode.checks_certificate() {
+            self.needs_focus = Some(self.password.clone());
+        }
+        self.sslmode = mode;
+        self.test = None;
+    }
+
     pub(crate) fn new(
         config: Option<&ConnectionConfig>,
         window: &mut Window,
@@ -403,44 +416,74 @@ impl ConnectionForm {
                 _ => {}
             },
         )];
-        // What the header reads: its title and the line saying where the
-        // form points.
+        // The header reads the display name, which does not change how the
+        // connection opens and must keep any Test result.
+        subscriptions.push(cx.subscribe(&name, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
+        // Every field that affects how DBDelve connects invalidates the last
+        // Test result (and cancels an in-flight one by dropping it). Guard on
+        // this form's own entity so an edit on one form can never clear another.
+        let form_id = host.entity_id();
         for input in [
-            &name,
             &path,
             &connection,
             &host,
             &port,
             &database,
             &user,
-            &service,
-            &ssh_host,
+            &password,
+            &password_command,
+            &password_expires,
+            &root_certificate,
             &ssm_target,
             &ssm_profile,
             &ssm_region,
             &ssm_aws_cli,
             &ssm_plugin,
+            &ssh_host,
+            &ssh_port,
+            &ssh_user,
+            &ssh_identity_file,
+            &ssh_passphrase,
+            &ssh_run_as,
             &account_name,
-            // And the Password field, disabled while a command is typed.
-            &password_command,
+            &private_key,
+            &warehouse,
+            &role,
+            &options,
+            &service,
+            &statement_timeout,
         ] {
-            subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(input, move |workspace, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        if let Some(form) = &mut workspace.form
+                            && form.host.entity_id() == form_id
+                        {
+                            form.test = None;
+                        }
+                        cx.notify();
+                    }
+                }),
+            );
         }
 
         for input in [&ssm_aws_cli, &ssm_plugin] {
-            subscriptions.push(cx.subscribe(input, |workspace, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    if let Some(form) = &mut workspace.form {
-                        form.ssm_dependencies = None;
-                        form.test = None;
+            subscriptions.push(
+                cx.subscribe(input, move |workspace, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        if let Some(form) = &mut workspace.form
+                            && form.host.entity_id() == form_id
+                        {
+                            form.ssm_dependencies = None;
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-            }));
+                }),
+            );
         }
         let mut form = Self {
             needs_focus: None,
