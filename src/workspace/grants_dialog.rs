@@ -4,7 +4,7 @@ use gpui::{
     CursorStyle, MouseButton, MouseDownEvent, Pixels, SharedString, Size, relative, size,
     uniform_list,
 };
-use gpui_component::{Icon, Selectable as _};
+use gpui_component::Icon;
 
 use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
@@ -135,11 +135,14 @@ impl Workspace {
             })
             .child({
                 let sticky = close_workspace.clone();
-                icon_button("grants-sticky", icon::PIN, Tone::Quiet, Control::Compact, t)
+                // Filled while on, an outline while off: the button's own
+                // fill stays the hover's, so hovering never reads as on.
+                let pin = match view.sticky {
+                    true => icon::PIN_FILLED,
+                    false => icon::PIN,
+                };
+                icon_button("grants-sticky", pin, Tone::Quiet, Control::Compact, t)
                     .debug_selector(|| "show-grants-sticky".into())
-                    .selected(view.sticky)
-                    // A ghost's selected look is faint; the fill says it is on.
-                    .when(view.sticky, |on| on.bg(t.element_active))
                     .tooltip(match view.sticky {
                         true => "Stop pinning the database, schema or role in view",
                         false => "Pin the database, schema or role in view while scrolling",

@@ -24,7 +24,13 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 91] = [
+/// Lucide draws its pin as an outline only; filled, it says a pin is on.
+const PIN_FILLED_DATA: IconData = IconData {
+    fill: Some("currentColor"),
+    ..*icondata_lu::LuPin
+};
+
+const ICONS: [(&str, &IconData); 92] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -93,6 +99,7 @@ const ICONS: [(&str, &IconData); 91] = [
     ("icons/folder-minus.svg", icondata_lu::LuFolderMinus),
     ("icons/folder-plus.svg", icondata_lu::LuFolderPlus),
     ("icons/pin.svg", icondata_lu::LuPin),
+    ("icons/pin-filled.svg", &PIN_FILLED_DATA),
     ("icons/package.svg", icondata_lu::LuPackage),
     ("icons/code.svg", icondata_lu::LuCode),
     ("icons/braces.svg", icondata_lu::LuBraces),
@@ -196,6 +203,8 @@ pub mod icon {
     pub const FOLDER: &str = "icons/folder.svg";
     /// The Pinned group's header, which is the icon alone.
     pub const PIN: &str = "icons/pin.svg";
+    /// A pin that is on: the Show Grants switch that keeps parents in view.
+    pub const PIN_FILLED: &str = "icons/pin-filled.svg";
     /// A schema: a box rather than a folder, since the folders beside it are
     /// the user's own.
     pub const SCHEMA: &str = "icons/package.svg";
