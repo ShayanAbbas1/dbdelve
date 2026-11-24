@@ -149,6 +149,9 @@ pub(crate) struct GrantsView {
     pub(crate) size: Option<gpui::Size<gpui::Pixels>>,
     /// A resize in progress.
     pub(crate) resize: Option<GrantsResize>,
+    /// The rows folded shut, by key: a database, a schema or a role with
+    /// members, whose rows under it are left out of the table drawn.
+    pub(crate) collapsed: std::collections::HashSet<String>,
 }
 
 /// Which edge of the Show Grants dialog is being dragged.
@@ -172,7 +175,10 @@ pub(crate) struct GrantsResize {
 #[derive(Default)]
 pub(crate) struct GrantsMatrix {
     pub(crate) columns: Vec<String>,
+    /// The rows drawn: `unfolded` less what the collapsed rows hold.
     pub(crate) rows: Vec<crate::grants::MatrixRow>,
+    /// Every row, as built from the grants, the filter and the members switch.
+    unfolded: Vec<crate::grants::MatrixRow>,
     /// How many times it was built, for a test to count.
     pub(crate) built: usize,
     filter: String,
@@ -202,7 +208,8 @@ impl GrantsView {
         };
         self.matrix = GrantsMatrix {
             columns,
-            rows,
+            rows: crate::grants::folded(&rows, &self.collapsed),
+            unfolded: rows,
             built: self.matrix.built + 1,
             filter,
             with_members: self.with_members,
@@ -211,6 +218,17 @@ impl GrantsView {
             // A different table starts at its top.
             self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         }
+    }
+}
+
+impl GrantsView {
+    /// Fold the row keyed `key` shut, or open it again: only the rows drawn
+    /// change, from the rows already built.
+    pub(crate) fn toggle_fold(&mut self, key: &str) {
+        if !self.collapsed.remove(key) {
+            self.collapsed.insert(key.to_string());
+        }
+        self.matrix.rows = crate::grants::folded(&self.matrix.unfolded, &self.collapsed);
     }
 }
 
@@ -1261,6 +1279,7 @@ impl Workspace {
             scroll: gpui::UniformListScrollHandle::new(),
             size: None,
             resize: None,
+            collapsed: Default::default(),
         });
         cx.notify();
         request

@@ -2,7 +2,7 @@
 //! four marks, built from what the server listed and nothing else. Pure, so
 //! the reading of the catalog is tested apart from the window.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::db::roles::{
     DatabaseAccess, HeldGrant, ObjectGrants, Right, RoleAccess, RoleGrants, Roles, SchemaAccess,
@@ -99,6 +99,29 @@ pub(crate) struct MatrixRow {
     /// Whether members are listed under it, for the chevron.
     pub(crate) opened: bool,
     pub(crate) marks: Vec<Mark>,
+}
+
+/// Whether `row` is drawn under `parent`, and goes with it when it is
+/// collapsed: deeper than it (a schema under its database, a relation under
+/// its schema), or a member listed under a role that is not one itself.
+fn under(parent: &MatrixRow, row: &MatrixRow) -> bool {
+    row.depth > parent.depth || (row.member && !parent.member)
+}
+
+/// `rows` with what is under every collapsed row left out. Only a row with
+/// rows under it (`opened`) folds, and a fold inside a folded one is hidden
+/// with it.
+pub(crate) fn folded(rows: &[MatrixRow], collapsed: &HashSet<String>) -> Vec<MatrixRow> {
+    let mut shown = Vec::with_capacity(rows.len());
+    let mut fold: Option<&MatrixRow> = None;
+    for row in rows {
+        if fold.is_some_and(|parent| under(parent, row)) {
+            continue;
+        }
+        fold = (row.opened && collapsed.contains(&row.key)).then_some(row);
+        shown.push(row.clone());
+    }
+    shown
 }
 
 /// What a column header says of a privilege the server spells `SELECT`.
@@ -786,6 +809,65 @@ fn held_schema<'a>(held: &[&'a HeldGrant]) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fold_row(key: &str, depth: u8, member: bool, opened: bool) -> MatrixRow {
+        MatrixRow {
+            key: key.into(),
+            name: key.into(),
+            via: String::new(),
+            who: Who::Schema,
+            depth,
+            member,
+            opened,
+            marks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_collapsed_row_hides_what_is_under_it_and_nothing_after() {
+        let rows = vec![
+            fold_row("db1", 0, false, true),
+            fold_row("db1.s1", 1, false, true),
+            fold_row("db1.s1.t1", 2, false, false),
+            fold_row("db1.s2", 1, false, true),
+            fold_row("db1.s2.t1", 2, false, false),
+            fold_row("db2", 0, false, true),
+            fold_row("db2.s1", 1, false, false),
+        ];
+        let keys = |collapsed: &[&str]| -> Vec<String> {
+            let collapsed = collapsed.iter().map(|key| key.to_string()).collect();
+            folded(&rows, &collapsed)
+                .into_iter()
+                .map(|row| row.key)
+                .collect()
+        };
+        assert_eq!(keys(&[]).len(), rows.len());
+        assert_eq!(
+            keys(&["db1.s1"]),
+            ["db1", "db1.s1", "db1.s2", "db1.s2.t1", "db2", "db2.s1"]
+        );
+        assert_eq!(keys(&["db1"]), ["db1", "db2", "db2.s1"]);
+        // A fold inside a folded row stays folded once it shows again.
+        assert_eq!(keys(&["db1", "db1.s1"]), ["db1", "db2", "db2.s1"]);
+        // A row with nothing under it does not fold what follows.
+        assert_eq!(keys(&["db2.s1"]).len(), rows.len());
+    }
+
+    #[test]
+    fn a_collapsed_role_hides_its_members_and_not_the_next_role() {
+        let rows = vec![
+            fold_row("a", 0, false, true),
+            fold_row("a/m1", 0, true, false),
+            fold_row("a/m2", 0, true, false),
+            fold_row("b", 0, false, false),
+        ];
+        let collapsed = HashSet::from(["a".to_string()]);
+        let keys: Vec<String> = folded(&rows, &collapsed)
+            .into_iter()
+            .map(|row| row.key)
+            .collect();
+        assert_eq!(keys, ["a", "b"]);
+    }
     use crate::db::roles::{Grant, HeldGrant, Role};
 
     fn role(name: &str, login: bool, superuser: bool) -> Role {

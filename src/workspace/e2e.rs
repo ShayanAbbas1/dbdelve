@@ -6868,6 +6868,94 @@ fn show_grants_draws_only_the_rows_in_view_and_keeps_its_scroll(cx: &mut TestApp
     });
 }
 
+/// Opens Show Grants on a table granted to `crowd`, a role with `members`
+/// members, listed under it.
+fn open_role_with_members(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    members: usize,
+) {
+    use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
+    let role = |name: String, login: bool| Role {
+        name,
+        login,
+        superuser: false,
+        password_expires: None,
+        expired: false,
+        connection_limit: None,
+        has_password: None,
+        last_login: None,
+    };
+    let names: Vec<String> = (0..members).map(|ix| format!("m{ix:04}")).collect();
+    let grants = ObjectGrants {
+        owner: "keeper".into(),
+        privileges: vec!["SELECT".into()],
+        grants: vec![Grant {
+            grantee: Some("crowd".into()),
+            privilege: "SELECT".into(),
+            grantable: false,
+        }],
+        roles: Roles {
+            roles: std::iter::once(role("crowd".into(), false))
+                .chain(names.iter().map(|name| role(name.clone(), true)))
+                .collect(),
+            memberships: names
+                .iter()
+                .map(|name| (name.clone(), "crowd".into()))
+                .collect(),
+            ..Roles::default()
+        },
+    };
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile().expect("a connection is in front");
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let request = workspace.open_grants_view(
+            &id,
+            "Grants on birds".into(),
+            "table · main".into(),
+            true,
+            window,
+            cx,
+        );
+        workspace.land_grants(
+            &id,
+            generation,
+            request,
+            Ok(super::GrantsOf::Object(grants)),
+            cx,
+        );
+    });
+    settle(cx);
+    settle(cx);
+}
+
+#[gpui::test]
+fn show_grants_folds_a_role_shut_and_opens_it_again_by_its_row(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_role_with_members(&workspace, cx, 3);
+        let members = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let view = workspace.grants_view.as_ref().unwrap();
+                view.matrix.rows.iter().filter(|row| row.member).count()
+            })
+        };
+        assert_eq!(members(cx), 3);
+
+        click_selector(cx, "show-grants-row-crowd");
+        settle(cx);
+        assert_eq!(members(cx), 0, "folded shut, its members leave the table");
+        assert!(cx.debug_bounds("show-grants-row-crowd").is_some());
+
+        click_selector(cx, "show-grants-row-crowd");
+        settle(cx);
+        assert_eq!(members(cx), 3, "opened again, they come back");
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn show_grants_is_resized_by_its_corner_within_the_window(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

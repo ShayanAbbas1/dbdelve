@@ -225,20 +225,27 @@ impl Workspace {
                             // Only the rows in view are built: a login with
                             // thousands of grants would otherwise build them
                             // all on every frame.
-                            cx.processor(move |workspace, range: std::ops::Range<usize>, _, _| {
+                            cx.processor(move |workspace, range: std::ops::Range<usize>, _, cx| {
                                 let Some(view) = workspace.grants_view_in_front() else {
                                     return Vec::new();
                                 };
                                 let matrix = &view.matrix;
+                                let folds = cx.entity().downgrade();
                                 range
                                     .filter_map(|ix| matrix.rows.get(ix))
                                     .map(|row| {
-                                        grants_row(
+                                        let shut = view.collapsed.contains(&row.key);
+                                        let drawn = grants_row(
                                             row,
                                             &matrix.columns,
+                                            shut,
                                             row_theme,
                                             row_font.clone(),
-                                        )
+                                        );
+                                        match row.opened {
+                                            false => drawn,
+                                            true => foldable(drawn, &row.key, folds.clone()),
+                                        }
                                     })
                                     .collect()
                             }),
@@ -663,7 +670,34 @@ impl Workspace {
 }
 
 /// One row of the grants table.
-fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString) -> AnyElement {
+/// A row with rows under it, which a click folds shut or opens again.
+fn foldable(drawn: AnyElement, key: &str, folds: gpui::WeakEntity<Workspace>) -> AnyElement {
+    let key = key.to_string();
+    div()
+        .id(SharedString::from(format!("show-grants-fold-{key}")))
+        .w_full()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            folds
+                .update(cx, |workspace, cx| {
+                    if let Some(view) = workspace.grants_view.as_mut() {
+                        view.toggle_fold(&key);
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+        .child(drawn)
+        .into_any_element()
+}
+
+fn grants_row(
+    row: &MatrixRow,
+    columns: &[String],
+    shut: bool,
+    t: Theme,
+    mono: SharedString,
+) -> AnyElement {
     if row.who == Who::Note {
         return div()
             .debug_selector({
@@ -716,7 +750,10 @@ fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString)
                 .pr(px(18.))
                 .child(
                     Icon::default()
-                        .path(icon::CHEVRON_DOWN)
+                        .path(match shut {
+                            true => icon::CHEVRON_RIGHT,
+                            false => icon::CHEVRON_DOWN,
+                        })
                         .size(px(11.))
                         .text_color(t.text_muted)
                         .when(!row.opened, |chevron| {
