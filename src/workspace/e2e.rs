@@ -23418,7 +23418,7 @@ fn closing_or_replacing_form_cancels_in_flight_connection_test(cx: &mut TestAppC
 
         // Programmatic input edits on a separate ConnectionForm instance never
         // invalidate the currently open form's test result.
-        cx.update(|window, cx| {
+        let other = cx.update(|window, cx| {
             workspace.update(cx, |workspace, cx| {
                 workspace.form.as_mut().unwrap().test =
                     Some(crate::connection_form::ConnectionTest::Passed(None));
@@ -23426,7 +23426,8 @@ fn closing_or_replacing_form_cancels_in_flight_connection_test(cx: &mut TestAppC
                 other
                     .host
                     .update(cx, |input, cx| input.insert("other.host", window, cx));
-            });
+                other
+            })
         });
         settle(cx);
         assert!(workspace.read_with(cx, |workspace, _| {
@@ -23435,6 +23436,7 @@ fn closing_or_replacing_form_cancels_in_flight_connection_test(cx: &mut TestAppC
                 Some(crate::connection_form::ConnectionTest::Passed(None))
             )
         }));
+        drop(other);
         quit(workspace, cx);
     });
 }
@@ -23458,7 +23460,7 @@ fn url_import_and_engine_switch_clear_connection_test_results(cx: &mut TestAppCo
                 let url = workspace.form.as_ref().unwrap().url.clone();
                 url.update(cx, |input, cx| {
                     input.set_value(
-                        "postgresql://ada:secret@db.internal:5433/app?sslmode=require",
+                        "postgresql://ada@db.example.test:5433/app?sslmode=require",
                         window,
                         cx,
                     );
@@ -23471,7 +23473,7 @@ fn url_import_and_engine_switch_clear_connection_test_results(cx: &mut TestAppCo
             let form = workspace.form.as_ref().unwrap();
             assert!(form.test.is_none());
             assert_eq!(form.engine, Engine::Postgres);
-            assert_eq!(form.host.read(cx).value(), "db.internal");
+            assert_eq!(form.host.read(cx).value(), "db.example.test");
             assert_eq!(form.port.read(cx).value(), "5433");
             assert_eq!(form.database.read(cx).value(), "app");
             assert_eq!(form.sslmode, crate::db::SslMode::Require);
