@@ -1045,7 +1045,29 @@ impl Connection {
         match session.as_mut() {
             None => Ok(()),
             Some(_) if !idle() => Ok(()),
-            Some(session) => ask(session, "SELECT 1").map(|_| ()),
+            Some(session) => {
+                // Bounded by [`super::PING_WITHIN`] even under no statement
+                // timeout: one that expires marks the session lost, so the
+                // next statement finds it so rather than waiting behind a
+                // ping on a socket gone quiet.
+                let within = u32::try_from(super::PING_WITHIN.as_secs()).unwrap_or(u32::MAX);
+                let bound = match session.timeout {
+                    0 => within,
+                    timeout => timeout.min(within),
+                };
+                let kept = std::mem::replace(&mut session.timeout, bound);
+                let pinged = ask(session, "SELECT 1").map(|_| ());
+                session.timeout = kept;
+                match pinged {
+                    Err(_) if matches!(session.lost, Some(Lost::TimedOut)) => {
+                        Err(plain_error(format!(
+                            "The server did not answer a keep-alive within {bound} seconds, \
+                             so the connection was closed."
+                        )))
+                    }
+                    pinged => pinged,
+                }
+            }
         }
     }
 
