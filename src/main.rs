@@ -19,6 +19,7 @@ mod import_rows;
 #[cfg_attr(not(test), allow(dead_code))]
 mod mql;
 mod palette;
+mod prompt;
 mod redis_cmd;
 mod result_grid;
 mod scroller;
@@ -245,6 +246,7 @@ fn main() {
             let theme = theme::starting_theme(theme::Appearance::of_system(cx.window_appearance()));
             theme.apply_to_components(cx);
             cx.set_global(theme);
+            prompt::install(cx);
             // The keymap is built from `keybindings::REGISTRY` plus whatever
             // overrides are on disk, so a chord shown here is a default rather
             // than gospel -- see `src/keybindings.rs` for the full list and

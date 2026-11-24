@@ -20,8 +20,8 @@ use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::{ConnectionTest, Reported, dialects, suggested_dialect};
 use crate::explorer::{
-    ExplorerLeaf, FILES_GROUP, Landing, Member, PINNED_GROUP, Pin, Shortcut, ShortcutDatabase,
-    Shortcuts, is_schema_row, landing, relation_copies, saved_query,
+    ExplorerLeaf, FILES_GROUP, FilesOrder, Landing, Member, PINNED_GROUP, Pin, Shortcut,
+    ShortcutDatabase, Shortcuts, is_schema_row, landing, relation_copies, saved_query,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
@@ -1453,11 +1453,6 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
-            ("unsaved", 0) => self.save_and_close(window, cx),
-            ("unsaved", 2) => self.confirm_discard_close(window, cx),
-            ("unsaved", _) => _ = self.cancel_discard_close(cx),
-            ("overwrite", 0) => self.confirm_overwrite(window, cx),
-            ("overwrite", _) => _ = self.cancel_overwrite(cx),
             ("forget-file", 0) => self.confirm_forget_file(cx),
             ("forget-file", _) => _ = self.cancel_forget_file(cx),
             ("delete", 0) => match deleting {
@@ -1825,84 +1820,6 @@ impl Workspace {
         )
     }
 
-    /// Save / Don't Save / Cancel, over closing file tabs with unsaved
-    /// changes.
-    pub(crate) fn render_unsaved_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let session = &self.profile()?.session;
-        let discard = session
-            .pending_discard
-            .as_ref()
-            .filter(|discard| discard.unsaved)?;
-        let (heading, question) = match discard.tabs().collect::<Vec<_>>().as_slice() {
-            [Tab::Query(id)] => (
-                "Close tab",
-                format!("Save changes to {}?", self.file_name_of(*id)?),
-            ),
-            tabs => (
-                "Close tabs",
-                format!("Save changes to {} files?", tabs.len()),
-            ),
-        };
-        Some(self.question(
-            "unsaved",
-            heading,
-            question,
-            [
-                (
-                    "dont-save",
-                    "Don't Save",
-                    Tone::Danger,
-                    Self::confirm_discard_close,
-                ),
-                (
-                    "cancel-unsaved",
-                    "Cancel",
-                    Tone::Quiet,
-                    |workspace, _, cx| {
-                        workspace.cancel_discard_close(cx);
-                    },
-                ),
-                ("save-unsaved", "Save", Tone::Primary, Self::save_and_close),
-            ],
-            cx,
-        ))
-    }
-
-    /// Overwrite / Cancel, over saving a file someone else wrote since the
-    /// tab read it.
-    pub(crate) fn render_overwrite_confirmation(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let pending = self.profile()?.session.pending_overwrite.as_ref()?;
-        let question = match pending.tabs.as_slice() {
-            [id] => format!("{} changed on disk. Overwrite it?", self.file_name_of(*id)?),
-            tabs => format!("{} files changed on disk. Overwrite them?", tabs.len()),
-        };
-        Some(self.question(
-            "overwrite",
-            "Save",
-            question,
-            [
-                (
-                    "cancel-overwrite",
-                    "Cancel",
-                    Tone::Quiet,
-                    |workspace, _, cx| {
-                        workspace.cancel_overwrite(cx);
-                    },
-                ),
-                (
-                    "confirm-overwrite",
-                    "Overwrite",
-                    Tone::Danger,
-                    Self::confirm_overwrite,
-                ),
-            ],
-            cx,
-        ))
-    }
-
     /// Remove / Keep, over a recent file found gone when its row was opened.
     pub(crate) fn render_forget_file(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = self.profile()?.session.pending_forget.as_ref()?;
@@ -1926,11 +1843,6 @@ impl Workspace {
             ],
             cx,
         ))
-    }
-
-    fn file_name_of(&self, id: u64) -> Option<String> {
-        let tab = self.profile()?.session.query_tab(id)?;
-        Some(crate::sql_file::file_name(&tab.file.as_ref()?.path))
     }
 
     /// A dialog asking one line, its buttons left to right, the last the
@@ -3514,14 +3426,16 @@ impl Workspace {
             .context_menu(move |_, entry, menu, window, cx| {
                 let id = entry.item().id.clone();
                 let shortcut = menu_shortcuts.get(id.as_ref()).cloned();
-                let shortcuts = menu_workspace
-                    .upgrade()
-                    .and_then(|workspace| {
-                        workspace
-                            .read(cx)
-                            .profile()
-                            .map(|profile| profile.shortcuts.clone())
-                    })
+                let Some(entity) = menu_workspace.upgrade() else {
+                    return menu;
+                };
+                let state = entity.read(cx);
+                if id.as_ref() == FILES_GROUP {
+                    return files_group_menu(menu, state.settings.files_order, &menu_workspace);
+                }
+                let shortcuts = state
+                    .profile()
+                    .map(|profile| profile.shortcuts.clone())
                     .unwrap_or_default();
                 if let Some(path) = menu_files.paths.get(id.as_ref()) {
                     return file_row_menu(menu, path, &menu_profile, &menu_workspace);
@@ -4055,6 +3969,25 @@ pub(super) fn file_row_menu(
     .item(item("Remove from List", |workspace, path, _, cx| {
         workspace.forget_recent_file(&path, cx)
     }))
+}
+
+/// What the Files group's own row offers, in either tree: the order of its
+/// rows, which is every connection's.
+pub(super) fn files_group_menu(
+    menu: PopupMenu,
+    current: FilesOrder,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    FilesOrder::ALL.into_iter().fold(menu, |menu, order| {
+        let workspace = workspace.clone();
+        menu.item(
+            PopupMenuItem::new(order.label())
+                .checked(order == current)
+                .on_click(move |_, _, cx| {
+                    _ = workspace.update(cx, |workspace, cx| workspace.set_files_order(order, cx));
+                }),
+        )
+    })
 }
 
 /// What a saved query's row offers on a right click: what its tab offers, for

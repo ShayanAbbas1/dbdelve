@@ -117,6 +117,7 @@ pub(crate) struct Settings {
     pub(crate) show_host: bool,
     /// Whether either tree shows sizes, and whether any is read.
     pub(crate) show_sizes: bool,
+    pub(crate) files_order: crate::explorer::FilesOrder,
 }
 
 impl Settings {
@@ -161,6 +162,7 @@ impl Default for Settings {
             density: Density::default(),
             show_host: true,
             show_sizes: true,
+            files_order: crate::explorer::FilesOrder::default(),
         }
     }
 }
@@ -737,6 +739,8 @@ impl Workspace {
                     Density::from_slug(stored_settings.sidebar_density.as_deref());
                 workspace.settings.show_host = stored_settings.sidebar_show_host.unwrap_or(true);
                 workspace.settings.show_sizes = stored_settings.sidebar_show_sizes.unwrap_or(true);
+                workspace.settings.files_order =
+                    crate::explorer::FilesOrder::from_slug(stored_settings.files_order.as_deref());
                 // Ahead of the restore, which must not prune grids an
                 // unavailable profile under the same id still owns.
                 workspace.unavailable = unavailable;
@@ -2886,8 +2890,6 @@ impl Render for Workspace {
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
-                    ("unsaved", self.render_unsaved_confirmation(cx)),
-                    ("overwrite", self.render_overwrite_confirmation(cx)),
                     ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
                     ("pending-export", self.render_pending_export(cx)),

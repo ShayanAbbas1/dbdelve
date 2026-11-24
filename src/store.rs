@@ -166,11 +166,18 @@ pub struct StoredProfile {
     /// order they were picked. Same rules as `open_rows`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_rows: Vec<String>,
-    /// The `.sql` files last opened or saved on this connection, newest
-    /// first, each resolved through its links: the sidebar's Files group.
-    /// Left out when empty, so a profile without any is written as before.
+    /// The `.sql` files last opened or saved on this connection, most
+    /// recently used first, each resolved through its links: the sidebar's
+    /// Files group. Left out when empty, so a profile without any is written
+    /// as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_files: Vec<PathBuf>,
+    /// The same files in the order each entered the list, which the Files
+    /// group can be sorted by. Its own list rather than a reordering of
+    /// `recent_files`, which an older build reads as most recently used
+    /// first and evicts from the end of.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_added: Vec<PathBuf>,
     /// The SSH tunnel this profile dials through, or absent for a direct
     /// connection -- which is every profile written before tunnels existed. A
     /// table, so it has to come after every scalar above. Nothing secret is in
@@ -364,7 +371,8 @@ pub struct StoredShortcut {
 pub struct StoredQueryTab {
     pub id: u64,
     /// A saved query's name, as a build before file tabs wrote it. Read once,
-    /// into [`Self::path`], and never written.
+    /// into [`Self::path`], kept on the restored tab to tell its scratch from
+    /// an older build's, and never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The file this tab is bound to, or absent for an untitled one.
@@ -388,8 +396,10 @@ pub struct StoredQueryTab {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     /// A file tab left with unsaved text: [`crate::sql_file::text_hash`] of
-    /// the file's text that text was written against. A file that reads
-    /// differently at relaunch was changed meanwhile, and the tab asks.
+    /// the file's text that text was written against, empty for a file gone.
+    /// A file that reads differently at relaunch was changed meanwhile, and
+    /// the tab asks. Never absent on such a tab, which is how a scratch file
+    /// a build before file tabs left beside a clean one is told apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_hash: Option<String>,
     /// Keep Mine was chosen and nothing saved since, so Save still asks.
@@ -750,6 +760,11 @@ pub struct StoredSettings {
     /// written while the default is classic. A scalar, above the tables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_mode: Option<String>,
+    /// How the sidebar's Files group orders its rows: `name` or `added`.
+    /// Absent, or a slug this build cannot read, reads as name. Not written
+    /// while it is name. A scalar, above the tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_order: Option<String>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -3580,6 +3595,7 @@ user = "shayan"
                 ssm: None,
                 open_rows: Vec::new(),
                 recent_files: Vec::new(),
+                recent_added: Vec::new(),
                 selected_rows: Vec::new(),
                 ssh: None,
                 open_queries: Vec::new(),
@@ -3642,6 +3658,7 @@ user = "shayan"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -3792,6 +3809,7 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -3866,6 +3884,7 @@ open_objects = []
     fn recent_files_round_trip_before_the_tables_and_an_old_file_reads_none() {
         let mut profile = a_stored_profile();
         profile.recent_files = vec!["/work/orders.sql".into(), "/work/daily.sql".into()];
+        profile.recent_added = vec!["/work/daily.sql".into(), "/work/orders.sql".into()];
         profile.ssh = Some(SshTunnel {
             host: "bastion".into(),
             ..Default::default()
@@ -3881,11 +3900,18 @@ open_objects = []
         );
         let decoded = decode_profiles(&text, &[]).expect("the file loads");
         assert_eq!(decoded.profiles[0].recent_files, profile.recent_files);
+        assert_eq!(decoded.profiles[0].recent_added, profile.recent_added);
+        assert!(
+            text.find("recent_added")
+                .is_some_and(|added| added < tunnel)
+        );
 
         let bare = written_alone(a_stored_profile());
         assert!(!bare.contains("recent_files"), "{bare}");
+        assert!(!bare.contains("recent_added"), "{bare}");
         let old = decode_profiles(&bare, &[]).expect("an older file loads");
         assert!(old.profiles[0].recent_files.is_empty());
+        assert!(old.profiles[0].recent_added.is_empty());
     }
 
     #[test]
@@ -4237,6 +4263,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4268,6 +4295,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4336,6 +4364,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: Some(SshTunnel {
                 host: "dbdelve-bastion".into(),
@@ -4464,6 +4493,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4553,6 +4583,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4628,6 +4659,7 @@ folder = "Hot"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4749,6 +4781,7 @@ open_objects = []
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -4844,6 +4877,7 @@ open_objects = []
                 sidebar_show_sizes: Some(false),
                 queries_move_dismissed: Some(true),
                 edit_mode: Some("row".into()),
+                files_order: Some("added".into()),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
@@ -4899,6 +4933,7 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     recent_files: Vec::new(),
+                    recent_added: Vec::new(),
                     selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
@@ -4941,6 +4976,7 @@ open_objects = []
                     ssm: None,
                     open_rows: Vec::new(),
                     recent_files: Vec::new(),
+                    recent_added: Vec::new(),
                     selected_rows: Vec::new(),
                     ssh: None,
                     open_queries: Vec::new(),
@@ -5800,6 +5836,7 @@ active = true
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: vec![
@@ -6430,6 +6467,7 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),
@@ -6561,6 +6599,7 @@ name = \"accounts\"
             ssm: None,
             open_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             selected_rows: Vec::new(),
             ssh: None,
             open_queries: Vec::new(),

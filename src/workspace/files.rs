@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{ExternalPaths, PathPromptOptions};
+use gpui::{ExternalPaths, PathPromptOptions, PromptButton, PromptLevel};
 
 use super::*;
 
@@ -297,9 +297,23 @@ impl Workspace {
             }
             return;
         }
-        crate::session::remember_recent(&mut profile.recent_files, path.to_path_buf());
+        crate::session::remember_recent(
+            &mut profile.recent_files,
+            &mut profile.recent_added,
+            path.to_path_buf(),
+        );
         self.profiles_unsaved = true;
-        self.refresh_query_library(profile_id, cx);
+        // Rebuilt only once the event in hand is done: a click on the file's
+        // row brings it up, and the tree then selects the row it drew under
+        // the pointer by its index. A file rejoining the list, and one the cap
+        // pushes out, can give that index to another file in either order.
+        let workspace = cx.entity().downgrade();
+        let profile_id = profile_id.to_string();
+        cx.defer(move |cx| {
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.refresh_query_library(&profile_id, cx)
+            });
+        });
     }
 
     /// [`Self::remember_file`] on the connection whose tab holds `path`.
@@ -358,6 +372,28 @@ impl Workspace {
         .detach();
     }
 
+    /// How every connection's Files group orders its rows.
+    pub(crate) fn set_files_order(
+        &mut self,
+        order: crate::explorer::FilesOrder,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.files_order == order {
+            return;
+        }
+        self.settings.files_order = order;
+        let ids: Vec<String> = self
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        for id in ids {
+            self.refresh_query_library(&id, cx);
+        }
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     /// Remove from List: `path` leaves the front connection's recent files.
     /// The file itself is never touched.
     pub(crate) fn forget_recent_file(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -365,6 +401,7 @@ impl Workspace {
             return;
         };
         profile.recent_files.retain(|held| held != path);
+        profile.recent_added.retain(|held| held != path);
         profile.missing_files.remove(path);
         profile.recent_files_changed();
         let profile_id = profile.id.clone();
@@ -511,7 +548,102 @@ impl Workspace {
                 close,
             });
         }
+        self.ask_to_overwrite(window, cx);
         cx.notify();
+    }
+
+    /// Overwrite / Cancel, over the files `pending_overwrite` holds.
+    fn ask_to_overwrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self
+            .profile()
+            .and_then(|profile| profile.session.pending_overwrite.as_ref())
+        else {
+            return;
+        };
+        let message = match pending.tabs.as_slice() {
+            [id] => match self.file_name_of(*id) {
+                Some(name) => format!("{name} changed on disk. Overwrite it?"),
+                None => return,
+            },
+            tabs => format!("{} files changed on disk. Overwrite them?", tabs.len()),
+        };
+        let answers = [
+            PromptButton::ok("Overwrite"),
+            PromptButton::cancel("Cancel"),
+        ];
+        self.ask(
+            &message,
+            &answers,
+            window,
+            cx,
+            |workspace, answer, window, cx| match answer {
+                0 => workspace.confirm_overwrite(window, cx),
+                _ => _ = workspace.cancel_overwrite(cx),
+            },
+        );
+    }
+
+    /// Save / Don't Save / Cancel, over closing the file tabs a
+    /// `pending_discard` holds for their unsaved changes.
+    pub(crate) fn ask_to_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discard) = self
+            .profile()
+            .and_then(|profile| profile.session.pending_discard.as_ref())
+        else {
+            return;
+        };
+        let message = match discard.tabs().collect::<Vec<_>>().as_slice() {
+            [Tab::Query(id)] => match self.file_name_of(*id) {
+                Some(name) => format!("Save changes to {name}?"),
+                None => return,
+            },
+            tabs => format!("Save changes to {} files?", tabs.len()),
+        };
+        let answers = [
+            PromptButton::ok("Save"),
+            PromptButton::new("Don't Save"),
+            PromptButton::cancel("Cancel"),
+        ];
+        self.ask(
+            &message,
+            &answers,
+            window,
+            cx,
+            |workspace, answer, window, cx| match answer {
+                0 => workspace.save_and_close(window, cx),
+                1 => workspace.confirm_discard_close(window, cx),
+                _ => _ = workspace.cancel_discard_close(cx),
+            },
+        );
+    }
+
+    /// The platform's own dialog where it has one (macOS, Windows), and
+    /// `crate::prompt`'s where it does not; in either, the `PromptButton::Ok`
+    /// takes Return and the `PromptButton::Cancel` Escape.
+    fn ask(
+        &mut self,
+        message: &str,
+        answers: &[PromptButton],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        answered: impl FnOnce(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let answer = window.prompt(PromptLevel::Warning, message, None, answers, cx);
+        cx.spawn_in(window, async move |workspace, cx| {
+            // Dropped unanswered, the dialog went with its window.
+            let Ok(answer) = answer.await else {
+                return;
+            };
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                answered(workspace, answer, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn file_name_of(&self, id: u64) -> Option<String> {
+        let tab = self.profile()?.session.query_tab(id)?;
+        Some(file_name(&tab.file.as_ref()?.path))
     }
 
     /// Overwrite: write each tab the question was asked about over whatever

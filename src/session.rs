@@ -118,10 +118,12 @@ pub(crate) struct Profile {
     /// loaded waits for it; the tree owns a row once it holds it.
     pub(crate) open_rows: Vec<String>,
     pub(crate) selected_rows: Vec<String>,
-    /// The `.sql` files last opened or saved here, newest first
-    /// ([`remember_recent`]), and those of them found gone at the last look,
-    /// which the Files group greys.
+    /// The `.sql` files last opened or saved here, most recently used first
+    /// ([`remember_recent`]), the same files in the order each entered the
+    /// list, and those of them found gone at the last look, which the Files
+    /// group greys.
     pub(crate) recent_files: Vec<PathBuf>,
+    pub(crate) recent_added: Vec<PathBuf>,
     pub(crate) missing_files: HashSet<PathBuf>,
     /// Bumped whenever the recent files or what is known of one changes, so a
     /// look that set out before lands on nothing ([`Self::take_missing`]).
@@ -308,9 +310,6 @@ impl Profile {
         }
     }
 
-    /// What the sidebar's Files group lists besides the saved queries: the
-    /// recent files, then any file open in a tab they no longer hold. A saved
-    /// query's file is listed as the query, so not here.
     pub(crate) fn recent_files_changed(&mut self) {
         self.recent_generation += 1;
     }
@@ -326,14 +325,20 @@ impl Profile {
         }
     }
 
+    /// What the sidebar's Files group lists besides the saved queries: the
+    /// recent files in the order they were added, then any file open in a tab
+    /// they no longer hold, by name. A saved query's file is listed as the
+    /// query, so not here.
     pub(crate) fn listed_files(&self) -> Vec<PathBuf> {
-        let mut listed: Vec<PathBuf> = Vec::new();
-        let open = self
+        let mut open: Vec<&PathBuf> = self
             .session
             .queries
             .iter()
-            .filter_map(|tab| Some(&tab.file.as_ref()?.path));
-        for path in self.recent_files.iter().chain(open) {
+            .filter_map(|tab| Some(&tab.file.as_ref()?.path))
+            .collect();
+        open.sort_by_cached_key(|path| crate::sql_file::file_name(path).to_lowercase());
+        let mut listed: Vec<PathBuf> = Vec::new();
+        for path in self.recent_added.iter().chain(open) {
             if !listed.contains(path) && path.parent() != Some(&self.session.query_directory) {
                 listed.push(path.clone());
             }
@@ -631,6 +636,7 @@ impl Profile {
                 .cloned()
                 .collect(),
             recent_files: self.recent_files.clone(),
+            recent_added: self.recent_added.clone(),
             ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
@@ -3550,12 +3556,12 @@ impl QueryTab {
                 .as_ref()
                 .and_then(|binding| binding.schema.clone()),
             // Only for a dirty tab: a clean one has nothing to lose to a file
-            // changed while the app was closed.
-            saved_hash: self
-                .file
-                .as_ref()
-                .filter(|_| self.dirty)
-                .and_then(|file| Some(sql_file::text_hash(file.saved.as_deref()?, file.bom))),
+            // changed while the app was closed. Always for one, a gone file's
+            // as empty, since a dirty file tab stored without it is how
+            // `stored_text` knows a scratch beside it is not its own.
+            saved_hash: self.file.as_ref().filter(|_| self.dirty).map(|file| {
+                sql_file::text_hash(file.saved.as_deref().unwrap_or_default(), file.bom)
+            }),
             kept_mine: self
                 .file
                 .as_ref()
@@ -4147,14 +4153,22 @@ pub(crate) enum QueryState {
 pub(crate) const RECENT_FILES_CAP: usize = 20;
 
 /// The recent files as `profiles.toml` holds them, as [`remember_recent`]
-/// would have left them: no saved query, each once, newest first, twenty.
+/// would have left them: no saved query, each once, most recently used
+/// first, twenty, and the same files in the order they were added. A file
+/// `added` does not hold, which is every file of a list written before it
+/// existed, counts as added in the order it was last used, so an older
+/// list comes up oldest first.
 ///
 /// ponytail: compared as written, not resolved through links, since a stat
 /// per path at launch waits on a stalled mount as long as it does. Every
 /// path DBDelve writes is already resolved, so only a hand edit can list a
 /// file twice; resolving on the blocking pool with the look at launch is
 /// the upgrade.
-pub(crate) fn restored_recent(stored: Vec<PathBuf>, query_directory: &Path) -> Vec<PathBuf> {
+pub(crate) fn restored_recent(
+    stored: Vec<PathBuf>,
+    added: Vec<PathBuf>,
+    query_directory: &Path,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut recent = Vec::new();
     for path in stored {
         if recent.len() == RECENT_FILES_CAP {
@@ -4164,7 +4178,13 @@ pub(crate) fn restored_recent(stored: Vec<PathBuf>, query_directory: &Path) -> V
             recent.push(path);
         }
     }
-    recent
+    let mut order = Vec::new();
+    for path in added.into_iter().chain(recent.iter().rev().cloned()) {
+        if recent.contains(&path) && !order.contains(&path) {
+            order.push(path);
+        }
+    }
+    (recent, order)
 }
 
 fn still_missing(
@@ -4180,16 +4200,24 @@ fn still_missing(
     })
 }
 
-/// `path`, already resolved through its links, to the front of `recent`, once.
-pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, path: PathBuf) {
+/// `path`, already resolved through its links, to the front of `recent`,
+/// once, and to the end of `added` only if it is new to the list, so using a
+/// file again never moves it there. Past the cap the least recently used
+/// leaves both.
+pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, added: &mut Vec<PathBuf>, path: PathBuf) {
+    if !recent.contains(&path) {
+        added.push(path.clone());
+    }
     recent.retain(|held| *held != path);
     recent.insert(0, path);
     recent.truncate(RECENT_FILES_CAP);
+    added.retain(|held| recent.contains(held));
 }
 
 /// The stored tabs, each holding a saved query by name as a build before file
 /// tabs wrote it, bound to that query's file instead. Nothing moves: the next
-/// Save writes the file where it is.
+/// Save writes the file where it is. The name stays, to tell the tab's
+/// scratch from one an older build left beside a file tab.
 fn adopted(
     stored: Vec<store::StoredQueryTab>,
     query_directory: &Path,
@@ -4197,7 +4225,7 @@ fn adopted(
     stored
         .into_iter()
         .map(|mut stored| {
-            if let Some(name) = stored.name.take() {
+            if let Some(name) = &stored.name {
                 stored.path = stored.path.or_else(|| {
                     Some(sql_file::canonical(
                         &query_directory.join(format!("{name}.sql")),
@@ -4260,6 +4288,28 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             let bom = on_disk.as_ref().is_some_and(|on_disk| on_disk.bom);
             let stamp = on_disk.as_ref().map(|on_disk| on_disk.stamp);
             let saved = on_disk.map(|on_disk| on_disk.text);
+            // Every file tab left dirty is stored with its `saved_hash`, so a
+            // scratch beside one stored without it was written by a build
+            // before file tabs, which showed it untitled and empty; taken as
+            // unsaved text, a Save would put it over the file. A tab adopted
+            // from a saved query's name is the exception: that build showed
+            // it holding the query, and its scratch is the buffer. Over a
+            // file gone, the scratch is all the tab can hold, whoever wrote it.
+            let (scratch, notice, scratch_unread) = match scratch {
+                Some(foreign)
+                    if saved.is_some() && stored.saved_hash.is_none() && stored.name.is_none() =>
+                {
+                    let (notice, scratch_unread) = put_aside_foreign_scratch(
+                        profile_id,
+                        stored.id,
+                        &foreign,
+                        saved.as_deref(),
+                        &path,
+                    );
+                    (None, notice, scratch_unread)
+                }
+                scratch => (scratch, notice, scratch_unread),
+            };
             let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
             let conflict = restored_conflict(stored, saved.as_deref(), bom, &text);
             StoredText {
@@ -4283,6 +4333,33 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             notice: notice.or(Some(message)),
             scratch_unread,
         },
+    }
+}
+
+/// An older build's scratch for the file tab on `path`: deleted when empty
+/// or what the file holds, and otherwise moved aside as one that will not
+/// read is, since it may hold text typed there. The notice to show, and
+/// whether it had to stay put.
+fn put_aside_foreign_scratch(
+    profile_id: &str,
+    id: u64,
+    text: &str,
+    saved: Option<&str>,
+    path: &Path,
+) -> (Option<String>, bool) {
+    if text.is_empty() || saved == Some(text) {
+        return (store::delete_scratch(profile_id, id).err(), false);
+    }
+    match store::set_aside_scratch(profile_id, id) {
+        Ok(aside) => (
+            Some(format!(
+                "Text an older DBDelve left for {} was kept as {}.",
+                sql_file::file_name(path),
+                aside.display()
+            )),
+            false,
+        ),
+        Err(message) => (Some(message), true),
     }
 }
 
@@ -5911,10 +5988,22 @@ mod tests {
         let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
         let mut stored = vec![path(0), queries.join("q.sql"), path(1), path(0)];
         stored.extend((2..30).map(path));
-        let recent = restored_recent(stored, queries);
+        let (recent, added) = restored_recent(stored, Vec::new(), queries);
         assert_eq!(recent.len(), RECENT_FILES_CAP);
         assert_eq!(recent[..3], [path(0), path(1), path(2)]);
         assert_eq!(recent[19], path(19));
+        let reversed: Vec<_> = recent.iter().rev().cloned().collect();
+        assert_eq!(added, reversed, "an older list is added oldest first");
+    }
+
+    #[test]
+    fn the_recent_files_restore_in_the_order_they_were_added() {
+        let queries = Path::new("/support/queries/e2e");
+        let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
+        let stored = vec![path(2), path(0), path(1), path(3)];
+        let added = vec![path(0), path(9), path(1), path(2), path(0)];
+        let (_, added) = restored_recent(stored, added, queries);
+        assert_eq!(added, [path(0), path(1), path(2), path(3)]);
     }
 
     #[test]
@@ -5929,19 +6018,32 @@ mod tests {
     }
 
     #[test]
-    fn the_recent_files_put_the_newest_first_once_and_keep_twenty() {
+    fn the_recent_files_put_the_last_used_first_and_keep_where_each_was_added() {
         let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
-        let mut recent = Vec::new();
+        let (mut recent, mut added) = (Vec::new(), Vec::new());
         for n in 0..25 {
-            remember_recent(&mut recent, path(n));
+            remember_recent(&mut recent, &mut added, path(n));
         }
         assert_eq!(recent.len(), RECENT_FILES_CAP);
         assert_eq!(recent[0], path(24));
         assert_eq!(recent[19], path(5));
-        remember_recent(&mut recent, path(10));
-        assert_eq!(recent[0], path(10));
+        assert_eq!(added, (5..25).map(path).collect::<Vec<_>>());
+        remember_recent(&mut recent, &mut added, path(5));
+        assert_eq!(recent[0], path(5));
         assert_eq!(recent.len(), RECENT_FILES_CAP);
-        assert_eq!(recent.iter().filter(|held| **held == path(10)).count(), 1);
+        assert_eq!(recent.iter().filter(|held| **held == path(5)).count(), 1);
+        assert_eq!(
+            added,
+            (5..25).map(path).collect::<Vec<_>>(),
+            "using a file again leaves where it was added"
+        );
+        remember_recent(&mut recent, &mut added, path(25));
+        assert!(
+            !recent.contains(&path(6)) && !added.contains(&path(6)),
+            "the least recently used goes, not the first added"
+        );
+        assert_eq!(added.first(), Some(&path(5)));
+        assert_eq!(added.last(), Some(&path(25)));
     }
 
     #[test]
@@ -5973,7 +6075,7 @@ mod tests {
             [
                 store::StoredQueryTab {
                     path: Some(daily),
-                    ..tab(None, None)
+                    ..tab(Some("daily"), None)
                 },
                 tab(None, None),
                 tab(None, Some("/q/a.sql")),
@@ -6004,7 +6106,7 @@ mod tests {
             };
 
             let adopted = adopted(vec![stored(Some("daily"), None)], &queries);
-            assert_eq!(adopted, [stored(None, Some(target.clone()))]);
+            assert_eq!(adopted, [stored(Some("daily"), Some(target.clone()))]);
             let restored = stored_text("dev", &stored(None, Some(queries.join("daily.sql"))));
             assert_eq!(restored.file.map(|file| file.path), Some(target));
         });
@@ -6035,19 +6137,110 @@ mod tests {
             assert_eq!(notice, None);
 
             store::write_scratch("dev", 3, "SELECT 2").unwrap();
-            let StoredText { file, text, .. } = stored_text("dev", &stored);
+            let left_dirty = store::StoredQueryTab {
+                saved_hash: Some(sql_file::text_hash("SELECT 1", false)),
+                ..stored.clone()
+            };
+            let StoredText { file, text, .. } = stored_text("dev", &left_dirty);
             assert_eq!(text, "SELECT 2");
             assert!(is_dirty(file.as_ref(), &text));
 
             std::fs::remove_file(&path).unwrap();
             store::delete_scratch("dev", 3).unwrap();
-            let StoredText { file, text, .. } = stored_text("dev", &stored);
+            let StoredText { file, text, .. } = stored_text("dev", &left_dirty);
             let file = file.expect("still bound");
             assert_eq!((file.path.as_path(), text.as_str()), (path.as_path(), ""));
             assert!(
                 is_dirty(Some(&file), &text),
                 "nothing on disk is unsaved work"
             );
+        });
+    }
+
+    /// A build before file tabs showed this tab untitled and empty and left
+    /// a scratch for it, empty or holding what was typed there.
+    #[test]
+    fn a_scratch_an_older_build_left_beside_a_clean_file_tab_is_not_its_text() {
+        store::tests::with_home(|| {
+            let path = sql_file::canonical(&store::home().unwrap().join("q.sql"));
+            std::fs::write(&path, "SELECT 1").unwrap();
+            let stored = store::StoredQueryTab {
+                id: 3,
+                name: None,
+                path: Some(path.clone()),
+                active: true,
+                queued_results: 0,
+                database: None,
+                schema: None,
+                saved_hash: None,
+                kept_mine: false,
+                asking: false,
+            };
+            let scratch = store::query_directory("dev")
+                .unwrap()
+                .join(".scratch-3.sql");
+
+            store::write_scratch("dev", 3, "").unwrap();
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 1");
+            assert!(!is_dirty(file.as_ref(), &text));
+            assert_eq!(notice, None);
+            assert!(!scratch.exists());
+
+            store::write_scratch("dev", 3, "SELECT 1").unwrap();
+            let StoredText { text, notice, .. } = stored_text("dev", &stored);
+            assert_eq!((text.as_str(), notice), ("SELECT 1", None));
+            assert!(!scratch.exists());
+
+            store::write_scratch("dev", 3, "SELECT 2").unwrap();
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 1");
+            assert!(!is_dirty(file.as_ref(), &text));
+            let aside = scratch.with_file_name(".scratch-3.unread-1.sql");
+            assert_eq!(std::fs::read_to_string(&aside).unwrap(), "SELECT 2");
+            assert!(notice.is_some_and(|notice| notice.contains(".unread-1.sql")));
+        });
+    }
+
+    /// A build before file tabs held this tab as the saved query "daily",
+    /// and its scratch is that buffer's text, edited since the last Save.
+    #[test]
+    fn a_saved_query_tab_an_older_build_left_comes_back_holding_its_scratch() {
+        store::tests::with_home(|| {
+            let queries = store::query_directory("dev").unwrap();
+            std::fs::create_dir_all(&queries).unwrap();
+            let daily = sql_file::canonical(&queries.join("daily.sql"));
+            std::fs::write(&daily, "SELECT 1").unwrap();
+            store::write_scratch("dev", 3, "SELECT 2").unwrap();
+            let stored = store::StoredQueryTab {
+                id: 3,
+                name: Some("daily".into()),
+                path: None,
+                active: true,
+                queued_results: 0,
+                database: None,
+                schema: None,
+                saved_hash: None,
+                kept_mine: false,
+                asking: false,
+            };
+
+            let [stored] = adopted(vec![stored], &sql_file::canonical(&queries))
+                .try_into()
+                .unwrap();
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 2");
+            assert_eq!(file.as_ref().map(|file| file.path.clone()), Some(daily));
+            assert!(is_dirty(file.as_ref(), &text));
+            assert_eq!(notice, None);
+            assert!(queries.join(".scratch-3.sql").exists());
+            assert!(!queries.join(".scratch-3.unread-1.sql").exists());
         });
     }
 

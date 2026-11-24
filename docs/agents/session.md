@@ -783,8 +783,21 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   restore, so a link and its file are one tab; two restored tabs that meet
   leave the later one untitled with its text (`Session::unbind_duplicates`).
 - **Closing a file tab with unsaved changes asks Save / Don't Save /
-  Cancel** (`PendingDiscard::unsaved`, the "unsaved" dialog), after the
-  unapplied-edits question and only once it is answered Discard. Close All
+  Cancel** (`PendingDiscard::unsaved`), after the
+  unapplied-edits question and only once it is answered Discard. It and the
+  Overwrite question are the window's own prompt (`window.prompt`, through
+  `Workspace::ask`), not a DBDelve dialog: an NSAlert sheet on macOS and a
+  task dialog on Windows, Save the default that takes Return and Cancel the
+  one that takes Escape. Linux has no native one, so DBDelve draws its own
+  (`src/prompt.rs`, installed by `main` as GPUI's prompt builder only off
+  macOS and Windows, since a builder replaces a native dialog too): the
+  dialog card over the window, holding its mouse, with the message and the
+  answers stacked full width, the `ok` one primary, taking the keyboard
+  while it is up and handing it back after. GPUI's own stand-in ignores the
+  theme and the keyboard and lets clicks through. The answer calls the same
+  handlers a button did, each of which hands the keyboard back; a prompt
+  dropped unanswered changes nothing. Tests answer it with
+  `simulate_prompt_answer`. Close All
   Tabs closes everything else first and asks once about every dirty file
   tab, its Save saving each; with cell edits too, the edits question holds
   the dirty file tabs as well and the Save question follows it. Don't Save
@@ -866,19 +879,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   no-overwrite move, never a write under the new name and a delete of the old
   one: on a case-insensitive filesystem `daily` and `Daily` are one file. A
   name taken in any case is refused. Staging files are private to each writer.
-- **The Files group lists a connection's files, then its saved queries.**
+- **The Files group lists a connection's files and its saved queries.**
   Its row id is still `queries` (`explorer::FILES_GROUP`), so the fold
   stored for the old Queries group applies. Its files are the profile's
-  recent files (`StoredProfile::recent_files`, left out when empty), then
-  any file open in a tab they no longer hold (`Profile::listed_files`); a
-  saved query's file is listed as the query instead. Opening a file in a
-  tab, Save and Save As put its resolved path first in the connection's list
-  (`session::remember_recent`: newest first, once, at most 20); so does the
-  move, for the connection each query was on. A launch reads the stored list
-  the same way (`session::restored_recent`), compared as written rather
-  than resolved, so no path is statted on the window's thread. Whatever
-  changes what a connection lists redraws its group, a tab closing on a
-  file it alone kept listed included. A row is named by its file,
+  recent files, then any file open in a tab they no longer hold, by name
+  (`Profile::listed_files`); a saved query's file is listed as the query
+  instead. Opening a file in a tab, Save and Save As put its resolved path
+  first in the connection's list (`session::remember_recent`: most recently
+  used first, once, at most 20, the least recently used evicted); so does
+  the move, for the connection each query was on. A launch reads the stored
+  list the same way (`session::restored_recent`), compared as written
+  rather than resolved, so no path is statted on the window's thread.
+  Whatever changes what a connection lists redraws its group, a tab closing
+  on a file it alone kept listed included. A row is named by its file,
   with its folder beside it where two listed share a name, and shows the
   full path on hover; its id is `file:` and the path's `Debug` spelling,
   which keeps bytes that are not UTF-8 apart where `display` would merge
@@ -898,6 +911,23 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   it set out. The palette's Queries scope lists the same files beside the
   saved queries, named as the sidebar names them (`explorer::file_labels`),
   with the full path beside each.
+- **The Files group's order is stable and the user's.** Its row's menu, in
+  either tree, offers Sort by Name (the default: every row by its label,
+  without case) and Sort by Date Added (the recent files in the order each
+  entered the list, oldest first, then the open files and the saved queries
+  by name), app-wide as `files_order` in `[settings]`, written only when
+  not by name (`explorer::FilesOrder`). Neither moves a row when a file is
+  opened or saved again, since a list that reorders on use moves rows under
+  the pointer mid-click. A file's dates on disk are not offered: a save
+  replaces the file, which resets its creation time and moves its
+  modification time. Recency, which only eviction reads, and the order of
+  adding are stored apart: `StoredProfile::recent_files` stays most
+  recently used first, as an older build reads and evicts it, and
+  `recent_added` holds the same paths in the order they were added (both
+  left out when empty). A path
+  `recent_added` lacks, which is every one of a list an older build wrote,
+  counts as added in the order it was last used, so that list comes up
+  oldest first.
 - **The saved queries move to a folder only when asked.** A launch where a
   connection has saved queries left shows one line under the titlebar ("Your
   N saved queries are now files."), washed in the accent so it is not missed,
@@ -1035,7 +1065,17 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   text as any other. A rename needs only the directory, so it works where
   the file will not read. Where even that fails the file is left alone
   (`QueryTab::scratch_unread`) for the tab's life: never written, and
-  removed by neither Save nor a close, while the tab still asks on close. A tab's path is `StoredQueryTab::path`, left out
+  removed by neither Save nor a close, while the tab still asks on close.
+  A file tab left dirty always stores `saved_hash` (of nothing, its file
+  gone), so a scratch beside a file tab stored without one, over a file that
+  reads, is not the tab's: a build before file tabs ignores `path`, shows
+  the tab untitled and empty, and writes that buffer on quit, and taken as
+  unsaved text it would come back dirty and a Save would empty the file. The
+  tab comes back clean from its file; that scratch is deleted when empty or
+  the file's own text, and otherwise set aside to an `.unread-<n>.sql` name
+  with a notice, as one that will not read is. A tab adopted from `name` is
+  not one: that build showed it holding the saved query, so its scratch is
+  its buffer, and the adopted tab keeps `name` for the check. A tab's path is `StoredQueryTab::path`, left out
   for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
   writes, timers or retries. A crash or forced termination can lose edits

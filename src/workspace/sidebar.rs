@@ -23,8 +23,8 @@ use gpui_component::{
 };
 
 use super::forms::{
-    ListedFiles, MenuRow, explorer_menu, file_row_menu, is_shortcut_row, node_items,
-    selection_menu, shortcut_row_menu,
+    ListedFiles, MenuRow, explorer_menu, file_row_menu, files_group_menu, is_shortcut_row,
+    node_items, selection_menu, shortcut_row_menu,
 };
 use super::profiles::{database_content, explorer_content};
 use super::*;
@@ -261,9 +261,9 @@ impl Workspace {
                         (ProfileState::Failed(message), _) | (_, CatalogState::Failed(message)) => {
                             Content::Failed(message.clone())
                         }
-                        (ProfileState::Connected(_), CatalogState::Loaded(..)) => {
-                            Content::Loaded(explorer_content(profile, narrowed))
-                        }
+                        (ProfileState::Connected(_), CatalogState::Loaded(..)) => Content::Loaded(
+                            explorer_content(profile, narrowed, self.settings.files_order),
+                        ),
                     },
                     databases: match (&profile.state, &profile.catalog) {
                         (ProfileState::Connected(_), CatalogState::Loaded(..))
@@ -1229,6 +1229,9 @@ impl Workspace {
                 }
             }
             let shortcut = menu_shortcuts.get(id).cloned();
+            if model::unscoped(id).is_some_and(|scoped| scoped.inner == FILES_GROUP) {
+                return files_group_menu(menu, state.settings.files_order, &menu_workspace);
+            }
             if let Some(scoped) = model::unscoped(id)
                 && let Some(profile) = state.profiles.iter().find(|p| p.id == scoped.profile)
                 && let Some(path) = ListedFiles::of(profile).paths.get(scoped.inner)

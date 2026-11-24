@@ -71,9 +71,13 @@ fn forget_what_was_read(profile: &mut Profile, window: &mut Window, cx: &mut Con
 }
 
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
-/// folders, its files and saved queries, then the catalog's schemas. Both trees draw
+/// folders, its files and saved queries in `order`, then the catalog's schemas. Both trees draw
 /// this, so a connection's rows are the same in either.
-pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::ExplorerTree {
+pub(super) fn explorer_content(
+    profile: &Profile,
+    filter: &str,
+    order: explorer::FilesOrder,
+) -> explorer::ExplorerTree {
     let catalog = match &profile.catalog {
         CatalogState::Loaded(catalog, _) => Some(catalog),
         _ => None,
@@ -89,6 +93,7 @@ pub(super) fn explorer_content(profile: &Profile, filter: &str) -> explorer::Exp
         &profile.listed_files(),
         &profile.session.saved_queries,
         filter,
+        order,
     ));
     if let Some(catalog) = catalog {
         explorer.extend(build_explorer_tree(catalog, filter));
@@ -195,6 +200,8 @@ impl Workspace {
                 .filter(|dismissed| *dismissed),
             edit_mode: (self.settings.edit_mode != EditMode::default())
                 .then(|| self.settings.edit_mode.slug().into()),
+            files_order: (self.settings.files_order != explorer::FilesOrder::default())
+                .then(|| self.settings.files_order.slug().into()),
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
         };
@@ -308,6 +315,11 @@ impl Workspace {
             session.notice.get_or_insert(message);
         }
         let id = stored.id.clone();
+        let (recent_files, recent_added) = crate::session::restored_recent(
+            stored.recent_files,
+            stored.recent_added,
+            &session.query_directory,
+        );
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -357,10 +369,8 @@ impl Workspace {
                 .into_iter()
                 .take(OPEN_ROWS_CAP)
                 .collect(),
-            recent_files: crate::session::restored_recent(
-                stored.recent_files,
-                &session.query_directory,
-            ),
+            recent_files,
+            recent_added,
             missing_files: HashSet::new(),
             recent_generation: 0,
             session,
@@ -430,6 +440,7 @@ impl Workspace {
             open_rows: Vec::new(),
             selected_rows: Vec::new(),
             recent_files: Vec::new(),
+            recent_added: Vec::new(),
             missing_files: HashSet::new(),
             recent_generation: 0,
             session,
@@ -3078,7 +3089,7 @@ impl Workspace {
             return;
         };
         let filter = profile.session.explorer_filter.read(cx).value();
-        let explorer = explorer_content(profile, &filter);
+        let explorer = explorer_content(profile, &filter, self.settings.files_order);
         let front = profile.front_row();
         let tree = profile.session.explorer_tree.clone();
         let (mut folds, selected) = match keep {
