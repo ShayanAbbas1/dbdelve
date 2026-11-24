@@ -1036,6 +1036,16 @@ impl Profile {
             mode: Some(self.mode.slug().to_string()),
             include_databases: self.include.databases.clone(),
             include_schemas: self.include.schemas.clone(),
+            include_tables: self
+                .include
+                .tables
+                .iter()
+                .map(|list| store::StoredTableFilter {
+                    database: list.database.clone(),
+                    schema: list.schema.clone(),
+                    tables: list.tables.clone(),
+                })
+                .collect(),
             introspection_depth: (self.behaviour.depth != Depth::default())
                 .then(|| self.behaviour.depth.slug().to_string()),
             startup_script: Some(self.behaviour.startup_script.clone())

@@ -246,7 +246,7 @@ fn written_entries(ticked: &[String], patterns: &str) -> Vec<String> {
 fn admits(pattern: &str, name: &str) -> bool {
     Include {
         databases: vec![pattern.to_string()],
-        schemas: Vec::new(),
+        ..Include::default()
     }
     .resolve(Levels::DatabaseHoldsObjects, None, None)
     .shows_database(name)
@@ -407,7 +407,9 @@ impl FilterPicker {
             .schemas
             .as_ref()
             .map_or_else(|| self.saved.schemas.clone(), PickerSection::entries);
+        // The table lists are not this dialog's: Save keeps the profile's.
         Include::from_stored(self.databases.entries(), schemas)
+            .with_tables(self.saved.tables.clone())
     }
 
     /// Nothing to write while a section is still being read, or when the lists
@@ -1421,6 +1423,7 @@ mod tests {
         let include = |databases: &[&str], schemas: &[&str]| Include {
             databases: databases.iter().map(|name| name.to_string()).collect(),
             schemas: schemas.iter().map(|name| name.to_string()).collect(),
+            ..Include::default()
         };
         assert!(unchanged(&include(&["e2e"], &[]), &include(&["E2E"], &[])));
         assert!(unchanged(

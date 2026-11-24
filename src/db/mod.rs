@@ -64,7 +64,7 @@ pub use graph::{GraphColumn, KeyTarget, SchemaGraph};
 #[cfg(test)]
 pub use graph::{GraphKey, GraphTable};
 pub(crate) use include::same_name;
-pub use include::{Include, Shown};
+pub use include::{Include, Shown, TableFilter};
 pub use password_command::{PasswordCommand, loggable_error};
 pub use plugin::Plugin;
 pub use properties::{Properties, Property};

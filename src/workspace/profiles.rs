@@ -11,7 +11,8 @@ use crate::connection_form::{
     ConnectionTest, Reported, duplicate_profile_name, keep_schema, name_is_automatic,
 };
 use crate::db::{
-    ExternalConfig, Include, PasswordCommand, Plugin, Properties, Target, check_time_zone,
+    ExternalConfig, Include, PasswordCommand, Plugin, Properties, TableFilter, Target,
+    check_time_zone,
 };
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
@@ -392,7 +393,18 @@ impl Workspace {
             // means that kind still asks.
             // A file is a person's to edit: blanks are dropped and each list is
             // capped, as `open_rows` is.
-            include: Include::from_stored(stored.include_databases, stored.include_schemas),
+            include: Include::from_stored(stored.include_databases, stored.include_schemas)
+                .with_tables(
+                    stored
+                        .include_tables
+                        .into_iter()
+                        .map(|list| TableFilter {
+                            database: list.database,
+                            schema: list.schema,
+                            tables: list.tables,
+                        })
+                        .collect(),
+                ),
             // A slug this build cannot read costs this one field: every load.
             behaviour: Behaviour {
                 depth: stored

@@ -19,35 +19,160 @@ use super::{Catalog, Databases, Engine, Levels, Sizes};
 /// read than a profile would write.
 pub const ENTRIES_CAP: usize = 500;
 
+/// One schema's table list: the relations of `schema` the tree shows, as exact
+/// names and `*`/`?` globs, matched like the other lists. A schema with no
+/// entry shows every relation.
+///
+/// `database` is the database that holds the schema by name, where the tree
+/// draws databases over schemas (`Levels::DatabaseThenSchema` and
+/// `DatabaseHoldsObjects`). It is `None` where there is no database level
+/// (`Levels::Flat`) or where the catalog's schemas are the databases
+/// (`Levels::DatabaseIsSchema`): there `schema` is the database's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableFilter {
+    pub database: Option<String>,
+    pub schema: String,
+    pub tables: Vec<String>,
+}
+
+impl TableFilter {
+    /// Whether `self` is the list of `database` and `schema`, which are
+    /// compared as the filter compares every name.
+    fn is_for(&self, database: Option<&str>, schema: &str) -> bool {
+        let same_database = match (&self.database, database) {
+            (Some(mine), Some(theirs)) => same_name(mine, theirs),
+            (None, None) => true,
+            _ => false,
+        };
+        same_database && same_name(&self.schema, schema)
+    }
+}
+
 /// What a profile's lists say, as written in `profiles.toml` and in the form.
 /// Not part of the connection: changing it never reconnects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Include {
     pub databases: Vec<String>,
     pub schemas: Vec<String>,
+    /// The per-schema table lists. Kept apart from the two above so the
+    /// call sites that build those two stay as they were; see
+    /// [`Include::with_tables`].
+    pub tables: Vec<TableFilter>,
+}
+
+/// `list` as a file is read: each entry trimmed, those left empty dropped, at
+/// most [`ENTRIES_CAP`] kept, in the order written.
+fn kept_entries(list: Vec<String>) -> Vec<String> {
+    list.into_iter()
+        // ponytail: a name the server lists with leading or trailing
+        // whitespace is matched by no exact entry once trimmed, since
+        // matching runs on the server's own spelling; a glob such as
+        // `*name*` still covers it. The upgrade is an entry spelling
+        // that keeps edge whitespace (a quoted name), read here and
+        // written by the picker.
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .take(ENTRIES_CAP)
+        .collect()
 }
 
 impl Include {
     /// What a file held, or what Save is about to write: each entry trimmed,
     /// those left empty dropped, at most [`ENTRIES_CAP`] of each list kept, in
-    /// the order written.
+    /// the order written. The table lists start empty; [`Self::with_tables`]
+    /// sets them.
     pub fn from_stored(databases: Vec<String>, schemas: Vec<String>) -> Self {
-        let kept = |list: Vec<String>| {
-            list.into_iter()
-                // ponytail: a name the server lists with leading or trailing
-                // whitespace is matched by no exact entry once trimmed, since
-                // matching runs on the server's own spelling; a glob such as
-                // `*name*` still covers it. The upgrade is an entry spelling
-                // that keeps edge whitespace (a quoted name), read here and
-                // written by the picker.
-                .map(|entry| entry.trim().to_string())
-                .filter(|entry| !entry.is_empty())
-                .take(ENTRIES_CAP)
-                .collect()
-        };
         Self {
-            databases: kept(databases),
-            schemas: kept(schemas),
+            databases: kept_entries(databases),
+            schemas: kept_entries(schemas),
+            tables: Vec::new(),
+        }
+    }
+
+    /// `self` with the table lists `lists`, normalised as a file is read: each
+    /// key and entry trimmed, an entry left with no schema or no tables
+    /// dropped, two lists of one key (names compared as the filter does)
+    /// joined into the first, at most [`ENTRIES_CAP`] lists and as many
+    /// tables in each, in the order written.
+    pub fn with_tables(mut self, lists: Vec<TableFilter>) -> Self {
+        self.tables = Vec::new();
+        for list in lists {
+            self.put_tables(list.database.as_deref(), &list.schema, list.tables, true);
+        }
+        self
+    }
+
+    /// The table list of `schema` in `database` (see [`TableFilter`] for when
+    /// that is `None`), empty when it has none.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table picker is the first reader")
+    )]
+    pub fn tables_of(&self, database: Option<&str>, schema: &str) -> &[String] {
+        self.tables
+            .iter()
+            .find(|list| list.is_for(database, schema))
+            .map_or(&[], |list| list.tables.as_slice())
+    }
+
+    /// Replace the table list of one schema with `tables`, normalised as
+    /// [`Self::with_tables`] does; an empty list removes it, so the schema
+    /// shows every relation again. Every other list is left as it was.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table picker is the first reader")
+    )]
+    pub fn set_tables(&mut self, database: Option<&str>, schema: &str, tables: Vec<String>) {
+        let database = database
+            .map(str::trim)
+            .filter(|database| !database.is_empty());
+        let schema = schema.trim();
+        let at = self
+            .tables
+            .iter()
+            .position(|list| list.is_for(database, schema));
+        let tables = kept_entries(tables);
+        match (at, tables.is_empty()) {
+            (Some(at), true) => {
+                self.tables.remove(at);
+            }
+            (Some(at), false) => self.tables[at].tables = tables,
+            (None, _) => self.put_tables(database, schema, tables, false),
+        }
+    }
+
+    /// Add one list in normalised form, joining it to the list of the same
+    /// key when `join` and there is one.
+    fn put_tables(
+        &mut self,
+        database: Option<&str>,
+        schema: &str,
+        tables: Vec<String>,
+        join: bool,
+    ) {
+        let database = database
+            .map(str::trim)
+            .filter(|database| !database.is_empty());
+        let schema = schema.trim();
+        let tables = kept_entries(tables);
+        if schema.is_empty() || tables.is_empty() {
+            return;
+        }
+        if let Some(existing) = self
+            .tables
+            .iter_mut()
+            .find(|list| list.is_for(database, schema))
+        {
+            if join {
+                existing.tables.extend(tables);
+                existing.tables.truncate(ENTRIES_CAP);
+            }
+        } else if self.tables.len() < ENTRIES_CAP {
+            self.tables.push(TableFilter {
+                database: database.map(str::to_string),
+                schema: schema.to_string(),
+                tables,
+            });
         }
     }
 
@@ -663,5 +788,69 @@ mod tests {
         let narrowed = shown.narrow_catalog(catalog(&["main", "s"]));
         assert_eq!(names(&narrowed), ["main"]);
         assert_eq!(narrowed.left_out, 1, "1 of 2");
+    }
+
+    fn table_list(database: Option<&str>, schema: &str, tables: &[&str]) -> TableFilter {
+        TableFilter {
+            database: database.map(str::to_string),
+            schema: schema.into(),
+            tables: text(tables),
+        }
+    }
+
+    #[test]
+    fn a_stored_table_list_is_trimmed_joined_by_key_and_dropped_when_it_names_nothing() {
+        let include = Include::default().with_tables(vec![
+            table_list(Some(" app "), " Public ", &["  users ", "", "audit_*"]),
+            table_list(Some("APP"), "public", &["orders"]),
+            table_list(None, "   ", &["ignored"]),
+            table_list(None, "main", &[" ", ""]),
+            table_list(Some("  "), "main", &["t?"]),
+        ]);
+        assert_eq!(
+            include.tables,
+            [
+                table_list(Some("app"), "Public", &["users", "audit_*", "orders"]),
+                table_list(None, "main", &["t?"]),
+            ],
+            "a blank database is none, and the lists of one key join into the first"
+        );
+
+        let many: Vec<String> = (0..ENTRIES_CAP + 5).map(|at| format!("t{at}")).collect();
+        let capped = Include::default().with_tables(vec![TableFilter {
+            database: None,
+            schema: "s".into(),
+            tables: many,
+        }]);
+        assert_eq!(capped.tables[0].tables.len(), ENTRIES_CAP);
+
+        let lists: Vec<TableFilter> = (0..ENTRIES_CAP + 5)
+            .map(|at| table_list(None, &format!("s{at}"), &["t"]))
+            .collect();
+        assert_eq!(
+            Include::default().with_tables(lists).tables.len(),
+            ENTRIES_CAP
+        );
+    }
+
+    #[test]
+    fn one_schemas_table_list_is_replaced_or_removed_without_touching_the_others() {
+        let mut include = Include::from_stored(text(&["db"]), Vec::new()).with_tables(vec![
+            table_list(Some("db"), "public", &["a"]),
+            table_list(Some("db"), "audit", &["b"]),
+        ]);
+        include.set_tables(Some("DB"), "PUBLIC", text(&[" x* ", ""]));
+        assert_eq!(include.tables_of(Some("db"), "public"), ["x*"]);
+        assert_eq!(include.tables_of(Some("db"), "audit"), ["b"]);
+        assert_eq!(include.tables_of(None, "public"), [] as [String; 0]);
+
+        include.set_tables(Some("db"), "new", text(&["n"]));
+        assert_eq!(include.tables.len(), 3);
+        assert_eq!(include.tables[2].schema, "new", "appended after the others");
+
+        include.set_tables(Some("db"), "public", Vec::new());
+        assert_eq!(include.tables_of(Some("db"), "public"), [] as [String; 0]);
+        assert_eq!(include.tables.len(), 2, "an empty list removes the entry");
+        assert_eq!(include.databases, ["db"], "the other lists are left alone");
     }
 }

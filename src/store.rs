@@ -188,6 +188,18 @@ pub struct StoredProfile {
     /// The schemas this profile shows, by the same rules as `include_databases`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include_schemas: Vec<String>,
+    /// The relations each schema shows, one entry per schema: see
+    /// [`StoredTableFilter`]. Left out when empty, so a profile without any
+    /// is written as it always was; a build without the key drops it on its
+    /// next save, and the profile then shows every relation. Entries pass
+    /// through `Include::with_tables` on load, as the two lists above pass
+    /// through `Include::from_stored`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_entries"
+    )]
+    pub include_tables: Vec<StoredTableFilter>,
     /// The slug of the connect-time loads this profile runs; absent is every
     /// load, which is every profile written before the setting existed. A slug
     /// this build cannot read reads as every load, so a newer build's value
@@ -333,6 +345,17 @@ impl<'de> Deserialize<'de> for StoredProfile {
         }
         Ok(profile)
     }
+}
+
+/// One schema's table list, as `db::TableFilter` holds it. `database` is left
+/// out where the schema has no database over it in the tree.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoredTableFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    pub schema: String,
+    #[serde(default)]
+    pub tables: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -3645,6 +3668,7 @@ user = "shayan"
                 selected_rows: Vec::new(),
                 include_databases: Vec::new(),
                 include_schemas: Vec::new(),
+                include_tables: Vec::new(),
                 introspection_depth: None,
                 startup_script: None,
                 keep_alive_seconds: None,
@@ -3716,6 +3740,7 @@ user = "shayan"
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -3875,6 +3900,7 @@ open_objects = []
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -4047,6 +4073,58 @@ open_objects = []
             !golden.contains("include_databases") && !golden.contains("include_schemas"),
             "the fixtures hold neither key"
         );
+    }
+
+    #[test]
+    fn the_table_lists_round_trip_with_the_include_lists_and_an_old_file_has_none() {
+        let mut profile = a_stored_profile();
+        profile.include_schemas = vec!["public".into()];
+        profile.include_tables = vec![
+            StoredTableFilter {
+                database: Some("app".into()),
+                schema: "public".into(),
+                tables: vec!["users".into(), "audit_*".into()],
+            },
+            StoredTableFilter {
+                database: None,
+                schema: "main".into(),
+                tables: vec!["t?".into()],
+            },
+        ];
+        profile.ssh = Some(SshTunnel {
+            host: "bastion".into(),
+            ..Default::default()
+        });
+        let text = written_alone(profile.clone());
+        assert!(
+            text.contains("[[profiles.include_tables]]"),
+            "one table of its own per schema:\n{text}"
+        );
+        let second = text.rfind("[[profiles.include_tables]]").unwrap();
+        assert!(
+            !text[second..]
+                .lines()
+                .take(3)
+                .any(|line| line.starts_with("database")),
+            "a list with no database leaves the key out:\n{text}"
+        );
+        let decoded = decode_profiles(&text, &[]).expect("the file loads");
+        assert_eq!(decoded.profiles[0].include_tables, profile.include_tables);
+        assert_eq!(
+            written_alone(decoded.profiles[0].clone()),
+            text,
+            "saving what was saved changes nothing"
+        );
+
+        let bare = written_alone(a_stored_profile());
+        assert!(
+            !bare.contains("include_tables"),
+            "a profile with none is written as it always was:\n{bare}"
+        );
+        let old = decode_profiles(&bare, &[]).expect("an older file loads");
+        assert!(old.profiles[0].include_tables.is_empty());
+        let golden = include_str!("testdata/every-engine.resaved.toml");
+        assert!(!golden.contains("include_tables"));
     }
 
     #[test]
@@ -4823,6 +4901,7 @@ folder = "Hot"
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -4921,6 +5000,7 @@ folder = "Hot"
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -5005,6 +5085,7 @@ folder = "Hot"
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -5135,6 +5216,7 @@ open_objects = []
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -5295,6 +5377,7 @@ open_objects = []
                     selected_rows: Vec::new(),
                     include_databases: Vec::new(),
                     include_schemas: Vec::new(),
+                    include_tables: Vec::new(),
                     introspection_depth: None,
                     startup_script: None,
                     keep_alive_seconds: None,
@@ -5346,6 +5429,7 @@ open_objects = []
                     selected_rows: Vec::new(),
                     include_databases: Vec::new(),
                     include_schemas: Vec::new(),
+                    include_tables: Vec::new(),
                     introspection_depth: None,
                     startup_script: None,
                     keep_alive_seconds: None,
@@ -6214,6 +6298,7 @@ active = true
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -6853,6 +6938,7 @@ name = \"accounts\"
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
@@ -6993,6 +7079,7 @@ name = \"accounts\"
             selected_rows: Vec::new(),
             include_databases: Vec::new(),
             include_schemas: Vec::new(),
+            include_tables: Vec::new(),
             introspection_depth: None,
             startup_script: None,
             keep_alive_seconds: None,
