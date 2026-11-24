@@ -1009,12 +1009,14 @@ fn connection_item(
                 highlights,
                 shortcuts,
                 left_out,
+                tables_left_out,
             } = content;
             let mut rows = Rows {
                 profile: connection.id,
                 leaves,
                 highlights,
                 shortcuts,
+                tables_left_out,
                 folds,
                 filtering: search.filtering,
             };
@@ -1265,12 +1267,14 @@ fn others_items(
                     highlights,
                     shortcuts,
                     left_out,
+                    tables_left_out,
                 } = content;
                 let mut rows = Rows {
                     profile,
                     leaves,
                     highlights,
                     shortcuts,
+                    tables_left_out,
                     folds,
                     filtering: search.filtering,
                 };
@@ -1296,8 +1300,15 @@ fn others_items(
                 if search.filtering && !named && under.is_empty() {
                     continue;
                 }
-                if left_out > 0 && !search.filtering {
-                    tree.totals.insert(row.clone(), count + left_out);
+                // Where the database row holds the schema's objects, it is
+                // the row the schema's hidden relations are missing from.
+                let tables_left_out: usize = match holds_objects {
+                    true => rows.tables_left_out.values().sum(),
+                    false => 0,
+                };
+                if left_out + tables_left_out > 0 && !search.filtering {
+                    tree.totals
+                        .insert(row.clone(), count + left_out + tables_left_out);
                 }
                 let children = match under.is_empty() {
                     true => vec![empty_row(tree, &row)],
@@ -1397,6 +1408,8 @@ struct Rows<'a> {
     leaves: HashMap<String, ExplorerLeaf>,
     highlights: HashMap<String, Vec<Range<usize>>>,
     shortcuts: HashMap<String, Shortcut>,
+    /// The relations a table list hid from each schema row, by unscoped row id.
+    tables_left_out: HashMap<String, usize>,
     folds: &'a HashMap<String, bool>,
     /// There is text typed: every row with rows under it is open.
     filtering: bool,
@@ -1414,6 +1427,7 @@ fn scoped_item(
     mut item: TreeItem,
 ) -> TreeItem {
     let id = scoped_row(rows.profile, database, &item.id);
+    let source_id = item.id.clone();
     tree.nodes.insert(
         id.clone(),
         Node::Row {
@@ -1449,6 +1463,13 @@ fn scoped_item(
             false => children.len(),
         };
         tree.counts.insert(id.clone(), count);
+        // Out of every relation the schema holds, the table list's hidden
+        // ones too: the count of what is drawn says `N of M` like a hidden
+        // database does, and not while searching.
+        let hidden = rows.tables_left_out.get(source_id.as_str()).copied();
+        if let Some(hidden) = hidden.filter(|_| schema && !rows.filtering) {
+            tree.totals.insert(id.clone(), count + hidden);
+        }
     }
     if children.is_empty() && schema {
         children.push(empty_row(tree, &id));
@@ -2971,6 +2992,114 @@ mod tests {
             "a",
         );
         assert!(tree.totals.is_empty());
+    }
+
+    /// `content` for a flat connection whose schema `main` holds `shown` of
+    /// `held` relations, as the narrowing leaves it.
+    fn narrowed_content(shown: &[&str], hidden: &[&str]) -> ExplorerTree {
+        let mut catalog = Catalog {
+            schemas: vec![schema(
+                "main",
+                shown
+                    .iter()
+                    .map(|name| relation(name, RelationKind::Table, None))
+                    .collect(),
+            )],
+            ..Catalog::default()
+        };
+        if !hidden.is_empty() {
+            catalog.hidden_relations.insert(
+                "main".into(),
+                hidden
+                    .iter()
+                    .map(|name| (name.to_string(), RelationKind::Table))
+                    .collect(),
+            );
+        }
+        explorer::tree(&catalog, "")
+    }
+
+    #[test]
+    fn a_schema_row_says_how_many_of_its_relations_the_table_list_shows() {
+        let listed = |content| Listed {
+            levels: Levels::Flat,
+            ..listed("a", "a", Content::Loaded(content))
+        };
+        let schema_id = scoped_row("a", None, &explorer::schema_row("main"));
+
+        let tree = build(
+            &[],
+            vec![listed(narrowed_content(&["t1", "t2"], &["t3", "t4", "t5"]))],
+            &opened([connection_row("a")]),
+        );
+        assert_eq!(tree.counts.get(&schema_id), Some(&2));
+        assert_eq!(tree.totals.get(&schema_id), Some(&5), "2 of 5");
+        assert_eq!(
+            count_label(2, tree.totals.get(&schema_id).copied()),
+            "2 of 5"
+        );
+
+        let unfiltered = build(
+            &[],
+            vec![listed(narrowed_content(&["t1", "t2"], &[]))],
+            &opened([connection_row("a")]),
+        );
+        assert!(
+            unfiltered.totals.is_empty(),
+            "a plain count while nothing is hidden"
+        );
+
+        let searching = super::build(
+            &[],
+            vec![listed(narrowed_content(&["t1", "t2"], &["t3"]))],
+            &opened([connection_row("a")]),
+            ListingScope::All,
+            None,
+            "t1",
+        );
+        assert!(
+            searching.totals.is_empty(),
+            "never while the search box has text"
+        );
+    }
+
+    #[test]
+    fn a_schema_whose_every_relation_the_table_list_hides_still_shows_with_its_empty_row() {
+        let listed = Listed {
+            levels: Levels::Flat,
+            ..listed(
+                "a",
+                "a",
+                Content::Loaded(narrowed_content(&[], &["t1", "t2", "t3"])),
+            )
+        };
+        let schema_id = scoped_row("a", None, &explorer::schema_row("main"));
+        let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+        let row = find(&tree.items, &schema_id);
+        assert_eq!(
+            row.children.len(),
+            1,
+            "the empty row, as a schema with nothing"
+        );
+        assert!(row.children[0].is_disabled());
+        assert_eq!(tree.counts.get(&schema_id), Some(&0));
+        assert_eq!(tree.totals.get(&schema_id), Some(&3), "0 of 3");
+    }
+
+    #[test]
+    fn where_a_database_row_holds_the_objects_it_carries_the_schemas_n_of_m() {
+        let listed = Listed {
+            levels: Levels::DatabaseHoldsObjects,
+            databases: vec![(
+                "other".into(),
+                Content::Loaded(narrowed_content(&["t1"], &["t2", "t3"])),
+            )],
+            ..listed("a", "a", Content::Loaded(ExplorerTree::default()))
+        };
+        let tree = build(&[], vec![listed], &opened([connection_row("a")]));
+        let other = database_row("a", "other");
+        assert_eq!(tree.counts.get(&other), Some(&1));
+        assert_eq!(tree.totals.get(&other), Some(&3));
     }
 
     #[test]

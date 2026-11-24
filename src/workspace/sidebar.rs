@@ -43,8 +43,7 @@ use crate::ui::{Status, row_icon_tinted, status_dot};
 
 /// What a pinned or foldered object the connection's filter hides says when
 /// hovered, so it is not taken for one the server dropped.
-pub(super) const HIDDEN_BY_FILTER: &str =
-    "Hidden by this connection's database filter, not missing";
+pub(super) const HIDDEN_BY_FILTER: &str = "Hidden by this connection's filter, not missing";
 
 /// The id of the row of `profile`'s front tab in the connections tree, if
 /// the tab has one.

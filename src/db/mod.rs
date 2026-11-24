@@ -3377,9 +3377,88 @@ pub struct Catalog {
     /// schemas, the include filter dropped. Set only by the narrowing, so
     /// [`Catalog::merge`] and [`Catalog::set_sizes`] leave it alone.
     pub left_out: usize,
+    /// The relations a schema's table list left out of `schemas`, by schema
+    /// name: the name and kind of each that stands alone (a partition goes
+    /// with its parent and is not listed). Set only by the narrowing, so
+    /// [`Catalog::merge`] and [`Catalog::set_sizes`] leave it alone.
+    ///
+    /// A deliberate exception to "nothing stores an unnarrowed answer": the
+    /// relations of a schema are read whole on every engine anyway, so keeping
+    /// their names costs no read, and the filter picker lists them so a hidden
+    /// table can be ticked again without a second one. The names live here,
+    /// apart from `schemas`, so nothing that offers objects (the tree,
+    /// completion, Go to Object) can see them.
+    pub hidden_relations: std::collections::HashMap<String, Vec<(String, RelationKind)>>,
+}
+
+/// The relations of one schema, as the table filter splits them: those the
+/// tree shows and those its table list left out, each name with its kind.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table picker is the first reader")
+)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelationNames {
+    pub shown: Vec<(String, RelationKind)>,
+    pub hidden: Vec<(String, RelationKind)>,
+}
+
+impl RelationNames {
+    /// How many relations the schema holds with no table list: what a count
+    /// of `N of M` is out of.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table picker is the first reader")
+    )]
+    pub fn total(&self) -> usize {
+        self.shown.len() + self.hidden.len()
+    }
 }
 
 impl Catalog {
+    /// What the catalog holds of `schema`'s relations, shown and hidden, for
+    /// the picker. Partitions are not listed: the filter treats one as part of
+    /// its parent. Empty for a schema the catalog does not have.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table picker is the first reader")
+    )]
+    pub fn relations_of(&self, schema: &str) -> RelationNames {
+        let Some(found) = self.schemas.iter().find(|found| found.name == schema) else {
+            return RelationNames::default();
+        };
+        let listed: std::collections::HashSet<&str> = found
+            .relations
+            .iter()
+            .map(|relation| relation.name.as_str())
+            .collect();
+        RelationNames {
+            shown: found
+                .relations
+                .iter()
+                // A parent the catalog did not list leaves its partition
+                // standing alone, as the tree draws it.
+                .filter(|relation| {
+                    !relation
+                        .partition_of
+                        .as_deref()
+                        .is_some_and(|parent| listed.contains(parent))
+                })
+                .map(|relation| (relation.name.clone(), relation.kind))
+                .collect(),
+            hidden: self
+                .hidden_relations
+                .get(schema)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// How many relations of `schema` its table list left out.
+    pub fn hidden_in(&self, schema: &str) -> usize {
+        self.hidden_relations.get(schema).map_or(0, Vec::len)
+    }
+
     /// Fold a later half into this one: the routines and sequences of a schema
     /// already here join it, and a schema that holds only those is added in its
     /// place.

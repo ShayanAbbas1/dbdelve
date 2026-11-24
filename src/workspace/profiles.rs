@@ -2924,7 +2924,7 @@ impl Workspace {
         // The active schema is kept in the connection's own database only.
         let Some(shown) = self
             .issued_to(id, generation)
-            .map(|profile| profile.shown().in_another_database())
+            .map(|profile| profile.shown().in_another_database(&database))
         else {
             return;
         };
@@ -2950,7 +2950,7 @@ impl Workspace {
                 // Asked under a filter saved over since: it would put back
                 // what that one hides. Read again under this one, if it
                 // still shows the database at all.
-                let current = profile.shown().in_another_database();
+                let current = profile.shown().in_another_database(&database);
                 if current != asked {
                     if current.shows_database(&database) {
                         workspace.load_database_catalog(&id, database, generation, cx);
@@ -3033,7 +3033,7 @@ impl Workspace {
             return;
         }
         // The active schema is kept in the connection's own database only.
-        let shown = profile.shown().in_another_database();
+        let shown = profile.shown().in_another_database(database);
         #[cfg(test)]
         {
             self.routine_reads += 1;
@@ -3053,7 +3053,7 @@ impl Workspace {
                 let Some(profile) = workspace
                     .issued_to(&id, generation)
                     .filter(|profile| profile.is_registered(&database, &session))
-                    .filter(|profile| profile.shown().in_another_database() == asked)
+                    .filter(|profile| profile.shown().in_another_database(&database) == asked)
                 else {
                     return;
                 };
@@ -3136,7 +3136,7 @@ impl Workspace {
         // The active schema is kept in the connection's own database only.
         let Some(shown) = self
             .issued_to(id, generation)
-            .map(|profile| profile.shown().in_another_database())
+            .map(|profile| profile.shown().in_another_database(database))
         else {
             return;
         };

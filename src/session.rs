@@ -572,12 +572,18 @@ impl Profile {
     }
 
     /// Whether the include lists hide an object in `schema` of `database`
-    /// (`None` for the connection's own), so the narrowed catalog not
-    /// listing it says nothing about whether it exists.
-    pub(crate) fn filter_hides(&self, database: Option<&str>, schema: &str) -> bool {
+    /// (`None` for the connection's own), or the relation `relation` of it
+    /// when one is named, so the narrowed catalog not listing it says nothing
+    /// about whether it exists.
+    pub(crate) fn filter_hides(
+        &self,
+        database: Option<&str>,
+        schema: &str,
+        relation: Option<&str>,
+    ) -> bool {
         let own = self.active_database();
         let elsewhere = database.filter(|database| own.as_deref() != Some(*database));
-        !self.shown().lists_object(elsewhere, schema)
+        !self.shown().lists_object(elsewhere, schema, relation)
     }
 
     /// The database a folder or a pin names its objects by, where the
@@ -4377,8 +4383,19 @@ pub(crate) fn matching_tab<'a>(
 
 /// What the catalog says a relation is. The only authority on it: a stored
 /// tab's kind is a cache of this, and can be a default rather than a kind.
+///
+/// A relation a table list left out of the catalog is still answered, from the
+/// record the narrowing kept: a tab on one keeps the right icon.
 pub(crate) fn relation_kind(catalog: &Catalog, schema: &str, name: &str) -> Option<RelationKind> {
-    catalog_relation(catalog, schema, name).map(|relation| relation.kind)
+    catalog_relation(catalog, schema, name)
+        .map(|relation| relation.kind)
+        .or_else(|| {
+            let hidden = catalog.hidden_relations.get(schema)?;
+            hidden
+                .iter()
+                .find(|(hidden, _)| hidden == name)
+                .map(|(_, kind)| *kind)
+        })
 }
 
 pub(crate) fn catalog_relation<'a>(

@@ -13,7 +13,9 @@
 //!
 //! [`Connection::databases`]: super::Connection::databases
 
-use super::{Catalog, Databases, Engine, Levels, Sizes};
+use std::collections::HashMap;
+
+use super::{Catalog, Databases, Engine, Levels, Relation, RelationKind, Schema, Sizes};
 
 /// How many entries a list keeps. A file is a person's to edit: no more is
 /// read than a profile would write.
@@ -179,7 +181,8 @@ impl Include {
     /// The lists as they apply to a target of shape `levels` whose session is
     /// on `own_database` and `active_schema`. A list the shape does not use is
     /// kept on disk and ignored here, and a shape with no databases to choose
-    /// between is never filtered.
+    /// between has none of the database and schema lists applied. The table
+    /// lists apply on every shape, keyed as [`TableFilter`] says.
     pub fn resolve(
         &self,
         levels: Levels,
@@ -194,20 +197,38 @@ impl Include {
                 .collect::<Vec<_>>();
             (!entries.is_empty()).then_some(entries)
         };
+        // Where the tree draws a database over its schemas, a table list is
+        // the one of its database; elsewhere it is the one with no database.
+        let by_database = matches!(
+            levels,
+            Levels::DatabaseThenSchema | Levels::DatabaseHoldsObjects
+        );
+        let tables = self
+            .tables
+            .iter()
+            .filter(|list| list.database.is_some() == by_database)
+            .cloned()
+            .collect();
+        let tables = Shown {
+            tables,
+            table_database: own_database.filter(|_| by_database).map(str::to_string),
+            tables_by_database: by_database,
+            ..Shown::default()
+        };
         match levels {
-            Levels::Flat => Shown::everything(),
+            Levels::Flat => tables,
             Levels::DatabaseIsSchema | Levels::DatabaseHoldsObjects => Shown {
                 databases: entries(&self.databases),
                 own_database: own_database.map(str::to_string),
                 schemas_are_databases: levels == Levels::DatabaseIsSchema,
-                ..Shown::default()
+                ..tables
             },
             Levels::DatabaseThenSchema => Shown {
                 databases: entries(&self.databases),
                 own_database: own_database.map(str::to_string),
                 schemas: entries(&self.schemas),
                 active_schema: active_schema.map(str::to_string),
-                ..Shown::default()
+                ..tables
             },
         }
     }
@@ -230,6 +251,17 @@ pub struct Shown {
     /// Whether the catalog's schemas are the server's databases, so the
     /// databases list narrows it.
     schemas_are_databases: bool,
+    /// The table lists that apply to the catalogs this narrows: those with a
+    /// database where the tree draws one over its schemas, else those with
+    /// none.
+    tables: Vec<TableFilter>,
+    /// The database whose catalog is narrowed, which picks among `tables`
+    /// where they are keyed by database. The session's own until
+    /// [`Shown::in_another_database`] says another.
+    table_database: Option<String>,
+    /// Whether `tables` are keyed by database, as `Include::resolve` read the
+    /// shape.
+    tables_by_database: bool,
 }
 
 impl Shown {
@@ -270,23 +302,127 @@ impl Shown {
 
     /// Whether an object in `schema` is listed: of the own database where
     /// `elsewhere` is `None`, else of that other database, which has to be
-    /// shown itself and whose schemas are matched without the active one. A
+    /// shown itself and whose schemas are matched without the active one. With
+    /// a `relation` named, the schema's table list has to admit it too. A
     /// tab or a shortcut on an object this does not list is hidden, not gone.
-    pub fn lists_object(&self, elsewhere: Option<&str>, schema: &str) -> bool {
-        match elsewhere {
-            None => self.shows_schema(schema),
+    ///
+    /// ponytail: a partition is matched by its own name, since a tab or a pin
+    /// does not know its parent; one whose parent the list admits but whose
+    /// own name it does not reads as hidden, and a hidden relation still
+    /// opens by name. The upgrade is a parent in the stored object.
+    pub fn lists_object(
+        &self,
+        elsewhere: Option<&str>,
+        schema: &str,
+        relation: Option<&str>,
+    ) -> bool {
+        let there;
+        let view = match elsewhere {
+            None => self,
             Some(database) => {
-                self.shows_database(database) && self.in_another_database().shows_schema(schema)
+                if !self.shows_database(database) {
+                    return false;
+                }
+                there = self.in_another_database(database);
+                &there
             }
+        };
+        view.shows_schema(schema) && relation.is_none_or(|name| view.shows_relation(schema, name))
+    }
+
+    /// What this shows of the catalog another database's session read, which
+    /// is `database`'s: the same lists, with no active schema, which is the
+    /// own database's, and the table lists of `database`.
+    pub fn in_another_database(&self, database: &str) -> Self {
+        Self {
+            active_schema: None,
+            table_database: Some(database.to_string()),
+            ..self.clone()
         }
     }
 
-    /// What this shows of a catalog another database's session read: the same
-    /// lists, with no active schema, which is the own database's.
-    pub fn in_another_database(&self) -> Self {
-        Self {
-            active_schema: None,
-            ..self.clone()
+    /// The table list of the catalog's schema `schema`, none for every
+    /// relation.
+    fn table_entries(&self, schema: &str) -> Option<&[String]> {
+        let database = self
+            .tables_by_database
+            .then_some(self.table_database.as_deref())
+            .flatten();
+        // Keyed by database and the database is not known: no list applies.
+        if self.tables_by_database && database.is_none() {
+            return None;
+        }
+        self.tables
+            .iter()
+            .find(|list| list.is_for(database, schema))
+            .map(|list| list.tables.as_slice())
+    }
+
+    /// Whether the relation `name` of `schema` is shown by the schema's table
+    /// list, true when it has none.
+    pub fn shows_relation(&self, schema: &str, name: &str) -> bool {
+        self.table_entries(schema)
+            .is_none_or(|entries| entries.iter().any(|entry| matches(entry, name)))
+    }
+
+    /// Drop from `schema` the relations its table list leaves out and note the
+    /// ones it names, in `hidden`. A partition goes with its parent and is
+    /// neither matched nor noted: only the relations that stand alone are, as
+    /// the tree counts them.
+    fn narrow_relations(
+        &self,
+        schema: &mut Schema,
+        hidden: &mut HashMap<String, Vec<(String, RelationKind)>>,
+    ) {
+        let Some(entries) = self.table_entries(&schema.name) else {
+            return;
+        };
+        let admits = |name: &str| entries.iter().any(|entry| matches(entry, name));
+        // A parent the catalog did not list leaves its partition standing
+        // alone, as the tree draws it.
+        let by_name: HashMap<&str, usize> = schema
+            .relations
+            .iter()
+            .enumerate()
+            .map(|(at, relation)| (relation.name.as_str(), at))
+            .collect();
+        let root = |mut at: usize| {
+            // Bounded, so a hand-made catalog with a cycle ends.
+            for _ in 0..schema.relations.len() {
+                match schema.relations[at]
+                    .partition_of
+                    .as_deref()
+                    .and_then(|parent| by_name.get(parent))
+                {
+                    Some(&parent) if parent != at => at = parent,
+                    _ => break,
+                }
+            }
+            at
+        };
+        let keeps: Vec<bool> = (0..schema.relations.len())
+            .map(|at| admits(&schema.relations[root(at)].name))
+            .collect();
+        let standing: Vec<bool> = (0..schema.relations.len())
+            .map(|at| root(at) == at)
+            .collect();
+        let dropped: Vec<(String, RelationKind)> = schema
+            .relations
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !keeps[*at] && standing[*at])
+            .map(|(_, relation): (usize, &Relation)| (relation.name.clone(), relation.kind))
+            .collect();
+        let mut at = 0;
+        schema.relations.retain(|_| {
+            at += 1;
+            keeps[at - 1]
+        });
+        if !dropped.is_empty() {
+            hidden
+                .entry(schema.name.clone())
+                .or_default()
+                .extend(dropped);
         }
     }
 
@@ -298,12 +434,18 @@ impl Shown {
     /// ceiling is a very large single database, which still reads every
     /// schema; the upgrade is a per-engine schema-names read pushed into the
     /// catalog SQL.
+    ///
+    /// The relations a schema's table list leaves out are dropped from it too,
+    /// and their names and kinds kept in [`Catalog::hidden_relations`].
     pub fn narrow_catalog(&self, mut catalog: Catalog) -> Catalog {
         let read = catalog.schemas.len();
         catalog
             .schemas
             .retain(|schema| self.shows_schema(&schema.name));
         catalog.left_out += read - catalog.schemas.len();
+        for schema in &mut catalog.schemas {
+            self.narrow_relations(schema, &mut catalog.hidden_relations);
+        }
         catalog
     }
 
@@ -744,7 +886,7 @@ mod tests {
         );
 
         let other = shown
-            .in_another_database()
+            .in_another_database("db")
             .narrow_catalog(catalog(&["main", "x"]));
         assert_eq!(names(&other), ["x"]);
         assert_eq!(other.left_out, 1);
@@ -755,25 +897,25 @@ mod tests {
         let include = Include::from_stored(text(&["app*"]), text(&["public"]));
         let shown = include.resolve(Levels::DatabaseThenSchema, Some("db"), Some("main"));
 
-        assert!(shown.lists_object(None, "public"));
-        assert!(shown.lists_object(None, "main"), "the active schema");
-        assert!(!shown.lists_object(None, "audit"));
-        assert!(shown.lists_object(Some("app1"), "public"));
+        assert!(shown.lists_object(None, "public", None));
+        assert!(shown.lists_object(None, "main", None), "the active schema");
+        assert!(!shown.lists_object(None, "audit", None));
+        assert!(shown.lists_object(Some("app1"), "public", None));
         assert!(
-            !shown.lists_object(Some("app1"), "main"),
+            !shown.lists_object(Some("app1"), "main", None),
             "active only at home"
         );
-        assert!(!shown.lists_object(Some("other"), "public"));
+        assert!(!shown.lists_object(Some("other"), "public", None));
 
         let mysql = Include::from_stored(text(&["app*"]), Vec::new()).resolve(
             Levels::DatabaseIsSchema,
             Some("db"),
             None,
         );
-        assert!(mysql.lists_object(None, "app1"));
-        assert!(mysql.lists_object(None, "db"));
-        assert!(!mysql.lists_object(None, "reporting"));
-        assert!(Shown::everything().lists_object(Some("any"), "thing"));
+        assert!(mysql.lists_object(None, "app1", None));
+        assert!(mysql.lists_object(None, "db", None));
+        assert!(!mysql.lists_object(None, "reporting", None));
+        assert!(Shown::everything().lists_object(Some("any"), "thing", None));
     }
 
     #[test]
@@ -796,6 +938,38 @@ mod tests {
             schema: schema.into(),
             tables: text(tables),
         }
+    }
+
+    fn relation(name: &str, kind: RelationKind, partition_of: Option<&str>) -> Relation {
+        Relation {
+            name: name.into(),
+            kind,
+            partition_of: partition_of.map(str::to_string),
+            size: None,
+            rows: None,
+        }
+    }
+
+    fn table(name: &str) -> Relation {
+        relation(name, RelationKind::Table, None)
+    }
+
+    fn catalog_of(schema_name: &str, relations: Vec<Relation>) -> Catalog {
+        let mut one = schema(schema_name);
+        one.relations = relations;
+        Catalog {
+            schemas: vec![one],
+            ..Catalog::default()
+        }
+    }
+
+    fn relation_names(catalog: &Catalog, schema_name: &str) -> Vec<String> {
+        catalog
+            .schemas
+            .iter()
+            .find(|found| found.name == schema_name)
+            .map(|found| found.relations.iter().map(|r| r.name.clone()).collect())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -852,5 +1026,230 @@ mod tests {
         assert_eq!(include.tables_of(Some("db"), "public"), [] as [String; 0]);
         assert_eq!(include.tables.len(), 2, "an empty list removes the entry");
         assert_eq!(include.databases, ["db"], "the other lists are left alone");
+    }
+
+    #[test]
+    fn a_table_list_matches_exact_names_and_globs_ignoring_case() {
+        let include = Include::default().with_tables(vec![table_list(
+            None,
+            "main",
+            &["Users", "log_?", "tmp*"],
+        )]);
+        let shown = include.resolve(Levels::Flat, None, None);
+        for name in ["users", "USERS", "log_1", "tmp", "TMP_old"] {
+            assert!(shown.shows_relation("MAIN", name), "{name}");
+        }
+        for name in ["log_12", "user", "audit"] {
+            assert!(!shown.shows_relation("main", name), "{name}");
+        }
+        assert!(
+            shown.shows_relation("other", "anything"),
+            "no list, no filter"
+        );
+    }
+
+    #[test]
+    fn each_level_keys_the_table_lists_as_its_catalog_is_keyed() {
+        let include = Include::default().with_tables(vec![
+            table_list(Some("db"), "public", &["a"]),
+            table_list(Some("other"), "public", &["b"]),
+            table_list(None, "public", &["c"]),
+        ]);
+        let admitted =
+            |shown: &Shown| ["a", "b", "c"].map(|name| shown.shows_relation("public", name));
+
+        // A database over its schemas: the lists of the catalog's database.
+        for levels in [Levels::DatabaseThenSchema, Levels::DatabaseHoldsObjects] {
+            let own = include.resolve(levels, Some("DB"), Some("public"));
+            assert_eq!(admitted(&own), [true, false, false], "{levels:?} own");
+            assert_eq!(
+                admitted(&own.in_another_database("other")),
+                [false, true, false],
+                "{levels:?} another"
+            );
+            assert_eq!(
+                admitted(&own.in_another_database("third")),
+                [true, true, true],
+                "{levels:?} a database with no list"
+            );
+            let unknown = include.resolve(levels, None, None);
+            assert_eq!(
+                admitted(&unknown),
+                [true, true, true],
+                "{levels:?} no database"
+            );
+        }
+
+        // The schemas are the databases, or there is no database level: the
+        // lists with no database, keyed by the schema's own name.
+        for levels in [Levels::DatabaseIsSchema, Levels::Flat] {
+            let shown = include.resolve(levels, Some("db"), None);
+            assert_eq!(admitted(&shown), [false, false, true], "{levels:?}");
+        }
+    }
+
+    #[test]
+    fn a_flat_target_ignores_the_database_and_schema_lists_but_not_the_table_lists() {
+        let none = Include::from_stored(text(&["x"]), text(&["y"]));
+        assert_eq!(none.resolve(Levels::Flat, None, None), Shown::everything());
+
+        let include = none.with_tables(vec![table_list(None, "main", &["t"])]);
+        let shown = include.resolve(Levels::Flat, None, None);
+        assert_ne!(shown, Shown::everything());
+        assert!(shown.shows_schema("anything") && shown.shows_database("anything"));
+        let narrowed = shown.narrow_catalog(catalog_of("main", vec![table("t"), table("u")]));
+        assert_eq!(relation_names(&narrowed, "main"), ["t"]);
+    }
+
+    #[test]
+    fn narrowing_drops_the_relations_a_table_list_leaves_out_and_records_them() {
+        let include = Include::default().with_tables(vec![table_list(None, "main", &["keep*"])]);
+        let shown = include.resolve(Levels::Flat, None, None);
+        let read = Catalog {
+            schemas: vec![
+                {
+                    let mut main = schema("main");
+                    main.relations = vec![
+                        table("keep_a"),
+                        table("drop_b"),
+                        relation("v_drop", RelationKind::View, None),
+                        relation("keep_view", RelationKind::MaterializedView, None),
+                    ];
+                    main.sequences = vec!["seq".into()];
+                    main
+                },
+                {
+                    let mut other = schema("other");
+                    other.relations = vec![table("untouched")];
+                    other
+                },
+            ],
+            ..Catalog::default()
+        };
+
+        let narrowed = shown.narrow_catalog(read);
+        assert_eq!(relation_names(&narrowed, "main"), ["keep_a", "keep_view"]);
+        assert_eq!(relation_names(&narrowed, "other"), ["untouched"]);
+        assert_eq!(narrowed.schemas[0].sequences, ["seq"], "never filtered");
+        assert_eq!(narrowed.left_out, 0, "no schema was left out");
+        assert_eq!(
+            narrowed.hidden_relations["main"],
+            [
+                ("drop_b".to_string(), RelationKind::Table),
+                ("v_drop".to_string(), RelationKind::View)
+            ]
+        );
+        assert!(!narrowed.hidden_relations.contains_key("other"));
+        assert_eq!(narrowed.hidden_in("main"), 2);
+        let names = narrowed.relations_of("main");
+        assert_eq!(names.shown.len(), 2);
+        assert_eq!(names.hidden.len(), 2);
+        assert_eq!(names.total(), 4, "the M of `N of M`");
+    }
+
+    #[test]
+    fn a_partition_is_shown_exactly_when_its_parent_is_and_is_never_counted() {
+        let include = Include::default().with_tables(vec![table_list(None, "main", &["events"])]);
+        let shown = include.resolve(Levels::Flat, None, None);
+        let read = catalog_of(
+            "main",
+            vec![
+                relation("events", RelationKind::PartitionedTable, None),
+                table("events_2024"),
+                relation("events_2024_q1", RelationKind::Table, Some("events_2024")),
+                relation("logs", RelationKind::PartitionedTable, None),
+                relation("events_2024_b", RelationKind::Table, Some("logs")),
+                relation("orphan", RelationKind::Table, Some("not_listed")),
+            ],
+        );
+        let mut read = read;
+        read.schemas[0].relations[1].partition_of = Some("events".into());
+
+        let narrowed = shown.narrow_catalog(read);
+        assert_eq!(
+            relation_names(&narrowed, "main"),
+            ["events", "events_2024", "events_2024_q1"],
+            "a partition of a partition follows the root, whatever its own name"
+        );
+        assert_eq!(
+            narrowed.hidden_relations["main"],
+            [
+                ("logs".to_string(), RelationKind::PartitionedTable),
+                ("orphan".to_string(), RelationKind::Table),
+            ],
+            "the partition of a hidden parent is not listed, a parent-less one stands alone"
+        );
+        assert_eq!(narrowed.relations_of("main").shown.len(), 1);
+    }
+
+    #[test]
+    fn narrowing_twice_changes_nothing_and_a_merge_or_sizes_leave_the_record_alone() {
+        let include = Include::default().with_tables(vec![table_list(None, "main", &["a"])]);
+        let shown = include.resolve(Levels::Flat, None, None);
+        let narrowed = shown.narrow_catalog(catalog_of("main", vec![table("a"), table("b")]));
+        let again = shown.narrow_catalog(narrowed.clone());
+        assert_eq!(again, narrowed);
+
+        let mut merged = narrowed.clone();
+        let mut routines = catalog(&["main"]);
+        routines.schemas[0].sequences.push("s".into());
+        merged.merge(shown.narrow_routines(routines));
+        assert_eq!(merged.hidden_relations, narrowed.hidden_relations);
+        assert_eq!(relation_names(&merged, "main"), ["a"]);
+
+        let mut sized = merged.clone();
+        let mut sizes = Sizes::new();
+        sizes.entry("main".into()).or_default().insert(
+            "b".into(),
+            crate::db::Statistics {
+                size: Some(9),
+                rows: Some(1),
+            },
+        );
+        sized.set_sizes(&shown.narrow_sizes(sizes));
+        assert_eq!(sized.hidden_relations, narrowed.hidden_relations);
+        assert_eq!(sized.schemas[0].relations[0].size, None);
+    }
+
+    #[test]
+    fn another_databases_catalog_is_narrowed_by_that_databases_table_lists() {
+        let include = Include::default().with_tables(vec![
+            table_list(Some("db"), "public", &["own_only"]),
+            table_list(Some("other"), "public", &["there_only"]),
+        ]);
+        let shown = include.resolve(Levels::DatabaseThenSchema, Some("db"), Some("public"));
+        let read = || catalog_of("public", vec![table("own_only"), table("there_only")]);
+
+        assert_eq!(
+            relation_names(&shown.narrow_catalog(read()), "public"),
+            ["own_only"]
+        );
+        assert_eq!(
+            relation_names(
+                &shown.in_another_database("other").narrow_catalog(read()),
+                "public"
+            ),
+            ["there_only"]
+        );
+    }
+
+    #[test]
+    fn a_relation_is_listed_by_its_schemas_table_list_in_its_own_or_another_database() {
+        let include = Include::default().with_tables(vec![
+            table_list(Some("db"), "public", &["users"]),
+            table_list(Some("app1"), "public", &["orders"]),
+        ]);
+        let shown = include.resolve(Levels::DatabaseThenSchema, Some("db"), Some("main"));
+
+        assert!(shown.lists_object(None, "public", Some("users")));
+        assert!(!shown.lists_object(None, "public", Some("orders")));
+        assert!(shown.lists_object(None, "public", None), "a routine, say");
+        assert!(
+            shown.lists_object(None, "main", Some("anything")),
+            "no list"
+        );
+        assert!(shown.lists_object(Some("app1"), "public", Some("orders")));
+        assert!(!shown.lists_object(Some("app1"), "public", Some("users")));
+        assert!(Shown::everything().lists_object(Some("x"), "y", Some("z")));
     }
 }

@@ -2603,7 +2603,7 @@ impl Workspace {
             let (got, waiting) = restorable(
                 profile.config.engine(),
                 profile.draws_diagrams(),
-                profile.filter_hides(stored.database.as_deref(), &stored.schema)
+                profile.filter_hides(stored.database.as_deref(), &stored.schema, None)
                     || !profile.catalog_under_saved_filter(stored.database.as_deref()),
                 profile.catalog_state_of(stored.database.as_deref()),
                 std::slice::from_ref(stored),
@@ -3137,6 +3137,70 @@ mod tests {
         assert_eq!(name(&opened[0].0), "accounts");
         assert!(opened[0].1, "the tab that was in front comes back in front");
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_relation_the_table_list_hides_still_opens_with_the_kind_the_record_keeps() {
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["other".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let narrowed = shown.narrow_catalog(crate::db::Catalog {
+            schemas: vec![crate::db::Schema {
+                name: "public".into(),
+                relations: vec![
+                    crate::db::Relation {
+                        name: "accounts".into(),
+                        kind: RelationKind::View,
+                        partition_of: None,
+                        size: None,
+                        rows: None,
+                    },
+                    crate::db::Relation {
+                        name: "other".into(),
+                        kind: RelationKind::Table,
+                        partition_of: None,
+                        size: None,
+                        rows: None,
+                    },
+                ],
+                routines: Vec::new(),
+                sequences: Vec::new(),
+            }],
+            ..Default::default()
+        });
+        assert!(shown.lists_object(None, "public", Some("other")));
+        assert!(!shown.lists_object(None, "public", Some("accounts")));
+        let pending = [store::StoredObject {
+            active: true,
+            ..stored("accounts", false)
+        }];
+
+        // `hidden` is what `restore_objects` passes: a relation tab does not
+        // wait on it, since it opens by name without the catalog.
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            true,
+            &CatalogState::Loaded(narrowed, Routines::Loaded),
+            &pending,
+        );
+
+        assert!(waiting.is_empty());
+        let Some((Reopened::Object(OpenedObject::Relation { name, kind, .. }), true)) =
+            opened.first()
+        else {
+            panic!("the tab of a hidden table is reopened in front");
+        };
+        assert_eq!(name, "accounts");
+        assert_eq!(
+            *kind,
+            RelationKind::View,
+            "the kind comes from the record of what the list hid"
+        );
     }
 
     #[test]

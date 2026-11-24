@@ -284,6 +284,10 @@ pub struct ExplorerTree {
     /// What the include filter dropped from the catalog this tree was built
     /// from, so a count can say how many of how many it shows.
     pub left_out: usize,
+    /// How many relations a schema's table list hid from each schema row
+    /// drawn, by row id: only the schemas it hid some of. A count draws
+    /// `N of M` for these, M being N's relations plus these.
+    pub tables_left_out: HashMap<String, usize>,
 }
 
 impl ExplorerTree {
@@ -294,6 +298,7 @@ impl ExplorerTree {
         self.highlights.extend(other.highlights);
         self.shortcuts.extend(other.shortcuts);
         self.left_out += other.left_out;
+        self.tables_left_out.extend(other.tables_left_out);
     }
 }
 
@@ -353,6 +358,7 @@ impl Builder {
 
 pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     let mut builder = Builder::new(filter);
+    let mut tables_left_out = HashMap::new();
 
     let items = catalog
         .by_name()
@@ -361,6 +367,12 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
             let id = schema_row(&schema.name);
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
+            // Noted before the schema can be left out, which a search that
+            // matches nothing in it does; a count says it only unsearched.
+            let hidden = catalog.hidden_in(&schema.name);
+            if hidden > 0 {
+                tables_left_out.insert(id.clone(), hidden);
+            }
 
             let partitions = partitions_by_parent(schema);
             let nested: HashSet<usize> = partitions.values().flatten().copied().collect();
@@ -472,6 +484,7 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
         left_out: catalog.left_out,
+        tables_left_out,
     }
 }
 
@@ -564,6 +577,7 @@ pub fn files(
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
         left_out: 0,
+        tables_left_out: HashMap::new(),
     }
 }
 
@@ -1192,6 +1206,7 @@ pub fn shortcuts(
         highlights: build.builder.highlights,
         shortcuts: build.rows,
         left_out: 0,
+        tables_left_out: HashMap::new(),
     }
 }
 
@@ -1254,8 +1269,13 @@ impl ShortcutBuilder<'_> {
                     .then(|| self.catalog.and_then(|catalog| object.leaf(catalog)))
                     .flatten();
                 // Every member drawn here is of the own database, so its
-                // schema is matched as the own catalog's are.
-                let hidden = here && leaf.is_none() && !self.shown.shows_schema(&object.schema);
+                // schema, and a relation's name in that schema's table list,
+                // are matched as the own catalog's are.
+                let relation =
+                    matches!(object.kind, ObjectKind::Relation(_)).then_some(object.name.as_str());
+                let hidden = here
+                    && leaf.is_none()
+                    && !self.shown.lists_object(None, &object.schema, relation);
                 let opens = hidden && matches!(object.kind, ObjectKind::Relation(_));
                 (object.name.clone(), leaf, leaf.is_some() || opens, hidden)
             }
@@ -2675,6 +2695,83 @@ mod tests {
             ],
             "a hidden relation opens by name, a hidden routine cannot, a dropped one is missing"
         );
+    }
+
+    #[test]
+    fn a_pin_on_a_relation_the_table_list_hides_is_hidden_not_missing() {
+        let shortcuts = Shortcuts {
+            folders: Vec::new(),
+            pins: vec![
+                // Hidden by the list, so absent from the narrowed catalog.
+                Pin::Member(relation("public", "active_accounts")),
+                // Shown by it and present.
+                Pin::Member(relation("public", "accounts")),
+                // In a schema with no list, present.
+                Pin::Member(relation("analytics", "events")),
+            ],
+        };
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["accounts".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let narrowed = shown.narrow_catalog(catalog());
+        assert_eq!(narrowed.hidden_in("public"), 1);
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&narrowed),
+            &[],
+            &ShortcutDatabase::Unnamed,
+            &shown,
+            "",
+        );
+
+        let states: Vec<_> = explorer.items[0]
+            .children
+            .iter()
+            .map(|row| {
+                let shortcut = &explorer.shortcuts[row.id.as_ref()];
+                let Shortcut::Member {
+                    missing, hidden, ..
+                } = shortcut
+                else {
+                    panic!("a pinned object is a member shortcut");
+                };
+                (*missing, *hidden, shortcut.hidden_relation().is_some())
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (false, true, true),
+                (false, false, false),
+                (false, false, false)
+            ],
+            "a hidden relation opens by name; the others are listed"
+        );
+    }
+
+    #[test]
+    fn the_tree_notes_how_many_relations_each_schema_row_lost_to_its_table_list() {
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["accounts".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let built = tree(&shown.narrow_catalog(catalog()), "");
+        assert_eq!(
+            built.tables_left_out,
+            HashMap::from([(schema_row("public"), 1)])
+        );
+
+        let mut both = tree(&catalog(), "");
+        assert!(both.tables_left_out.is_empty());
+        both.extend(built);
+        assert_eq!(both.tables_left_out.len(), 1);
     }
 
     #[test]
