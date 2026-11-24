@@ -279,5 +279,9 @@ actions!(
         DiagramFocusRight,
         DiagramFocusUp,
         DiagramFocusDown,
+        UsersListPrevious,
+        UsersListNext,
+        UsersListFirst,
+        UsersListLast,
     ]
 );

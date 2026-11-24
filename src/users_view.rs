@@ -6,12 +6,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder,
-    px, relative,
+    AnyElement, Context, EventEmitter, FocusHandle, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::{Disableable as _, Icon, button::Button};
 
+use crate::actions::{UsersListFirst, UsersListLast, UsersListNext, UsersListPrevious};
 use crate::db::roles::{Reach, Reports, Role, Roles};
 use crate::icons::icon;
 use crate::theme::{ConnectionColor, Theme, fonts, layout, theme};
@@ -60,6 +61,11 @@ pub struct UsersView {
     reports_request: u64,
     reports_shown: bool,
     reports: Option<Loaded<Reports>>,
+    /// What the list's keys are bound to (`UsersList`): focused, the arrows
+    /// move the pick; a form or an input holding focus leaves them alone.
+    focus: FocusHandle,
+    /// The list's scroll, to bring a row the keys picked into view.
+    scroll: ScrollHandle,
 }
 
 impl EventEmitter<UsersEvent> for UsersView {}
@@ -176,6 +182,30 @@ pub fn reach_sentence(role: &Role, reach: &Reach) -> String {
     }
 }
 
+/// How a key moves the pick through the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+/// The row a key lands on in a list of `len`, from the one picked, `None`
+/// for an empty list. Up and Down wrap, as the palette's do: a list this
+/// short is faster to cross from the other end than by holding a key; with
+/// nothing picked they start from the end they point away from. Home and End
+/// go to the ends.
+fn stepped(len: usize, from: Option<usize>, step: Step) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    Some(match (step, from) {
+        (Step::First, _) | (Step::Next, None) => 0,
+        (Step::Last, _) | (Step::Previous, None) => last,
+        (Step::Next, Some(at)) => (at + 1) % len,
+        (Step::Previous, Some(at)) => (at + last) % len,
+    })
+}
+
 /// One row of the list, as [`listing`] builds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Listed {
@@ -227,7 +257,7 @@ fn initials(name: &str) -> String {
 }
 
 impl UsersView {
-    pub fn new(server: String) -> Self {
+    pub fn new(server: String, cx: &mut Context<Self>) -> Self {
         Self {
             server: server.into(),
             roles: Loaded::Loading,
@@ -238,7 +268,30 @@ impl UsersView {
             reports_request: 0,
             reports_shown: false,
             reports: None,
+            focus: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
         }
+    }
+
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    /// Move the pick by `step`, as a click on that row would, and bring the
+    /// row into view.
+    fn step(&mut self, step: Step, cx: &mut Context<Self>) {
+        let at = self.selected.as_deref().and_then(|name| {
+            self.listing
+                .iter()
+                .position(|listed| listed.role.name == name)
+        });
+        let Some(to) = stepped(self.listing.len(), at, step) else {
+            return;
+        };
+        // The header is the list's first child.
+        self.scroll.scroll_to_item(to + 1);
+        let name = self.listing[to].role.name.clone();
+        self.select(&name, cx);
     }
 
     pub fn reports(&self) -> Option<&Reports> {
@@ -305,6 +358,11 @@ impl UsersView {
         self.reports_request += 1;
         self.reports = Some(Loaded::Loading);
         cx.emit(UsersEvent::Reports(self.reports_request));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
     }
 
     #[cfg(test)]
@@ -470,7 +528,11 @@ impl UsersView {
             let member_of = member_of.clone();
             let login = role.last_login.clone().unwrap_or_else(|| "—".into());
             let name = role.name.clone();
-            let pick = cx.listener(move |view, _, _, cx| view.select(&name, cx));
+            let pick = cx.listener(move |view, _, window, cx| {
+                // A click puts the keys on the list, whatever held them.
+                view.focus.focus(window, cx);
+                view.select(&name, cx)
+            });
             columns(div())
                 .id(SharedString::from(format!("users-row-{}", role.name)))
                 .debug_selector({
@@ -528,10 +590,19 @@ impl UsersView {
         });
         div()
             .id("users-list")
+            .key_context("UsersList")
+            .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|view, _: &UsersListPrevious, _, cx| view.step(Step::Previous, cx)),
+            )
+            .on_action(cx.listener(|view, _: &UsersListNext, _, cx| view.step(Step::Next, cx)))
+            .on_action(cx.listener(|view, _: &UsersListFirst, _, cx| view.step(Step::First, cx)))
+            .on_action(cx.listener(|view, _: &UsersListLast, _, cx| view.step(Step::Last, cx)))
             .flex_1()
             .min_w_0()
             .py(px(layout::SPACE_SM))
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .child(header)
             .children(rows)
             .into_any_element()
@@ -1171,7 +1242,7 @@ mod tests {
     #[gpui::test]
     fn an_older_read_of_reach_or_reports_never_replaces_a_newer_one(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
-        let view = cx.new(|_| UsersView::new("main".into()));
+        let view = cx.new(|cx| UsersView::new("main".into(), cx));
         let reach = |owns| {
             Loaded::Ready(Reach {
                 owns,
@@ -1227,6 +1298,25 @@ mod tests {
                 ("reporting", "—")
             ]
         );
+    }
+
+    #[test]
+    fn the_keys_wrap_up_and_down_and_home_and_end_go_to_the_ends() {
+        use Step::*;
+        assert_eq!(stepped(0, None, Next), None);
+        assert_eq!(stepped(3, Some(0), Next), Some(1));
+        assert_eq!(stepped(3, Some(2), Next), Some(0), "Down wraps to the top");
+        assert_eq!(
+            stepped(3, Some(0), Previous),
+            Some(2),
+            "Up wraps to the end"
+        );
+        assert_eq!(stepped(3, Some(1), Previous), Some(0));
+        assert_eq!(stepped(3, None, Next), Some(0));
+        assert_eq!(stepped(3, None, Previous), Some(2));
+        assert_eq!(stepped(3, Some(1), First), Some(0));
+        assert_eq!(stepped(3, Some(1), Last), Some(2));
+        assert_eq!(stepped(1, Some(0), Next), Some(0));
     }
 
     #[test]

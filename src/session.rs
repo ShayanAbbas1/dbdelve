@@ -2616,6 +2616,8 @@ pub(crate) enum Focus {
     Grid(Entity<TableState<ResultGrid>>),
     Structure(Entity<TableState<StructureGrid>>),
     Diagram(gpui::FocusHandle),
+    /// The Users and roles list, which takes its own keys.
+    Users(gpui::FocusHandle),
     /// The window itself, for a surface with nothing in it to type into. Not a
     /// no-op: a keystroke only reaches the workspace along the focused
     /// element's dispatch path, so focusing nothing at all is what makes every

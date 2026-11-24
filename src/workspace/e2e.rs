@@ -6715,7 +6715,7 @@ fn users_tab_on(
     window: &mut Window,
     cx: &mut gpui::Context<Workspace>,
 ) -> u64 {
-    let view = cx.new(|_| crate::users_view::UsersView::new("main".into()));
+    let view = cx.new(|cx| crate::users_view::UsersView::new("main".into(), cx));
     let results = crate::result_grid::new_grid(window, cx);
     let profile = workspace.profile_mut().expect("a connection is in front");
     let id = profile.session.next_object_id;
@@ -6734,6 +6734,110 @@ fn users_tab_on(
         },
     });
     id
+}
+
+/// A role of the Users and roles tests: `ana`'s kind by the flags given.
+fn test_role(name: &str, login: bool) -> crate::db::roles::Role {
+    crate::db::roles::Role {
+        name: name.into(),
+        login,
+        superuser: false,
+        password_expires: None,
+        expired: false,
+        connection_limit: None,
+        has_password: None,
+        last_login: None,
+    }
+}
+
+/// A Users and roles tab in front with `ana` and `bo` (logins) and
+/// `reporting` (a role) read, its events collected, and its list focused.
+fn users_tab_with_roles(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (
+    Entity<crate::users_view::UsersView>,
+    std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+) {
+    use crate::users_view::{Loaded, UsersEvent};
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let view = workspace.update_in(cx, |workspace, window, cx| {
+        let tab = users_tab_on(workspace, window, cx);
+        let profile = workspace.profile_mut().unwrap();
+        let roles = std::sync::Arc::new(crate::db::roles::Roles {
+            roles: vec![
+                test_role("ana", true),
+                test_role("bo", true),
+                test_role("reporting", false),
+            ],
+            ..Default::default()
+        });
+        profile.roles = crate::session::RolesState::Loaded(roles.clone());
+        let view = match &profile.session.objects.last().unwrap().body {
+            ObjectBody::Users { view, .. } => view.clone(),
+            _ => unreachable!(),
+        };
+        let log = events.clone();
+        cx.subscribe(&view, move |_, _, event: &UsersEvent, _| {
+            log.borrow_mut().push(match event {
+                UsersEvent::Select(name, _) => format!("select {name}"),
+                UsersEvent::Edit(name) => format!("edit {name}"),
+                UsersEvent::ShowGrants(name) => format!("grants {name}"),
+                _ => "other".into(),
+            })
+        })
+        .detach();
+        view.update(cx, |view, cx| view.set_roles(Loaded::Ready(roles), cx));
+        workspace.activate_tab(Tab::Object(tab), window, cx);
+        view
+    });
+    settle(cx);
+    settle(cx);
+    events.borrow_mut().clear();
+    (view, events)
+}
+
+#[gpui::test]
+fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let (view, events) = users_tab_with_roles(&workspace, cx);
+        let picked = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.selected().map(str::to_string))
+        };
+        // Logins first, then roles: ana, bo, reporting. The first is picked.
+        assert_eq!(picked(cx).as_deref(), Some("ana"));
+        press(cx, "down");
+        assert_eq!(picked(cx).as_deref(), Some("bo"));
+        assert_eq!(*events.borrow(), ["select bo"], "a fresh read, as a click");
+        press(cx, "end");
+        assert_eq!(picked(cx).as_deref(), Some("reporting"));
+        press(cx, "down");
+        assert_eq!(picked(cx).as_deref(), Some("ana"), "Down wraps");
+        press(cx, "up");
+        assert_eq!(picked(cx).as_deref(), Some("reporting"), "Up wraps");
+        press(cx, "home");
+        assert_eq!(picked(cx).as_deref(), Some("ana"));
+
+        // With a form up, its field holds the keys and the list keeps its pick.
+        let profile =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_role_form(
+                &profile,
+                super::RoleFormKind::New { login: true },
+                window,
+                cx,
+            )
+        });
+        settle(cx);
+        settle(cx);
+        press(cx, "down");
+        assert_eq!(picked(cx).as_deref(), Some("ana"));
+        quit(workspace, cx);
+    });
 }
 
 #[gpui::test]

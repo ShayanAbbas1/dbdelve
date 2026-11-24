@@ -45,7 +45,8 @@ use crate::{
         ShowEditor, ShowMessages, ShowReferences, SortActiveColumn, SubmitConnection,
         SwitchConnection, TickDialogBox, ToggleAutoCommit, ToggleComment, ToggleNextJoin,
         TogglePinColumn, ToggleResults, ToggleResultsFocus, ToggleRowEdit, ToggleRowPanel,
-        ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+        ToggleSidebar, ToggleStructure, UsersListFirst, UsersListLast, UsersListNext,
+        UsersListPrevious, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
     export::RowsAs,
@@ -321,6 +322,12 @@ registry! {
     // Its own rather than the input's submit, which hands the keystroke on to
     // Open Table behind it.
     ("diagram_find_pick", "Diagram: Pick Match", Some("DiagramFind > Input"), ["enter"], DiagramFindPick),
+    // The Users and roles list's own context, so a form's field or a dialog
+    // on top keeps its arrows. Up and Down wrap, as the palette's do.
+    ("users_list_previous", "Users: Previous Role", Some("UsersList"), ["up"], UsersListPrevious),
+    ("users_list_next", "Users: Next Role", Some("UsersList"), ["down"], UsersListNext),
+    ("users_list_first", "Users: First Role", Some("UsersList"), ["home"], UsersListFirst),
+    ("users_list_last", "Users: Last Role", Some("UsersList"), ["end"], UsersListLast),
 }
 
 /// The bindings that exist on this platform. macOS-only actions stay out of

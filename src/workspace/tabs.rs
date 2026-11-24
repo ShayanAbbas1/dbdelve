@@ -1234,7 +1234,7 @@ impl Workspace {
                 crate::result_grid::take_keyboard(table, window, cx)
             }),
             Focus::Structure(grid) => grid.focus_handle(cx).focus(window, cx),
-            Focus::Diagram(handle) => handle.focus(window, cx),
+            Focus::Diagram(handle) | Focus::Users(handle) => handle.focus(window, cx),
             Focus::Buffer(editor) => editor.focus_handle(cx).focus(window, cx),
             Focus::Window => return,
         }

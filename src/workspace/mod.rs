@@ -1928,7 +1928,10 @@ impl Render for Workspace {
                     // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
-                    Some(ObjectBody::Routine(_) | ObjectBody::Users { .. }) | None => Focus::Window,
+                    Some(ObjectBody::Users { view, .. }) => {
+                        Focus::Users(view.read(cx).focus_handle().clone())
+                    }
+                    Some(ObjectBody::Routine(_)) | None => Focus::Window,
                 },
             };
             profile.session.editor_needs_focus = false;
@@ -1964,7 +1967,7 @@ impl Render for Workspace {
             Some(Focus::Buffer(editor)) => editor.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
-            Some(Focus::Diagram(handle)) => handle.focus(window, cx),
+            Some(Focus::Diagram(handle) | Focus::Users(handle)) => handle.focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }

@@ -125,6 +125,12 @@ sizes step return before sending `sizes()`, and turning it on again reads every
 connected profile and loaded database (`sidebar::shown_size` decides the slot;
 the agent's own catalog read is not part of it).
 
+## The Users and roles tab
+
+`users_view.rs` draws it and only asks: what a row or a button wants goes back as a `UsersEvent`, and `workspace/users.rs` does it through the review and `sql::is_generated_role_change`. The list has its own key context, `UsersList` (the list's focus handle, taken when the tab comes to the front and by a click on a row), so a form's field or a dialog keeps its arrows. `users_list_previous`, `_next`, `_first` and `_last` (Up, Down, Home, End, rebindable in Settings) move the pick as a click does, with a fresh `Select` so the reach is read, and scroll the row into view. Up and Down wrap, as the palette's do. No list in the app binds PageUp or PageDown, so these do not.
+
+Deactivate stays login-only: on Postgres a NOLOGIN role has nothing to switch off, it acts only through membership and grants.
+
 ## Titlebar and appearance
 
 - **Titlebar**: macOS and Windows get DBDelve's own strip over a transparent

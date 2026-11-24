@@ -353,7 +353,7 @@ impl Workspace {
                 let server = profile
                     .active_database()
                     .unwrap_or_else(|| profile.name.clone());
-                let view = cx.new(|_| UsersView::new(server));
+                let view = cx.new(|cx| UsersView::new(server, cx));
                 let profile_id = id.to_string();
                 cx.subscribe_in(&view, window, move |workspace, view, event, window, cx| {
                     workspace.users_event(&profile_id, view, event, window, cx)
