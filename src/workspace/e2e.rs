@@ -6838,6 +6838,15 @@ fn show_grants_draws_only_the_rows_in_view_and_keeps_its_scroll(cx: &mut TestApp
         assert!(first > 0, "the rows in view are drawn");
         assert!(first < 60, "{first} of {total} rows were drawn");
         assert!(cx.debug_bounds("show-grants-row-role04999").is_none());
+        // Each row spans the list, so the privilege columns line up whatever
+        // the length of the name before them.
+        let list = cx
+            .debug_bounds("show-grants-rows")
+            .expect("the list is drawn");
+        let row = cx
+            .debug_bounds("show-grants-row-role00000")
+            .expect("the first row is drawn");
+        assert_eq!(row.size.width, list.size.width);
 
         // Scrolled down, a window of rows is still all that is drawn, and a
         // frame does not send the list back to the top.

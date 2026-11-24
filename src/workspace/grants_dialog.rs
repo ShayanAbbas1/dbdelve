@@ -244,6 +244,7 @@ impl Workspace {
                             }),
                         )
                         .track_scroll(&view.scroll)
+                        .w_full()
                         .flex_1()
                         .min_h_0(),
                     )
@@ -669,6 +670,7 @@ fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString)
                 let key = row.key.clone();
                 move || format!("show-grants-note-{key}")
             })
+            .w_full()
             .flex()
             .items_center()
             .h(px(GRANTS_ROW_HEIGHT))
@@ -685,7 +687,11 @@ fn grants_row(row: &MatrixRow, columns: &[String], t: Theme, mono: SharedString)
         div().text_color(t.text)
     };
     let header = row.who == Who::Database;
+    // The list lays each row out on its own, as wide as its content unless
+    // told otherwise, and the privilege columns line up only when every row
+    // spans the list.
     div()
+        .w_full()
         .flex()
         .items_center()
         .h(px(GRANTS_ROW_HEIGHT))
