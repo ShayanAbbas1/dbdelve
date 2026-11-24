@@ -294,16 +294,6 @@ impl Profile {
         })
     }
 
-    /// Keeps `sql`, which was just sent on the connection's own session, in
-    /// [`Profile::transaction_statements`] when the next `COMMIT` or
-    /// `ROLLBACK` will end it. `transaction` is what `sql::Leaves` says the
-    /// submission does to the transaction: `Some(false)` ends one and empties
-    /// the record, `Some(true)` leaves one open and starts the record again
-    /// with what this submission runs after its last end when the open
-    /// transaction really ended, and
-    /// `None` appends only while one is open. Called before [`Profile::in_transaction`] is
-    /// updated for the same submission, because it reads whether a
-    /// transaction was open before it.
     /// A statement `sql` that ends the open transaction has landed, with
     /// `error` where it failed. Until now the transaction was still read as
     /// open. It ended unless the statement never reached the server
@@ -445,6 +435,16 @@ impl Profile {
         }
     }
 
+    /// Keeps `sql`, which was just sent on the connection's own session, in
+    /// [`Profile::transaction_statements`] when the next `COMMIT` or
+    /// `ROLLBACK` will end it. `transaction` is what `sql::Leaves` says the
+    /// submission does to the transaction: `Some(false)` ends one and empties
+    /// the record, `Some(true)` leaves one open and starts the record again
+    /// with what this submission runs after its last end when the open
+    /// transaction really ended, and
+    /// `None` appends only while one is open. Called before [`Profile::in_transaction`] is
+    /// updated for the same submission, because it reads whether a
+    /// transaction was open before it.
     pub(crate) fn record_sent(&mut self, sql: &str, transaction: Option<bool>) {
         match transaction {
             Some(false) => self.transaction_statements.clear(),
