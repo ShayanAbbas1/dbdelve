@@ -6957,6 +6957,38 @@ fn show_grants_folds_a_role_shut_and_opens_it_again_by_its_row(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn show_grants_pins_the_role_in_view_until_the_pin_is_turned_off(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_role_with_members(&workspace, cx, 200);
+        // At the top the role's own row is in view: nothing is pinned.
+        assert!(cx.debug_bounds("show-grants-pinned-crowd").is_none());
+
+        workspace.update(cx, |workspace, cx| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            view.scroll.scroll_to_item(100, gpui::ScrollStrategy::Top);
+            cx.notify();
+        });
+        settle(cx);
+        settle(cx);
+        assert!(
+            cx.debug_bounds("show-grants-pinned-crowd").is_some(),
+            "scrolled into its members, the role stays over them"
+        );
+
+        click_selector(cx, "show-grants-sticky");
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-pinned-crowd").is_none());
+        assert!(workspace.read_with(cx, |workspace, _| {
+            !workspace.grants_view.as_ref().unwrap().sticky
+        }));
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn show_grants_is_resized_by_its_corner_within_the_window(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");

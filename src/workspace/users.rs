@@ -152,6 +152,9 @@ pub(crate) struct GrantsView {
     /// The rows folded shut, by key: a database, a schema or a role with
     /// members, whose rows under it are left out of the table drawn.
     pub(crate) collapsed: std::collections::HashSet<String>,
+    /// Whether the rows holding the first one in view stay pinned over the
+    /// top of the list while it scrolls.
+    pub(crate) sticky: bool,
 }
 
 /// Which edge of the Show Grants dialog is being dragged.
@@ -175,8 +178,9 @@ pub(crate) struct GrantsResize {
 #[derive(Default)]
 pub(crate) struct GrantsMatrix {
     pub(crate) columns: Vec<String>,
-    /// The rows drawn: `unfolded` less what the collapsed rows hold.
-    pub(crate) rows: Vec<crate::grants::MatrixRow>,
+    /// The rows drawn: `unfolded` less what the collapsed rows hold. Shared,
+    /// so the rows pinned over the list are found without a copy per frame.
+    pub(crate) rows: std::sync::Arc<[crate::grants::MatrixRow]>,
     /// Every row, as built from the grants, the filter and the members switch.
     unfolded: Vec<crate::grants::MatrixRow>,
     /// How many times it was built, for a test to count.
@@ -208,7 +212,7 @@ impl GrantsView {
         };
         self.matrix = GrantsMatrix {
             columns,
-            rows: crate::grants::folded(&rows, &self.collapsed),
+            rows: crate::grants::folded(&rows, &self.collapsed).into(),
             unfolded: rows,
             built: self.matrix.built + 1,
             filter,
@@ -228,7 +232,7 @@ impl GrantsView {
         if !self.collapsed.remove(key) {
             self.collapsed.insert(key.to_string());
         }
-        self.matrix.rows = crate::grants::folded(&self.matrix.unfolded, &self.collapsed);
+        self.matrix.rows = crate::grants::folded(&self.matrix.unfolded, &self.collapsed).into();
     }
 }
 
@@ -1280,6 +1284,7 @@ impl Workspace {
             size: None,
             resize: None,
             collapsed: Default::default(),
+            sticky: true,
         });
         cx.notify();
         request
@@ -1330,6 +1335,13 @@ impl Workspace {
         self.refocus_front();
         cx.notify();
         true
+    }
+
+    pub(crate) fn toggle_grants_sticky(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.grants_view.as_mut() {
+            view.sticky = !view.sticky;
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_grants_members(&mut self, with_members: bool, cx: &mut Context<Self>) {

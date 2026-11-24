@@ -4,7 +4,7 @@ use gpui::{
     CursorStyle, MouseButton, MouseDownEvent, Pixels, SharedString, Size, relative, size,
     uniform_list,
 };
-use gpui_component::Icon;
+use gpui_component::{Icon, Selectable as _};
 
 use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
@@ -133,6 +133,21 @@ impl Workspace {
                         ),
                 )
             })
+            .child({
+                let sticky = close_workspace.clone();
+                icon_button("grants-sticky", icon::PIN, Tone::Quiet, Control::Compact, t)
+                    .debug_selector(|| "show-grants-sticky".into())
+                    .selected(view.sticky)
+                    // A ghost's selected look is faint; the fill says it is on.
+                    .when(view.sticky, |on| on.bg(t.element_active))
+                    .tooltip(match view.sticky {
+                        true => "Stop pinning the database, schema or role in view",
+                        false => "Pin the database, schema or role in view while scrolling",
+                    })
+                    .on_click(move |_, _, cx| {
+                        _ = sticky.update(cx, |workspace, cx| workspace.toggle_grants_sticky(cx));
+                    })
+            })
             .child(
                 div()
                     .px(px(layout::SPACE_SM))
@@ -251,6 +266,15 @@ impl Workspace {
                             }),
                         )
                         .track_scroll(&view.scroll)
+                        .when(view.sticky, |list| {
+                            list.with_decoration(StickyParents {
+                                rows: view.matrix.rows.clone(),
+                                columns: view.matrix.columns.clone(),
+                                scroll: view.scroll.clone(),
+                                t,
+                                mono: mono.clone(),
+                            })
+                        })
                         .w_full()
                         .flex_1()
                         .min_h_0(),
@@ -670,6 +694,67 @@ impl Workspace {
 }
 
 /// One row of the grants table.
+/// The rows holding the first one in view, pinned over the top of the list
+/// ([`crate::grants::sticky_parents`]). A click on one scrolls to it.
+struct StickyParents {
+    rows: std::sync::Arc<[MatrixRow]>,
+    columns: Vec<String>,
+    scroll: gpui::UniformListScrollHandle,
+    t: Theme,
+    mono: SharedString,
+}
+
+impl gpui::UniformListDecoration for StickyParents {
+    fn compute(
+        &self,
+        visible_range: std::ops::Range<usize>,
+        _bounds: gpui::Bounds<Pixels>,
+        _scroll_offset: gpui::Point<Pixels>,
+        _item_height: Pixels,
+        _item_count: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> AnyElement {
+        let pinned = crate::grants::sticky_parents(&self.rows, visible_range.start);
+        div()
+            .debug_selector(|| "show-grants-sticky-rows".into())
+            .w_full()
+            .flex()
+            .flex_col()
+            .when(!pinned.is_empty(), |stack| {
+                stack.border_b_1().border_color(self.t.border)
+            })
+            .children(pinned.into_iter().map(|at| {
+                let row = &self.rows[at];
+                let scroll = self.scroll.clone();
+                div()
+                    .id(SharedString::from(format!(
+                        "show-grants-pinned-{}",
+                        row.key
+                    )))
+                    .debug_selector({
+                        let key = row.key.clone();
+                        move || format!("show-grants-pinned-{key}")
+                    })
+                    .w_full()
+                    .occlude()
+                    .cursor_pointer()
+                    .bg(self.t.overlay)
+                    .on_click(move |_, _, _| {
+                        scroll.scroll_to_item(at, gpui::ScrollStrategy::Top);
+                    })
+                    .child(grants_row(
+                        row,
+                        &self.columns,
+                        false,
+                        self.t,
+                        self.mono.clone(),
+                    ))
+            }))
+            .into_any_element()
+    }
+}
+
 /// A row with rows under it, which a click folds shut or opens again.
 fn foldable(drawn: AnyElement, key: &str, folds: gpui::WeakEntity<Workspace>) -> AnyElement {
     let key = key.to_string();

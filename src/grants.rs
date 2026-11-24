@@ -124,6 +124,41 @@ pub(crate) fn folded(rows: &[MatrixRow], collapsed: &HashSet<String>) -> Vec<Mat
     shown
 }
 
+/// The rows that hold `rows[index]`, outermost first: its schema and
+/// database, or the role it is listed under as a member.
+fn parents_of(rows: &[MatrixRow], index: usize) -> Vec<usize> {
+    let mut parents = Vec::new();
+    let Some(mut held) = rows.get(index) else {
+        return parents;
+    };
+    for at in (0..index).rev() {
+        let row = &rows[at];
+        if row.opened && under(row, held) {
+            parents.push(at);
+            held = row;
+        }
+    }
+    parents.reverse();
+    parents
+}
+
+/// The rows to keep pinned over the top of the table while row `top` is the
+/// first in view: what holds the first row they leave uncovered, so a pinned
+/// schema never hides the next schema's own row.
+pub(crate) fn sticky_parents(rows: &[MatrixRow], top: usize) -> Vec<usize> {
+    let mut pinned = parents_of(rows, top);
+    // Each pass looks below the rows pinned so far; the depth of the table
+    // bounds how many it takes to settle.
+    for _ in 0..4 {
+        let next = parents_of(rows, top + pinned.len());
+        if next.len() == pinned.len() {
+            return next;
+        }
+        pinned = next;
+    }
+    pinned
+}
+
 /// What a column header says of a privilege the server spells `SELECT`.
 pub(crate) fn column_label(privilege: &str) -> String {
     // The column is as wide as the longest of the others.
@@ -851,6 +886,41 @@ mod tests {
         assert_eq!(keys(&["db1", "db1.s1"]), ["db1", "db2", "db2.s1"]);
         // A row with nothing under it does not fold what follows.
         assert_eq!(keys(&["db2.s1"]).len(), rows.len());
+    }
+
+    #[test]
+    fn the_rows_pinned_are_what_holds_the_first_row_they_leave_in_view() {
+        let rows = vec![
+            fold_row("db1", 0, false, true),
+            fold_row("db1.s1", 1, false, true),
+            fold_row("db1.s1.t1", 2, false, false),
+            fold_row("db1.s1.t2", 2, false, false),
+            fold_row("db1.s1.t3", 2, false, false),
+            fold_row("db1.s2", 1, false, true),
+            fold_row("db1.s2.t1", 2, false, false),
+            fold_row("db1.note", 1, false, false),
+            fold_row("db2", 0, false, false),
+        ];
+        // At the top, nothing is scrolled away.
+        assert_eq!(sticky_parents(&rows, 0), Vec::<usize>::new());
+        // Deep in s1, its database and schema stay over it.
+        assert_eq!(sticky_parents(&rows, 2), [0, 1]);
+        // Pinned over t2 and t3, s1 still holds what it covers.
+        assert_eq!(sticky_parents(&rows, 3), [0, 1]);
+        // Over t3 and s2's own row, s1 gives way to s2.
+        assert_eq!(sticky_parents(&rows, 4), [0, 5]);
+        // A note belongs to its database, not to the schema before it.
+        assert_eq!(sticky_parents(&rows, 7), [0]);
+        // A database with nothing under it pins nothing.
+        assert_eq!(sticky_parents(&rows, 8), Vec::<usize>::new());
+        let members = vec![
+            fold_row("a", 0, false, true),
+            fold_row("a/m1", 0, true, false),
+            fold_row("a/m2", 0, true, false),
+            fold_row("a/m3", 0, true, false),
+            fold_row("b", 0, false, false),
+        ];
+        assert_eq!(sticky_parents(&members, 2), [0]);
     }
 
     #[test]
