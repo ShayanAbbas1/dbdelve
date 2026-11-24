@@ -388,8 +388,10 @@ pub struct StoredQueryTab {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     /// A file tab left with unsaved text: [`crate::sql_file::text_hash`] of
-    /// the file's text that text was written against. A file that reads
-    /// differently at relaunch was changed meanwhile, and the tab asks.
+    /// the file's text that text was written against, empty for a file gone.
+    /// A file that reads differently at relaunch was changed meanwhile, and
+    /// the tab asks. Never absent on such a tab, which is how a scratch file
+    /// a build before file tabs left beside a clean one is told apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_hash: Option<String>,
     /// Keep Mine was chosen and nothing saved since, so Save still asks.

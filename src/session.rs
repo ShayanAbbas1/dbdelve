@@ -3550,12 +3550,12 @@ impl QueryTab {
                 .as_ref()
                 .and_then(|binding| binding.schema.clone()),
             // Only for a dirty tab: a clean one has nothing to lose to a file
-            // changed while the app was closed.
-            saved_hash: self
-                .file
-                .as_ref()
-                .filter(|_| self.dirty)
-                .and_then(|file| Some(sql_file::text_hash(file.saved.as_deref()?, file.bom))),
+            // changed while the app was closed. Always for one, a gone file's
+            // as empty, since a dirty file tab stored without it is how
+            // `stored_text` knows a scratch beside it is not its own.
+            saved_hash: self.file.as_ref().filter(|_| self.dirty).map(|file| {
+                sql_file::text_hash(file.saved.as_deref().unwrap_or_default(), file.bom)
+            }),
             kept_mine: self
                 .file
                 .as_ref()
@@ -4260,6 +4260,19 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             let bom = on_disk.as_ref().is_some_and(|on_disk| on_disk.bom);
             let stamp = on_disk.as_ref().map(|on_disk| on_disk.stamp);
             let saved = on_disk.map(|on_disk| on_disk.text);
+            // Every file tab left dirty is stored with its `saved_hash`, so a
+            // scratch beside one stored without it was written by a build
+            // before file tabs, which showed it untitled and empty; taken as
+            // unsaved text, a Save would put it over the file. Over a file
+            // gone, the scratch is all the tab can hold, whoever wrote it.
+            let (scratch, notice, scratch_unread) = match scratch {
+                Some(foreign) if saved.is_some() && stored.saved_hash.is_none() => {
+                    let (notice, scratch_unread) =
+                        put_aside_foreign_scratch(profile_id, stored.id, &foreign, &path);
+                    (None, notice, scratch_unread)
+                }
+                scratch => (scratch, notice, scratch_unread),
+            };
             let text = scratch.or_else(|| saved.clone()).unwrap_or_default();
             let conflict = restored_conflict(stored, saved.as_deref(), bom, &text);
             StoredText {
@@ -4283,6 +4296,31 @@ fn stored_text(profile_id: &str, stored: &store::StoredQueryTab) -> StoredText {
             notice: notice.or(Some(message)),
             scratch_unread,
         },
+    }
+}
+
+/// An older build's scratch for the file tab on `path`: deleted when empty,
+/// and otherwise moved aside as one that will not read is, since it may hold
+/// text typed there. The notice to show, and whether it had to stay put.
+fn put_aside_foreign_scratch(
+    profile_id: &str,
+    id: u64,
+    text: &str,
+    path: &Path,
+) -> (Option<String>, bool) {
+    if text.is_empty() {
+        return (store::delete_scratch(profile_id, id).err(), false);
+    }
+    match store::set_aside_scratch(profile_id, id) {
+        Ok(aside) => (
+            Some(format!(
+                "Text an older DBDelve left for {} was kept as {}.",
+                sql_file::file_name(path),
+                aside.display()
+            )),
+            false,
+        ),
+        Err(message) => (Some(message), true),
     }
 }
 
@@ -6035,19 +6073,67 @@ mod tests {
             assert_eq!(notice, None);
 
             store::write_scratch("dev", 3, "SELECT 2").unwrap();
-            let StoredText { file, text, .. } = stored_text("dev", &stored);
+            let left_dirty = store::StoredQueryTab {
+                saved_hash: Some(sql_file::text_hash("SELECT 1", false)),
+                ..stored.clone()
+            };
+            let StoredText { file, text, .. } = stored_text("dev", &left_dirty);
             assert_eq!(text, "SELECT 2");
             assert!(is_dirty(file.as_ref(), &text));
 
             std::fs::remove_file(&path).unwrap();
             store::delete_scratch("dev", 3).unwrap();
-            let StoredText { file, text, .. } = stored_text("dev", &stored);
+            let StoredText { file, text, .. } = stored_text("dev", &left_dirty);
             let file = file.expect("still bound");
             assert_eq!((file.path.as_path(), text.as_str()), (path.as_path(), ""));
             assert!(
                 is_dirty(Some(&file), &text),
                 "nothing on disk is unsaved work"
             );
+        });
+    }
+
+    /// A build before file tabs showed this tab untitled and empty and left
+    /// a scratch for it, empty or holding what was typed there.
+    #[test]
+    fn a_scratch_an_older_build_left_beside_a_clean_file_tab_is_not_its_text() {
+        store::tests::with_home(|| {
+            let path = sql_file::canonical(&store::home().unwrap().join("q.sql"));
+            std::fs::write(&path, "SELECT 1").unwrap();
+            let stored = store::StoredQueryTab {
+                id: 3,
+                name: None,
+                path: Some(path.clone()),
+                active: true,
+                queued_results: 0,
+                database: None,
+                schema: None,
+                saved_hash: None,
+                kept_mine: false,
+                asking: false,
+            };
+            let scratch = store::query_directory("dev")
+                .unwrap()
+                .join(".scratch-3.sql");
+
+            store::write_scratch("dev", 3, "").unwrap();
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 1");
+            assert!(!is_dirty(file.as_ref(), &text));
+            assert_eq!(notice, None);
+            assert!(!scratch.exists());
+
+            store::write_scratch("dev", 3, "SELECT 2").unwrap();
+            let StoredText {
+                file, text, notice, ..
+            } = stored_text("dev", &stored);
+            assert_eq!(text, "SELECT 1");
+            assert!(!is_dirty(file.as_ref(), &text));
+            let aside = scratch.with_file_name(".scratch-3.unread-1.sql");
+            assert_eq!(std::fs::read_to_string(&aside).unwrap(), "SELECT 2");
+            assert!(notice.is_some_and(|notice| notice.contains(".unread-1.sql")));
         });
     }
 

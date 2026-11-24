@@ -1043,7 +1043,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   text as any other. A rename needs only the directory, so it works where
   the file will not read. Where even that fails the file is left alone
   (`QueryTab::scratch_unread`) for the tab's life: never written, and
-  removed by neither Save nor a close, while the tab still asks on close. A tab's path is `StoredQueryTab::path`, left out
+  removed by neither Save nor a close, while the tab still asks on close.
+  A file tab left dirty always stores `saved_hash` (of nothing, its file
+  gone), so a scratch beside a file tab stored without one, over a file that
+  reads, is not the tab's: a build before file tabs ignores `path`, shows
+  the tab untitled and empty, and writes that buffer on quit, and taken as
+  unsaved text it would come back dirty and a Save would empty the file. The
+  tab comes back clean from its file; that scratch is deleted when empty and
+  otherwise set aside to an `.unread-<n>.sql` name with a notice, as one
+  that will not read is. A tab's path is `StoredQueryTab::path`, left out
   for an untitled tab, and `name` is read for the adoption and never written.
   Writes are synchronous at those boundaries; typing schedules no disk
   writes, timers or retries. A crash or forced termination can lose edits
