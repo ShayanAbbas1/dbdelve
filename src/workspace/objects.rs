@@ -832,6 +832,13 @@ impl Workspace {
                     self.open_filter_picker(&node.profile, window, cx);
                 }
             }
+            NodeAction::FilterTables => {
+                if let Some(scope) = self.table_scope_of(node)
+                    && self.make_front(&node.profile, cx)
+                {
+                    self.open_table_picker(scope, &node.profile, window, cx);
+                }
+            }
         }
     }
 

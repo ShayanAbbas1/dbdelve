@@ -1368,7 +1368,11 @@ impl Workspace {
                         return menu;
                     };
                     let mut actions = node_actions(node.kind, &node.name, target);
-                    actions.retain(|action| filterable || *action != NodeAction::FilterDatabases);
+                    actions.retain(|action| match action {
+                        NodeAction::FilterDatabases => filterable,
+                        NodeAction::FilterTables => state.table_scope_of(&node).is_some(),
+                        _ => true,
+                    });
                     node_items(menu, &node, actions, &menu_workspace)
                 }
                 // A row of one connection's own rows: the menu simple mode

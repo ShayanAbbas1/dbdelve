@@ -4078,7 +4078,10 @@ pub(super) fn explorer_menu(
                     }),
             );
         }
-        let actions = node_actions(node.kind, &node.name, target);
+        let mut actions = node_actions(node.kind, &node.name, target);
+        actions.retain(|action| {
+            *action != NodeAction::FilterTables || state.table_scope_of(&node).is_some()
+        });
         let menu = node_items(menu, &node, actions, workspace);
         // Last, below the node's own actions. The export reads the
         // connection's own database, so another one's schemas offer none.

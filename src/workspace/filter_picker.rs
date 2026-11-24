@@ -10,6 +10,11 @@
 //! and reads the catalog again; it never reconnects, because the lists are not
 //! part of the connection. Which sections exist comes from `Target::levels()`,
 //! never from the engine.
+//!
+//! The same dialog has a second mode, one schema's table list. Its one section
+//! lists the relations of that schema the catalog holds, the shown and the ones
+//! its list leaves out ([`Catalog::relations_of`](crate::db::Catalog)), so it
+//! reads nothing and has no loading state. Save writes only that list.
 
 use std::ops::Range;
 
@@ -21,8 +26,9 @@ use gpui_component::{
 };
 
 use super::*;
-use crate::db::{Include, Levels, Shown, same_name};
+use crate::db::{Include, Levels, RelationKind, Shown, same_name};
 use crate::fuzzy::{Fuzzy, Query};
+use crate::sidebar::{NodeKind, SelectedNode};
 use crate::theme::Theme;
 use crate::ui::{button_inked, highlighted, quiet_ink, well};
 
@@ -31,6 +37,8 @@ use crate::ui::{button_inked, highlighted, quiet_ink, well};
 pub(crate) enum Which {
     Databases,
     Schemas,
+    /// The relations of one schema, in the table mode.
+    Tables,
 }
 
 impl Which {
@@ -38,6 +46,7 @@ impl Which {
         match self {
             Self::Databases => "Databases",
             Self::Schemas => "Schemas",
+            Self::Tables => "Tables",
         }
     }
 
@@ -48,6 +57,8 @@ impl Which {
             (Self::Databases, false) => "databases",
             (Self::Schemas, true) => "schema",
             (Self::Schemas, false) => "schemas",
+            (Self::Tables, true) => "table",
+            (Self::Tables, false) => "tables",
         }
     }
 
@@ -56,6 +67,7 @@ impl Which {
         match self {
             Self::Databases => "databases",
             Self::Schemas => "schemas",
+            Self::Tables => "tables",
         }
     }
 }
@@ -84,6 +96,40 @@ pub(crate) fn boundary(levels: Levels) -> &'static str {
              still read a hidden database, though completion and Go to Object offer only \
              what is listed."
         }
+    }
+}
+
+/// What the filter says it is not, for the table list: as [`boundary`], for the
+/// relations of one schema.
+const TABLE_BOUNDARY: &str = "This filter changes what is listed, not what can be reached: a \
+     statement can still read a hidden table, though completion and Go to Object offer only \
+     what is listed.";
+
+/// The schema whose table list the picker edits, and where its catalog is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TableScope {
+    /// The database that keys the list, as [`crate::db::TableFilter`] says.
+    pub(crate) database: Option<String>,
+    pub(crate) schema: String,
+    /// The database whose catalog holds the schema when it is not the
+    /// connection's own, which is read again over its own session on Save.
+    pub(crate) elsewhere: Option<String>,
+}
+
+/// The table mode's state: what it edits, and the kind of each name it lists.
+struct TablesOf {
+    scope: TableScope,
+    kinds: Vec<(String, RelationKind)>,
+}
+
+/// What a row says of a relation that is not a plain table.
+fn kind_hint(kind: RelationKind) -> Option<&'static str> {
+    match kind {
+        RelationKind::Table | RelationKind::PartitionedTable => None,
+        RelationKind::View => Some("view"),
+        RelationKind::MaterializedView => Some("materialized view"),
+        RelationKind::ForeignTable => Some("foreign table"),
+        RelationKind::Dictionary => Some("dictionary"),
     }
 }
 
@@ -123,7 +169,10 @@ pub(crate) struct FilterPicker {
     active_schema: Option<String>,
     /// What the profile held when the dialog opened.
     saved: Include,
+    /// The databases section; in the table mode, the one section, the tables'.
     pub(crate) databases: PickerSection,
+    /// Set in the table mode, which has no other section.
+    tables: Option<TablesOf>,
     /// The own database's schemas, on a target that has both levels.
     pub(crate) schemas: Option<PickerSection>,
     /// The first draw after opening puts the keyboard in the first search box.
@@ -252,6 +301,14 @@ fn admits(pattern: &str, name: &str) -> bool {
     .shows_database(name)
 }
 
+/// How many of the listed relation `names` a table list of `entries` shows.
+fn tables_shown(entries: &[String], names: &[String]) -> usize {
+    names
+        .iter()
+        .filter(|name| entries.iter().any(|entry| admits(entry, name)))
+        .count()
+}
+
 /// The line naming the patterns that admit none of the listed `names`: the
 /// first three, then how many more. `noun` is what the names are, `database` or
 /// `schema in {database}`.
@@ -295,6 +352,7 @@ impl FilterPicker {
         match which {
             Which::Databases => self.row_hint(name),
             Which::Schemas => self.schema_hint(name),
+            Which::Tables => None,
         }
     }
 
@@ -321,21 +379,24 @@ impl FilterPicker {
             (Which::Databases, _) => "database".to_string(),
             (Which::Schemas, Some(database)) => format!("schema in {database}"),
             (Which::Schemas, None) => "schema".to_string(),
+            (Which::Tables, _) => format!("table in {}", self.tables.as_ref()?.scope.schema),
         };
         unmatched_line(&noun, &section.patterns, names)
     }
 
     fn section(&self, which: Which) -> Option<&PickerSection> {
         match which {
-            Which::Databases => Some(&self.databases),
+            Which::Databases => self.tables.is_none().then_some(&self.databases),
             Which::Schemas => self.schemas.as_ref(),
+            Which::Tables => self.tables.as_ref().map(|_| &self.databases),
         }
     }
 
     fn section_mut(&mut self, which: Which) -> Option<&mut PickerSection> {
         match which {
-            Which::Databases => Some(&mut self.databases),
+            Which::Databases => self.tables.is_none().then_some(&mut self.databases),
             Which::Schemas => self.schemas.as_mut(),
+            Which::Tables => self.tables.as_ref().map(|_| &mut self.databases),
         }
     }
 
@@ -352,6 +413,10 @@ impl FilterPicker {
                     Some(database) => format!("No schemas in {database}."),
                     None => "No schemas.".into(),
                 },
+                Which::Tables => match &self.tables {
+                    Some(tables) => format!("No tables in {}.", tables.scope.schema),
+                    None => "No tables.".into(),
+                },
             },
             Listing::Loaded(_) => return None,
         })
@@ -364,17 +429,44 @@ impl FilterPicker {
 
     /// Whether either list holds anything Remove Filter would empty.
     pub(crate) fn can_remove(&self) -> bool {
-        [Which::Databases, Which::Schemas]
+        [Which::Databases, Which::Schemas, Which::Tables]
             .into_iter()
             .filter_map(|which| self.section(which))
             .any(|section| !section.ticked.is_empty() || !section.patterns.is_empty())
     }
 
     pub(crate) fn boundary(&self) -> &'static str {
-        boundary(self.levels)
+        match self.tables {
+            Some(_) => TABLE_BOUNDARY,
+            None => boundary(self.levels),
+        }
+    }
+
+    /// Says which schema the table list is of, and what it holds.
+    pub(crate) fn tables_caption(&self) -> Option<String> {
+        let scope = &self.tables.as_ref()?.scope;
+        Some(format!(
+            "Tables of {}, with its views and other relations.",
+            scope.schema
+        ))
+    }
+
+    /// What a listed row says of what it is, besides why it is shown: the
+    /// kind of a relation that is not a plain table.
+    pub(crate) fn kind_note(&self, name: &str) -> Option<&'static str> {
+        let (_, kind) = self
+            .tables
+            .as_ref()?
+            .kinds
+            .iter()
+            .find(|(listed, _)| listed == name)?;
+        kind_hint(*kind)
     }
 
     pub(crate) fn heading(&self) -> &'static str {
+        if self.tables.is_some() {
+            return "Filter Tables";
+        }
         match self.schemas {
             Some(_) => "Filter databases and schemas",
             None => "Filter databases",
@@ -403,6 +495,15 @@ impl FilterPicker {
     /// blanks dropped, at most `ENTRIES_CAP` each) so the profile, the file
     /// and the next load agree.
     fn written(&self) -> Include {
+        if let Some(tables) = &self.tables {
+            let mut include = self.saved.clone();
+            include.set_tables(
+                tables.scope.database.as_deref(),
+                &tables.scope.schema,
+                self.databases.entries(),
+            );
+            return include;
+        }
         let schemas = self
             .schemas
             .as_ref()
@@ -415,7 +516,18 @@ impl FilterPicker {
     /// Nothing to write while a section is still being read, or when the lists
     /// are the ones the profile already holds.
     pub(crate) fn can_save(&self) -> bool {
-        !self.loading() && !unchanged(&self.written(), &self.saved)
+        let written = self.written();
+        let unchanged = match &self.tables {
+            Some(tables) => {
+                let (database, schema) = (tables.scope.database.as_deref(), &tables.scope.schema);
+                same_entries(
+                    written.tables_of(database, schema),
+                    self.saved.tables_of(database, schema),
+                )
+            }
+            None => unchanged(&written, &self.saved),
+        };
+        !self.loading() && !unchanged
     }
 
     /// The line under a list: how many of the listed names the list, as
@@ -433,6 +545,11 @@ impl FilterPicker {
         let noun = which.noun(total);
         let place = match which {
             Which::Databases => String::new(),
+            Which::Tables => self
+                .tables
+                .as_ref()
+                .map(|tables| format!(" in {}", tables.scope.schema))
+                .unwrap_or_default(),
             Which::Schemas => self
                 .own_database
                 .as_deref()
@@ -443,8 +560,14 @@ impl FilterPicker {
         if entries.is_empty() {
             return Some(format!("Showing all {total} {noun}{place}"));
         }
+        // The stored rule's own matcher, as `admits` asks it, so the count
+        // cannot drift from what Save will show.
+        if which == Which::Tables {
+            let count = tables_shown(&entries, names);
+            return Some(format!("Showing {count} of {total} {noun}{place}"));
+        }
         let include = match which {
-            Which::Databases => Include::from_stored(entries, Vec::new()),
+            Which::Databases | Which::Tables => Include::from_stored(entries, Vec::new()),
             Which::Schemas => Include::from_stored(Vec::new(), entries),
         };
         let shown = include.resolve(
@@ -455,7 +578,7 @@ impl FilterPicker {
         let count = names
             .iter()
             .filter(|name| match which {
-                Which::Databases => shown.shows_database(name),
+                Which::Databases | Which::Tables => shown.shows_database(name),
                 Which::Schemas => shown.shows_schema(name),
             })
             .count();
@@ -467,10 +590,13 @@ impl FilterPicker {
 /// change (the filter reads the two spellings alike, so a resave would rewrite
 /// the file for nothing); order is, because it is what the file holds.
 fn unchanged(written: &Include, saved: &Include) -> bool {
-    let same = |a: &[String], b: &[String]| {
-        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_name(a, b))
-    };
-    same(&written.databases, &saved.databases) && same(&written.schemas, &saved.schemas)
+    same_entries(&written.databases, &saved.databases)
+        && same_entries(&written.schemas, &saved.schemas)
+}
+
+/// Whether two lists hold the same entries in the same order, case aside.
+fn same_entries(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_name(a, b))
 }
 
 /// The saved entries as rows: an entry that names a listed name, with no
@@ -590,12 +716,87 @@ impl Workspace {
                 window,
                 cx,
             ),
+            tables: None,
             schemas: wants_schemas.then(|| {
                 PickerSection::loading(&found.include.schemas, Which::Schemas, window, cx)
             }),
             focus_search: std::cell::Cell::new(true),
         });
         self.list_names_for_picker(true, wants_schemas, window, cx);
+    }
+
+    /// The schema a table filter would edit for the row `node` is, and where
+    /// its catalog is: a schema row on every shape, and where the database
+    /// row holds the objects, that row. `None` when the row has no relations
+    /// to choose between yet, or its connection is not open.
+    pub(crate) fn table_scope_of(&self, node: &SelectedNode) -> Option<TableScope> {
+        let profile = self
+            .profiles
+            .iter()
+            .find(|found| found.id == node.profile)?;
+        match node.kind {
+            NodeKind::Schema => table_scope(profile, node.database.as_deref(), Some(&node.name)),
+            NodeKind::Database
+                if profile.config.target().levels() == Levels::DatabaseHoldsObjects =>
+            {
+                table_scope(profile, node.database.as_deref(), None)
+            }
+            _ => None,
+        }
+    }
+
+    /// The same for the schema the front connection is in, which the palette
+    /// offers it for.
+    pub(crate) fn front_table_scope(&self) -> Option<TableScope> {
+        let profile = self.profile()?;
+        table_scope(profile, None, profile.schema_in().as_deref())
+    }
+
+    /// Put the picker up over the table list of `scope`, listing the
+    /// relations its catalog holds: the ones shown and the ones the list
+    /// leaves out. Nothing is read, so the section is loaded as it opens.
+    pub(crate) fn open_table_picker(
+        &mut self,
+        scope: TableScope,
+        profile: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(found) = self.profiles.iter().find(|found| found.id == profile) else {
+            return;
+        };
+        let Some(catalog) = found.catalog_of(scope.elsewhere.as_deref()) else {
+            return;
+        };
+        let relations = catalog.relations_of(&scope.schema);
+        let mut kinds: Vec<(String, RelationKind)> = relations
+            .shown
+            .into_iter()
+            .chain(relations.hidden)
+            .collect();
+        kinds.sort_by_cached_key(|(name, _)| name.to_lowercase());
+        let names: Vec<String> = kinds.iter().map(|(name, _)| name.clone()).collect();
+        let saved = found.include.clone();
+        let mut section = PickerSection::loading(
+            saved.tables_of(scope.database.as_deref(), &scope.schema),
+            Which::Tables,
+            window,
+            cx,
+        );
+        section.listed(names, window, cx);
+        self.filter_picker = Some(FilterPicker {
+            profile: found.id.clone(),
+            request: 0,
+            levels: found.config.target().levels(),
+            own_database: found.active_database(),
+            active_schema: None,
+            saved,
+            databases: section,
+            tables: Some(TablesOf { scope, kinds }),
+            schemas: None,
+            focus_search: std::cell::Cell::new(true),
+        });
+        cx.notify();
     }
 
     /// Read the names of the lists asked for, unfiltered, since the names the
@@ -826,6 +1027,15 @@ impl Workspace {
         else {
             return;
         };
+        if let Some(tables) = &picker.tables {
+            let (id, include, elsewhere) = (
+                picker.profile.clone(),
+                picker.written(),
+                tables.scope.elsewhere.clone(),
+            );
+            self.save_table_filter(&id, include, elsewhere, cx);
+            return;
+        }
         let id = picker.profile.clone();
         let include = picker.written();
         let Some(profile) = self.profiles.iter_mut().find(|found| found.id == id) else {
@@ -863,6 +1073,39 @@ impl Workspace {
         self.close_filter_picker(cx);
         if !under_way {
             self.refresh_schema(cx);
+        }
+    }
+
+    /// Write one schema's table list and read the catalog it narrows again.
+    /// Another database's is read over its own session; the own one by the
+    /// refresh, which a read under way hands over to the one that lands. The
+    /// lists of databases and schemas, and every connection, stay as they
+    /// were.
+    fn save_table_filter(
+        &mut self,
+        id: &str,
+        include: Include,
+        elsewhere: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self.profiles.iter_mut().find(|found| found.id == id) else {
+            return;
+        };
+        profile.include = include;
+        let under_way = profile.refreshing_schema()
+            || matches!(
+                profile.catalog,
+                CatalogState::Loading | CatalogState::Loaded(_, Routines::Loading)
+            );
+        if elsewhere.is_none() {
+            profile.reread_after_load = under_way;
+        }
+        self.remember_profiles(cx);
+        self.close_filter_picker(cx);
+        match elsewhere {
+            Some(database) => self.reload_database(id, database, cx),
+            None if !under_way => self.refresh_schema(cx),
+            None => {}
         }
     }
 
@@ -985,7 +1228,7 @@ impl Workspace {
                                     ),
                                 ),
                         )
-                        .children(hint.map(|hint| {
+                        .children(hint.or_else(|| picker.kind_note(listed)).map(|hint| {
                             div()
                                 .flex_none()
                                 .whitespace_nowrap()
@@ -1071,6 +1314,7 @@ impl Workspace {
         let caption = match which {
             Which::Databases => None,
             Which::Schemas => picker.schemas_caption(),
+            Which::Tables => picker.tables_caption(),
         };
         Some(
             div()
@@ -1125,7 +1369,7 @@ impl Workspace {
             });
         }
         let removable = picker.can_remove();
-        let sections: Vec<AnyElement> = [Which::Databases, Which::Schemas]
+        let sections: Vec<AnyElement> = [Which::Databases, Which::Schemas, Which::Tables]
             .into_iter()
             .filter_map(|which| self.render_section(picker, which, cx))
             .collect();
@@ -1254,6 +1498,48 @@ impl Workspace {
                 .into_any_element(),
         )
     }
+}
+
+/// The scope of a table filter for the schema `schema` of `database` (the
+/// connection's own where that is `None`), or for the one schema the database
+/// holds where `schema` is `None`. Only where the catalog is loaded and the
+/// schema has relations, and where the key's database is known on a shape that
+/// keys by one: no list applies to a key that names none.
+fn table_scope(
+    profile: &Profile,
+    database: Option<&str>,
+    schema: Option<&str>,
+) -> Option<TableScope> {
+    if !matches!(profile.state, ProfileState::Connected(_)) {
+        return None;
+    }
+    let own = profile.active_database();
+    let elsewhere = database
+        .filter(|database| own.as_deref() != Some(database))
+        .map(str::to_string);
+    let catalog = profile.catalog_of(elsewhere.as_deref())?;
+    let schema = match schema {
+        Some(schema) => catalog.schemas.iter().find(|found| found.name == schema)?,
+        None => catalog.schemas.first()?,
+    }
+    .name
+    .clone();
+    if catalog.relations_of(&schema).total() == 0 {
+        return None;
+    }
+    let by_database = matches!(
+        profile.config.target().levels(),
+        Levels::DatabaseThenSchema | Levels::DatabaseHoldsObjects
+    );
+    let key = match by_database {
+        true => Some(elsewhere.clone().or(own)?),
+        false => None,
+    };
+    Some(TableScope {
+        database: key,
+        schema,
+        elsewhere,
+    })
 }
 
 /// A text field in a box of its own: the box is the field's edge, so the
@@ -1442,6 +1728,57 @@ mod tests {
             &include(&[], &["main"]),
             &include(&[], &["extra"])
         ));
+    }
+
+    #[test]
+    fn a_table_list_is_written_for_its_own_key_and_leaves_every_other_list_alone() {
+        let mut include = Include::from_stored(vec!["app".into()], vec!["public".into()])
+            .with_tables(vec![crate::db::TableFilter {
+                database: Some("app".into()),
+                schema: "audit".into(),
+                tables: vec!["log".into()],
+            }]);
+        let before = include.clone();
+        // What Save writes: the ticked names, then the typed patterns.
+        let written = written_entries(&["orders".into()], "tmp_*, ORDERS");
+        include.set_tables(Some("app"), "public", written);
+        assert_eq!(
+            include.tables_of(Some("app"), "public"),
+            ["orders", "tmp_*"]
+        );
+        assert_eq!(include.tables_of(Some("app"), "audit"), ["log"]);
+        assert_eq!(include.databases, before.databases);
+        assert_eq!(include.schemas, before.schemas);
+        // Emptied, the key goes and the schema shows everything again.
+        include.set_tables(Some("app"), "public", Vec::new());
+        assert_eq!(include, before);
+    }
+
+    #[test]
+    fn the_table_preview_counts_what_the_list_shows_by_the_stored_rule() {
+        let names: Vec<String> = ["junk", "orders", "orders_old", "Users"]
+            .map(String::from)
+            .to_vec();
+        let entries = |list: &[&str]| list.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+        assert_eq!(tables_shown(&entries(&["orders"]), &names), 1);
+        assert_eq!(tables_shown(&entries(&["orders*", "users"]), &names), 3);
+        assert_eq!(tables_shown(&entries(&["nothing"]), &names), 0);
+    }
+
+    #[test]
+    fn a_table_list_is_unchanged_only_when_it_holds_the_same_names_in_order_ignoring_case() {
+        let list = |entries: &[&str]| entries.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+        assert!(same_entries(&list(&["Orders"]), &list(&["orders"])));
+        assert!(!same_entries(&list(&["a", "b"]), &list(&["b", "a"])));
+        assert!(!same_entries(&list(&["a"]), &list(&[])));
+    }
+
+    #[test]
+    fn only_views_and_the_like_say_what_they_are() {
+        assert_eq!(kind_hint(RelationKind::Table), None);
+        assert_eq!(kind_hint(RelationKind::PartitionedTable), None);
+        assert_eq!(kind_hint(RelationKind::View), Some("view"));
+        assert_eq!(kind_hint(RelationKind::Dictionary), Some("dictionary"));
     }
 
     #[test]

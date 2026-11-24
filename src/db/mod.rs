@@ -3393,10 +3393,6 @@ pub struct Catalog {
 
 /// The relations of one schema, as the table filter splits them: those the
 /// tree shows and those its table list left out, each name with its kind.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the table picker is the first reader")
-)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelationNames {
     pub shown: Vec<(String, RelationKind)>,
@@ -3406,10 +3402,6 @@ pub struct RelationNames {
 impl RelationNames {
     /// How many relations the schema holds with no table list: what a count
     /// of `N of M` is out of.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the table picker is the first reader")
-    )]
     pub fn total(&self) -> usize {
         self.shown.len() + self.hidden.len()
     }
@@ -3419,10 +3411,6 @@ impl Catalog {
     /// What the catalog holds of `schema`'s relations, shown and hidden, for
     /// the picker. Partitions are not listed: the filter treats one as part of
     /// its parent. Empty for a schema the catalog does not have.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the table picker is the first reader")
-    )]
     pub fn relations_of(&self, schema: &str) -> RelationNames {
         let Some(found) = self.schemas.iter().find(|found| found.name == schema) else {
             return RelationNames::default();

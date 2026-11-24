@@ -58,7 +58,7 @@ use crate::{
     },
     sidebar::{
         ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, connection_row,
-        count_label, node_actions, selection_header,
+        count_label, node_actions, scoped_row, selection_header,
     },
     sql,
     store::{HistoryEntry, StoredProject},
@@ -446,6 +446,9 @@ pub enum Command {
     SelectDatabase,
     /// Open the filter picker over the front connection's databases.
     FilterDatabases,
+    /// Open the filter picker over the tables of the schema the front
+    /// connection is in.
+    FilterTables,
     SetDatabase(String),
     /// Put the palette back up over the catalog's schemas.
     SelectSchema,
@@ -4123,9 +4126,10 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 // The profile's own `Filter databases…` runs the same
                 // command where the node is the profile in front: listed
                 // once, as that one, which carries the count.
-                .filter(|action| {
-                    *action != NodeAction::FilterDatabases
-                        || (filterable && node.profile != profile.id)
+                .filter(|action| match action {
+                    NodeAction::FilterDatabases => filterable && node.profile != profile.id,
+                    NodeAction::FilterTables => workspace.table_scope_of(&node).is_some(),
+                    _ => true,
                 })
                 .map(|action| {
                     let icon = match action {
@@ -4135,6 +4139,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                         NodeAction::ShowGrants => icon::SHIELD,
                         NodeAction::Refresh => icon::REFRESH,
                         NodeAction::FilterDatabases => icon::DATABASE,
+                        NodeAction::FilterTables => icon::TABLE,
                     };
                     command(
                         action.label(),
@@ -4667,6 +4672,36 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
             "Filter databases…",
             icon::DATABASE,
             Command::FilterDatabases,
+            CONNECTION,
+        );
+        items.push(match counted {
+            Some(count) => item.hint(count),
+            None => item,
+        });
+    }
+    if let Some(scope) = workspace.front_table_scope() {
+        // The schema row's count, as the tree draws it.
+        // Under the database row only where the shape has schemas inside a
+        // database.
+        let under = (profile.config.target().levels() == crate::db::Levels::DatabaseThenSchema)
+            .then_some(scope.database.as_deref())
+            .flatten();
+        let row = scoped_row(
+            &profile.id,
+            under,
+            &crate::explorer::schema_row(&scope.schema),
+        );
+        let counted = (workspace.view_mode() == ViewMode::Complex)
+            .then(|| {
+                let shown = workspace.connections.counts.get(&row)?;
+                let total = workspace.connections.totals.get(&row)?;
+                Some(count_label(*shown, Some(*total)))
+            })
+            .flatten();
+        let item = command(
+            "Filter tables…",
+            icon::TABLE,
+            Command::FilterTables,
             CONNECTION,
         );
         items.push(match counted {

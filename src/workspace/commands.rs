@@ -811,6 +811,14 @@ impl Workspace {
                     self.open_filter_picker(&profile, window, cx);
                 }
             }
+            Command::FilterTables => {
+                if let (Some(profile), Some(scope)) = (
+                    self.profile().map(|profile| profile.id.clone()),
+                    self.front_table_scope(),
+                ) {
+                    self.open_table_picker(scope, &profile, window, cx);
+                }
+            }
             Command::SetDatabase(name) => _ = self.set_database(name, window, cx),
             Command::SetTarget(target) => {
                 if let Some(form) = &mut self.form {

@@ -4184,6 +4184,470 @@ fn the_filter_command_shows_the_count_the_tree_shows(cx: &mut TestAppContext) {
     });
 }
 
+/// A schema holding a view among its tables, for the table filter's tests.
+const RELATIONS: &str = "CREATE TABLE junk (id INTEGER); CREATE TABLE orders (id INTEGER); \
+     CREATE VIEW recent AS SELECT * FROM orders; CREATE TABLE users (id INTEGER);";
+
+/// The `Filter Tables` entry of a schema row's menu: Show Diagram, Set as
+/// Active Schema, New Query Here, Copy Name, Refresh, then it.
+const FILTER_TABLES_DOWNS: usize = 6;
+
+/// DuckDB over `RELATIONS`, connected, its database row open so the schema row
+/// shows.
+fn duckdb_with_relations(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_duckdb_seeded(
+        cx,
+        "",
+        "mode = \"full\"",
+        RELATIONS,
+        "CREATE TABLE u (id INTEGER);",
+    );
+    for id in [connection_row("e2e"), database_row("e2e", "e2e")] {
+        let at = connections_row(&workspace, cx, &id).expect("the row shows");
+        click_connections_row(cx, at);
+    }
+    (workspace, cx)
+}
+
+fn open_the_tables_picker_from_the_schema_menu(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) {
+    let schema = scoped_row("e2e", Some("e2e"), "schema-main");
+    let at = connections_row(workspace, cx, &schema).expect("the schema row shows");
+    pick_from_connections_menu(cx, at, FILTER_TABLES_DOWNS);
+    settle(cx);
+    assert_eq!(front_dialog(workspace, cx), Some("filter-picker"));
+}
+
+/// The relations of `main` the own catalog holds, in the order it lists them.
+fn main_relations(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| {
+        let catalog = workspace
+            .profile()
+            .and_then(|profile| profile.catalog_of(None))
+            .expect("the catalog has loaded");
+        let mut names: Vec<String> = catalog
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "main")
+            .flat_map(|schema| {
+                schema
+                    .relations
+                    .iter()
+                    .map(|relation| relation.name.clone())
+            })
+            .collect();
+        names.sort();
+        names
+    })
+}
+
+#[gpui::test]
+fn filter_tables_on_a_schema_menu_saves_a_ticked_list_and_rereads_without_reconnecting(
+    cx: &mut TestAppContext,
+) {
+    use super::filter_picker::{Listing, Which};
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_relations(cx);
+        let before = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            (profile.generation, profile.config.clone())
+        });
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        assert!(cx.debug_bounds("filter-picker-list-tables").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.heading(), "Filter Tables");
+            assert_eq!(
+                picker.databases.listing,
+                Listing::Loaded(vec![
+                    "junk".into(),
+                    "orders".into(),
+                    "recent".into(),
+                    "users".into()
+                ]),
+                "every relation of the schema, with no read"
+            );
+            assert_eq!(picker.kind_note("recent"), Some("view"));
+            assert_eq!(picker.kind_note("orders"), None);
+            assert_eq!(
+                picker.preview(Which::Tables).as_deref(),
+                Some("Showing all 4 tables in main")
+            );
+            assert!(picker.boundary().contains("a hidden table"));
+            assert!(!picker.can_save(), "nothing is changed");
+        });
+
+        click_selector(cx, "filter-picker-row-tables-1");
+        click_selector(cx, "filter-picker-row-tables-3");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["orders", "users"]);
+            assert_eq!(
+                picker.preview(Which::Tables).as_deref(),
+                Some("Showing 2 of 4 tables in main")
+            );
+            assert!(picker.can_save());
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None, "Save closes the dialog");
+        assert!(editor_has_keyboard(&workspace, cx));
+        assert_eq!(
+            main_relations(&workspace, cx),
+            ["orders", "users"],
+            "the catalog is read again under the list"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.tables_of(Some("e2e"), "main"),
+                ["orders", "users"]
+            );
+            assert!(profile.include.databases.is_empty() && profile.include.schemas.is_empty());
+            assert_eq!(
+                (profile.generation, profile.config.clone()),
+                before,
+                "a filter edit never reconnects"
+            );
+            let nodes = &workspace.connections.nodes;
+            let row =
+                |name: &str| scoped_row("e2e", Some("e2e"), &explorer::relation_row("main", name));
+            assert!(nodes.contains_key(&row("orders")));
+            assert!(!nodes.contains_key(&row("junk")), "the table is gone");
+            assert!(
+                !nodes.contains_key(&row("recent")),
+                "views are filtered too"
+            );
+            let schema = scoped_row("e2e", Some("e2e"), "schema-main");
+            assert_eq!(workspace.connections.counts.get(&schema), Some(&2));
+            assert_eq!(
+                workspace.connections.totals.get(&schema),
+                Some(&4),
+                "the row reads `2 of 4`"
+            );
+        });
+        let saved = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        let saved = saved
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "e2e")
+            .expect("the profile was saved");
+        assert_eq!(saved.include_tables.len(), 1);
+        assert_eq!(saved.include_tables[0].schema, "main");
+        assert_eq!(saved.include_tables[0].tables, ["orders", "users"]);
+
+        // Opened again, the dialog still lists what the list hides, ticked
+        // for what it shows.
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.databases.listing,
+                Listing::Loaded(vec![
+                    "junk".into(),
+                    "orders".into(),
+                    "recent".into(),
+                    "users".into()
+                ]),
+                "the hidden names are kept to be ticked again"
+            );
+            assert_eq!(picker.databases.ticked, ["orders", "users"]);
+        });
+        // Removing the filter and saving lists everything again.
+        click_selector(cx, "filter-picker-remove");
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        assert_eq!(
+            main_relations(&workspace, cx),
+            ["junk", "orders", "recent", "users"]
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.tables.is_empty());
+        });
+        let file = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("profiles.toml");
+        let text = std::fs::read_to_string(file).expect("profiles.toml reads");
+        assert!(!text.contains("include_tables"), "{text}");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn escape_closes_the_table_picker_without_saving(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_relations(cx);
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-tables-0");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["junk"]);
+        });
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.filter_picker.is_none());
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.tables.is_empty(), "nothing was saved");
+        });
+        assert_eq!(main_relations(&workspace, cx).len(), 4);
+
+        // Discard Changes drops the edits the same way.
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-tables-0");
+        click_selector(cx, "filter-picker-1");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().unwrap().include.tables.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn filter_tables_in_the_palette_opens_the_picker_and_carries_the_count(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            RELATIONS,
+            "CREATE TABLE u (id INTEGER);",
+        );
+        for id in [connection_row("e2e"), database_row("e2e", "e2e")] {
+            let at = connections_row(&workspace, cx, &id).expect("the row shows");
+            click_connections_row(cx, at);
+        }
+        let hint = |cx: &mut VisualTestContext| {
+            palette_hints(&workspace, cx)
+                .into_iter()
+                .find(|(label, _)| label == "Filter tables…")
+                .map(|(_, hint)| hint)
+        };
+        assert_eq!(
+            hint(cx).as_deref(),
+            Some(""),
+            "offered, with no count while nothing is left out"
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .set_tables(Some("e2e"), "main", vec!["orders".into(), "users".into()]);
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert_eq!(hint(cx).as_deref(), Some("2 of 4"), "the tree's count");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(crate::sidebar::ViewMode::Simple, cx);
+            workspace.refocus_front();
+        });
+        settle(cx);
+        assert_eq!(
+            hint(cx).as_deref(),
+            Some(""),
+            "simple mode has no count slot"
+        );
+
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Filter tables");
+        settle(cx);
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.heading(), "Filter Tables");
+            assert_eq!(picker.databases.ticked, ["orders", "users"]);
+            assert!(matches!(
+                &picker.databases.listing,
+                super::filter_picker::Listing::Loaded(names) if names.len() == 4
+            ));
+        });
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_hidden_table_is_not_offered_and_its_open_tab_and_pin_keep_working(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_relations(cx);
+        let click = |id: &str, cx: &mut VisualTestContext| {
+            let at = connections_row(&workspace, cx, id)
+                .unwrap_or_else(|| panic!("{id} is not showing"));
+            click_connections_row(cx, at);
+        };
+        let junk = scoped_row("e2e", Some("e2e"), &explorer::relation_row("main", "junk"));
+        for id in [
+            scoped_row("e2e", Some("e2e"), "schema-main"),
+            scoped_row("e2e", Some("e2e"), "category-Tables-main"),
+            junk.clone(),
+        ] {
+            click(&id, cx);
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::Pin, window, cx)
+        });
+        settle(cx);
+        let survivors = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("a profile is in front");
+                (
+                    profile
+                        .session
+                        .objects
+                        .iter()
+                        .map(|tab| tab.name.clone())
+                        .collect::<Vec<_>>(),
+                    profile.shortcuts.pins.len(),
+                )
+            })
+        };
+        assert_eq!(survivors(cx), (vec!["junk".to_string()], 1));
+
+        // Hidden through the dialog, as a person would.
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-tables-1");
+        click_selector(cx, "filter-picker-row-tables-3");
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        assert_eq!(main_relations(&workspace, cx), ["orders", "users"]);
+
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        let objects = palette_labels(&workspace, cx);
+        assert!(
+            objects.iter().any(|label| label == "main.orders"),
+            "{objects:?}"
+        );
+        assert!(
+            !objects.iter().any(|label| label == "main.junk"),
+            "{objects:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        new_query_here(&workspace, cx, None, None);
+        let offered = completion_labels(&workspace, cx, "SELECT * FROM ju");
+        assert!(
+            !offered.iter().any(|label| label.contains("junk")),
+            "{offered:?}"
+        );
+        let offered = completion_labels(&workspace, cx, "SELECT * FROM ord");
+        assert!(
+            offered.iter().any(|label| label.contains("orders")),
+            "the shown ones still are: {offered:?}"
+        );
+
+        // Nothing was dropped by the save, and the tab still reads.
+        assert_eq!(survivors(cx), (vec!["junk".to_string()], 1));
+        let id = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.objects[0].id
+        });
+        workspace.update(cx, |workspace, cx| workspace.refresh_relation(id, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let tab = &workspace.profile().unwrap().session.objects[0];
+            let ObjectBody::Relation { query, .. } = &tab.body else {
+                panic!("junk is a table");
+            };
+            assert!(matches!(query, QueryState::Complete { .. }));
+            let hidden = workspace
+                .connections
+                .shortcuts
+                .values()
+                .any(|shortcut| shortcut.hidden_relation().is_some());
+            assert!(hidden, "the pin draws hidden, not dropped");
+        });
+
+        // Closed, the tab opens again from the pin by the relation's name.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_object(id, window, cx);
+        });
+        settle(cx);
+        assert!(survivors(cx).0.is_empty());
+        let pin = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .connections
+                .shortcuts
+                .iter()
+                .find(|(_, shortcut)| shortcut.hidden_relation().is_some())
+                .map(|(row, _)| row.clone())
+                .expect("the connections tree lists the hidden pin")
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.open_connection_row(&pin, window, cx));
+        });
+        settle(cx);
+        assert_eq!(survivors(cx).0, vec!["junk".to_string()]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_table_list_survives_a_relaunch_on_a_flat_connection(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (name text); create table nests (id integer); \
+             create view flocks as select * from birds;",
+        );
+        let names = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let catalog = workspace
+                    .profile()
+                    .and_then(|profile| profile.catalog_of(None))
+                    .expect("the catalog has loaded");
+                let mut names: Vec<_> = catalog
+                    .schemas
+                    .iter()
+                    .flat_map(|schema| schema.relations.iter().map(|r| r.name.clone()))
+                    .collect();
+                names.sort();
+                names
+            })
+        };
+        assert_eq!(names(&workspace, cx), ["birds", "flocks", "nests"]);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_command(Command::FilterTables, window, cx)
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        click_selector(cx, "filter-picker-row-tables-0");
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        assert_eq!(names(&workspace, cx), ["birds"]);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.tables_of(None, "main"), ["birds"]);
+        });
+
+        drop(workspace);
+        let (workspace, cx) = relaunch(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.tables_of(None, "main"),
+                ["birds"],
+                "the list is read back from profiles.toml"
+            );
+        });
+        assert_eq!(names(&workspace, cx), ["birds"], "and narrows the catalog");
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_flat_connection_offers_no_filter(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

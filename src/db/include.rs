@@ -106,10 +106,6 @@ impl Include {
 
     /// The table list of `schema` in `database` (see [`TableFilter`] for when
     /// that is `None`), empty when it has none.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the table picker is the first reader")
-    )]
     pub fn tables_of(&self, database: Option<&str>, schema: &str) -> &[String] {
         self.tables
             .iter()
@@ -120,10 +116,6 @@ impl Include {
     /// Replace the table list of one schema with `tables`, normalised as
     /// [`Self::with_tables`] does; an empty list removes it, so the schema
     /// shows every relation again. Every other list is left as it was.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the table picker is the first reader")
-    )]
     pub fn set_tables(&mut self, database: Option<&str>, schema: &str, tables: Vec<String>) {
         let database = database
             .map(str::trim)

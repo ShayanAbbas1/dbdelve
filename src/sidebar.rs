@@ -477,6 +477,8 @@ pub(crate) enum NodeAction {
     Refresh,
     /// Choose which of the server's databases the connection lists.
     FilterDatabases,
+    /// Choose which relations of a schema the tree lists.
+    FilterTables,
 }
 
 /// What a node of `kind` named `name` offers, in the order its menu lists
@@ -491,7 +493,21 @@ pub(crate) fn node_actions(kind: NodeKind, name: &str, target: Target) -> Vec<No
             NodeAction::Refresh,
             NodeAction::FilterDatabases,
         ],
-        NodeKind::Connection | NodeKind::Database | NodeKind::Schema => {
+        // The row that directly holds the relation categories: a schema, and
+        // where a database's one schema is the database itself, that row.
+        NodeKind::Schema => vec![
+            NodeAction::NewQueryHere,
+            copy,
+            NodeAction::Refresh,
+            NodeAction::FilterTables,
+        ],
+        NodeKind::Database if target.levels() == Levels::DatabaseHoldsObjects => vec![
+            NodeAction::NewQueryHere,
+            copy,
+            NodeAction::Refresh,
+            NodeAction::FilterTables,
+        ],
+        NodeKind::Connection | NodeKind::Database => {
             vec![NodeAction::NewQueryHere, copy, NodeAction::Refresh]
         }
         // A target with no definition to write out has none to show.
@@ -519,6 +535,7 @@ impl NodeAction {
             NodeAction::ShowGrants => "Show Grants",
             NodeAction::Refresh => "Refresh",
             NodeAction::FilterDatabases => "Filter Databases",
+            NodeAction::FilterTables => "Filter Tables",
         }
     }
 }
@@ -3361,13 +3378,33 @@ mod tests {
             on(NodeKind::Routine, Engine::Postgres),
             [copy(), NodeAction::ShowDdl]
         );
-        for kind in [NodeKind::Database, NodeKind::Schema] {
+        assert_eq!(
+            on(NodeKind::Database, Engine::Postgres),
+            [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
+            "a database that holds schemas has no relations to filter"
+        );
+        for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
             assert_eq!(
-                on(kind, Engine::Postgres),
-                [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
-                "{kind:?} has no definition of its own"
+                on(NodeKind::Schema, engine),
+                [
+                    NodeAction::NewQueryHere,
+                    copy(),
+                    NodeAction::Refresh,
+                    NodeAction::FilterTables
+                ],
+                "a schema row holds the relations on every shape"
             );
         }
+        assert_eq!(
+            on(NodeKind::Database, Engine::MongoDb),
+            [
+                NodeAction::NewQueryHere,
+                copy(),
+                NodeAction::Refresh,
+                NodeAction::FilterTables
+            ],
+            "where the database is the schema, its row holds the relations"
+        );
         assert_eq!(
             on(NodeKind::Connection, Engine::Postgres),
             [
