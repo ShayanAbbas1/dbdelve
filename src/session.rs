@@ -1326,6 +1326,12 @@ pub(crate) struct Session {
 pub(crate) const APPLY_IN_TRANSACTION: &str =
     "A transaction is open on this connection; the edits were not applied.";
 
+/// Why a review written to join the user's transaction is not run once that
+/// transaction has ended ([`ApplyReview::joining`]).
+pub(crate) const JOINING_ENDED_REFUSAL: &str = "Not sent: these edits were written to join the \
+     transaction that was open, which has since ended. Apply them again to write them as a \
+     batch of their own.";
+
 /// A generated statement waiting to be read and run.
 pub(crate) struct ApplyReview {
     /// The tab the edits came from, so the modal is shown over that surface
@@ -1351,6 +1357,12 @@ pub(crate) struct ApplyReview {
     /// The profile generation its last Run went out on. A reconnect since
     /// means that run's landing will be dropped, so the review may close.
     pub(crate) ran_on: Option<u64>,
+    /// `sql` was written without brackets of its own, to join the user's
+    /// transaction open when it was written (`sql::update_batch_joining`).
+    /// Run refuses it once that transaction has ended: each statement would
+    /// then commit on its own, and a failure part way would leave some of
+    /// the edits applied.
+    pub(crate) joining: bool,
 }
 
 /// The rows a reviewed draft was written from, as they were fetched: one step
@@ -5490,6 +5502,7 @@ mod tests {
             edits: true,
             verify: None,
             ran_on: None,
+            joining: false,
         }
     }
 

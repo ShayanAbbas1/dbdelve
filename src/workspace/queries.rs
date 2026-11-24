@@ -14,9 +14,9 @@ use crate::result_grid::{ColumnView, ColumnWidth, StepRow};
 
 use super::*;
 use crate::session::{
-    APPLY_IN_TRANSACTION, AfterEdits, Binding, Bound, Finished, Lane, PendingDelete,
-    PendingDiscard, PendingRun, QueryRename, Queue, Resume, Routed, Step, TabKey, Verification,
-    next_step, query_name_refusal, reveals_results,
+    APPLY_IN_TRANSACTION, AfterEdits, Binding, Bound, Finished, JOINING_ENDED_REFUSAL, Lane,
+    PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Routed, Step, TabKey,
+    Verification, next_step, query_name_refusal, reveals_results,
 };
 
 /// What a `COMMIT` over a failed transaction says it did instead.
@@ -2260,6 +2260,18 @@ impl Workspace {
                 (edit && binding.is_none())
                     .then(|| profile.own_write_refusal(&sql))
                     .flatten()
+            })
+            // The opposite case: a batch written to join the user's open
+            // transaction, unbracketed, after that transaction has ended.
+            .or_else(|| {
+                (edit
+                    && profile
+                        .session
+                        .apply_review
+                        .as_ref()
+                        .is_some_and(|review| review.covers(tab) && review.joining)
+                    && !profile.transaction_open_for(tab))
+                .then(|| JOINING_ENDED_REFUSAL.to_string())
             });
         // An edit sent to a transactional SQL engine leaves the grid and the
         // draft where they are until the server answers, so a refusal or a

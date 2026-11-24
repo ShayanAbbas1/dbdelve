@@ -833,6 +833,7 @@ impl Workspace {
                 edits: false,
                 verify: None,
                 ran_on: None,
+                joining: false,
             });
             cx.notify();
         }

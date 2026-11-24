@@ -369,6 +369,7 @@ impl Workspace {
                 edits: false,
                 verify,
                 ran_on: None,
+                joining: false,
             });
         }
         cx.notify();
@@ -1578,6 +1579,7 @@ impl Workspace {
                 edits: false,
                 verify,
                 ran_on: None,
+                joining: false,
             });
         }
         cx.notify();
@@ -2588,6 +2590,7 @@ impl Workspace {
                         edits: true,
                         verify,
                         ran_on: None,
+                        joining,
                     });
                     cx.notify();
                 }
@@ -2684,6 +2687,7 @@ impl Workspace {
                 edits: true,
                 verify,
                 ran_on: None,
+                joining: false,
             });
             cx.notify();
         }
