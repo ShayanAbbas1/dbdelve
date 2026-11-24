@@ -13969,6 +13969,43 @@ fn clicking_a_listed_files_open_tab_selects_that_files_row(cx: &mut TestAppConte
     });
 }
 
+/// The recent list holds 20, so the 21st file opened pushes the first out of
+/// it while its tab keeps it listed, after the recent ones. Bringing that tab
+/// up puts it back at the head and drops another, which moves the clicked row.
+#[gpui::test]
+fn clicking_a_file_the_recent_cap_pushed_out_still_selects_its_row(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let files: Vec<_> = (0..=20)
+            .map(|n| user_sql_file(&format!("{n:02}.sql"), "SELECT 1;"))
+            .collect();
+        for path in &files {
+            open_sql_file(&workspace, cx, path);
+        }
+        pick_from_explorer_menu(&workspace, cx, explorer::FILES_GROUP, 2);
+        settle(cx);
+        let evicted = &files[0];
+        workspace.read_with(cx, |workspace, _| {
+            let recent = &workspace.profile().unwrap().recent_files;
+            assert_eq!(recent.len(), 20);
+            assert!(!recent.contains(evicted));
+        });
+
+        let row = explorer_row(&workspace, &explorer::file_row(evicted), cx).center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_file(&workspace, cx), Some(evicted.clone()));
+        let selected = workspace.read_with(cx, |workspace, cx| {
+            let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+            tree.read(cx)
+                .selected_item()
+                .map(|item| item.id.to_string())
+        });
+        assert_eq!(selected, Some(explorer::file_row(evicted)));
+        quit(workspace, cx);
+    });
+}
+
 /// The Files group's row menu orders every Files group, in either tree, and
 /// the order is kept in the settings. Bringing a listed file up moves no row.
 #[gpui::test]

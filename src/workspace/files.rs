@@ -305,7 +305,8 @@ impl Workspace {
         self.profiles_unsaved = true;
         // Rebuilt only once the event in hand is done: a click on the file's
         // row brings it up, and the tree then selects the row it drew under
-        // the pointer by its index, which the reorder has given another file.
+        // the pointer by its index. A file rejoining the list, and one the cap
+        // pushes out, can give that index to another file in either order.
         let workspace = cx.entity().downgrade();
         let profile_id = profile_id.to_string();
         cx.defer(move |cx| {
