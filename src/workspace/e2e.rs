@@ -2829,7 +2829,11 @@ fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_hidden_and_open
         let pin_missing = |cx: &mut VisualTestContext| {
             workspace.read_with(cx, |workspace, _| {
                 let profile = workspace.profile().expect("a profile is in front");
-                let content = super::profiles::explorer_content(profile, "");
+                let content = super::profiles::explorer_content(
+                    profile,
+                    "",
+                    crate::explorer::FilesOrder::Name,
+                );
                 let mut pins = content
                     .shortcuts
                     .values()

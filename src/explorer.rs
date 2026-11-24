@@ -3420,7 +3420,7 @@ mod tests {
         let built = super::tree(&narrowed, "");
         assert_eq!(built.left_out, 3);
 
-        let mut after_queries = super::files(&[], &["q".to_string()], "");
+        let mut after_queries = super::files(&[], &["q".to_string()], "", FilesOrder::Name);
         after_queries.extend(built);
         assert_eq!(after_queries.left_out, 3);
 
