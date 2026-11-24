@@ -3465,15 +3465,15 @@ mod tests {
         );
         assert_eq!(
             role_node_actions(&role(true), Some(&read(true, None))),
-            [Edit, ResetPassword, ShowGrants, Deactivate]
+            [Edit, ResetPassword, ShowGrants, Deactivate, CopyDropRole]
         );
         assert_eq!(
             role_node_actions(&role(true), Some(&read(false, Some(true)))),
-            [Edit, ResetPassword, ShowGrants, Reactivate]
+            [Edit, ResetPassword, ShowGrants, Reactivate, CopyDropRole]
         );
         assert_eq!(
             role_node_actions(&role(false), Some(&read(false, None))),
-            [Edit, ShowGrants, AllowLogin]
+            [Edit, ShowGrants, AllowLogin, CopyDropRole]
         );
         assert!(role_node_actions(&role(false), None).is_empty());
         assert!(role_node_actions(&Node::Group, None).is_empty());

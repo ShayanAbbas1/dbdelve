@@ -343,6 +343,57 @@ pub fn set_login(name: &str, login: bool) -> String {
     )
 }
 
+/// The statements that drop `role`, for Copy DROP ROLE: text for the
+/// clipboard, never sent or put in a buffer (AGENTS.md, hard rule 1), as the
+/// explorer's Copy DROP is. `REASSIGN OWNED` and `DROP OWNED` act on the
+/// current database only, so the note names `databases` (what the profile
+/// lists, which the include filter has already narrowed) to run them in.
+/// `connected` is the role the connection signs in as, offered to take over
+/// what `role` owns; with none known, or when it is `role` itself, a marked
+/// placeholder stands in. A connected role or a superuser still gets the
+/// text, with a warning line. Names in a comment lose their line breaks, so
+/// a name cannot end the comment.
+pub fn drop_role_text(role: &Role, connected: Option<&str>, databases: &[String]) -> String {
+    let flat = |text: &str| text.replace(['\n', '\r'], " ");
+    let name = ident(&role.name);
+    let named = flat(&name);
+    let itself = connected == Some(role.name.as_str());
+    let heir = connected.filter(|_| !itself);
+    let mut lines = vec![format!(
+        "-- REASSIGN OWNED and DROP OWNED act on the current database only: run them in every database where {named} owns objects or holds privileges{}.",
+        match databases.is_empty() {
+            true => String::new(),
+            false => format!(": {}", flat(&databases.join(", "))),
+        }
+    )];
+    lines.push(match heir {
+        Some(heir) => format!(
+            "-- Check that {} is the role that should take ownership of what {named} owns.",
+            flat(&ident(heir))
+        ),
+        None => format!(
+            "-- Replace <new_owner> with the role that should take ownership of what {named} owns."
+        ),
+    });
+    if itself {
+        lines.push(format!(
+            "-- Warning: {named} is the role this connection is signed in as, and the server refuses to drop the current user. Connect as another role first."
+        ));
+    }
+    if role.superuser {
+        lines.push(format!(
+            "-- Warning: {named} is a superuser: dropping it removes everything it can do."
+        ));
+    }
+    lines.push(format!(
+        "REASSIGN OWNED BY {name} TO {};",
+        heir.map_or_else(|| "<new_owner>".to_string(), ident)
+    ));
+    lines.push(format!("DROP OWNED BY {name};"));
+    lines.push(format!("DROP ROLE {name};"));
+    lines.join("\n")
+}
+
 fn ident(name: &str) -> String {
     Engine::Postgres.quote_identifier(name)
 }
@@ -805,6 +856,84 @@ pub(super) fn assemble_reports(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_role(name: &str, superuser: bool) -> Role {
+        Role {
+            name: name.into(),
+            login: true,
+            superuser,
+            password_expires: None,
+            expired: false,
+            connection_limit: None,
+            has_password: None,
+            last_login: None,
+        }
+    }
+
+    #[test]
+    fn dropping_a_role_hands_what_it_owns_to_the_connected_role_first() {
+        let text = drop_role_text(&plain_role("ana", false), Some("Boss"), &[]);
+        assert_eq!(
+            text,
+            "-- REASSIGN OWNED and DROP OWNED act on the current database only: run them in every database where \"ana\" owns objects or holds privileges.\n\
+             -- Check that \"Boss\" is the role that should take ownership of what \"ana\" owns.\n\
+             REASSIGN OWNED BY \"ana\" TO \"Boss\";\n\
+             DROP OWNED BY \"ana\";\n\
+             DROP ROLE \"ana\";"
+        );
+    }
+
+    #[test]
+    fn dropping_a_role_names_the_listed_databases_and_marks_a_missing_heir() {
+        let databases = ["app".to_string(), "audit".to_string()];
+        let text = drop_role_text(&plain_role("ana", false), None, &databases);
+        assert!(
+            text.contains("or holds privileges: app, audit.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("-- Replace <new_owner> with the role"),
+            "{text}"
+        );
+        assert!(text.contains("TO <new_owner>;"), "{text}");
+    }
+
+    #[test]
+    fn dropping_the_connected_role_or_a_superuser_still_copies_with_a_warning() {
+        let itself = drop_role_text(&plain_role("ana", false), Some("ana"), &[]);
+        assert!(
+            itself.contains("-- Warning: \"ana\" is the role this connection"),
+            "{itself}"
+        );
+        assert!(
+            itself.contains("TO <new_owner>;"),
+            "it cannot take over its own: {itself}"
+        );
+        assert!(itself.ends_with("DROP ROLE \"ana\";"));
+        let root = drop_role_text(&plain_role("root", true), Some("ana"), &[]);
+        assert!(
+            root.contains("-- Warning: \"root\" is a superuser"),
+            "{root}"
+        );
+        assert!(root.contains("TO \"ana\";"));
+    }
+
+    #[test]
+    fn a_role_name_cannot_end_the_comment_or_the_statement_it_sits_in() {
+        let odd = "a\"b\n; DROP ROLE x";
+        let text = drop_role_text(&plain_role(odd, false), Some("o\nk"), &["d\nb".to_string()]);
+        for line in text.lines().filter(|line| line.starts_with("--")) {
+            assert!(!line.contains('\n'));
+        }
+        // Every line is a comment or one of the three statements: the name's
+        // line break stays inside its quotes, in the statements only.
+        let comments = text
+            .lines()
+            .take_while(|line| line.starts_with("--"))
+            .count();
+        assert_eq!(comments, 2, "{text}");
+        assert!(text.contains("\"a\"\"b\n; DROP ROLE x\""), "{text}");
+    }
 
     #[test]
     fn a_new_login_carries_the_verifier_and_never_the_password() {

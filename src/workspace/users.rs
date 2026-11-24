@@ -462,6 +462,7 @@ impl Workspace {
             UsersEvent::ResetPassword(name) => {
                 self.open_role_form(id, RoleFormKind::Password(name.clone()), window, cx)
             }
+            UsersEvent::CopyDropRole(name) => self.copy_drop_role(id, name, cx),
             UsersEvent::ShowGrants(name) => self.show_role_grants(id, name.clone(), window, cx),
             UsersEvent::SetLogin(name, login) => {
                 let title = if *login {
@@ -517,6 +518,23 @@ impl Workspace {
         };
         let event = action.event(name.unwrap_or_default());
         self.users_event(profile, &view, &event, window, cx);
+    }
+
+    /// Copy Drop Role: the statements that drop `name`, on the clipboard and
+    /// nowhere else. The connection's own user is offered to take over what
+    /// the role owns, and the databases are those already listed.
+    fn copy_drop_role(&self, id: &str, name: &str, cx: &mut Context<Self>) {
+        let Some(role) = self.role_of(id, name) else {
+            return;
+        };
+        let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+            return;
+        };
+        let connected = (profile.config.server())
+            .map(|server| server.user.as_str())
+            .filter(|user| !user.is_empty());
+        let text = roles::drop_role_text(&role, connected, &profile.databases.names);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     fn role_of(&self, id: &str, name: &str) -> Option<Role> {

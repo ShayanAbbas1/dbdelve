@@ -6936,6 +6936,17 @@ fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_
             workspace.run_role_action("far", RoleAction::Edit, Some("ana"), window, cx);
             let form = workspace.role_form.as_ref().expect("Edit… opened its form");
             assert!(matches!(&form.kind, super::RoleFormKind::Edit(role) if role.name == "ana"));
+            // Copy DROP ROLE puts text on the clipboard and sends nothing:
+            // the connection's user, `u`, is offered to take over.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+            workspace.run_role_action("far", RoleAction::CopyDropRole, Some("ana"), window, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            let copied = copied.unwrap_or_default();
+            assert!(
+                copied.contains("REASSIGN OWNED BY \"ana\" TO \"u\";"),
+                "{copied}"
+            );
+            assert!(copied.ends_with("DROP ROLE \"ana\";"), "{copied}");
         });
         quit(workspace, cx);
     });

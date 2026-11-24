@@ -41,6 +41,8 @@ pub enum UsersEvent {
         login: bool,
     },
     Edit(String),
+    /// Copy the statements that drop a role; nothing is run.
+    CopyDropRole(String),
     ResetPassword(String),
     ShowGrants(String),
     /// Turn a login off, or back on.
@@ -63,6 +65,9 @@ pub enum RoleAction {
     Deactivate,
     Reactivate,
     AllowLogin,
+    /// Puts the statements that drop the role on the clipboard, and sends
+    /// nothing.
+    CopyDropRole,
 }
 
 impl RoleAction {
@@ -77,6 +82,7 @@ impl RoleAction {
             RoleAction::Deactivate => "Deactivate…",
             RoleAction::Reactivate => "Reactivate…",
             RoleAction::AllowLogin => "Allow Login…",
+            RoleAction::CopyDropRole => "Copy DROP ROLE",
         }
     }
 
@@ -89,6 +95,7 @@ impl RoleAction {
             RoleAction::Edit => UsersEvent::Edit(name),
             RoleAction::ResetPassword => UsersEvent::ResetPassword(name),
             RoleAction::ShowGrants => UsersEvent::ShowGrants(name),
+            RoleAction::CopyDropRole => UsersEvent::CopyDropRole(name),
             RoleAction::Deactivate => UsersEvent::SetLogin(name, false),
             RoleAction::Reactivate | RoleAction::AllowLogin => UsersEvent::SetLogin(name, true),
         }
@@ -114,6 +121,7 @@ pub fn role_actions(role: &Role) -> Vec<RoleAction> {
         (false, true) => actions.push(RoleAction::Reactivate),
         (false, false) => actions.push(RoleAction::AllowLogin),
     }
+    actions.push(RoleAction::CopyDropRole);
     actions
 }
 
@@ -1297,16 +1305,16 @@ mod tests {
         };
         assert_eq!(
             role_actions(&role("ana", true)),
-            [Edit, ResetPassword, ShowGrants, Deactivate]
+            [Edit, ResetPassword, ShowGrants, Deactivate, CopyDropRole]
         );
         assert_eq!(
             role_actions(&off),
-            [Edit, ResetPassword, ShowGrants, Reactivate],
+            [Edit, ResetPassword, ShowGrants, Reactivate, CopyDropRole],
             "a turned off login is brought back, not deactivated again"
         );
         assert_eq!(
             role_actions(&role("reporting", false)),
-            [Edit, ShowGrants, AllowLogin],
+            [Edit, ShowGrants, AllowLogin, CopyDropRole],
             "a NOLOGIN role has nothing to switch off and no password to reset"
         );
         assert_eq!(NEW_ACTIONS, [NewUser, NewRole]);
