@@ -10,7 +10,11 @@ use gpui::{
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window,
     div, prelude::FluentBuilder, px, relative,
 };
-use gpui_component::{Disableable as _, Icon, button::Button};
+use gpui_component::{
+    Disableable as _, Icon,
+    button::Button,
+    menu::{ContextMenuExt as _, PopupMenuItem},
+};
 
 use crate::actions::{UsersListFirst, UsersListLast, UsersListNext, UsersListPrevious};
 use crate::db::roles::{Reach, Reports, Role, Roles};
@@ -43,6 +47,74 @@ pub enum UsersEvent {
     SetLogin(String, bool),
     /// Write the Reports to a CSV file.
     Export,
+}
+
+/// One thing a row of logins and roles offers, from the detail panel's
+/// buttons and the context menus alike: the one list they all read, as
+/// `sidebar::node_actions` is for a node. Each is a [`UsersEvent`], so none
+/// writes anything but through the review and its gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleAction {
+    NewUser,
+    NewRole,
+    Edit,
+    ResetPassword,
+    ShowGrants,
+    Deactivate,
+    Reactivate,
+    AllowLogin,
+}
+
+impl RoleAction {
+    /// What a button and a menu call it.
+    pub fn label(self) -> &'static str {
+        match self {
+            RoleAction::NewUser => "New User…",
+            RoleAction::NewRole => "New Role…",
+            RoleAction::Edit => "Edit…",
+            RoleAction::ResetPassword => "Reset Password…",
+            RoleAction::ShowGrants => "Show Grants",
+            RoleAction::Deactivate => "Deactivate…",
+            RoleAction::Reactivate => "Reactivate…",
+            RoleAction::AllowLogin => "Allow Login…",
+        }
+    }
+
+    /// What the tab is asked for `name`, which the two New ones ignore.
+    pub fn event(self, name: &str) -> UsersEvent {
+        let name = name.to_string();
+        match self {
+            RoleAction::NewUser => UsersEvent::NewRole { login: true },
+            RoleAction::NewRole => UsersEvent::NewRole { login: false },
+            RoleAction::Edit => UsersEvent::Edit(name),
+            RoleAction::ResetPassword => UsersEvent::ResetPassword(name),
+            RoleAction::ShowGrants => UsersEvent::ShowGrants(name),
+            RoleAction::Deactivate => UsersEvent::SetLogin(name, false),
+            RoleAction::Reactivate | RoleAction::AllowLogin => UsersEvent::SetLogin(name, true),
+        }
+    }
+}
+
+/// What a group row and the Users and roles row offer: a new login or role.
+pub const NEW_ACTIONS: [RoleAction; 2] = [RoleAction::NewUser, RoleAction::NewRole];
+
+/// What `role`'s row offers, in the order its buttons and menus list it.
+/// Deactivate is a login's alone: a NOLOGIN role has nothing to switch off,
+/// it acts only through membership and grants. A login turned off reads as
+/// one only where passwords can be read; elsewhere a role that cannot log in
+/// may be one, so letting it log in again is offered on every such row.
+pub fn role_actions(role: &Role) -> Vec<RoleAction> {
+    let mut actions = vec![RoleAction::Edit];
+    if is_login(role) {
+        actions.push(RoleAction::ResetPassword);
+    }
+    actions.push(RoleAction::ShowGrants);
+    match (role.login, role.deactivated()) {
+        (true, _) => actions.push(RoleAction::Deactivate),
+        (false, true) => actions.push(RoleAction::Reactivate),
+        (false, false) => actions.push(RoleAction::AllowLogin),
+    }
+    actions
 }
 
 pub struct UsersView {
@@ -522,12 +594,16 @@ impl UsersView {
             .child(cell(2, head("Member of").into_any_element()))
             .child(cell(3, head("Last login").into_any_element()))
             .child(cell(4, head("Status").into_any_element()));
+        let view = cx.entity().downgrade();
         let rows = self.listing.iter().map(|Listed { role, member_of }| {
             let status = Status::of(role, roles);
             let selected = self.selected.as_deref() == Some(role.name.as_str());
             let member_of = member_of.clone();
             let login = role.last_login.clone().unwrap_or_else(|| "—".into());
             let name = role.name.clone();
+            let actions = role_actions(role);
+            let menu_view = view.clone();
+            let menu_name = role.name.clone();
             let pick = cx.listener(move |view, _, window, cx| {
                 // A click puts the keys on the list, whatever held them.
                 view.focus.focus(window, cx);
@@ -587,6 +663,24 @@ impl UsersView {
                         .into_any_element(),
                 ))
                 .child(cell(4, status_pill(status, t).into_any_element()))
+                // The detail panel's actions, for this row: a right click
+                // picks it first, as a left one does.
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener({
+                        let name = role.name.clone();
+                        move |view, _, window, cx| {
+                            view.focus.focus(window, cx);
+                            view.select(&name, cx)
+                        }
+                    }),
+                )
+                .context_menu(move |menu, _, _| {
+                    let (view, name) = (menu_view.clone(), menu_name.clone());
+                    actions.iter().fold(menu, |menu, action| {
+                        menu.item(action_item(*action, &name, &view))
+                    })
+                })
         });
         div()
             .id("users-list")
@@ -684,23 +778,7 @@ impl UsersView {
             Some(Loaded::Loading) | None => "Reading the grants…".into(),
         };
         let name = role.name.clone();
-        let edit = cx.listener({
-            let name = name.clone();
-            move |_, _, _, cx| cx.emit(UsersEvent::Edit(name.clone()))
-        });
-        let password = cx.listener({
-            let name = name.clone();
-            move |_, _, _, cx| cx.emit(UsersEvent::ResetPassword(name.clone()))
-        });
-        let grants = cx.listener({
-            let name = name.clone();
-            move |_, _, _, cx| cx.emit(UsersEvent::ShowGrants(name.clone()))
-        });
-        let (off, on) = (name.clone(), name.clone());
-        let deactivate =
-            cx.listener(move |_, _, _, cx| cx.emit(UsersEvent::SetLogin(off.clone(), false)));
-        let reactivate =
-            cx.listener(move |_, _, _, cx| cx.emit(UsersEvent::SetLogin(on.clone(), true)));
+        let actions = role_actions(role);
         panel
             .child(
                 div()
@@ -773,42 +851,25 @@ impl UsersView {
                             .child(reach),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(layout::SPACE_SM))
-                    .child(outline_button("users-edit", "Edit…", t, t.text).on_click(edit))
-                    .when(login, |actions| {
-                        actions.child(
-                            outline_button("users-password", "Reset Password…", t, t.text)
-                                .on_click(password),
-                        )
-                    })
-                    .child(
-                        outline_button("users-grants", "Show Grants", t, t.text).on_click(grants),
-                    )
-                    .when(login && role.login, |actions| {
-                        actions.child(
-                            outline_button("users-deactivate", "Deactivate…", t, t.danger)
-                                .border_color(t.danger.alpha(0.45))
-                                .on_click(deactivate),
-                        )
-                    })
-                    // A login turned off reads as one only where passwords can
-                    // be read; elsewhere a role that cannot log in may be one,
-                    // so letting it log in again is offered on every such row.
-                    .when(!role.login, |actions| {
-                        let label = match role.deactivated() {
-                            true => "Reactivate…",
-                            false => "Allow Login…",
-                        };
-                        actions.child(
-                            outline_button("users-reactivate", label, t, t.text)
-                                .on_click(reactivate),
-                        )
-                    }),
-            )
+            .child(div().flex().flex_wrap().gap(px(layout::SPACE_SM)).children(
+                actions.into_iter().map(|action| {
+                    let name = name.clone();
+                    let (id, ink) = match action {
+                        RoleAction::Deactivate => ("users-deactivate", t.danger),
+                        RoleAction::Reactivate | RoleAction::AllowLogin => {
+                            ("users-reactivate", t.text)
+                        }
+                        RoleAction::ResetPassword => ("users-password", t.text),
+                        RoleAction::ShowGrants => ("users-grants", t.text),
+                        _ => ("users-edit", t.text),
+                    };
+                    outline_button(id, action.label(), t, ink)
+                        .when(action == RoleAction::Deactivate, |button| {
+                            button.border_color(t.danger.alpha(0.45))
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(action.event(&name))))
+                }),
+            ))
             .child(div().flex_1())
             .child(
                 div()
@@ -1060,6 +1121,19 @@ fn status_pill(status: Status, t: Theme) -> impl IntoElement {
     )
 }
 
+/// A menu item running `action` on `name` through the tab's own event, the
+/// code path its button takes.
+fn action_item(
+    action: RoleAction,
+    name: &str,
+    view: &gpui::WeakEntity<UsersView>,
+) -> PopupMenuItem {
+    let (view, name) = (view.clone(), name.to_string());
+    PopupMenuItem::new(action.label()).on_click(move |_, _, cx| {
+        _ = view.update(cx, |_, cx| cx.emit(action.event(&name)));
+    })
+}
+
 /// A button drawn as a hairline outline, its label in `ink`.
 fn outline_button(
     id: &'static str,
@@ -1212,6 +1286,51 @@ mod tests {
         assert_eq!(Status::of(&roles.roles[0], &roles), Status::Role);
         // Postgres records no logins, so no login is called never logged in.
         assert_eq!(Status::of(&roles.roles[2], &roles), Status::Active);
+    }
+
+    #[test]
+    fn a_row_offers_what_its_state_allows() {
+        use RoleAction::*;
+        let off = Role {
+            has_password: Some(true),
+            ..role("intern", false)
+        };
+        assert_eq!(
+            role_actions(&role("ana", true)),
+            [Edit, ResetPassword, ShowGrants, Deactivate]
+        );
+        assert_eq!(
+            role_actions(&off),
+            [Edit, ResetPassword, ShowGrants, Reactivate],
+            "a turned off login is brought back, not deactivated again"
+        );
+        assert_eq!(
+            role_actions(&role("reporting", false)),
+            [Edit, ShowGrants, AllowLogin],
+            "a NOLOGIN role has nothing to switch off and no password to reset"
+        );
+        assert_eq!(NEW_ACTIONS, [NewUser, NewRole]);
+    }
+
+    #[test]
+    fn an_action_asks_for_what_its_button_asks() {
+        assert!(matches!(
+            RoleAction::NewUser.event("x"),
+            UsersEvent::NewRole { login: true }
+        ));
+        assert!(matches!(
+            RoleAction::NewRole.event("x"),
+            UsersEvent::NewRole { login: false }
+        ));
+        assert!(matches!(RoleAction::Edit.event("ana"), UsersEvent::Edit(n) if n == "ana"));
+        assert!(matches!(
+            RoleAction::Deactivate.event("ana"),
+            UsersEvent::SetLogin(n, false) if n == "ana"
+        ));
+        assert!(matches!(
+            RoleAction::AllowLogin.event("ana"),
+            UsersEvent::SetLogin(n, true) if n == "ana"
+        ));
     }
 
     #[test]

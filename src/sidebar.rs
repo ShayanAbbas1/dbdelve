@@ -15,12 +15,14 @@ use std::{
 
 use gpui_component::tree::TreeItem;
 
+use crate::db::roles::Role;
 use crate::db::{Levels, RelationKind, Target};
 use crate::explorer::{
     Builder, ExplorerLeaf, ExplorerTree, RELATION_CATEGORIES, Shortcut, is_file_row, is_schema_row,
     saved_query,
 };
 use crate::store::StoredProject;
+use crate::users_view::{NEW_ACTIONS, RoleAction, role_actions};
 
 /// Which sidebar the window draws: today's tree for the connection in front,
 /// or every connection under its project.
@@ -537,6 +539,19 @@ impl NodeAction {
             NodeAction::FilterDatabases => "Filter Databases",
             NodeAction::FilterTables => "Filter Tables",
         }
+    }
+}
+
+/// What a Users and roles row of the connections tree offers on a right
+/// click: the Users and roles row and its group rows a new login or role, a
+/// login's or role's own row what the Users and roles tab's buttons offer
+/// for it (`role`, as read; `None` while it is not, which offers nothing).
+/// Any other node offers none of these.
+pub(crate) fn role_node_actions(node: &Node, role: Option<&Role>) -> Vec<RoleAction> {
+    match node {
+        Node::Users { .. } | Node::RoleGroup { .. } => NEW_ACTIONS.to_vec(),
+        Node::Role { .. } => role.map(role_actions).unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 
@@ -3420,6 +3435,48 @@ mod tests {
             [NodeAction::NewQueryHere, copy(), NodeAction::Refresh],
             "a target with no databases to choose between has nothing to filter"
         );
+    }
+
+    #[test]
+    fn the_users_and_roles_rows_offer_the_tabs_actions() {
+        use crate::users_view::RoleAction::*;
+        let role = |login| Node::Role {
+            profile: "a".into(),
+            name: "ana".into(),
+            login,
+        };
+        let read = |login, has_password| Role {
+            name: "ana".into(),
+            login,
+            superuser: false,
+            password_expires: None,
+            expired: false,
+            connection_limit: None,
+            has_password,
+            last_login: None,
+        };
+        let users = Node::Users {
+            profile: "a".into(),
+        };
+        assert_eq!(role_node_actions(&users, None), [NewUser, NewRole]);
+        assert_eq!(
+            role_node_actions(&Node::RoleGroup { logins: false }, None),
+            [NewUser, NewRole]
+        );
+        assert_eq!(
+            role_node_actions(&role(true), Some(&read(true, None))),
+            [Edit, ResetPassword, ShowGrants, Deactivate]
+        );
+        assert_eq!(
+            role_node_actions(&role(true), Some(&read(false, Some(true)))),
+            [Edit, ResetPassword, ShowGrants, Reactivate]
+        );
+        assert_eq!(
+            role_node_actions(&role(false), Some(&read(false, None))),
+            [Edit, ShowGrants, AllowLogin]
+        );
+        assert!(role_node_actions(&role(false), None).is_empty());
+        assert!(role_node_actions(&Node::Group, None).is_empty());
     }
 
     #[test]

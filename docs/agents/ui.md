@@ -129,7 +129,9 @@ the agent's own catalog read is not part of it).
 
 `users_view.rs` draws it and only asks: what a row or a button wants goes back as a `UsersEvent`, and `workspace/users.rs` does it through the review and `sql::is_generated_role_change`. The list has its own key context, `UsersList` (the list's focus handle, taken when the tab comes to the front and by a click on a row), so a form's field or a dialog keeps its arrows. `users_list_previous`, `_next`, `_first` and `_last` (Up, Down, Home, End, rebindable in Settings) move the pick as a click does, with a fresh `Select` so the reach is read, and scroll the row into view. Up and Down wrap, as the palette's do. No list in the app binds PageUp or PageDown, so these do not.
 
-Deactivate stays login-only: on Postgres a NOLOGIN role has nothing to switch off, it acts only through membership and grants.
+What a row offers is one list, `users_view::role_actions` (Edit…, Reset Password… on a login, Show Grants, and Deactivate…, Reactivate… or Allow Login… as the buttons' conditions say), and `NEW_ACTIONS` (New User…, New Role…) for the Users and roles row and its Logins and Roles rows: the detail panel's buttons, a right click on a row of the tab, and a right click on the connections tree's Users and roles rows (`sidebar::role_node_actions`, read where the menu opens) all read them. Each is a `UsersEvent`, so every change still goes through the review and `sql::is_generated_role_change`; a sidebar row's action goes through `Workspace::run_role_action`, which brings its connection forward and opens the tab first, as `run_node_action` does. Role rows do not feed the palette: `selected_node` has no node for them.
+
+Deactivate stays login-only: on Postgres a NOLOGIN role has nothing to switch off, it acts only through membership and grants. Delete…/DROP ROLE is not offered (AGENTS.md, hard rule 1).
 
 ## Titlebar and appearance
 

@@ -6841,6 +6841,107 @@ fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
 }
 
 #[gpui::test]
+fn a_right_click_on_a_users_row_offers_the_detail_panels_actions_for_that_row(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let (view, events) = users_tab_with_roles(&workspace, cx);
+        let menu_item = |cx: &mut VisualTestContext, row: &'static str, downs: usize| {
+            let at = cx.debug_bounds(row).expect("the row is drawn").center();
+            cx.simulate_event(gpui::MouseDownEvent {
+                position: at,
+                modifiers: gpui::Modifiers::default(),
+                button: gpui::MouseButton::Right,
+                click_count: 1,
+                first_mouse: false,
+            });
+            settle(cx);
+            cx.update(|window, _| {
+                assert!(
+                    window
+                        .context_stack()
+                        .iter()
+                        .any(|context| context.contains("PopupMenu")),
+                    "the row's menu is up"
+                )
+            });
+            // The first item is the first press.
+            for _ in 0..=downs {
+                cx.simulate_keystrokes("down");
+            }
+            press(cx, "enter");
+        };
+        // bo: Edit…, Reset Password…, Show Grants, Deactivate…. The right
+        // click picks the row first, as a left one does.
+        menu_item(cx, "users-row-bo", 0);
+        assert_eq!(*events.borrow(), ["select bo", "edit bo"]);
+        events.borrow_mut().clear();
+        menu_item(cx, "users-row-bo", 2);
+        assert_eq!(*events.borrow(), ["grants bo"]);
+        events.borrow_mut().clear();
+        // A role has no password to reset: Edit…, Show Grants, Allow Login….
+        menu_item(cx, "users-row-reporting", 1);
+        assert_eq!(*events.borrow(), ["select reporting", "grants reporting"]);
+        view.read_with(cx, |view, _| assert_eq!(view.selected(), Some("reporting")));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_does(
+    cx: &mut TestAppContext,
+) {
+    use crate::users_view::RoleAction;
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}[[profiles]]\nid = \"far\"\nname = \"Faraway\"\nhost = \"far.invalid\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"postgres\"\n",
+                sqlite_profile("e2e", "E2E", "")
+            ),
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_ne!(workspace.profile().unwrap().id, "far");
+            workspace.run_role_action("far", RoleAction::NewUser, None, window, cx);
+            let profile = workspace.profile().unwrap();
+            assert_eq!(profile.id, "far", "its connection came to the front");
+            assert!(
+                (profile.session.objects.iter())
+                    .any(|tab| matches!(tab.body, ObjectBody::Users { .. })),
+                "its Users and roles tab opened"
+            );
+            let form = workspace
+                .role_form
+                .as_ref()
+                .expect("New User… opened its form");
+            assert!(matches!(
+                form.kind,
+                super::RoleFormKind::New { login: true }
+            ));
+        });
+        // Bringing the connection forward forgets what it had read of its
+        // roles; with them read, Edit… names the role it was asked for.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let far = workspace.profile_mut().unwrap();
+            far.roles =
+                crate::session::RolesState::Loaded(std::sync::Arc::new(crate::db::roles::Roles {
+                    roles: vec![test_role("ana", true)],
+                    ..Default::default()
+                }));
+            workspace.run_role_action("far", RoleAction::Edit, Some("ana"), window, cx);
+            let form = workspace.role_form.as_ref().expect("Edit… opened its form");
+            assert!(matches!(&form.kind, super::RoleFormKind::Edit(role) if role.name == "ana"));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_users_and_roles_tab_is_never_saved_with_the_session(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");

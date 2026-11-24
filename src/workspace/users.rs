@@ -20,7 +20,7 @@ use super::*;
 
 use crate::db::roles::{self, NewRole, ObjectGrants, Role, RoleEdit, RoleGrants};
 use crate::sidebar::RolesListing;
-use crate::users_view::{Loaded, UsersEvent, UsersView, reports_csv};
+use crate::users_view::{Loaded, RoleAction, UsersEvent, UsersView, reports_csv};
 
 use super::exports::{choose_path, could_not_write, write_replacing};
 
@@ -223,6 +223,33 @@ fn limit_in(text: &str) -> Result<Option<i64>, String> {
         Ok(limit) if limit >= 0 => Ok(Some(limit.into())),
         _ => Err("Connection limit takes a whole number, or nothing for no limit.".into()),
     }
+}
+
+/// The items of a Users and roles row's menu, each running
+/// [`Workspace::run_role_action`] for the row the menu was built for.
+pub(super) fn role_items(
+    menu: gpui_component::menu::PopupMenu,
+    profile: &str,
+    name: Option<&str>,
+    actions: Vec<RoleAction>,
+    workspace: &WeakEntity<Workspace>,
+) -> gpui_component::menu::PopupMenu {
+    actions.into_iter().fold(menu, |menu, action| {
+        let (workspace, profile, name) = (
+            workspace.clone(),
+            profile.to_string(),
+            name.map(str::to_string),
+        );
+        menu.item(
+            gpui_component::menu::PopupMenuItem::new(action.label()).on_click(
+                move |_, window, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.run_role_action(&profile, action, name.as_deref(), window, cx)
+                    });
+                },
+            ),
+        )
+    })
 }
 
 impl Workspace {
@@ -446,6 +473,50 @@ impl Workspace {
             }
             UsersEvent::Export => self.export_reports(id, cx),
         }
+    }
+
+    /// What a right click on the connections tree's row `id` offers where it
+    /// is a Users and roles row: its connection, the login or role it names
+    /// (none on the group rows) and the actions. Read where the menu opens,
+    /// so a role turned off since the tree was drawn is offered as it is now.
+    pub(crate) fn role_menu(&self, id: &str) -> Option<(String, Option<String>, Vec<RoleAction>)> {
+        let node = self.connections.nodes.get(id)?;
+        let (profile, name) = match node {
+            crate::sidebar::Node::Users { profile } => (profile.clone(), None),
+            crate::sidebar::Node::RoleGroup { .. } => {
+                (crate::sidebar::unscoped(id)?.profile.to_string(), None)
+            }
+            crate::sidebar::Node::Role { profile, name, .. } => {
+                (profile.clone(), Some(name.clone()))
+            }
+            _ => return None,
+        };
+        let role = name
+            .as_deref()
+            .and_then(|name| self.role_of(&profile, name));
+        let actions = crate::sidebar::role_node_actions(node, role.as_ref());
+        Some((profile, name, actions))
+    }
+
+    /// What `action` does for a sidebar row of `profile`: its connection
+    /// comes to the front and its Users and roles tab opens (or comes
+    /// forward) with `name` picked, then the tab is asked as its own button
+    /// asks, so the review and `sql::is_generated_role_change` stand in
+    /// between whatever it changes.
+    pub(crate) fn run_role_action(
+        &mut self,
+        profile: &str,
+        action: RoleAction,
+        name: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_users(profile, name.map(str::to_string), window, cx);
+        let Some(view) = self.users_view_of(profile) else {
+            return;
+        };
+        let event = action.event(name.unwrap_or_default());
+        self.users_event(profile, &view, &event, window, cx);
     }
 
     fn role_of(&self, id: &str, name: &str) -> Option<Role> {

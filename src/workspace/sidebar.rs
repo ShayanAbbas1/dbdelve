@@ -1329,6 +1329,16 @@ impl Workspace {
             {
                 return file_row_menu(menu, path, &profile.id, &menu_workspace);
             }
+            // A Users and roles row: the tab's own actions, for the role.
+            if let Some((profile, name, actions)) = state.role_menu(id) {
+                return super::users::role_items(
+                    menu,
+                    &profile,
+                    name.as_deref(),
+                    actions,
+                    &menu_workspace,
+                );
+            }
             let Some(node) = state.connections_node(id) else {
                 // A saved query, a folder, the Pinned group or a pin whose
                 // object is gone: the menu simple mode draws for it, but for
