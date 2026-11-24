@@ -5254,6 +5254,25 @@ pub(crate) fn ends_transaction(engine: Engine, sql: &str) -> bool {
     })
 }
 
+/// Whether `sql` ends a transaction at any depth: [`ends_transaction`], but
+/// also inside a T-SQL `BEGIN … END` block or an `IF` branch, which
+/// [`leaves`] reads as ending the transaction just the same.
+pub(crate) fn ends_transaction_at_any_depth(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        visit_statements(&statements, |statement| match statement {
+            Statement::Commit { .. }
+            | Statement::Rollback {
+                savepoint: None, ..
+            } => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break()
+    })
+}
+
 /// Whether `sql` may commit somewhere in it: a `COMMIT` it parses to, at
 /// any depth (a `BEGIN … END` block, an `IF` branch), or,
 /// where the text cannot be read whole, the word anywhere in it, the side
@@ -12155,6 +12174,24 @@ mod tests {
             // Snowflake's requests are stateless: no session holds a
             // transaction there for a submission to end.
             assert!(!ended, "{statement}");
+        }
+    }
+
+    #[test]
+    fn an_end_inside_a_block_is_seen_at_any_depth_but_not_at_the_top_level() {
+        let nested = "BEGIN UPDATE t SET a = 1; COMMIT; END";
+        assert!(!ends_transaction(Engine::SqlServer, nested));
+        assert!(ends_transaction_at_any_depth(Engine::SqlServer, nested));
+        assert_eq!(
+            leaves(Engine::SqlServer, nested).transaction,
+            Some(false),
+            "leaves reads the nested COMMIT as ending the transaction"
+        );
+        for statement in ["SELECT 1", "BEGIN SELECT 1; END", "ROLLBACK TRANSACTION a"] {
+            assert!(
+                !ends_transaction_at_any_depth(Engine::SqlServer, statement),
+                "{statement}"
+            );
         }
     }
 

@@ -3203,7 +3203,10 @@ fn transaction_outcome(
         }
     } else if after == 0 && before > 0 {
         ended_outcome(sql, bracketed)
-    } else if after > 0 && !bracketed && crate::sql::ends_transaction(Engine::SqlServer, sql) {
+    } else if after > 0
+        && !bracketed
+        && crate::sql::ends_transaction_at_any_depth(Engine::SqlServer, sql)
+    {
         // A compile error stops the batch before its `COMMIT` or `ROLLBACK`
         // runs, and `XACT_ABORT` rolls back only on a runtime one.
         super::TRANSACTION_KEPT_OPEN
