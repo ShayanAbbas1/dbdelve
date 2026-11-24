@@ -788,8 +788,13 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Overwrite question are the window's own prompt (`window.prompt`, through
   `Workspace::ask`), not a DBDelve dialog: an NSAlert sheet on macOS and a
   task dialog on Windows, Save the default that takes Return and Cancel the
-  one that takes Escape. Linux has no native one, so GPUI draws its plain
-  fallback, which answers to the mouse alone. The answer calls the same
+  one that takes Escape. Linux has no native one, so DBDelve draws its own
+  (`src/prompt.rs`, installed by `main` as GPUI's prompt builder only off
+  macOS and Windows, since a builder replaces a native dialog too): the
+  dialog card over the window, holding its mouse, with the message and the
+  answers stacked full width, the `ok` one primary, taking the keyboard
+  while it is up and handing it back after. GPUI's own stand-in ignores the
+  theme and the keyboard and lets clicks through. The answer calls the same
   handlers a button did, each of which hands the keyboard back; a prompt
   dropped unanswered changes nothing. Tests answer it with
   `simulate_prompt_answer`. Close All

@@ -13233,6 +13233,54 @@ fn open_dirty_file(
     path
 }
 
+/// Linux's prompt, which DBDelve draws: Escape cancels and hands the
+/// keyboard back, a click behind it does not take the keyboard from it, the
+/// buttons stack in the order asked, and Return saves.
+#[gpui::test]
+fn the_drawn_prompt_answers_the_keyboard_and_holds_the_mouse(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        cx.update(|_, cx| cx.set_prompt_builder(crate::prompt::build));
+        let path = open_dirty_file(&workspace, cx, "drawn.sql");
+        let asked = |cx: &mut VisualTestContext| cx.update(|window, _| window.has_active_prompt());
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        assert!(asked(cx));
+        assert!(!editor_has_keyboard(&workspace, cx), "the prompt has it");
+        press(cx, "escape");
+        assert!(!asked(cx));
+        assert!(is_open(&workspace, cx, &path));
+        assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
+
+        cx.simulate_keystrokes("secondary-w");
+        settle(cx);
+        // Over the buffer, which takes the keyboard from GPUI's own prompt.
+        let window = cx.update(|window, _| window.viewport_size());
+        let buffer = gpui::point(window.width * 0.75, window.height * 0.2);
+        cx.simulate_click(buffer, gpui::Modifiers::default());
+        settle(cx);
+        assert!(asked(cx));
+        assert!(
+            !editor_has_keyboard(&workspace, cx),
+            "nothing behind took it"
+        );
+        let top =
+            |cx: &mut VisualTestContext, button| cx.debug_bounds(button).expect("drawn").top();
+        let stacked = [
+            top(cx, "prompt: Save"),
+            top(cx, "prompt: Don't Save"),
+            top(cx, "prompt: Cancel"),
+        ];
+        assert!(stacked.is_sorted(), "{stacked:?}");
+        press(cx, "enter");
+        assert!(!asked(cx));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
+        assert!(!is_open(&workspace, cx, &path));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn closing_a_dirty_file_tab_asks_and_cancel_keeps_it(cx: &mut TestAppContext) {
     store::tests::with_home(|| {

@@ -580,10 +580,9 @@ impl Workspace {
         );
     }
 
-    /// The platform's own dialog where it has one (macOS, Windows), where
-    /// the first answer takes Return and a `PromptButton::Cancel` Escape.
-    /// Linux has none, and GPUI draws a plain one over the window that
-    /// answers only to the mouse.
+    /// The platform's own dialog where it has one (macOS, Windows), and
+    /// `crate::prompt`'s where it does not; in either, the `PromptButton::Ok`
+    /// takes Return and the `PromptButton::Cancel` Escape.
     fn ask(
         &mut self,
         message: &str,
@@ -594,9 +593,7 @@ impl Workspace {
     ) {
         let answer = window.prompt(PromptLevel::Warning, message, None, answers, cx);
         cx.spawn_in(window, async move |workspace, cx| {
-            // Dropped unanswered, the dialog went with its window or, drawn
-            // by GPUI, was replaced by the next one, whose question now holds
-            // the slot this one would answer.
+            // Dropped unanswered, the dialog went with its window.
             let Ok(answer) = answer.await else {
                 return;
             };
