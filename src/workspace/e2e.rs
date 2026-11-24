@@ -117,8 +117,13 @@ fn launch_on_sqlite_holding<'a>(
     .expect("profiles.toml must be writable");
 
     let (workspace, cx) = launch(cx);
-    // CI's live-test job sets `PG*`, which puts an environment profile in
-    // front of the saved one.
+    front_saved_sqlite(&workspace, cx);
+    (workspace, cx)
+}
+
+/// The saved SQLite profile in front. CI's live-test job sets `PG*`, which
+/// puts an environment profile in front of the saved one on every launch.
+fn front_saved_sqlite(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     workspace.update(cx, |workspace, cx| {
         let index = workspace
             .profiles
@@ -128,7 +133,6 @@ fn launch_on_sqlite_holding<'a>(
         workspace.activate(index, cx);
     });
     cx.run_until_parked();
-    (workspace, cx)
 }
 
 /// The app launched on `profiles`, the `[[profiles]]` tables of a hand-written
@@ -4635,6 +4639,7 @@ fn a_table_list_survives_a_relaunch_on_a_flat_connection(cx: &mut TestAppContext
 
         drop(workspace);
         let (workspace, cx) = relaunch(cx);
+        front_saved_sqlite(&workspace, cx);
         workspace.read_with(cx, |workspace, _| {
             let profile = workspace.profile().expect("the connection is in front");
             assert_eq!(
