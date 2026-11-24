@@ -6859,6 +6859,70 @@ fn show_grants_draws_only_the_rows_in_view_and_keeps_its_scroll(cx: &mut TestApp
     });
 }
 
+#[gpui::test]
+fn show_grants_is_resized_by_its_corner_within_the_window(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_crowded_grants(&workspace, cx, 20);
+        let card = cx.debug_bounds("show-grants").expect("the dialog is drawn");
+        let corner = cx
+            .debug_bounds("grants-resize-corner")
+            .expect("the corner grip is drawn")
+            .center();
+
+        // Pulled in, the centred card shrinks by twice the drag, down to its
+        // least size and no further.
+        drag(
+            cx,
+            corner,
+            corner - gpui::point(gpui::px(40.), gpui::px(30.)),
+        );
+        let smaller = cx.debug_bounds("show-grants").unwrap();
+        assert_eq!(smaller.size.width, card.size.width - gpui::px(80.));
+        assert_eq!(smaller.size.height, card.size.height - gpui::px(60.));
+        let corner = cx.debug_bounds("grants-resize-corner").unwrap().center();
+        drag(
+            cx,
+            corner,
+            corner - gpui::point(gpui::px(2_000.), gpui::px(2_000.)),
+        );
+        let least = cx.debug_bounds("show-grants").unwrap();
+        assert_eq!(
+            least.size.width,
+            gpui::px(crate::theme::layout::GRANTS_MIN_WIDTH)
+        );
+        assert_eq!(
+            least.size.height,
+            gpui::px(crate::theme::layout::GRANTS_MIN_HEIGHT)
+        );
+
+        // The size stays on the dialog's state through frames, and the
+        // bottom edge changes the height alone.
+        settle(cx);
+        let edge = cx.debug_bounds("grants-resize-bottom").unwrap().center();
+        drag(cx, edge, edge + gpui::point(gpui::px(0.), gpui::px(25.)));
+        let taller = cx.debug_bounds("show-grants").unwrap();
+        assert_eq!(taller.size.width, least.size.width);
+        assert_eq!(taller.size.height, least.size.height + gpui::px(50.));
+
+        // Dragged out, it stops at the window's share.
+        let corner = cx.debug_bounds("grants-resize-corner").unwrap().center();
+        drag(
+            cx,
+            corner,
+            corner + gpui::point(gpui::px(5_000.), gpui::px(5_000.)),
+        );
+        let window = cx.update(|window, _| window.viewport_size());
+        let largest = cx.debug_bounds("show-grants").unwrap();
+        assert!(largest.size.width <= window.width * 0.96 + gpui::px(1.));
+        assert!(largest.size.height <= window.height * 0.92 + gpui::px(1.));
+        assert!(largest.size.width > taller.size.width);
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
 /// A Users and roles tab put behind the editor, which SQLite never opens
 /// itself, and its id.
 fn users_tab_on(

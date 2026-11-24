@@ -119,6 +119,17 @@ pub mod layout {
     pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
     pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
     pub const DIALOG_WIDTH: f32 = 420.0;
+    /// The least the Show Grants dialog can be dragged down to: wide enough
+    /// for its title, filter and Close beside each other, tall enough for the
+    /// head, a few rows and the legend.
+    pub const GRANTS_MIN_WIDTH: f32 = 560.0;
+    pub const GRANTS_MIN_HEIGHT: f32 = 320.0;
+    /// How thick the strip along the Show Grants dialog's right and bottom
+    /// edges is that takes a resize drag.
+    pub const RESIZE_EDGE: f32 = 6.0;
+    /// The square at its bottom-right corner that takes a resize drag in
+    /// both directions; larger than the edges so it is easy to hit.
+    pub const RESIZE_GRIP: f32 = 16.0;
     /// A statement or an error shown on a modal, capped so a long one scrolls
     /// inside the card instead of pushing its buttons off the window.
     pub const DIALOG_TEXT_MAX_HEIGHT: f32 = 220.0;

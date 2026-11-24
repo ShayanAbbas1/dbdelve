@@ -1,11 +1,15 @@
 //! Drawing the Show Grants dialog and the role form.
 
-use gpui::{SharedString, relative, uniform_list};
+use gpui::{
+    CursorStyle, MouseButton, MouseDownEvent, Pixels, SharedString, Size, relative, size,
+    uniform_list,
+};
 use gpui_component::Icon;
 
 use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
 
+use super::users::{GrantsEdge, GrantsResize};
 use crate::grants::{Mark, MatrixRow, Who, column_label};
 use crate::theme::ConnectionColor;
 use crate::users_view::Loaded;
@@ -16,6 +20,10 @@ const GRANTS_WIDTH: f32 = 840.;
 /// and a relation's in one row of columns.
 const ROLE_GRANTS_WIDTH: f32 = 1040.;
 const GRANTS_HEIGHT: f32 = 600.;
+/// The share of the window the dialog can take, across and down, however far
+/// it is dragged.
+const GRANTS_MAX_WIDTH_SHARE: f32 = 0.96;
+const GRANTS_MAX_HEIGHT_SHARE: f32 = 0.92;
 /// How tall a row of the table is. The list draws only the rows in view and
 /// needs them all the same height, notes included.
 const GRANTS_ROW_HEIGHT: f32 = 36.;
@@ -325,6 +333,54 @@ impl Workspace {
                     t,
                 ),
             );
+        let resizing = view
+            .resize
+            .map(|drag| drag.edge)
+            .filter(|_| cx.has_active_drag());
+        let (width, height) = match view.size {
+            Some(size) => (size.width, size.height),
+            None => default_grants_size(view.of_object),
+        };
+        let grip = |edge: GrantsEdge, cx: &mut Context<Self>| {
+            let (id, cursor) = match edge {
+                GrantsEdge::Right => ("grants-resize-right", CursorStyle::ResizeLeftRight),
+                GrantsEdge::Bottom => ("grants-resize-bottom", CursorStyle::ResizeUpDown),
+                GrantsEdge::Corner => ("grants-resize-corner", CursorStyle::ResizeUpLeftDownRight),
+            };
+            let edge_width = px(layout::RESIZE_EDGE);
+            let corner = px(layout::RESIZE_GRIP);
+            div()
+                .id(id)
+                .debug_selector(|| id.into())
+                .absolute()
+                .cursor(cursor)
+                .map(|handle| match edge {
+                    GrantsEdge::Right => handle.top_0().right_0().bottom(corner).w(edge_width),
+                    GrantsEdge::Bottom => handle.left_0().bottom_0().right(corner).h(edge_width),
+                    GrantsEdge::Corner => handle.right_0().bottom_0().size(corner),
+                })
+                .when(edge == GrantsEdge::Corner, |handle| {
+                    // The mark of a grip, in the corner it sits in.
+                    handle.child(
+                        div()
+                            .absolute()
+                            .right(px(layout::SPACE_XS))
+                            .bottom(px(layout::SPACE_XS))
+                            .size(px(layout::SPACE_SM + 2.))
+                            .border_r_1()
+                            .border_b_1()
+                            .border_color(t.text_faint),
+                    )
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |workspace, event: &MouseDownEvent, window, cx| {
+                        workspace.begin_grants_resize(edge, event.position, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_drag(DragGrantsResize, |_, _, _, cx| cx.new(|_| DragGrantsResize))
+        };
         Some(
             div()
                 .absolute()
@@ -334,17 +390,22 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
+                .when_some(resizing, |overlay, edge| {
+                    overlay.cursor(grants_cursor(edge))
+                })
+                .on_drag_move::<DragGrantsResize>(cx.listener(
+                    |workspace, event: &gpui::DragMoveEvent<DragGrantsResize>, window, cx| {
+                        workspace.drag_grants_resize(event.event.position, window, cx);
+                    },
+                ))
                 .child(
                     div()
                         .occlude()
                         .debug_selector(|| "show-grants".into())
-                        .w(px(match view.of_object {
-                            true => GRANTS_WIDTH,
-                            false => ROLE_GRANTS_WIDTH,
-                        }))
-                        .max_w(relative(0.96))
-                        .h(px(GRANTS_HEIGHT))
-                        .max_h(relative(0.92))
+                        .w(width)
+                        .max_w(relative(GRANTS_MAX_WIDTH_SHARE))
+                        .h(height)
+                        .max_h(relative(GRANTS_MAX_HEIGHT_SHARE))
                         .flex()
                         .flex_col()
                         .border_1()
@@ -353,6 +414,7 @@ impl Workspace {
                         .overflow_hidden()
                         .text_size(px(layout::chrome(layout::TEXT_MD)))
                         .map(|card| raised_card(card, t))
+                        .when_some(resizing, |card, edge| card.cursor(grants_cursor(edge)))
                         .child(header)
                         .child(
                             div()
@@ -363,12 +425,112 @@ impl Workspace {
                                 .py(px(6.))
                                 .child(body),
                         )
-                        .child(footer),
+                        .child(footer)
+                        .child(grip(GrantsEdge::Right, cx))
+                        .child(grip(GrantsEdge::Bottom, cx))
+                        .child(grip(GrantsEdge::Corner, cx)),
                 )
                 .into_any_element(),
         )
     }
 
+    /// The dialog's size now, as drawn: what the user dragged it to or its
+    /// default, within the window.
+    fn grants_size(&self, window: &Window) -> Option<Size<Pixels>> {
+        let view = self.grants_view_in_front()?;
+        let (width, height) = match view.size {
+            Some(size) => (size.width, size.height),
+            None => default_grants_size(view.of_object),
+        };
+        Some(clamp_grants_size(width, height, window.viewport_size()))
+    }
+
+    /// A press on one of the dialog's grips: remember where, and how big.
+    fn begin_grants_resize(
+        &mut self,
+        edge: GrantsEdge,
+        origin: gpui::Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(size) = self.grants_size(window) else {
+            return;
+        };
+        if let Some(view) = self.grants_view.as_mut() {
+            view.resize = Some(GrantsResize { edge, origin, size });
+            cx.notify();
+        }
+    }
+
+    /// The pointer moved with a grip held. The dialog stays centred, so each
+    /// pixel the pointer travels moves the opposite edge too: twice as much
+    /// size keeps the corner under the pointer.
+    fn drag_grants_resize(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.grants_view.as_mut() else {
+            return;
+        };
+        let Some(drag) = view.resize else {
+            return;
+        };
+        let moved = position - drag.origin;
+        let (mut width, mut height) = (drag.size.width, drag.size.height);
+        if drag.edge != GrantsEdge::Bottom {
+            width += moved.x * 2.;
+        }
+        if drag.edge != GrantsEdge::Right {
+            height += moved.y * 2.;
+        }
+        let next = clamp_grants_size(width, height, window.viewport_size());
+        if view.size != Some(next) {
+            view.size = Some(next);
+            cx.notify();
+        }
+    }
+}
+
+/// What a grip drags the dialog by, empty: the dialog itself is the preview.
+struct DragGrantsResize;
+
+impl Render for DragGrantsResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+fn grants_cursor(edge: GrantsEdge) -> CursorStyle {
+    match edge {
+        GrantsEdge::Right => CursorStyle::ResizeLeftRight,
+        GrantsEdge::Bottom => CursorStyle::ResizeUpDown,
+        GrantsEdge::Corner => CursorStyle::ResizeUpLeftDownRight,
+    }
+}
+
+/// The size the dialog opens at.
+fn default_grants_size(of_object: bool) -> (Pixels, Pixels) {
+    let width = match of_object {
+        true => GRANTS_WIDTH,
+        false => ROLE_GRANTS_WIDTH,
+    };
+    (px(width), px(GRANTS_HEIGHT))
+}
+
+/// A size held between the least the dialog's content fits in and the share
+/// of the window it can take, the window's share winning in a small window.
+fn clamp_grants_size(width: Pixels, height: Pixels, window: Size<Pixels>) -> Size<Pixels> {
+    let widest = window.width * GRANTS_MAX_WIDTH_SHARE;
+    let tallest = window.height * GRANTS_MAX_HEIGHT_SHARE;
+    size(
+        width.max(px(layout::GRANTS_MIN_WIDTH)).min(widest),
+        height.max(px(layout::GRANTS_MIN_HEIGHT)).min(tallest),
+    )
+}
+
+impl Workspace {
     pub(crate) fn render_role_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let form = self.role_form.as_ref()?;
         if self

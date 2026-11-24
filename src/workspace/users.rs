@@ -145,6 +145,27 @@ pub(crate) struct GrantsView {
     pub(crate) matrix: GrantsMatrix,
     /// The rows' scroll position, kept here so a frame does not lose it.
     pub(crate) scroll: gpui::UniformListScrollHandle,
+    /// The size the user dragged the dialog to; `None` until they do.
+    pub(crate) size: Option<gpui::Size<gpui::Pixels>>,
+    /// A resize in progress.
+    pub(crate) resize: Option<GrantsResize>,
+}
+
+/// Which edge of the Show Grants dialog is being dragged.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GrantsEdge {
+    Right,
+    Bottom,
+    Corner,
+}
+
+/// A resize of the Show Grants dialog: where the pointer went down and how
+/// big the dialog was then.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GrantsResize {
+    pub(crate) edge: GrantsEdge,
+    pub(crate) origin: gpui::Point<gpui::Pixels>,
+    pub(crate) size: gpui::Size<gpui::Pixels>,
 }
 
 /// What the Show Grants dialog draws, with what it was built under.
@@ -1238,6 +1259,8 @@ impl Workspace {
             filter,
             matrix: GrantsMatrix::default(),
             scroll: gpui::UniformListScrollHandle::new(),
+            size: None,
+            resize: None,
         });
         cx.notify();
         request
