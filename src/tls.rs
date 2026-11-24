@@ -27,7 +27,7 @@ use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     client::verify_server_cert_signed_by_trust_anchor,
     crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature},
-    pki_types::{CertificateDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
     server::ParsedCertificate,
 };
 pub use tokio_postgres_rustls::MakeRustlsConnect;
@@ -141,13 +141,24 @@ impl SslMode {
 /// Built per connection rather than once: the roots depend on the profile's own
 /// certificate file, and a profile pointing at a private CA must not be able to
 /// widen what another profile trusts.
+///
+/// `client_certificate` and `client_key` are libpq's `sslcert` and `sslkey`:
+/// both or neither, presented whenever the server asks for one.
 pub fn connector(
     mode: SslMode,
     root_certificate: Option<&str>,
+    client_certificate: Option<&str>,
+    client_key: Option<&str>,
 ) -> Result<Option<MakeRustlsConnect>, String> {
     if mode == SslMode::Disable {
+        // Refused rather than dropped: a server that requires the certificate
+        // would otherwise see a login without one and say only that it failed.
+        if client_certificate.is_some() || client_key.is_some() {
+            return Err("A client certificate needs an sslmode other than disable.".to_string());
+        }
         return Ok(None);
     }
+    let identity = client_identity(client_certificate, client_key)?;
 
     // `ring`, matching the provider already in the tree. rustls defaults to
     // `aws-lc-rs`, which would drag in a second crypto library with a C and
@@ -157,28 +168,62 @@ pub fn connector(
         .with_safe_default_protocol_versions()
         .map_err(|error| format!("Could not configure TLS: {error}"))?;
 
-    let config = match mode {
+    let verifying = match mode {
         // The one mode that needs nothing written for it, and deliberately the
         // only one that does not go through `dangerous()`.
-        SslMode::VerifyFull => versions
-            .with_root_certificates(roots(root_certificate)?)
-            .with_no_client_auth(),
+        SslMode::VerifyFull => versions.with_root_certificates(roots(root_certificate)?),
         SslMode::VerifyCa => versions
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(TrustChainOnly {
                 roots: roots(root_certificate)?,
                 provider,
-            }))
-            .with_no_client_auth(),
+            })),
         // libpq's `prefer` and `require` encrypt without asking who answered.
         SslMode::Prefer | SslMode::Require => versions
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(TrustAnyServer { provider }))
-            .with_no_client_auth(),
+            .with_custom_certificate_verifier(Arc::new(TrustAnyServer { provider })),
         SslMode::Disable => unreachable!("returned above"),
+    };
+    let config = match identity {
+        Some((chain, key)) => verifying
+            .with_client_auth_cert(chain, key)
+            .map_err(|error| format!("The client certificate cannot be used: {error}"))?,
+        None => verifying.with_no_client_auth(),
     };
 
     Ok(Some(MakeRustlsConnect::new(config)))
+}
+
+/// The certificate chain and private key a client presents, read from their
+/// PEM files.
+///
+/// ponytail: PEM only, and the key unencrypted. libpq also reads a DER key and
+/// decrypts one with `sslpassword`; either needs the key converted first.
+fn client_identity(
+    certificate: Option<&str>,
+    key: Option<&str>,
+) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>, String> {
+    let (certificate, key) = match (certificate, key) {
+        (None, None) => return Ok(None),
+        (Some(certificate), Some(key)) => (certificate, key),
+        (Some(_), None) => return Err("A client certificate needs its private key.".to_string()),
+        (None, Some(_)) => return Err("A client key needs its certificate.".to_string()),
+    };
+    let open = |path: &str| {
+        std::fs::File::open(crate::store::home_expanded(path))
+            .map(std::io::BufReader::new)
+            .map_err(|error| format!("Could not read {path}: {error}"))
+    };
+    let chain = rustls_pemfile::certs(&mut open(certificate)?)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not read {certificate}: {error}"))?;
+    if chain.is_empty() {
+        return Err(format!("{certificate} holds no certificates."));
+    }
+    let private_key = rustls_pemfile::private_key(&mut open(key)?)
+        .map_err(|error| format!("Could not read {key}: {error}"))?
+        .ok_or_else(|| format!("{key} holds no unencrypted private key."))?;
+    Ok(Some((chain, private_key)))
 }
 
 /// The roots a certificate is checked against.
@@ -419,11 +464,34 @@ mod tests {
 
     #[test]
     fn disable_builds_no_connector_and_every_other_mode_builds_one() {
-        assert!(connector(SslMode::Disable, None).unwrap().is_none());
+        assert!(
+            connector(SslMode::Disable, None, None, None)
+                .unwrap()
+                .is_none()
+        );
         // These two never read a trust store, so they cannot fail on a machine
         // that has none.
-        assert!(connector(SslMode::Prefer, None).unwrap().is_some());
-        assert!(connector(SslMode::Require, None).unwrap().is_some());
+        assert!(
+            connector(SslMode::Prefer, None, None, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            connector(SslMode::Require, None, None, None)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_client_certificate_comes_with_its_key_and_never_goes_unsent() {
+        let half = |certificate, key| connector(SslMode::Require, None, certificate, key).err();
+        assert!(half(Some("/c.pem"), None).unwrap().contains("private key"));
+        assert!(half(None, Some("/k.pem")).unwrap().contains("certificate"));
+        assert!(
+            connector(SslMode::Disable, None, Some("/c.pem"), Some("/k.pem"))
+                .is_err_and(|error| error.contains("disable"))
+        );
     }
 
     #[test]
@@ -431,8 +499,8 @@ mod tests {
         // Falling back to the platform store would trust a wider set than the
         // profile asked for, which is the one thing pinning a CA is meant to
         // prevent.
-        let missing = connector(SslMode::VerifyFull, Some("/nonexistent/ca.pem"));
+        let missing = connector(SslMode::VerifyFull, Some("/nonexistent/ca.pem"), None, None);
         assert!(missing.is_err());
-        assert!(connector(SslMode::VerifyCa, Some("/nonexistent/ca.pem")).is_err());
+        assert!(connector(SslMode::VerifyCa, Some("/nonexistent/ca.pem"), None, None).is_err());
     }
 }

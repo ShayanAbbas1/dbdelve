@@ -2191,6 +2191,8 @@ mod tests {
                 password_command: None,
                 sslmode: SslMode::default(),
                 root_certificate: None,
+                client_certificate: None,
+                client_key: None,
                 statement_timeout: 0,
                 ssm: None,
                 ssh: None,

@@ -1077,6 +1077,8 @@ pub(super) fn server_from_url(url: &str, engine: &str) -> Result<ServerConfig, S
         password_command: None,
         sslmode,
         root_certificate,
+        client_certificate: None,
+        client_key: None,
         // A URL has nowhere to say it; the form is where it is set.
         statement_timeout: 0,
         // Same reason: a URL has nowhere to say it either.
@@ -1153,6 +1155,12 @@ pub struct ServerConfig {
     /// libpq's `sslrootcert`. Replaces the platform's trust store rather than
     /// adding to it, and only consulted by the two verifying modes.
     pub root_certificate: Option<String>,
+    /// libpq's `sslcert` and `sslkey`: the PEM files of the certificate a
+    /// client presents and its unencrypted private key, both or neither. Only
+    /// where [`Target::takes_client_certificate`]; every other engine leaves
+    /// both None.
+    pub client_certificate: Option<String>,
+    pub client_key: Option<String>,
     /// How long a statement may run, in seconds, or 0 for no limit.
     ///
     /// A number here and nothing else: how it is expressed is a question each

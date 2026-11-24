@@ -559,6 +559,14 @@ impl Workspace {
                     &form.root_certificate,
                     server.root_certificate.clone().unwrap_or_default(),
                 ),
+                (
+                    &form.client_certificate,
+                    server.client_certificate.clone().unwrap_or_default(),
+                ),
+                (
+                    &form.client_key,
+                    server.client_key.clone().unwrap_or_default(),
+                ),
             ],
             // `from_url` refuses the scheme, so no URL arrives as one.
             ConnectionConfig::Snowflake(_) | ConnectionConfig::External(_) => Vec::new(),
@@ -3411,6 +3419,8 @@ fn stored_config(
                 password_command: stored_password_command(stored, engine),
                 sslmode,
                 root_certificate: stored.root_certificate.clone(),
+                client_certificate: stored.client_certificate.clone(),
+                client_key: stored.client_key.clone(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
                 ssm: stored.ssm.clone(),
                 ssh: stored.ssh.clone(),

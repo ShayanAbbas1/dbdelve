@@ -85,6 +85,8 @@ fn environment(variable: &dyn Fn(&str) -> Option<OsString>) -> Vec<(String, Stri
         ("PGPASSWORD", "password"),
         ("PGSSLMODE", "sslmode"),
         ("PGSSLROOTCERT", "sslrootcert"),
+        ("PGSSLCERT", "sslcert"),
+        ("PGSSLKEY", "sslkey"),
     ]
     .into_iter()
     .filter_map(|(name, key)| {
@@ -192,6 +194,14 @@ fn filled(server: &ServerConfig, settings: &[(String, String)]) -> Result<Server
             }
             "sslrootcert" => {
                 filled.root_certificate.get_or_insert_with(|| value.clone());
+            }
+            "sslcert" => {
+                filled
+                    .client_certificate
+                    .get_or_insert_with(|| value.clone());
+            }
+            "sslkey" => {
+                filled.client_key.get_or_insert_with(|| value.clone());
             }
             "service" => return Err("a service cannot name another service.".to_string()),
             // Refused rather than dropped, like a URL parameter: a connection
@@ -423,6 +433,29 @@ host=replica.harness.test
     }
 
     #[test]
+    fn a_service_finishes_the_client_certificate_a_profile_half_states() {
+        let certificate = ServerConfig {
+            client_certificate: Some("/mine.crt".into()),
+            ..ServerConfig::default()
+        };
+        let service = settings(
+            "[harness]\nsslcert=/theirs.crt\nsslkey=/theirs.key\n",
+            "harness",
+        );
+        let server = filled(&certificate, &service).unwrap();
+        assert_eq!(server.client_certificate.as_deref(), Some("/mine.crt"));
+        assert_eq!(server.client_key.as_deref(), Some("/theirs.key"));
+
+        let key = ServerConfig {
+            client_key: Some("/mine.key".into()),
+            ..ServerConfig::default()
+        };
+        let server = filled(&key, &service).unwrap();
+        assert_eq!(server.client_certificate.as_deref(), Some("/theirs.crt"));
+        assert_eq!(server.client_key.as_deref(), Some("/mine.key"));
+    }
+
+    #[test]
     fn a_service_fills_what_the_profile_leaves_blank() {
         let server = filled(&ServerConfig::default(), &settings(FILE, "harness")).unwrap();
         assert_eq!(server.host, "db.harness.test");
@@ -494,9 +527,9 @@ host=replica.harness.test
     fn a_setting_dbdelve_cannot_carry_is_refused_by_name() {
         let failure = filled(
             &ServerConfig::default(),
-            &settings("[harness]\nsslcert=/c\n", "harness"),
+            &settings("[harness]\nsslcompression=1\n", "harness"),
         );
-        assert!(failure.unwrap_err().contains("sslcert"));
+        assert!(failure.unwrap_err().contains("sslcompression"));
     }
 
     #[test]

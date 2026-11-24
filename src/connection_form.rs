@@ -63,6 +63,10 @@ pub(crate) struct ConnectionForm {
     /// Only reachable while the mode consults one, so the field cannot sit
     /// there filled in and doing nothing.
     pub(crate) root_certificate: Entity<InputState>,
+    /// Shown while the target takes one and the mode encrypts, for the same
+    /// reason. Both or neither.
+    pub(crate) client_certificate: Entity<InputState>,
+    pub(crate) client_key: Entity<InputState>,
     /// Off, the SSH fields are kept but not read, the way another engine's
     /// fields are, so turning it back on finds them as they were typed.
     pub(crate) ssh: bool,
@@ -306,6 +310,21 @@ impl ConnectionForm {
                     server.and_then(|server| server.root_certificate.as_deref()),
                 ))
         });
+        let mut path_input = |placeholder: &'static str, path: Option<&str>| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .default_value(value(path))
+            })
+        };
+        let client_certificate = path_input(
+            "None",
+            server.and_then(|server| server.client_certificate.as_deref()),
+        );
+        let client_key = path_input(
+            "None",
+            server.and_then(|server| server.client_key.as_deref()),
+        );
         let ssh = config.and_then(ConnectionConfig::ssh);
         let [ssh_host, ssh_port, ssh_user, ssh_identity_file, ssh_run_as] = ssh_fields(ssh);
         let mut input = |placeholder: &'static str, value: String| {
@@ -461,6 +480,8 @@ impl ConnectionForm {
             password_expires,
             sslmode: server.map(|server| server.sslmode).unwrap_or_default(),
             root_certificate,
+            client_certificate,
+            client_key,
             ssh: ssh.is_some(),
             ssm: config.and_then(ConnectionConfig::ssm).is_some(),
             ssm_target,
@@ -768,6 +789,11 @@ impl ConnectionForm {
         consults_root_certificate(self.sslmode, self.typed_service(cx).as_deref())
     }
 
+    /// Whether the client certificate fields mean anything for what is typed.
+    pub(crate) fn shows_client_certificate(&self) -> bool {
+        self.target().takes_client_certificate() && self.sslmode != SslMode::Disable
+    }
+
     /// What Encryption means for what is typed.
     pub(crate) fn encryption_explanation(&self, cx: &App) -> &'static str {
         encryption_explanation(self.sslmode, self.typed_service(cx).as_deref())
@@ -880,6 +906,17 @@ impl ConnectionForm {
         let root_certificate = consults_root_certificate(self.sslmode, service.as_deref())
             .then(|| read(&self.root_certificate))
             .filter(|path| !path.is_empty());
+        let (client_certificate, client_key) = if self.shows_client_certificate() {
+            let path =
+                |input: &Entity<InputState>| Some(read(input)).filter(|path| !path.is_empty());
+            client_identity(
+                path(&self.client_certificate),
+                path(&self.client_key),
+                service.is_some(),
+            )?
+        } else {
+            (None, None)
+        };
 
         let (password, password_command) = login(
             self.password.read(cx).unmask_value().to_string(),
@@ -895,6 +932,8 @@ impl ConnectionForm {
             password_command,
             sslmode: self.sslmode,
             root_certificate,
+            client_certificate,
+            client_key,
             statement_timeout: self.statement_timeout(cx)?,
             ssm: self.ssm_tunnel(cx)?,
             ssh: self.ssh_tunnel(cx)?,
@@ -1042,6 +1081,25 @@ fn encryption_explanation(mode: SslMode, service: Option<&str>) -> &'static str 
 /// `disable` is stated, so no service replaces it.
 pub(crate) fn consults_root_certificate(mode: SslMode, service: Option<&str>) -> bool {
     mode.checks_certificate() || (service.is_some() && mode != SslMode::Disable)
+}
+
+/// The client certificate and key as typed: both or neither, except beside a
+/// service, which may supply the other half; the connector checks the pair
+/// the service leaves.
+fn client_identity(
+    certificate: Option<String>,
+    key: Option<String>,
+    beside_a_service: bool,
+) -> Result<(Option<String>, Option<String>), String> {
+    match (certificate, key) {
+        (Some(_), None) if !beside_a_service => {
+            Err("Client key is required with a certificate.".into())
+        }
+        (None, Some(_)) if !beside_a_service => {
+            Err("Client certificate is required with a key.".into())
+        }
+        pair => Ok(pair),
+    }
 }
 
 /// The fields `summary` reads, as typed and trimmed.
@@ -1768,6 +1826,8 @@ mod tests {
             password_command: None,
             sslmode: SslMode::default(),
             root_certificate: None,
+            client_certificate: None,
+            client_key: None,
             statement_timeout: 0,
             ssm: None,
             ssh: None,
@@ -2036,6 +2096,23 @@ mod tests {
         assert_eq!(
             summary(Target::built_in(Engine::Postgres), false, &typed).as_deref(),
             Some("db.internal:6432")
+        );
+    }
+
+    #[test]
+    fn half_a_client_certificate_is_kept_only_beside_a_service_that_may_finish_it() {
+        let half = |certificate: Option<&str>, key: Option<&str>, service| {
+            client_identity(certificate.map(Into::into), key.map(Into::into), service)
+        };
+        assert!(half(Some("/c.pem"), None, false).is_err());
+        assert!(half(None, Some("/k.pem"), false).is_err());
+        assert_eq!(
+            half(Some("/c.pem"), None, true),
+            Ok((Some("/c.pem".into()), None))
+        );
+        assert_eq!(
+            half(None, Some("/k.pem"), true),
+            Ok((None, Some("/k.pem".into())))
         );
     }
 

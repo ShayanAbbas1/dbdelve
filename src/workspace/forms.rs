@@ -491,6 +491,28 @@ impl Workspace {
                     .into_any_element(),
                 );
             }
+            if form.shows_client_certificate() {
+                for (id, browse, label, input) in [
+                    (
+                        "client-certificate",
+                        "browse-client-certificate",
+                        "Client certificate",
+                        &form.client_certificate,
+                    ),
+                    (
+                        "client-key",
+                        "browse-client-key",
+                        "Client key",
+                        &form.client_key,
+                    ),
+                ] {
+                    security.push(
+                        field_row(id, label, input, mono_field(input), t)
+                            .child(browse_button(browse, input, t, cx))
+                            .into_any_element(),
+                    );
+                }
+            }
         }
         // A connection string's TLS is the driver's, in its own keys, so it
         // has the tunnel and no Encryption row.
@@ -4624,6 +4646,9 @@ fn shown_file_fields<'a>(form: &'a ConnectionForm, cx: &App) -> Vec<&'a Entity<I
             let mut shown = Vec::new();
             if fields == Fields::Server && form.shows_root_certificate(cx) {
                 shown.push(&form.root_certificate);
+            }
+            if fields == Fields::Server && form.shows_client_certificate() {
+                shown.extend([&form.client_certificate, &form.client_key]);
             }
             if form.ssh {
                 shown.push(&form.ssh_identity_file);
