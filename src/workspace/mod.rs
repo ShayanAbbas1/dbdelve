@@ -16,6 +16,7 @@ mod filter_picker;
 mod filters;
 mod folders;
 mod forms;
+mod grant_edits;
 mod grants_dialog;
 mod import_dialog;
 mod import_rows;

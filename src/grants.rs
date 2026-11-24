@@ -48,6 +48,18 @@ impl Mark {
             false => self,
         }
     }
+
+    /// What a cell's tooltip says of it.
+    pub(crate) fn said(self) -> &'static str {
+        match self {
+            Mark::Granted => "granted",
+            Mark::Grantable => "granted, can grant to others",
+            Mark::Through => "through a role it belongs to",
+            Mark::Public => "granted to PUBLIC",
+            Mark::Blocked => "granted, but the schema is closed to it: out of reach",
+            Mark::None => "not granted",
+        }
+    }
 }
 
 /// What a row's icon says of it.
@@ -83,7 +95,6 @@ impl Who {
 
 /// What a click on one cell of a row does.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub(crate) enum Edit {
     /// Not a privilege this object has (a SELECT on a database).
     Inapplicable,
@@ -100,7 +111,6 @@ pub(crate) enum Edit {
 /// What a row's cells change when edited: the object, the role, and the
 /// database whose session runs the statement.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub(crate) struct EditTarget {
     /// `None` for the connection's own database, which is where database
     /// privileges live whatever database they are on. The editor resolves a
@@ -113,11 +123,46 @@ pub(crate) struct EditTarget {
 /// Which object the grants of an object view are of, which the grants read
 /// does not say.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub(crate) struct EditObject {
     pub(crate) database: Option<String>,
     pub(crate) schema: String,
     pub(crate) name: String,
+}
+
+/// What a cell says in Edit mode: what is staged on it, else what a click on
+/// it does, else why a click does nothing.
+pub(crate) fn edit_tooltip(
+    privilege: &str,
+    mark: Mark,
+    edit: Option<&Edit>,
+    pending: Option<GrantAction>,
+    object: Option<&GrantObject>,
+) -> String {
+    let label = column_label(privilege);
+    match (pending, edit) {
+        (Some(GrantAction::Grant), _) => format!("{label}: to be granted. Click to take it back."),
+        (Some(GrantAction::Revoke), _) => format!("{label}: to be revoked. Click to take it back."),
+        (None, Some(Edit::Revoke)) => format!("{label}: {}. Click to revoke it.", mark.said()),
+        (None, Some(Edit::Grant(Some(how)))) => {
+            format!("{label}: held {how}; that is not changed here. Click to grant it directly.")
+        }
+        (None, Some(Edit::Grant(None))) => format!("{label}: {}. Click to grant it.", mark.said()),
+        (None, Some(Edit::Fixed(why))) => format!("{label}: {}. {why}", mark.said()),
+        (None, Some(Edit::Inapplicable)) => match object {
+            Some(object) => format!("{privilege} does not apply to a {}.", object_kind(object)),
+            None => format!("{privilege} does not apply here."),
+        },
+        (None, None) => format!("{label}: {}. This row cannot be changed.", mark.said()),
+    }
+}
+
+fn object_kind(object: &GrantObject) -> &'static str {
+    match object {
+        GrantObject::Database(_) => "database",
+        GrantObject::Schema(_) => "schema",
+        GrantObject::Relation { sequence: true, .. } => "sequence",
+        GrantObject::Relation { .. } => "table",
+    }
 }
 
 const SUPERUSER_FIXED: &str = "A superuser holds every privilege.";
@@ -143,11 +188,9 @@ pub(crate) struct MatrixRow {
     pub(crate) opened: bool,
     pub(crate) marks: Vec<Mark>,
     /// `None` for a note and a row that cannot be edited at all.
-    #[allow(dead_code)] // read by the Show Grants editor, next commit
     pub(crate) target: Option<EditTarget>,
     /// One per column; empty for a note, and for every row of an object view
     /// built without its [`EditObject`].
-    #[allow(dead_code)] // read by the Show Grants editor, next commit
     pub(crate) edits: Vec<Edit>,
 }
 
@@ -1107,7 +1150,6 @@ fn held_schema<'a>(held: &[&'a HeldGrant]) -> &'a str {
 /// itself, so a role listed in two places (a member under two roles) shows
 /// the same staged cell in both.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the Show Grants editor, next commit
 pub(crate) struct Staged(BTreeSet<GrantChange>);
 
 #[allow(dead_code)] // read by the Show Grants editor, next commit
@@ -2185,6 +2227,40 @@ mod tests {
         assert_eq!(
             sql[1].sql,
             "GRANT DELETE ON TABLE \"public\".\"t\" TO \"ana\";"
+        );
+    }
+
+    #[test]
+    fn an_edit_cell_says_what_a_click_does_or_why_it_does_nothing() {
+        let table = GrantObject::Relation {
+            schema: "s".into(),
+            name: "t".into(),
+            sequence: false,
+        };
+        let says = |edit: Option<&Edit>, pending| {
+            edit_tooltip("SELECT", Mark::Through, edit, pending, Some(&table))
+        };
+        assert_eq!(
+            says(Some(&Edit::Grant(Some("through staff".into()))), None),
+            "Select: held through staff; that is not changed here. Click to grant it directly."
+        );
+        assert_eq!(
+            says(Some(&Edit::Revoke), Some(GrantAction::Revoke)),
+            "Select: to be revoked. Click to take it back."
+        );
+        assert_eq!(
+            says(Some(&Edit::Fixed(OWNER_FIXED.into())), None),
+            format!("Select: through a role it belongs to. {OWNER_FIXED}")
+        );
+        assert_eq!(
+            edit_tooltip(
+                "CONNECT",
+                Mark::None,
+                Some(&Edit::Inapplicable),
+                None,
+                Some(&table)
+            ),
+            "CONNECT does not apply to a table."
         );
     }
 }

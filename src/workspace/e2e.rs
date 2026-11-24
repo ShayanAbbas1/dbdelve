@@ -6565,6 +6565,15 @@ fn show_ddl_opens_a_read_only_view_of_a_tables_definition_and_hands_the_keyboard
     });
 }
 
+/// Which object `birds_grants` are the grants of.
+fn birds_object() -> crate::grants::EditObject {
+    crate::grants::EditObject {
+        database: None,
+        schema: "main".into(),
+        name: "birds".into(),
+    }
+}
+
 /// A table's grants as Postgres would list them: an owner, a role with one
 /// member, and PUBLIC holding nothing.
 fn birds_grants() -> crate::db::roles::ObjectGrants {
@@ -6632,7 +6641,7 @@ fn show_grants_of_a_role_lists_each_database_and_a_failed_read_stays_in_its_own(
                 &id,
                 "Grants of ana".into(),
                 "login".into(),
-                false,
+                None,
                 window,
                 cx,
             );
@@ -6676,7 +6685,7 @@ fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut Te
                 &id,
                 "Grants on birds".into(),
                 "table · main".into(),
-                true,
+                Some(birds_object()),
                 window,
                 cx,
             );
@@ -6806,7 +6815,7 @@ fn open_crowded_grants(workspace: &Entity<Workspace>, cx: &mut VisualTestContext
             &id,
             "Grants on birds".into(),
             "table · main".into(),
-            true,
+            Some(birds_object()),
             window,
             cx,
         );
@@ -6916,7 +6925,7 @@ fn open_role_with_members(
             &id,
             "Grants on birds".into(),
             "table · main".into(),
-            true,
+            Some(birds_object()),
             window,
             cx,
         );
@@ -7058,6 +7067,183 @@ fn show_grants_is_resized_by_its_corner_within_the_window(cx: &mut TestAppContex
         assert!(largest.size.height <= window.height * 0.92 + gpui::px(1.));
         assert!(largest.size.width > taller.size.width);
 
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+/// The front profile made to read as Postgres, the one engine that writes
+/// grant changes, while its live connection stays the SQLite one: what is
+/// built and gated is Postgres's, and anything sent reaches SQLite, which
+/// reads no `GRANT`.
+fn as_postgres(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    workspace.update(cx, |workspace, _| {
+        let profile = workspace.profile_mut().expect("a connection is in front");
+        profile.config = ConnectionConfig::postgres(crate::db::ServerConfig {
+            database: "main".into(),
+            ..Default::default()
+        });
+    });
+}
+
+fn open_birds_grants(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile().expect("a connection is in front");
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let request = workspace.open_grants_view(
+            &id,
+            "Grants on birds".into(),
+            "table · main".into(),
+            Some(birds_object()),
+            window,
+            cx,
+        );
+        let grants = super::GrantsOf::Object(birds_grants());
+        workspace.land_grants(&id, generation, request, Ok(grants), cx);
+    });
+    settle(cx);
+}
+
+fn staged_count(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+    workspace.read_with(cx, |workspace, _| {
+        workspace.grants_view.as_ref().unwrap().staged.len()
+    })
+}
+
+/// Clicks the cell of the row keyed `key` under `privilege`.
+fn click_grant_cell(cx: &mut VisualTestContext, key: &str, privilege: &str) {
+    let selector: &'static str = format!("show-grants-cell-{key}-{privilege}").leak();
+    click_selector(cx, selector);
+}
+
+#[gpui::test]
+fn show_grants_stages_grants_and_revokes_in_edit_mode_and_discards_them(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        // SQLite writes no grant: the dialog stays read-only and says so.
+        open_birds_grants(&workspace, cx);
+        assert!(cx.debug_bounds("show-grants-read-only").is_some());
+        assert!(cx.debug_bounds("show-grants-edit").is_none());
+        press(cx, "escape");
+
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        assert!(cx.debug_bounds("show-grants-read-only").is_none());
+        assert!(cx.debug_bounds("show-grants-edit-bar").is_none());
+        click_selector(cx, "show-grants-edit");
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.grants_view.as_ref().unwrap().editing
+        }));
+        assert!(cx.debug_bounds("show-grants-edit-bar").is_some());
+        assert_eq!(staged_count(&workspace, cx), 0);
+
+        // watchers holds SELECT directly: a click stages its revoke. ana,
+        // listed as watchers' member, holds INSERT through nothing: a click
+        // stages its grant.
+        click_grant_cell(cx, "watchers", "SELECT");
+        click_grant_cell(cx, "watchers\u{1f}ana", "INSERT");
+        assert_eq!(staged_count(&workspace, cx), 2);
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            let changes = view.staged.changes();
+            assert!(changes.iter().any(|change| change.grantee == "watchers"
+                && change.privilege == "SELECT"
+                && change.action == crate::db::roles::GrantAction::Revoke));
+            assert!(changes.iter().any(|change| change.grantee == "ana"
+                && change.privilege == "INSERT"
+                && change.action == crate::db::roles::GrantAction::Grant));
+        });
+
+        // The owner's cells are fixed: the click stages nothing and says why.
+        assert!(cx.debug_bounds("show-grants-refusal").is_none());
+        click_grant_cell(cx, "keeper", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 2);
+        assert!(cx.debug_bounds("show-grants-refusal").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let refusal = workspace.grants_view.as_ref().unwrap().refusal.clone();
+            assert_eq!(
+                refusal.as_deref(),
+                Some("The owner holds every privilege on what it owns.")
+            );
+        });
+
+        // A staged cell clicked again is taken back.
+        click_grant_cell(cx, "watchers", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        assert!(cx.debug_bounds("show-grants-refusal").is_none());
+
+        click_selector(cx, "show-grants-discard");
+        assert_eq!(staged_count(&workspace, cx), 0);
+
+        // Back to View drops what was staged.
+        click_grant_cell(cx, "watchers", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        click_selector(cx, "show-grants-view");
+        assert_eq!(staged_count(&workspace, cx), 0);
+        assert!(cx.debug_bounds("show-grants-edit-bar").is_none());
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_of_a_role_lists_every_privilege_in_edit_mode(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().expect("a connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let request = workspace.open_grants_view(
+                &id,
+                "Grants of ana".into(),
+                "login".into(),
+                None,
+                window,
+                cx,
+            );
+            let access = RoleAccess {
+                superuser: false,
+                databases: vec![DatabaseAccess {
+                    name: "locked".into(),
+                    allows_connections: true,
+                    rights: vec![Right {
+                        privilege: "TEMPORARY".into(),
+                        sources: vec![Source::Public],
+                    }],
+                }],
+            };
+            workspace.land_role_access(&id, generation, request, "ana".into(), Ok(access), cx);
+        });
+        settle(cx);
+        let columns = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .grants_view
+                    .as_ref()
+                    .unwrap()
+                    .matrix
+                    .columns
+                    .clone()
+            })
+        };
+        assert_eq!(columns(&workspace, cx), ["TEMPORARY"]);
+        click_selector(cx, "show-grants-edit");
+        assert_eq!(
+            columns(&workspace, cx),
+            crate::db::roles::PRIVILEGE_ORDER.map(str::to_string)
+        );
+        // A database takes CONNECT, so its cell stages a grant; SELECT does
+        // not apply to one, and the click says so.
+        click_grant_cell(cx, "locked\u{1f}", "CONNECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        click_grant_cell(cx, "locked\u{1f}", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        assert!(cx.debug_bounds("show-grants-refusal").is_some());
+        click_selector(cx, "show-grants-view");
+        assert_eq!(columns(&workspace, cx), ["TEMPORARY"]);
         press(cx, "escape");
         quit(workspace, cx);
     });

@@ -10,7 +10,8 @@ use super::*;
 use crate::ui::{raised_card, segmented, segmented_choice};
 
 use super::users::{GrantsEdge, GrantsResize};
-use crate::grants::{Mark, MatrixRow, Who, column_label};
+use crate::db::roles::GrantAction;
+use crate::grants::{Edit, Mark, MatrixRow, Staged, Who, column_label};
 use crate::theme::ConnectionColor;
 use crate::users_view::Loaded;
 
@@ -43,6 +44,8 @@ impl Workspace {
         let header_close = close_workspace.clone();
         let roles_workspace = close_workspace.clone();
         let members_workspace = close_workspace.clone();
+        let editable = self.grants_editable();
+        let editing = view.editing && editable;
         let header = div()
             .flex()
             .items_center()
@@ -151,16 +154,19 @@ impl Workspace {
                         _ = sticky.update(cx, |workspace, cx| workspace.toggle_grants_sticky(cx));
                     })
             })
-            .child(
-                div()
+            .child(match editable {
+                true => self.grants_mode_switch(editing, view.staged.len(), t, cx),
+                false => div()
+                    .debug_selector(|| "show-grants-read-only".into())
                     .px(px(layout::SPACE_SM))
                     .py(px(3.))
                     .rounded_full()
                     .bg(t.element_hover)
                     .text_color(t.text_muted)
                     .text_size(px(layout::chrome(11.5)))
-                    .child("Read-only"),
-            )
+                    .child("Read-only")
+                    .into_any_element(),
+            })
             .child(
                 icon_button(
                     "close-grants",
@@ -249,6 +255,7 @@ impl Workspace {
                                 };
                                 let matrix = &view.matrix;
                                 let folds = cx.entity().downgrade();
+                                let clicks = folds.clone();
                                 range
                                     .filter_map(|ix| matrix.rows.get(ix))
                                     .map(|row| {
@@ -257,6 +264,10 @@ impl Workspace {
                                             row,
                                             &matrix.columns,
                                             shut,
+                                            editing.then_some(CellEditing {
+                                                staged: &view.staged,
+                                                clicks: Some(&clicks),
+                                            }),
                                             row_theme,
                                             row_font.clone(),
                                         );
@@ -273,6 +284,7 @@ impl Workspace {
                             list.with_decoration(StickyParents {
                                 rows: view.matrix.rows.clone(),
                                 columns: view.matrix.columns.clone(),
+                                staged: editing.then(|| view.staged.clone()),
                                 scroll: view.scroll.clone(),
                                 t,
                                 mono: mono.clone(),
@@ -345,9 +357,10 @@ impl Workspace {
                         "granted, but the schema is closed",
                     ))
             })
-            .child(div().flex_1().min_w(px(160.)).line_height(px(layout::chrome(15.))).child(match view.of_object {
-                true => "Members listed where the engine has role membership. Nothing here runs.",
-                false => "Effective access, as the server answers for it. Nothing here runs.",
+            .child(div().flex_1().min_w(px(160.)).line_height(px(layout::chrome(15.))).child(match (editing, view.of_object) {
+                (true, _) => "A click stages a change. Nothing runs before Run, in the review of every statement.",
+                (false, true) => "Members listed where the engine has role membership. Nothing here runs.",
+                (false, false) => "Effective access, as the server answers for it. Nothing here runs.",
             }))
             .child(
                 self.choice(
@@ -460,6 +473,7 @@ impl Workspace {
                                 .py(px(6.))
                                 .child(body),
                         )
+                        .children(editing.then(|| self.grants_edit_bar(t, mono.clone(), cx)))
                         .child(footer)
                         .child(grip(GrantsEdge::Right, cx))
                         .child(grip(GrantsEdge::Bottom, cx))
@@ -467,6 +481,121 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// View or Edit, in the header, where the engine writes grant changes.
+    /// Back to View drops what was staged, as its tooltip says.
+    fn grants_mode_switch(
+        &self,
+        editing: bool,
+        staged: usize,
+        t: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (view_workspace, edit_workspace) = (cx.entity().downgrade(), cx.entity().downgrade());
+        segmented(t)
+            .debug_selector(|| "show-grants-mode".into())
+            .child(
+                segmented_choice("grants-view", "View", !editing, true, t)
+                    .debug_selector(|| "show-grants-view".into())
+                    .when(staged > 0, |choice| {
+                        choice.tooltip(match staged {
+                            1 => "Back to viewing: drops the change staged".to_string(),
+                            n => format!("Back to viewing: drops the {n} changes staged"),
+                        })
+                    })
+                    .on_click(move |_, _, cx| {
+                        _ = view_workspace
+                            .update(cx, |workspace, cx| workspace.set_grants_editing(false, cx));
+                    }),
+            )
+            .child(
+                segmented_choice("grants-edit", "Edit", editing, true, t)
+                    .debug_selector(|| "show-grants-edit".into())
+                    .tooltip("Stage grants and revokes, to review before any runs")
+                    .on_click(move |_, _, cx| {
+                        _ = edit_workspace
+                            .update(cx, |workspace, cx| workspace.set_grants_editing(true, cx));
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The strip over the footer in Edit mode: what a staged cell looks like,
+    /// why the last click staged nothing, the count, Discard and Review.
+    fn grants_edit_bar(&self, t: Theme, mono: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = self.grants_view_in_front() else {
+            return div().into_any_element();
+        };
+        let staged = view.staged.len();
+        let discard_workspace = cx.entity().downgrade();
+        let key = |chip: AnyElement, label: &'static str| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(chip)
+                .child(label)
+        };
+        div()
+            .debug_selector(|| "show-grants-edit-bar".into())
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_MD))
+            .px(px(18.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(t.border)
+            .text_size(px(layout::chrome(layout::TEXT_SM)))
+            .text_color(t.text_muted)
+            .child(key(
+                staged_chip(GrantAction::Grant, 18., t),
+                "to be granted",
+            ))
+            .child(key(
+                staged_chip(GrantAction::Revoke, 18., t),
+                "to be revoked",
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .children(view.refusal.clone().map(|refusal| {
+                        div()
+                            .debug_selector(|| "show-grants-refusal".into())
+                            .text_color(t.danger)
+                            .child(refusal)
+                    })),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "show-grants-staged-count".into())
+                    .font_family(mono)
+                    .child(match staged {
+                        1 => "1 change".to_string(),
+                        n => format!("{n} changes"),
+                    }),
+            )
+            .child(
+                button(
+                    "grants-discard",
+                    "Discard",
+                    Tone::Quiet,
+                    Control::Compact,
+                    t,
+                )
+                .debug_selector(|| "show-grants-discard".into())
+                .disabled(staged == 0)
+                .on_click(move |_, _, cx| {
+                    _ = discard_workspace
+                        .update(cx, |workspace, cx| workspace.discard_grant_changes(cx));
+                }),
+            )
+            .into_any_element()
     }
 
     /// The dialog's size now, as drawn: what the user dragged it to or its
@@ -702,6 +831,9 @@ impl Workspace {
 struct StickyParents {
     rows: std::sync::Arc<[MatrixRow]>,
     columns: Vec<String>,
+    /// What Edit mode has staged, drawn on the pinned rows too; their cells
+    /// take no click, the row's click scrolls to it.
+    staged: Option<Staged>,
     scroll: gpui::UniformListScrollHandle,
     t: Theme,
     mono: SharedString,
@@ -753,6 +885,10 @@ impl gpui::UniformListDecoration for StickyParents {
                         row,
                         &self.columns,
                         false,
+                        self.staged.as_ref().map(|staged| CellEditing {
+                            staged,
+                            clicks: None,
+                        }),
                         self.t,
                         self.mono.clone(),
                     ))
@@ -786,10 +922,19 @@ fn foldable(drawn: AnyElement, key: &str, folds: gpui::WeakEntity<Workspace>) ->
         .into_any_element()
 }
 
+/// What Edit mode adds to a row's cells: what is staged, and where a click
+/// goes (nowhere on a pinned row).
+#[derive(Clone, Copy)]
+struct CellEditing<'a> {
+    staged: &'a Staged,
+    clicks: Option<&'a gpui::WeakEntity<Workspace>>,
+}
+
 fn grants_row(
     row: &MatrixRow,
     columns: &[String],
     shut: bool,
+    editing: Option<CellEditing>,
     t: Theme,
     mono: SharedString,
 ) -> AnyElement {
@@ -891,28 +1036,115 @@ fn grants_row(
                         }),
                 ),
         )
-        .children(columns.iter().zip(&row.marks).map(|(privilege, mark)| {
-            let privilege = column_label(privilege);
-            let said = match mark {
-                Mark::Granted => "granted",
-                Mark::Grantable => "granted, can grant to others",
-                Mark::Through => "through a role it belongs to",
-                Mark::Public => "granted to PUBLIC",
-                Mark::Blocked => "granted, but the schema is closed to it: out of reach",
-                Mark::None => "not granted",
-            };
+        .children((columns.iter().zip(&row.marks).enumerate()).map(
+            |(column, (privilege, mark))| match editing {
+                Some(editing) => edit_cell(row, column, privilege, *mark, editing, t),
+                None => {
+                    let (label, said) = (column_label(privilege), mark.said());
+                    div()
+                        .id(SharedString::from(format!("grant-{}-{label}", row.key)))
+                        .w(px(PRIVILEGE_COLUMN))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(format!("{label}: {said}"))
+                                .build(window, cx)
+                        })
+                        .child(mark_chip(*mark, 22., t, SharedString::default()))
+                        .into_any_element()
+                }
+            },
+        ))
+        .into_any_element()
+}
+
+/// One cell in Edit mode: a staged change drawn in its place, every other
+/// cell with what a click on it does, a cell that cannot change faded. Every
+/// cell takes the click, so one that cannot change says why in the dialog.
+fn edit_cell(
+    row: &MatrixRow,
+    column: usize,
+    privilege: &str,
+    mark: Mark,
+    editing: CellEditing,
+    t: Theme,
+) -> AnyElement {
+    let pending = editing.staged.pending(row, privilege);
+    let edit = row.edits.get(column);
+    let tip = crate::grants::edit_tooltip(
+        privilege,
+        mark,
+        edit,
+        pending,
+        row.target.as_ref().map(|target| &target.object),
+    );
+    let changes = matches!(edit, Some(Edit::Revoke | Edit::Grant(_)));
+    let selector = format!("show-grants-cell-{}-{privilege}", row.key);
+    let chip = match pending {
+        Some(action) => staged_chip(action, 22., t),
+        None => mark_chip(mark, 22., t, SharedString::default()),
+    };
+    let key = row.key.clone();
+    div()
+        .id(SharedString::from(format!(
+            "grant-edit-{}-{privilege}",
+            row.key
+        )))
+        .debug_selector(move || selector.clone())
+        .w(px(PRIVILEGE_COLUMN))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+        .when(changes, |cell| {
+            cell.cursor_pointer().hover(|cell| cell.bg(t.element_hover))
+        })
+        .when_some(editing.clicks.cloned(), |cell, clicks| {
+            cell.on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                _ = clicks.update(cx, |workspace, cx| {
+                    workspace.toggle_grant_cell(&key, column, cx)
+                });
+            })
+        })
+        .child(
             div()
-                .id(SharedString::from(format!("grant-{}-{privilege}", row.key)))
-                .w(px(PRIVILEGE_COLUMN))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(format!("{privilege}: {said}"))
-                        .build(window, cx)
-                })
-                .child(mark_chip(*mark, 22., t, SharedString::default()))
-        }))
+                .when(!changes && pending.is_none(), |chip| chip.opacity(0.4))
+                .child(chip),
+        )
+        .into_any_element()
+}
+
+/// A staged change, drawn where the cell's mark was: a grant in the colour
+/// an added row has, a revoke in a deleted row's, each outlined dashed, so
+/// neither reads as something the server holds.
+fn staged_chip(action: GrantAction, size: f32, t: Theme) -> AnyElement {
+    let (wash, ink, glyph) = match action {
+        GrantAction::Grant => (t.added, t.success, icon::PLUS),
+        GrantAction::Revoke => (t.deleted, t.danger, icon::MINUS),
+    };
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(if size > 20. { 5. } else { 4. }))
+        .bg(wash)
+        .border_1()
+        .border_dashed()
+        .border_color(ink)
+        .child(
+            Icon::default()
+                .path(glyph)
+                .size(px(size * 0.55))
+                .text_color(ink),
+        )
         .into_any_element()
 }
 

@@ -19,7 +19,7 @@ use gpui::WeakEntity;
 use super::*;
 
 use crate::db::roles::{self, NewRole, ObjectGrants, Role, RoleEdit, RoleGrants};
-use crate::grants::RoleView;
+use crate::grants::{EditObject, RoleView, Staged};
 use crate::sidebar::RolesListing;
 use crate::users_view::{Loaded, RoleAction, UsersEvent, UsersView, reports_csv};
 
@@ -126,8 +126,9 @@ pub(crate) enum GrantsOf {
     Role(RoleView),
 }
 
-/// The Show Grants dialog: read-only, its answer landing only while it
-/// still names the same request.
+/// The Show Grants dialog, its answer landing only while it still names the
+/// same request. Read-only until Edit mode is turned on, where the engine
+/// writes grant changes ([`crate::db::Target::manages_roles`]).
 pub(crate) struct GrantsView {
     pub(crate) profile: String,
     pub(crate) request: u64,
@@ -155,6 +156,14 @@ pub(crate) struct GrantsView {
     /// Whether the rows holding the first one in view stay pinned over the
     /// top of the list while it scrolls.
     pub(crate) sticky: bool,
+    /// Which object an object view lists, which its rows need to be edited.
+    pub(crate) object: Option<EditObject>,
+    /// Edit mode: a click on a cell stages a grant or a revoke.
+    pub(crate) editing: bool,
+    /// What Edit mode has staged, run only through the review.
+    pub(crate) staged: Staged,
+    /// Why the last click staged nothing.
+    pub(crate) refusal: Option<String>,
 }
 
 /// Which edge of the Show Grants dialog is being dragged.
@@ -187,24 +196,42 @@ pub(crate) struct GrantsMatrix {
     pub(crate) built: usize,
     filter: String,
     with_members: bool,
+    editing: bool,
+}
+
+impl GrantsMatrix {
+    /// The row keyed `key`, folded away or not.
+    pub(crate) fn row(&self, key: &str) -> Option<&crate::grants::MatrixRow> {
+        self.unfolded.iter().find(|row| row.key == key)
+    }
 }
 
 impl GrantsView {
     /// Build the table again where what it is built from changed since:
-    /// the grants (`landed`), the filter's text, or the members switch.
-    fn rebuild(&mut self, landed: bool, cx: &App) {
+    /// the grants (`landed`), the filter's text, the members switch or Edit
+    /// mode, which lists every privilege of a role's access.
+    pub(super) fn rebuild(&mut self, landed: bool, cx: &App) {
         let filter = self.filter.read(cx).value().to_string();
-        if !landed && filter == self.matrix.filter && self.with_members == self.matrix.with_members
+        if !landed
+            && filter == self.matrix.filter
+            && self.with_members == self.matrix.with_members
+            && self.editing == self.matrix.editing
         {
             return;
         }
         let (columns, rows) = match &self.data {
             Loaded::Ready(GrantsOf::Object(grants)) => (
                 grants.privileges.clone(),
-                crate::grants::object_rows(grants, self.with_members, &filter, None, &[]),
+                crate::grants::object_rows(
+                    grants,
+                    self.with_members,
+                    &filter,
+                    self.object.as_ref(),
+                    &[],
+                ),
             ),
             Loaded::Ready(GrantsOf::Role(view)) => {
-                let columns = crate::grants::role_columns(view, false);
+                let columns = crate::grants::role_columns(view, self.editing);
                 let rows = crate::grants::role_rows(view, &columns, &filter);
                 (columns, rows)
             }
@@ -217,6 +244,7 @@ impl GrantsView {
             built: self.matrix.built + 1,
             filter,
             with_members: self.with_members,
+            editing: self.editing,
         };
         if !landed {
             // A different table starts at its top.
@@ -1025,14 +1053,20 @@ impl Workspace {
         else {
             return;
         };
-        let shown_database = self
-            .elsewhere(database)
+        let elsewhere = self.elsewhere(database);
+        let shown_database = elsewhere
+            .clone()
             .or_else(|| self.profile().and_then(Profile::active_database));
         let subtitle = [Some(kind.to_string()), shown_database, Some(schema.clone())]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
+        let object = EditObject {
+            database: elsewhere,
+            schema: schema.clone(),
+            name: name.clone(),
+        };
         let (asked_schema, asked) = (schema.clone(), name.clone());
         let task = self.run_routed(
             &profile_id,
@@ -1045,7 +1079,7 @@ impl Workspace {
             &profile_id,
             format!("Grants on {name}"),
             subtitle,
-            true,
+            Some(object),
             window,
             cx,
         );
@@ -1098,7 +1132,7 @@ impl Workspace {
             id,
             format!("Grants of {name}"),
             format!("{kind} · every database it can connect to"),
-            false,
+            None,
             window,
             cx,
         );
@@ -1245,16 +1279,19 @@ impl Workspace {
         true
     }
 
+    /// Open the dialog, `object` naming the object whose grants it lists, or
+    /// `None` for a role's own.
     pub(super) fn open_grants_view(
         &mut self,
         profile: &str,
         title: String,
         subtitle: String,
-        of_object: bool,
+        object: Option<EditObject>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> u64 {
         self.clear_notice();
+        let of_object = object.is_some();
         self.last_grants_request += 1;
         let request = self.last_grants_request;
         let placeholder = if of_object {
@@ -1285,6 +1322,10 @@ impl Workspace {
             resize: None,
             collapsed: Default::default(),
             sticky: true,
+            object,
+            editing: false,
+            staged: Staged::default(),
+            refusal: None,
         });
         cx.notify();
         request
