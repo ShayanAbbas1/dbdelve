@@ -837,6 +837,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Snowflake and Turso are out of the Row-mode set (no Draft or Row control on
   their tables) because their results are never editable: Snowflake's keys are
   not enforced, and Turso's driver names no column's table.
+- **A grant review is over the tab, not run by it.** Show Grants' Review
+  changes… (`Workspace::review_grant_changes`) puts an `ApplyReview` whose
+  `grants` is set over whatever tab is in front, since a Show Grants opened
+  from the explorer has no Users and roles tab, and through
+  `review_slot_free` like any other. Its Run (`run_grant_review`) never goes
+  through `execute_and_then` or the tab's `QueryState`: each database's
+  batch goes to that database's session (`route_in`, `run_routed`) and runs
+  on a session of its own (`generated_apart`), one after another, so the tab
+  shows no spinner, its own failure is never the review's, and the history
+  keeps none of it, as a role change's. `GrantRun::running` holds the run's
+  Cancel: a second Run waits for it, and Cancel or Esc while it is out sends
+  the cancel first (what was not sent is not sent) and closes on the second
+  press.
 - **A requery over a draft asks first.** An action that would replace a grid's
   rows over cell edits nobody has applied asks Discard / Cancel and does
   nothing until answered. `Workspace::held_for_edits` is the one guard,

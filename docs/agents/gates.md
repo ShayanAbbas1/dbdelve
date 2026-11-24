@@ -437,9 +437,31 @@ Refused, and why:
 - Anything else in the batch: a `DROP` after the `GRANT` fails the whole batch.
 
 A batch runs on the session of its database (`GrantBatch::database`; `None`
-is the connection's own), since a table's privileges live in its database's
-catalog. `sql::classify` reads every `GRANT` and `REVOKE` as Full, so the mode
-decides.
+is the connection's own, and a role view's sections that name it are mapped
+to `None` first, `grants::on_own_session`, so they share its batch), since a
+table's privileges live in its database's catalog. Each batch is gated on its
+own; the review shows them joined, under a `-- in database` comment line per
+batch when more than one database runs or the one that does is not the
+connection's own, and that comment is the only difference from what runs. At
+Run, `sql::classify` reads every `GRANT` and `REVOKE` as Full and `sql::gate`
+decides: below Full it raises the upgrade prompt (`Workspace::require`, with
+nothing to resume: Run is pressed again), and nothing is sent below Full.
+
+Each batch runs on a session of its own beside its database's session
+(`Connection::generated_apart`, through `route_in` and `run_routed`), never
+inside a transaction the user has open, which would hold it and whose
+rollback would undo it: the same reason a role change runs apart. On
+Postgres a batch is one simple-query submission, so it is one implicit
+transaction: a database's statements all apply or none do. The databases run
+in order and stop at the first failure; the review keeps the server's error,
+which databases applied and which were never sent (`grants::run_failure`), and
+the staged changes. A run that applied anything reads the grants again, and
+once every database's read has landed, `Staged::prune` drops what landed.
+
+Not edited, by decision: grant option (no `WITH GRANT OPTION`, no `GRANT
+OPTION FOR`); PUBLIC, neither granted to nor revoked from, since a click on
+it would change every role; column privileges and `ALTER DEFAULT
+PRIVILEGES`, which the matrix has no cell for.
 
 Show Grants and everything else the tab reads are catalog reads on a side
 connection (`Connection::apart`), never a statement of the user's.

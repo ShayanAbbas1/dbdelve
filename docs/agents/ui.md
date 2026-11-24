@@ -133,6 +133,33 @@ What a row offers is one list, `users_view::role_actions` (Edit…, Reset Passwo
 
 Show Grants of a role (`Workspace::show_role_grants`) lists what the role can do in every database of the server it can `CONNECT` to, not only the connected one: `pg_class`, `pg_namespace` and their ACLs are per database, so one read of the connected database says nothing of the others. `db::roles::database_access_sql` reads the cluster-wide part once (`pg_database`, with `has_database_privilege` for what is effective and the ACL, or `acldefault` where `datacl` is NULL, for where it comes from: owner, direct, through a role, PUBLIC, superuser). `grants::RoleView::plan` then decides what is read inside each database: only one the role can connect to (`datallowconn` and an effective `CONNECT`) and that the profile's database filter shows (`Shown::shows_database`), at most `MAX_DATABASES_READ`, and not for a superuser; every other database is still a row, saying why it was not read (no CONNECT, hidden by the filter, over the limit). Each database read is `Postgres::role_grants` (schemas with `USAGE`/`CREATE` and their sources, the relation and column ACLs, ownership and predefined roles, the default-privilege rules that name the role), one after another: the connected database on the tab's side session, any other over its bound session (`route_in` and `run_routed`, as the sidebar reads that database's catalog) on a connection of its own (`apart`), so a failure lands in that database's section only and never touches a tab's transaction. Each answer carries the dialog's request number and is dropped, and the reading ends, once the dialog was closed or asked again. Sources come from the role's `held` set (itself, then each role it inherits from: per membership by `inherit_option` from Postgres 16, by the member's `rolinherit` before) plus PUBLIC (grantee 0); a grant in a schema the role has no `USAGE` on is listed and marked blocked, because it reaches nothing. What a predefined role (`pg_read_all_data`) or the database owner gives without any ACL entry is named as such, and is read from the server's own `has_*_privilege`, which counts them. What it does not read: `pg_hba.conf`, connection limits and `ALTER ROLE ... SET`, so CONNECT is the privilege, not proof a login gets in.
 
+Show Grants has an Edit mode where the target manages roles
+(`Target::manages_roles`, Postgres only, which is also where
+`sql::is_generated_grant_change` admits anything): a View and Edit switch
+takes the header's place of the `Read-only` chip, which stays everywhere
+else. Edit mode lives in `workspace/grant_edits.rs`, its drawing in
+`grants_dialog.rs`. A role view lists every privilege as a column in it
+(`grants::role_columns(view, true)`), so one nothing holds yet can be granted.
+A click on a cell stages its change in `GrantsView::staged`
+(`grants::Staged::toggle`) or takes it back; every cell takes the click, and
+one that cannot change (an owner's, a superuser's, PUBLIC's, a privilege the
+object does not take) stages nothing and says why in the strip over the
+footer. Every cell's tooltip says what a click does or why it does nothing
+(`grants::edit_tooltip`); one held only through a role or PUBLIC says that
+hold is not changed and a click grants it directly. A staged cell is drawn in
+the mark's place, a grant as `+` in an added row's wash and a revoke as `−` in
+a deleted row's, each outlined dashed so neither reads as held. The strip
+counts what is staged and has Discard and Review changes…, which puts every
+statement in the apply review; nothing runs before its Run (gates.md, "Grant
+changes have their own gate"). Back to View drops what was staged, and so
+does closing the dialog, with no prompt: nothing has run, and the review is
+the confirmation. After a successful Run the dialog stays in Edit mode on the
+grants read again. A role view edits only what it lists: a grant on a
+relation the role holds nothing on is made from that relation's own Show
+Grants, whose Edit mode has Grant to…, a menu of the roles not listed
+(`grants::grant_candidates`), the one picked listed holding nothing
+(`GrantsView::added`).
+
 Deactivate stays login-only: on Postgres a NOLOGIN role has nothing to switch off, it acts only through membership and grants. Delete…/DROP ROLE is not offered (AGENTS.md, hard rule 1).
 
 ## Titlebar and appearance

@@ -429,7 +429,8 @@ impl Target {
     }
 
     /// Whether the connection lists its server's users and roles, shows who
-    /// holds which grant on an object, and writes role changes for review.
+    /// holds which grant on an object, and writes role and grant changes for
+    /// review.
     /// Never for a plugin, whose dialect's catalog it may not carry.
     pub fn manages_roles(self) -> bool {
         self.abilities().manages_roles
