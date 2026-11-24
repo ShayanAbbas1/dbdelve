@@ -162,6 +162,9 @@ pub(crate) struct GrantsView {
     pub(crate) editing: bool,
     /// What Edit mode has staged, run only through the review.
     pub(crate) staged: Staged,
+    /// Roles picked by Grant to… in an object view, listed with nothing held
+    /// so a grant can be staged on their row.
+    pub(crate) added: Vec<String>,
     /// Why the last click staged nothing.
     pub(crate) refusal: Option<String>,
 }
@@ -227,7 +230,7 @@ impl GrantsView {
                     self.with_members,
                     &filter,
                     self.object.as_ref(),
-                    &[],
+                    &self.added,
                 ),
             ),
             Loaded::Ready(GrantsOf::Role(view)) => {
@@ -265,7 +268,8 @@ impl GrantsView {
         }
         match &self.data {
             Loaded::Ready(GrantsOf::Object(grants)) => {
-                let rows = crate::grants::object_rows(grants, true, "", self.object.as_ref(), &[]);
+                let rows =
+                    crate::grants::object_rows(grants, true, "", self.object.as_ref(), &self.added);
                 self.staged.prune(&rows, &grants.privileges);
             }
             Loaded::Ready(GrantsOf::Role(view)) if view.pending().is_empty() => {
@@ -1381,6 +1385,7 @@ impl Workspace {
             object,
             editing: false,
             staged: Staged::default(),
+            added: Vec::new(),
             refusal: None,
         });
         cx.notify();

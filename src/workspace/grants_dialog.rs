@@ -558,6 +558,7 @@ impl Workspace {
                 staged_chip(GrantAction::Revoke, 18., t),
                 "to be revoked",
             ))
+            .when(view.of_object, |bar| bar.child(self.grant_to_button(t, cx)))
             .child(
                 div()
                     .flex_1()
@@ -617,6 +618,64 @@ impl Workspace {
                 }),
             )
             .into_any_element()
+    }
+
+    /// Grant to…, in an object view's Edit mode: a role not listed yet, picked
+    /// from a menu, is listed holding nothing so a grant can be staged on it.
+    ///
+    /// ponytail: a plain scrolling menu of every role. A server with
+    /// thousands wants the menu filtered as it is typed into.
+    fn grant_to_button(&self, t: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let candidates: Vec<String> = match self.grants_view_in_front() {
+            Some(view) => match &view.data {
+                Loaded::Ready(GrantsOf::Object(grants)) => {
+                    crate::grants::grant_candidates(grants, &view.added)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                }
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let workspace = cx.entity().downgrade();
+        button(
+            "grants-grant-to",
+            "Grant to…",
+            Tone::Quiet,
+            Control::Compact,
+            t,
+        )
+        .debug_selector(|| "show-grants-grant-to".into())
+        .disabled(candidates.is_empty())
+        .tooltip(match candidates.is_empty() {
+            true => "Every role is listed already",
+            false => "List a role that holds nothing here, to grant it something",
+        })
+        .child(
+            Icon::default()
+                .path(icon::CHEVRON_DOWN)
+                .size(px(layout::chrome(layout::ICON_SIZE)))
+                .text_color(t.text_faint),
+        )
+        .dropdown_menu(move |menu, _, _| {
+            candidates.iter().fold(
+                menu.scrollable(true).max_h(px(layout::MENU_MAX_HEIGHT)),
+                |menu, role| {
+                    let (workspace, role) = (workspace.clone(), role.clone());
+                    menu.item(
+                        gpui_component::menu::PopupMenuItem::new(role.clone()).on_click(
+                            move |_, _, cx| {
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.add_grant_role(&role, cx)
+                                });
+                            },
+                        ),
+                    )
+                },
+            )
+        })
+        .into_any_element()
     }
 
     /// The dialog's size now, as drawn: what the user dragged it to or its

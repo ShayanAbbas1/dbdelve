@@ -493,6 +493,23 @@ pub(crate) fn object_rows(
     rows
 }
 
+/// The roles Grant to… offers on an object view: every role not listed as a
+/// row of its own already (not a superuser, the owner, a grantee, nor one
+/// picked before), in name order.
+pub(crate) fn grant_candidates<'a>(grants: &'a ObjectGrants, added: &[String]) -> Vec<&'a str> {
+    let listed = |name: &str| {
+        name == grants.owner
+            || added.iter().any(|added| added == name)
+            || (grants.grants.iter()).any(|grant| grant.grantee.as_deref() == Some(name))
+    };
+    let mut names: Vec<&str> = (grants.roles.roles.iter())
+        .filter(|role| !role.superuser && !listed(&role.name))
+        .map(|role| role.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
 /// What a click on each cell of `grantee`'s row of an object view does. A cell
 /// a member holds through `through` is one grant short of holding it itself.
 fn object_edits(
@@ -2372,6 +2389,19 @@ mod tests {
         assert_eq!(
             run_failure(&["main".into()], "other", "boom", &[]),
             "Applied in main. In other, none of its statements applied: boom"
+        );
+    }
+
+    #[test]
+    fn grant_to_offers_every_role_not_listed_already() {
+        let grants = orders();
+        assert_eq!(
+            grant_candidates(&grants, &[]),
+            ["ana", "analytics_team", "bi"]
+        );
+        assert_eq!(
+            grant_candidates(&grants, &["bi".into()]),
+            ["ana", "analytics_team"]
         );
     }
 }

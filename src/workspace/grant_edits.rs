@@ -37,6 +37,7 @@ impl Workspace {
         view.refusal = None;
         if !editing {
             view.staged.clear();
+            view.added.clear();
         }
         view.rebuild(true, cx);
         cx.notify();
@@ -53,6 +54,24 @@ impl Workspace {
             return;
         };
         view.refusal = view.staged.toggle(row, &view.matrix.columns, column).err();
+        cx.notify();
+    }
+
+    /// Grant to…: list `role` in an object view, holding nothing yet, so a
+    /// grant can be staged on its row.
+    pub(crate) fn add_grant_role(&mut self, role: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.grants_view.as_mut().filter(|view| view.editing) else {
+            return;
+        };
+        let Loaded::Ready(GrantsOf::Object(grants)) = &view.data else {
+            return;
+        };
+        if !crate::grants::grant_candidates(grants, &view.added).contains(&role) {
+            return;
+        }
+        view.added.push(role.to_string());
+        view.refusal = None;
+        view.rebuild(true, cx);
         cx.notify();
     }
 

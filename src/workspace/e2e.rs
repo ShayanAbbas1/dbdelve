@@ -7332,6 +7332,50 @@ fn show_grants_reviews_every_statement_and_sends_nothing_before_run(cx: &mut Tes
     });
 }
 
+#[gpui::test]
+fn show_grants_lists_a_role_picked_by_grant_to_and_stages_its_grant(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        assert!(cx.debug_bounds("show-grants-grant-to").is_none());
+        click_selector(cx, "show-grants-edit");
+        assert!(cx.debug_bounds("show-grants-grant-to").is_some());
+        // ana holds nothing of its own on birds: listed only as watchers'
+        // member until it is picked.
+        assert!(cx.debug_bounds("show-grants-cell-ana-SELECT").is_none());
+        workspace.update(cx, |workspace, cx| workspace.add_grant_role("ana", cx));
+        settle(cx);
+        click_grant_cell(cx, "ana", "SELECT");
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            assert_eq!(view.added, ["ana"]);
+            let changes = view.staged.changes();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(
+                (changes[0].grantee.as_str(), changes[0].privilege.as_str()),
+                ("ana", "SELECT")
+            );
+        });
+        // A role listed already is not picked twice, nor the owner at all.
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_grant_role("ana", cx);
+            workspace.add_grant_role("keeper", cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.grants_view.as_ref().unwrap().added, ["ana"]);
+        });
+        // Back to View lets the pick go with what was staged.
+        click_selector(cx, "show-grants-view");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.grants_view.as_ref().unwrap().added.is_empty());
+        });
+        assert!(cx.debug_bounds("show-grants-cell-ana-SELECT").is_none());
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
 /// A Users and roles tab put behind the editor, which SQLite never opens
 /// itself, and its id.
 fn users_tab_on(
