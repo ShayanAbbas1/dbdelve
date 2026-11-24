@@ -2496,6 +2496,17 @@ fn front_dialog(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Op
     workspace.read_with(cx, |workspace, _| workspace.dialog_in_front.get())
 }
 
+/// What the platform's dialog is asking, if one is up.
+fn platform_prompt(cx: &mut VisualTestContext) -> Option<String> {
+    cx.pending_prompt().map(|(message, _)| message)
+}
+
+/// The platform's dialog answered with the button labelled `button`.
+fn answer_platform_prompt(cx: &mut VisualTestContext, button: &str) {
+    cx.simulate_prompt_answer(button);
+    settle(cx);
+}
+
 fn palette_mode(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<PaletteMode> {
     workspace.read_with(cx, |workspace, cx| {
         workspace
@@ -13111,9 +13122,11 @@ fn a_scratch_file_that_will_not_read_back_is_set_aside_and_the_tab_carries_on(
         assert!(front_dirty(&workspace, cx));
         cx.simulate_keystrokes("secondary-w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-        cx.simulate_keystrokes("escape");
-        settle(cx);
+        assert_eq!(
+            platform_prompt(cx).as_deref(),
+            Some("Save changes to draft.sql?")
+        );
+        answer_platform_prompt(cx, "Cancel");
 
         let (workspace, cx) = relaunch_closing(workspace, cx);
         bring_back(&workspace, cx, &path);
@@ -13145,11 +13158,8 @@ fn a_scratch_file_that_cannot_be_moved_aside_is_never_deleted(cx: &mut TestAppCo
             cx.simulate_input("x");
             cx.simulate_keystrokes("secondary-w");
             settle(cx);
-            assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-            press(cx, "left");
-            press(cx, "left");
-            press(cx, "enter");
-            settle(cx);
+            assert!(platform_prompt(cx).is_some());
+            answer_platform_prompt(cx, "Don't Save");
             assert!(!is_open(&workspace, cx, &path));
             assert_eq!(std::fs::read(&scratch).unwrap(), b"-- \xff SELECT 1;");
         }
@@ -13231,12 +13241,13 @@ fn closing_a_dirty_file_tab_asks_and_cancel_keeps_it(cx: &mut TestAppContext) {
 
         cx.simulate_keystrokes("secondary-w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-        press(cx, "left");
-        press(cx, "enter");
-        settle(cx);
+        assert_eq!(
+            platform_prompt(cx).as_deref(),
+            Some("Save changes to kept.sql?")
+        );
+        answer_platform_prompt(cx, "Cancel");
 
-        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(platform_prompt(cx), None);
         assert_eq!(front_file(&workspace, cx), Some(path.clone()));
         assert!(front_dirty(&workspace, cx));
         assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
@@ -13256,11 +13267,8 @@ fn dont_save_closes_a_dirty_file_tab_and_removes_its_scratch(cx: &mut TestAppCon
 
         cx.simulate_keystrokes("secondary-w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-        press(cx, "left");
-        press(cx, "left");
-        press(cx, "enter");
-        settle(cx);
+        assert!(platform_prompt(cx).is_some());
+        answer_platform_prompt(cx, "Don't Save");
 
         assert!(!is_open(&workspace, cx, &path));
         assert!(!scratch.exists());
@@ -13277,9 +13285,8 @@ fn save_in_the_close_question_writes_the_file_and_closes_its_tab(cx: &mut TestAp
 
         cx.simulate_keystrokes("secondary-w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-        press(cx, "enter");
-        settle(cx);
+        assert!(platform_prompt(cx).is_some());
+        answer_platform_prompt(cx, "Save");
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
         assert!(!is_open(&workspace, cx, &path));
@@ -13297,7 +13304,10 @@ fn close_all_tabs_asks_once_about_every_dirty_file_tab(cx: &mut TestAppContext) 
 
         cx.simulate_keystrokes("secondary-k w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        assert_eq!(
+            platform_prompt(cx).as_deref(),
+            Some("Save changes to 2 files?")
+        );
         workspace.read_with(cx, |workspace, _| {
             let session = &workspace.profile().expect("a connection in front").session;
             let asked = session.pending_discard.as_ref().expect("one question");
@@ -13305,10 +13315,9 @@ fn close_all_tabs_asks_once_about_every_dirty_file_tab(cx: &mut TestAppContext) 
             assert_eq!(asked.len(), 2);
             assert_eq!(session.strip_tabs(), asked, "the rest closed unasked");
         });
-        press(cx, "enter");
-        settle(cx);
+        answer_platform_prompt(cx, "Save");
 
-        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(platform_prompt(cx), None);
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "-- SELECT 1;");
         assert_eq!(std::fs::read_to_string(&second).unwrap(), "-- SELECT 1;");
         assert_eq!(query_tab_count(&workspace, cx), 0);
@@ -13328,9 +13337,8 @@ fn close_all_says_why_a_file_it_could_not_save_stayed_open(cx: &mut TestAppConte
 
         cx.simulate_keystrokes("secondary-k w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-        press(cx, "enter");
-        settle(cx);
+        assert!(platform_prompt(cx).is_some());
+        answer_platform_prompt(cx, "Save");
 
         assert_eq!(std::fs::read_to_string(&saved).unwrap(), "-- SELECT 1;");
         assert!(!is_open(&workspace, cx, &saved));
@@ -13372,16 +13380,15 @@ fn close_all_asks_about_edits_then_once_about_every_dirty_file(cx: &mut TestAppC
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("discard"));
         confirm_discard(&workspace, cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
-        workspace.read_with(cx, |workspace, _| {
-            let session = &workspace.profile().expect("a connection in front").session;
-            let asked = session.pending_discard.as_ref().expect("one question");
-            assert_eq!(asked.tabs().count(), 2, "both files, in one question");
-        });
-        press(cx, "enter");
-        settle(cx);
-
         assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(
+            platform_prompt(cx).as_deref(),
+            Some("Save changes to 2 files?"),
+            "both files, in one question"
+        );
+        answer_platform_prompt(cx, "Save");
+
+        assert_eq!(platform_prompt(cx), None);
         assert_eq!(
             std::fs::read_to_string(&edited).unwrap(),
             "-- select * from birds"
@@ -13465,7 +13472,10 @@ fn an_outside_write_under_unsaved_text_raises_the_bar(cx: &mut TestAppContext) {
         assert!(front_dirty(&workspace, cx));
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert_eq!(
+            platform_prompt(cx).as_deref(),
+            Some("contested.sql changed on disk. Overwrite it?")
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 22;");
         quit(workspace, cx);
     });
@@ -13480,12 +13490,11 @@ fn save_after_an_outside_write_asks_before_overwriting_it(cx: &mut TestAppContex
 
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert!(platform_prompt(cx).is_some());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 22;");
-        press(cx, "enter");
-        settle(cx);
+        answer_platform_prompt(cx, "Overwrite");
 
-        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(platform_prompt(cx), None);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
         assert!(!front_dirty(&workspace, cx));
         assert!(editor_has_keyboard(&workspace, cx), "focus is handed back");
@@ -13537,32 +13546,6 @@ fn a_deleted_file_written_again_says_it_changed_and_offers_reload(cx: &mut TestA
         std::fs::write(&path, "SELECT 22;").unwrap();
         bring_back(&workspace, cx, &path);
         assert!(cx.debug_bounds("file-banner: Changed on disk").is_some());
-        quit(workspace, cx);
-    });
-}
-
-/// A Save from the menu can raise Overwrite while Forget File is up, under
-/// it: `escape` takes down the one on top.
-#[gpui::test]
-fn escape_takes_down_forget_file_before_the_overwrite_under_it(cx: &mut TestAppContext) {
-    store::tests::with_home(|| {
-        let (workspace, cx) = launch_on_sqlite(cx);
-        let path = open_dirty_file(&workspace, cx, "under.sql");
-        let (id, _) = front_scratch(&workspace, cx);
-        workspace.update(cx, |workspace, cx| {
-            let session = &mut workspace.profile_mut().unwrap().session;
-            session.pending_forget = Some(path.clone());
-            session.pending_overwrite = Some(crate::session::PendingOverwrite {
-                tabs: vec![id],
-                close: false,
-            });
-            cx.notify();
-        });
-        settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("forget-file"));
-
-        press(cx, "escape");
-        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
         quit(workspace, cx);
     });
 }
@@ -13637,7 +13620,7 @@ fn save_after_keep_mine_recreates_a_file_deleted_since_without_asking(cx: &mut T
         std::fs::remove_file(&path).unwrap();
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(platform_prompt(cx), None);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- SELECT 1;");
         quit(workspace, cx);
     });
@@ -13658,7 +13641,7 @@ fn save_asks_about_an_outside_edit_that_kept_the_files_stamp(cx: &mut TestAppCon
 
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert!(platform_prompt(cx).is_some());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 2;");
         quit(workspace, cx);
     });
@@ -13676,10 +13659,9 @@ fn closing_a_clean_tab_whose_file_was_deleted_behind_it_asks(cx: &mut TestAppCon
 
         cx.simulate_keystrokes("secondary-k w");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("unsaved"));
+        assert!(platform_prompt(cx).is_some());
         assert!(is_open(&workspace, cx, &path));
-        press(cx, "enter");
-        settle(cx);
+        answer_platform_prompt(cx, "Save");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "SELECT 1;");
         quit(workspace, cx);
     });
@@ -13766,7 +13748,7 @@ fn a_relaunch_keeps_keep_mine_so_save_still_asks(cx: &mut TestAppContext) {
         assert!(editor_has_keyboard(&workspace, cx));
         cx.simulate_keystrokes("secondary-s");
         settle(cx);
-        assert_eq!(front_dialog(&workspace, cx), Some("overwrite"));
+        assert!(platform_prompt(cx).is_some());
         quit(workspace, cx);
     });
 }

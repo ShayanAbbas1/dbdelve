@@ -1453,11 +1453,6 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("discard", 0) => self.confirm_discard_close(window, cx),
             ("discard", _) => _ = self.cancel_discard_close(cx),
-            ("unsaved", 0) => self.save_and_close(window, cx),
-            ("unsaved", 2) => self.confirm_discard_close(window, cx),
-            ("unsaved", _) => _ = self.cancel_discard_close(cx),
-            ("overwrite", 0) => self.confirm_overwrite(window, cx),
-            ("overwrite", _) => _ = self.cancel_overwrite(cx),
             ("forget-file", 0) => self.confirm_forget_file(cx),
             ("forget-file", _) => _ = self.cancel_forget_file(cx),
             ("delete", 0) => match deleting {
@@ -1825,84 +1820,6 @@ impl Workspace {
         )
     }
 
-    /// Save / Don't Save / Cancel, over closing file tabs with unsaved
-    /// changes.
-    pub(crate) fn render_unsaved_confirmation(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let session = &self.profile()?.session;
-        let discard = session
-            .pending_discard
-            .as_ref()
-            .filter(|discard| discard.unsaved)?;
-        let (heading, question) = match discard.tabs().collect::<Vec<_>>().as_slice() {
-            [Tab::Query(id)] => (
-                "Close tab",
-                format!("Save changes to {}?", self.file_name_of(*id)?),
-            ),
-            tabs => (
-                "Close tabs",
-                format!("Save changes to {} files?", tabs.len()),
-            ),
-        };
-        Some(self.question(
-            "unsaved",
-            heading,
-            question,
-            [
-                (
-                    "dont-save",
-                    "Don't Save",
-                    Tone::Danger,
-                    Self::confirm_discard_close,
-                ),
-                (
-                    "cancel-unsaved",
-                    "Cancel",
-                    Tone::Quiet,
-                    |workspace, _, cx| {
-                        workspace.cancel_discard_close(cx);
-                    },
-                ),
-                ("save-unsaved", "Save", Tone::Primary, Self::save_and_close),
-            ],
-            cx,
-        ))
-    }
-
-    /// Overwrite / Cancel, over saving a file someone else wrote since the
-    /// tab read it.
-    pub(crate) fn render_overwrite_confirmation(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let pending = self.profile()?.session.pending_overwrite.as_ref()?;
-        let question = match pending.tabs.as_slice() {
-            [id] => format!("{} changed on disk. Overwrite it?", self.file_name_of(*id)?),
-            tabs => format!("{} files changed on disk. Overwrite them?", tabs.len()),
-        };
-        Some(self.question(
-            "overwrite",
-            "Save",
-            question,
-            [
-                (
-                    "cancel-overwrite",
-                    "Cancel",
-                    Tone::Quiet,
-                    |workspace, _, cx| {
-                        workspace.cancel_overwrite(cx);
-                    },
-                ),
-                (
-                    "confirm-overwrite",
-                    "Overwrite",
-                    Tone::Danger,
-                    Self::confirm_overwrite,
-                ),
-            ],
-            cx,
-        ))
-    }
-
     /// Remove / Keep, over a recent file found gone when its row was opened.
     pub(crate) fn render_forget_file(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = self.profile()?.session.pending_forget.as_ref()?;
@@ -1926,11 +1843,6 @@ impl Workspace {
             ],
             cx,
         ))
-    }
-
-    fn file_name_of(&self, id: u64) -> Option<String> {
-        let tab = self.profile()?.session.query_tab(id)?;
-        Some(crate::sql_file::file_name(&tab.file.as_ref()?.path))
     }
 
     /// A dialog asking one line, its buttons left to right, the last the

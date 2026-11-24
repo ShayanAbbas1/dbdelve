@@ -1349,6 +1349,7 @@ impl Workspace {
                 unsaved: true,
             });
         }
+        self.ask_to_save(window, cx);
         cx.notify();
     }
 

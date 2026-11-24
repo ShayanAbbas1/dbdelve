@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{ExternalPaths, PathPromptOptions};
+use gpui::{ExternalPaths, PathPromptOptions, PromptButton, PromptLevel};
 
 use super::*;
 
@@ -511,7 +511,105 @@ impl Workspace {
                 close,
             });
         }
+        self.ask_to_overwrite(window, cx);
         cx.notify();
+    }
+
+    /// Overwrite / Cancel, over the files `pending_overwrite` holds.
+    fn ask_to_overwrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self
+            .profile()
+            .and_then(|profile| profile.session.pending_overwrite.as_ref())
+        else {
+            return;
+        };
+        let message = match pending.tabs.as_slice() {
+            [id] => match self.file_name_of(*id) {
+                Some(name) => format!("{name} changed on disk. Overwrite it?"),
+                None => return,
+            },
+            tabs => format!("{} files changed on disk. Overwrite them?", tabs.len()),
+        };
+        let answers = [
+            PromptButton::ok("Overwrite"),
+            PromptButton::cancel("Cancel"),
+        ];
+        self.ask(
+            &message,
+            &answers,
+            window,
+            cx,
+            |workspace, answer, window, cx| match answer {
+                0 => workspace.confirm_overwrite(window, cx),
+                _ => _ = workspace.cancel_overwrite(cx),
+            },
+        );
+    }
+
+    /// Save / Don't Save / Cancel, over closing the file tabs a
+    /// `pending_discard` holds for their unsaved changes.
+    pub(crate) fn ask_to_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discard) = self
+            .profile()
+            .and_then(|profile| profile.session.pending_discard.as_ref())
+        else {
+            return;
+        };
+        let message = match discard.tabs().collect::<Vec<_>>().as_slice() {
+            [Tab::Query(id)] => match self.file_name_of(*id) {
+                Some(name) => format!("Save changes to {name}?"),
+                None => return,
+            },
+            tabs => format!("Save changes to {} files?", tabs.len()),
+        };
+        let answers = [
+            PromptButton::ok("Save"),
+            PromptButton::new("Don't Save"),
+            PromptButton::cancel("Cancel"),
+        ];
+        self.ask(
+            &message,
+            &answers,
+            window,
+            cx,
+            |workspace, answer, window, cx| match answer {
+                0 => workspace.save_and_close(window, cx),
+                1 => workspace.confirm_discard_close(window, cx),
+                _ => _ = workspace.cancel_discard_close(cx),
+            },
+        );
+    }
+
+    /// The platform's own dialog where it has one (macOS, Windows), where
+    /// the first answer takes Return and a `PromptButton::Cancel` Escape.
+    /// Linux has none, and GPUI draws a plain one over the window that
+    /// answers only to the mouse.
+    fn ask(
+        &mut self,
+        message: &str,
+        answers: &[PromptButton],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        answered: impl FnOnce(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let answer = window.prompt(PromptLevel::Warning, message, None, answers, cx);
+        cx.spawn_in(window, async move |workspace, cx| {
+            // Dropped unanswered, the dialog went with its window or, drawn
+            // by GPUI, was replaced by the next one, whose question now holds
+            // the slot this one would answer.
+            let Ok(answer) = answer.await else {
+                return;
+            };
+            _ = workspace.update_in(cx, |workspace, window, cx| {
+                answered(workspace, answer, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn file_name_of(&self, id: u64) -> Option<String> {
+        let tab = self.profile()?.session.query_tab(id)?;
+        Some(file_name(&tab.file.as_ref()?.path))
     }
 
     /// Overwrite: write each tab the question was asked about over whatever

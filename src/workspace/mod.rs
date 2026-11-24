@@ -2886,8 +2886,6 @@ impl Render for Workspace {
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
-                    ("unsaved", self.render_unsaved_confirmation(cx)),
-                    ("overwrite", self.render_overwrite_confirmation(cx)),
                     ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
                     ("pending-export", self.render_pending_export(cx)),

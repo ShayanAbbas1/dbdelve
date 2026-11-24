@@ -783,8 +783,16 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   restore, so a link and its file are one tab; two restored tabs that meet
   leave the later one untitled with its text (`Session::unbind_duplicates`).
 - **Closing a file tab with unsaved changes asks Save / Don't Save /
-  Cancel** (`PendingDiscard::unsaved`, the "unsaved" dialog), after the
-  unapplied-edits question and only once it is answered Discard. Close All
+  Cancel** (`PendingDiscard::unsaved`), after the
+  unapplied-edits question and only once it is answered Discard. It and the
+  Overwrite question are the window's own prompt (`window.prompt`, through
+  `Workspace::ask`), not a DBDelve dialog: an NSAlert sheet on macOS and a
+  task dialog on Windows, Save the default that takes Return and Cancel the
+  one that takes Escape. Linux has no native one, so GPUI draws its plain
+  fallback, which answers to the mouse alone. The answer calls the same
+  handlers a button did, each of which hands the keyboard back; a prompt
+  dropped unanswered changes nothing. Tests answer it with
+  `simulate_prompt_answer`. Close All
   Tabs closes everything else first and asks once about every dirty file
   tab, its Save saving each; with cell edits too, the edits question holds
   the dirty file tabs as well and the Save question follows it. Don't Save
