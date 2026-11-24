@@ -45,6 +45,10 @@ use crate::ui::{Status, row_icon_tinted, status_dot};
 /// hovered, so it is not taken for one the server dropped.
 pub(super) const HIDDEN_BY_FILTER: &str = "Hidden by this connection's filter, not missing";
 
+/// How far a coloured connection row's fill stops short of its slot, above and
+/// below: half of it on each of two such rows makes the gap between them.
+const FILLED_ROW_INSET: f32 = layout::SPACE_XS / 2.0;
+
 /// The id of the row of `profile`'s front tab in the connections tree, if
 /// the tab has one.
 pub(crate) fn front_row_id(profile: &Profile) -> Option<String> {
@@ -1132,8 +1136,17 @@ impl Workspace {
                 // library's 16 rather than dbdelve's body size.
                 .text_size(px(layout::chrome(layout::TEXT_MD)))
                 // The tree gives every row the height of its first, so each
-                // is told its density's.
-                .h(px(layout::chrome(density.row_height())))
+                // is told its density's. A coloured connection's fill is
+                // inset by a margin that keeps that height, so two of them
+                // one under the other read as two rows, not one band.
+                .map(|row| match connection.and_then(|(_, look)| look.color) {
+                    Some(_) => row
+                        .h(px(layout::chrome(
+                            density.row_height() - 2.0 * FILLED_ROW_INSET,
+                        )))
+                        .my(px(layout::chrome(FILLED_ROW_INSET))),
+                    None => row.h(px(layout::chrome(density.row_height()))),
+                })
                 .pl(px(
                     layout::SPACE_SM + entry.depth() as f32 * density.indent()
                 ))
