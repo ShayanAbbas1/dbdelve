@@ -470,12 +470,61 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     }
 }
 
+/// How the Files group orders its rows, app-wide. Neither moves a row when
+/// a file is opened or saved again, so a click never lands on a row the
+/// list has just moved under the pointer. Nothing is ordered by a file's
+/// dates on disk: a save replaces the file, which resets its creation time
+/// and moves its modification time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilesOrder {
+    /// Every row by its label, without case.
+    #[default]
+    Name,
+    /// The recent files in the order each entered the list, oldest first,
+    /// then the rest by name.
+    Added,
+}
+
+impl FilesOrder {
+    pub const ALL: [FilesOrder; 2] = [FilesOrder::Name, FilesOrder::Added];
+
+    /// How `profiles.toml` spells it.
+    pub fn slug(self) -> &'static str {
+        match self {
+            FilesOrder::Name => "name",
+            FilesOrder::Added => "added",
+        }
+    }
+
+    /// The order a stored slug names; none, or one this build does not know,
+    /// is by name.
+    pub fn from_slug(slug: Option<&str>) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|order| Some(order.slug()) == slug)
+            .unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FilesOrder::Name => "Sort by Name",
+            FilesOrder::Added => "Sort by Date Added",
+        }
+    }
+}
+
 /// The Files group: every file in `files` and saved query in `queries` whose
-/// name the filter keeps, or no row at all when it keeps none. Only the names
-/// are matched: a filter that matched the group's own label would keep every
-/// row for typing `f`. A file shares its name with another listed only
-/// alongside its folder's name.
-pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTree {
+/// name the filter keeps, or no row at all when it keeps none, in `order`
+/// (`files` as `Profile::listed_files` gives them, `queries` by name). Only
+/// the names are matched: a filter that matched the group's own label would
+/// keep every row for typing `f`. A file shares its name with another listed
+/// only alongside its folder's name.
+pub fn files(
+    files: &[PathBuf],
+    queries: &[String],
+    filter: &str,
+    order: FilesOrder,
+) -> ExplorerTree {
     let mut builder = Builder::new(filter);
     let file_rows = files
         .iter()
@@ -484,8 +533,12 @@ pub fn files(files: &[PathBuf], queries: &[String], filter: &str) -> ExplorerTre
     let query_rows = queries
         .iter()
         .map(|name| (query_row(name), query_file_name(name)));
-    let children: Vec<TreeItem> = file_rows
-        .chain(query_rows)
+    let mut rows: Vec<(String, String)> = file_rows.chain(query_rows).collect();
+    if order == FilesOrder::Name {
+        rows.sort_by_cached_key(|(_, label)| label.to_lowercase());
+    }
+    let children: Vec<TreeItem> = rows
+        .into_iter()
         .filter_map(|(id, label)| {
             builder
                 .name_matches(&id, &label)
@@ -1830,7 +1883,12 @@ mod tests {
             PathBuf::from("/work/billing/orders.sql"),
             PathBuf::from("/work/daily.sql"),
         ];
-        let listed = files(&files_listed, &["nightly".to_string()], "");
+        let listed = files(
+            &files_listed,
+            &["nightly".to_string()],
+            "",
+            FilesOrder::Added,
+        );
         let rows: Vec<_> = listed.items[0]
             .children
             .iter()
@@ -1854,8 +1912,39 @@ mod tests {
             "orders.sql — reports"
         );
         assert_eq!(listed.items[0].label.as_ref(), "Files");
-        let narrowed = files(&files_listed, &["nightly".to_string()], "dai");
+        let narrowed = files(
+            &files_listed,
+            &["nightly".to_string()],
+            "dai",
+            FilesOrder::Added,
+        );
         assert_eq!(narrowed.items[0].children.len(), 1);
+    }
+
+    #[test]
+    fn the_files_group_lists_by_name_or_as_given_then_the_saved_queries() {
+        let listed = [
+            PathBuf::from("/work/zeta.sql"),
+            PathBuf::from("/work/Beta.sql"),
+        ];
+        let queries = ["alpha".to_string(), "gamma".to_string()];
+        let labels = |order| {
+            files(&listed, &queries, "", order).items[0]
+                .children
+                .iter()
+                .map(|row| row.label.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(FilesOrder::Name),
+            ["alpha.sql", "Beta.sql", "gamma.sql", "zeta.sql"]
+        );
+        assert_eq!(
+            labels(FilesOrder::Added),
+            ["zeta.sql", "Beta.sql", "alpha.sql", "gamma.sql"]
+        );
+        assert_eq!(FilesOrder::from_slug(Some("added")), FilesOrder::Added);
+        assert_eq!(FilesOrder::from_slug(Some("modified")), FilesOrder::Name);
     }
 
     #[cfg(unix)]
@@ -1874,7 +1963,7 @@ mod tests {
     fn every_saved_query_is_listed_under_its_group_and_a_filter_narrows_them() {
         let names = ["daily revenue".to_string(), "signups".to_string()];
 
-        let all = files(&[], &names, "");
+        let all = files(&[], &names, "", FilesOrder::Name);
         assert_eq!(all.items.len(), 1);
         assert_eq!(all.items[0].id.as_ref(), FILES_GROUP);
         let rows: Vec<_> = all.items[0]
@@ -1890,7 +1979,7 @@ mod tests {
             ]
         );
 
-        let narrowed = files(&[], &names, "rev");
+        let narrowed = files(&[], &names, "rev", FilesOrder::Name);
         assert_eq!(narrowed.items[0].children.len(), 1);
         assert_eq!(
             marked(&narrowed, "query:daily revenue", "daily revenue.sql").as_deref(),
@@ -1899,8 +1988,8 @@ mod tests {
 
         // No query, or none the filter keeps, is no group rather than an
         // empty one.
-        assert!(files(&[], &names, "zzz").items.is_empty());
-        assert!(files(&[], &[], "").items.is_empty());
+        assert!(files(&[], &names, "zzz", FilesOrder::Name).items.is_empty());
+        assert!(files(&[], &[], "", FilesOrder::Name).items.is_empty());
     }
 
     #[test]
@@ -1924,7 +2013,7 @@ mod tests {
         // A schema named like the group is still a schema, and the group is
         // never one: picking it would set and save a schema called Queries.
         let names = ["daily".to_string()];
-        let mut explorer = files(&[], &names, "");
+        let mut explorer = files(&[], &names, "", FilesOrder::Name);
         explorer.extend(tree(&catalog(), ""));
         let roots: Vec<_> = explorer
             .items
@@ -1949,7 +2038,7 @@ mod tests {
         // Each root of a sidebar built afresh, as `root_folds` leaves it. Built
         // expanded, so a schema it failed to close would show here as open.
         let shown = |catalog: &Catalog, saved: &BTreeMap<String, bool>, active| {
-            let mut explorer = files(&[], &["daily".to_string()], "");
+            let mut explorer = files(&[], &["daily".to_string()], "", FilesOrder::Name);
             explorer.extend(tree(catalog, ""));
             let folds = root_folds(&explorer.items, saved, active);
             with_folds(explorer.items, &folds)
@@ -2009,7 +2098,7 @@ mod tests {
     #[test]
     fn a_change_to_the_saved_queries_keeps_what_was_folded_and_opened() {
         let build = |names: &[String]| {
-            let mut explorer = files(&[], names, "");
+            let mut explorer = files(&[], names, "", FilesOrder::Name);
             explorer.extend(tree(&partitioned_catalog(), ""));
             explorer.items
         };
@@ -2206,7 +2295,7 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        explorer.extend(files(&[], &names, ""));
+        explorer.extend(files(&[], &names, "", FilesOrder::Name));
         explorer.extend(tree(&catalog(), ""));
 
         assert_eq!(
@@ -2257,7 +2346,7 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        explorer.extend(files(&[], &names, ""));
+        explorer.extend(files(&[], &names, "", FilesOrder::Name));
         explorer.extend(tree(&catalog, ""));
         let mut ids = Vec::new();
         every_id(&explorer.items, &mut ids);
@@ -2556,7 +2645,7 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        explorer.extend(files(&[], &names, ""));
+        explorer.extend(files(&[], &names, "", FilesOrder::Name));
         explorer.extend(tree(&catalog(), ""));
 
         let mut ids = Vec::new();

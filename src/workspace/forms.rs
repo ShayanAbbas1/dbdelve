@@ -20,8 +20,8 @@ use super::*;
 use crate::actions::{ConfirmDialog, NextDialogButton, PreviousDialogButton, TickDialogBox};
 use crate::connection_form::{ConnectionTest, Reported, dialects, suggested_dialect};
 use crate::explorer::{
-    ExplorerLeaf, FILES_GROUP, Landing, Member, PINNED_GROUP, Pin, Shortcut, ShortcutDatabase,
-    Shortcuts, is_schema_row, landing, relation_copies, saved_query,
+    ExplorerLeaf, FILES_GROUP, FilesOrder, Landing, Member, PINNED_GROUP, Pin, Shortcut,
+    ShortcutDatabase, Shortcuts, is_schema_row, landing, relation_copies, saved_query,
 };
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::scroller::{SmoothScrollable, smooth_scoped};
@@ -3426,14 +3426,16 @@ impl Workspace {
             .context_menu(move |_, entry, menu, window, cx| {
                 let id = entry.item().id.clone();
                 let shortcut = menu_shortcuts.get(id.as_ref()).cloned();
-                let shortcuts = menu_workspace
-                    .upgrade()
-                    .and_then(|workspace| {
-                        workspace
-                            .read(cx)
-                            .profile()
-                            .map(|profile| profile.shortcuts.clone())
-                    })
+                let Some(entity) = menu_workspace.upgrade() else {
+                    return menu;
+                };
+                let state = entity.read(cx);
+                if id.as_ref() == FILES_GROUP {
+                    return files_group_menu(menu, state.settings.files_order, &menu_workspace);
+                }
+                let shortcuts = state
+                    .profile()
+                    .map(|profile| profile.shortcuts.clone())
                     .unwrap_or_default();
                 if let Some(path) = menu_files.paths.get(id.as_ref()) {
                     return file_row_menu(menu, path, &menu_profile, &menu_workspace);
@@ -3967,6 +3969,25 @@ pub(super) fn file_row_menu(
     .item(item("Remove from List", |workspace, path, _, cx| {
         workspace.forget_recent_file(&path, cx)
     }))
+}
+
+/// What the Files group's own row offers, in either tree: the order of its
+/// rows, which is every connection's.
+pub(super) fn files_group_menu(
+    menu: PopupMenu,
+    current: FilesOrder,
+    workspace: &gpui::WeakEntity<Workspace>,
+) -> PopupMenu {
+    FilesOrder::ALL.into_iter().fold(menu, |menu, order| {
+        let workspace = workspace.clone();
+        menu.item(
+            PopupMenuItem::new(order.label())
+                .checked(order == current)
+                .on_click(move |_, _, cx| {
+                    _ = workspace.update(cx, |workspace, cx| workspace.set_files_order(order, cx));
+                }),
+        )
+    })
 }
 
 /// What a saved query's row offers on a right click: what its tab offers, for

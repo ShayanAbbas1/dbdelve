@@ -1513,7 +1513,12 @@ mod tests {
             &ShortcutDatabase::On(database.to_string()),
             filter,
         );
-        content.extend(explorer::files(&[], &queries, filter));
+        content.extend(explorer::files(
+            &[],
+            &queries,
+            filter,
+            explorer::FilesOrder::Name,
+        ));
         content.extend(explorer::tree(&catalog, filter));
         content
     }
@@ -2189,7 +2194,12 @@ mod tests {
             &ShortcutDatabase::Unnamed,
             "",
         );
-        content.extend(explorer::files(&[], &queries, ""));
+        content.extend(explorer::files(
+            &[],
+            &queries,
+            "",
+            explorer::FilesOrder::Name,
+        ));
         content.extend(explorer::tree(&catalog, ""));
         let projects = [project("Zoo", &["a", "b"]), project("Empty", &[])];
         let tree = build(

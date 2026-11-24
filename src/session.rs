@@ -118,10 +118,12 @@ pub(crate) struct Profile {
     /// loaded waits for it; the tree owns a row once it holds it.
     pub(crate) open_rows: Vec<String>,
     pub(crate) selected_rows: Vec<String>,
-    /// The `.sql` files last opened or saved here, newest first
-    /// ([`remember_recent`]), and those of them found gone at the last look,
-    /// which the Files group greys.
+    /// The `.sql` files last opened or saved here, most recently used first
+    /// ([`remember_recent`]), the same files in the order each entered the
+    /// list, and those of them found gone at the last look, which the Files
+    /// group greys.
     pub(crate) recent_files: Vec<PathBuf>,
+    pub(crate) recent_added: Vec<PathBuf>,
     pub(crate) missing_files: HashSet<PathBuf>,
     /// Bumped whenever the recent files or what is known of one changes, so a
     /// look that set out before lands on nothing ([`Self::take_missing`]).
@@ -308,9 +310,6 @@ impl Profile {
         }
     }
 
-    /// What the sidebar's Files group lists besides the saved queries: the
-    /// recent files, then any file open in a tab they no longer hold. A saved
-    /// query's file is listed as the query, so not here.
     pub(crate) fn recent_files_changed(&mut self) {
         self.recent_generation += 1;
     }
@@ -326,14 +325,20 @@ impl Profile {
         }
     }
 
+    /// What the sidebar's Files group lists besides the saved queries: the
+    /// recent files in the order they were added, then any file open in a tab
+    /// they no longer hold, by name. A saved query's file is listed as the
+    /// query, so not here.
     pub(crate) fn listed_files(&self) -> Vec<PathBuf> {
-        let mut listed: Vec<PathBuf> = Vec::new();
-        let open = self
+        let mut open: Vec<&PathBuf> = self
             .session
             .queries
             .iter()
-            .filter_map(|tab| Some(&tab.file.as_ref()?.path));
-        for path in self.recent_files.iter().chain(open) {
+            .filter_map(|tab| Some(&tab.file.as_ref()?.path))
+            .collect();
+        open.sort_by_cached_key(|path| crate::sql_file::file_name(path).to_lowercase());
+        let mut listed: Vec<PathBuf> = Vec::new();
+        for path in self.recent_added.iter().chain(open) {
             if !listed.contains(path) && path.parent() != Some(&self.session.query_directory) {
                 listed.push(path.clone());
             }
@@ -631,6 +636,7 @@ impl Profile {
                 .cloned()
                 .collect(),
             recent_files: self.recent_files.clone(),
+            recent_added: self.recent_added.clone(),
             ssh: self.config.ssh().cloned(),
             open_queries: self
                 .session
@@ -4147,14 +4153,22 @@ pub(crate) enum QueryState {
 pub(crate) const RECENT_FILES_CAP: usize = 20;
 
 /// The recent files as `profiles.toml` holds them, as [`remember_recent`]
-/// would have left them: no saved query, each once, newest first, twenty.
+/// would have left them: no saved query, each once, most recently used
+/// first, twenty, and the same files in the order they were added. A file
+/// `added` does not hold, which is every file of a list written before it
+/// existed, counts as added in the order it was last used, so an older
+/// list comes up oldest first.
 ///
 /// ponytail: compared as written, not resolved through links, since a stat
 /// per path at launch waits on a stalled mount as long as it does. Every
 /// path DBDelve writes is already resolved, so only a hand edit can list a
 /// file twice; resolving on the blocking pool with the look at launch is
 /// the upgrade.
-pub(crate) fn restored_recent(stored: Vec<PathBuf>, query_directory: &Path) -> Vec<PathBuf> {
+pub(crate) fn restored_recent(
+    stored: Vec<PathBuf>,
+    added: Vec<PathBuf>,
+    query_directory: &Path,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut recent = Vec::new();
     for path in stored {
         if recent.len() == RECENT_FILES_CAP {
@@ -4164,7 +4178,13 @@ pub(crate) fn restored_recent(stored: Vec<PathBuf>, query_directory: &Path) -> V
             recent.push(path);
         }
     }
-    recent
+    let mut order = Vec::new();
+    for path in added.into_iter().chain(recent.iter().rev().cloned()) {
+        if recent.contains(&path) && !order.contains(&path) {
+            order.push(path);
+        }
+    }
+    (recent, order)
 }
 
 fn still_missing(
@@ -4180,11 +4200,18 @@ fn still_missing(
     })
 }
 
-/// `path`, already resolved through its links, to the front of `recent`, once.
-pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, path: PathBuf) {
+/// `path`, already resolved through its links, to the front of `recent`,
+/// once, and to the end of `added` only if it is new to the list, so using a
+/// file again never moves it there. Past the cap the least recently used
+/// leaves both.
+pub(crate) fn remember_recent(recent: &mut Vec<PathBuf>, added: &mut Vec<PathBuf>, path: PathBuf) {
+    if !recent.contains(&path) {
+        added.push(path.clone());
+    }
     recent.retain(|held| *held != path);
     recent.insert(0, path);
     recent.truncate(RECENT_FILES_CAP);
+    added.retain(|held| recent.contains(held));
 }
 
 /// The stored tabs, each holding a saved query by name as a build before file
@@ -5949,10 +5976,22 @@ mod tests {
         let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
         let mut stored = vec![path(0), queries.join("q.sql"), path(1), path(0)];
         stored.extend((2..30).map(path));
-        let recent = restored_recent(stored, queries);
+        let (recent, added) = restored_recent(stored, Vec::new(), queries);
         assert_eq!(recent.len(), RECENT_FILES_CAP);
         assert_eq!(recent[..3], [path(0), path(1), path(2)]);
         assert_eq!(recent[19], path(19));
+        let reversed: Vec<_> = recent.iter().rev().cloned().collect();
+        assert_eq!(added, reversed, "an older list is added oldest first");
+    }
+
+    #[test]
+    fn the_recent_files_restore_in_the_order_they_were_added() {
+        let queries = Path::new("/support/queries/e2e");
+        let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
+        let stored = vec![path(2), path(0), path(1), path(3)];
+        let added = vec![path(0), path(9), path(1), path(2), path(0)];
+        let (_, added) = restored_recent(stored, added, queries);
+        assert_eq!(added, [path(0), path(1), path(2), path(3)]);
     }
 
     #[test]
@@ -5967,19 +6006,32 @@ mod tests {
     }
 
     #[test]
-    fn the_recent_files_put_the_newest_first_once_and_keep_twenty() {
+    fn the_recent_files_put_the_last_used_first_and_keep_where_each_was_added() {
         let path = |n: usize| PathBuf::from(format!("/work/{n}.sql"));
-        let mut recent = Vec::new();
+        let (mut recent, mut added) = (Vec::new(), Vec::new());
         for n in 0..25 {
-            remember_recent(&mut recent, path(n));
+            remember_recent(&mut recent, &mut added, path(n));
         }
         assert_eq!(recent.len(), RECENT_FILES_CAP);
         assert_eq!(recent[0], path(24));
         assert_eq!(recent[19], path(5));
-        remember_recent(&mut recent, path(10));
-        assert_eq!(recent[0], path(10));
+        assert_eq!(added, (5..25).map(path).collect::<Vec<_>>());
+        remember_recent(&mut recent, &mut added, path(5));
+        assert_eq!(recent[0], path(5));
         assert_eq!(recent.len(), RECENT_FILES_CAP);
-        assert_eq!(recent.iter().filter(|held| **held == path(10)).count(), 1);
+        assert_eq!(recent.iter().filter(|held| **held == path(5)).count(), 1);
+        assert_eq!(
+            added,
+            (5..25).map(path).collect::<Vec<_>>(),
+            "using a file again leaves where it was added"
+        );
+        remember_recent(&mut recent, &mut added, path(25));
+        assert!(
+            !recent.contains(&path(6)) && !added.contains(&path(6)),
+            "the least recently used goes, not the first added"
+        );
+        assert_eq!(added.first(), Some(&path(5)));
+        assert_eq!(added.last(), Some(&path(25)));
     }
 
     #[test]

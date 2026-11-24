@@ -297,7 +297,11 @@ impl Workspace {
             }
             return;
         }
-        crate::session::remember_recent(&mut profile.recent_files, path.to_path_buf());
+        crate::session::remember_recent(
+            &mut profile.recent_files,
+            &mut profile.recent_added,
+            path.to_path_buf(),
+        );
         self.profiles_unsaved = true;
         // Rebuilt only once the event in hand is done: a click on the file's
         // row brings it up, and the tree then selects the row it drew under
@@ -367,6 +371,28 @@ impl Workspace {
         .detach();
     }
 
+    /// How every connection's Files group orders its rows.
+    pub(crate) fn set_files_order(
+        &mut self,
+        order: crate::explorer::FilesOrder,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.files_order == order {
+            return;
+        }
+        self.settings.files_order = order;
+        let ids: Vec<String> = self
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        for id in ids {
+            self.refresh_query_library(&id, cx);
+        }
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
     /// Remove from List: `path` leaves the front connection's recent files.
     /// The file itself is never touched.
     pub(crate) fn forget_recent_file(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -374,6 +400,7 @@ impl Workspace {
             return;
         };
         profile.recent_files.retain(|held| held != path);
+        profile.recent_added.retain(|held| held != path);
         profile.missing_files.remove(path);
         profile.recent_files_changed();
         let profile_id = profile.id.clone();

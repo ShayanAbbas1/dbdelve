@@ -13969,6 +13969,68 @@ fn clicking_a_listed_files_open_tab_selects_that_files_row(cx: &mut TestAppConte
     });
 }
 
+/// The Files group's row menu orders every Files group, in either tree, and
+/// the order is kept in the settings. Bringing a listed file up moves no row.
+#[gpui::test]
+fn the_files_groups_menu_sorts_its_rows_by_name_or_date_added(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let [zeta, alpha, mid] =
+            ["zeta.sql", "alpha.sql", "Mid.sql"].map(|name| user_sql_file(name, "SELECT 1;"));
+        for path in [&zeta, &alpha, &mid] {
+            open_sql_file(&workspace, cx, path);
+        }
+        let rows = |paths: [&std::path::PathBuf; 3]| paths.map(|path| explorer::file_row(path));
+        let listed = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let tree = workspace.profile().unwrap().session.explorer_tree.read(cx);
+                (0..)
+                    .map_while(|ix| tree.entry(ix))
+                    .map(|entry| entry.item().id.to_string())
+                    .filter(|id| explorer::is_file_row(id))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let saved = || {
+            store::peek_profiles(&[])
+                .unwrap()
+                .settings
+                .unwrap()
+                .files_order
+        };
+        assert_eq!(listed(&workspace, cx), rows([&alpha, &mid, &zeta]));
+
+        pick_from_explorer_menu(&workspace, cx, explorer::FILES_GROUP, 2);
+        settle(cx);
+        assert_eq!(listed(&workspace, cx), rows([&zeta, &alpha, &mid]));
+        assert_eq!(saved().as_deref(), Some("added"));
+        let row = explorer_row(&workspace, &explorer::file_row(&alpha), cx).center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        settle(cx);
+        assert_eq!(front_file(&workspace, cx), Some(alpha.clone()));
+        assert_eq!(listed(&workspace, cx), rows([&zeta, &alpha, &mid]));
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(crate::sidebar::ViewMode::Complex, cx)
+        });
+        settle(cx);
+        let group = scoped_row("e2e", None, explorer::FILES_GROUP);
+        reveal_connections_row(&workspace, cx, &group);
+        let index = connections_row(&workspace, cx, &group).expect("the group is listed");
+        pick_from_connections_menu(cx, index, 1);
+        settle(cx);
+        open_connections_rows(&workspace, cx, std::slice::from_ref(&group));
+        let files: Vec<String> = connections_rows(&workspace, cx)
+            .into_iter()
+            .filter_map(|(_, id)| Some(crate::sidebar::unscoped(&id)?.inner.to_string()))
+            .filter(|inner| explorer::is_file_row(inner))
+            .collect();
+        assert_eq!(files, rows([&alpha, &mid, &zeta]));
+        assert_eq!(saved(), None, "by name is the default, not written");
+        quit(workspace, cx);
+    });
+}
+
 /// A listed file opens in a file tab whatever its name, Save As having
 /// taken the one typed, and one gone since asks to leave the list.
 #[gpui::test]

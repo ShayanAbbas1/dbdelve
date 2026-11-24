@@ -879,19 +879,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   no-overwrite move, never a write under the new name and a delete of the old
   one: on a case-insensitive filesystem `daily` and `Daily` are one file. A
   name taken in any case is refused. Staging files are private to each writer.
-- **The Files group lists a connection's files, then its saved queries.**
+- **The Files group lists a connection's files and its saved queries.**
   Its row id is still `queries` (`explorer::FILES_GROUP`), so the fold
   stored for the old Queries group applies. Its files are the profile's
-  recent files (`StoredProfile::recent_files`, left out when empty), then
-  any file open in a tab they no longer hold (`Profile::listed_files`); a
-  saved query's file is listed as the query instead. Opening a file in a
-  tab, Save and Save As put its resolved path first in the connection's list
-  (`session::remember_recent`: newest first, once, at most 20); so does the
-  move, for the connection each query was on. A launch reads the stored list
-  the same way (`session::restored_recent`), compared as written rather
-  than resolved, so no path is statted on the window's thread. Whatever
-  changes what a connection lists redraws its group, a tab closing on a
-  file it alone kept listed included. A row is named by its file,
+  recent files, then any file open in a tab they no longer hold, by name
+  (`Profile::listed_files`); a saved query's file is listed as the query
+  instead. Opening a file in a tab, Save and Save As put its resolved path
+  first in the connection's list (`session::remember_recent`: most recently
+  used first, once, at most 20, the least recently used evicted); so does
+  the move, for the connection each query was on. A launch reads the stored
+  list the same way (`session::restored_recent`), compared as written
+  rather than resolved, so no path is statted on the window's thread.
+  Whatever changes what a connection lists redraws its group, a tab closing
+  on a file it alone kept listed included. A row is named by its file,
   with its folder beside it where two listed share a name, and shows the
   full path on hover; its id is `file:` and the path's `Debug` spelling,
   which keeps bytes that are not UTF-8 apart where `display` would merge
@@ -911,6 +911,23 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   it set out. The palette's Queries scope lists the same files beside the
   saved queries, named as the sidebar names them (`explorer::file_labels`),
   with the full path beside each.
+- **The Files group's order is stable and the user's.** Its row's menu, in
+  either tree, offers Sort by Name (the default: every row by its label,
+  without case) and Sort by Date Added (the recent files in the order each
+  entered the list, oldest first, then the open files and the saved queries
+  by name), app-wide as `files_order` in `[settings]`, written only when
+  not by name (`explorer::FilesOrder`). Neither moves a row when a file is
+  opened or saved again, since a list that reorders on use moves rows under
+  the pointer mid-click. A file's dates on disk are not offered: a save
+  replaces the file, which resets its creation time and moves its
+  modification time. Recency, which only eviction reads, and the order of
+  adding are stored apart: `StoredProfile::recent_files` stays most
+  recently used first, as an older build reads and evicts it, and
+  `recent_added` holds the same paths in the order they were added (both
+  left out when empty). A path
+  `recent_added` lacks, which is every one of a list an older build wrote,
+  counts as added in the order it was last used, so that list comes up
+  oldest first.
 - **The saved queries move to a folder only when asked.** A launch where a
   connection has saved queries left shows one line under the titlebar ("Your
   N saved queries are now files."), washed in the accent so it is not missed,
