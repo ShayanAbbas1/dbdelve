@@ -82,8 +82,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   takes the Read-only hold inside the open, before it is stored; a mode change
   reaches every one, each ordered on a hold line of its own
   (`Profile::sessions_to_hold`, `Bound::holds`, `set_mode`); all of them end
-  with the connection they were opened from (`Profile::drop_sessions`). The
-  agent keeps its own lanes and reaches none of them.
+  with the connection they were opened from (`Profile::drop_sessions`), and
+  so does the Users and roles tab's kept session (`RolesSide::release`, which
+  never waits on a read under way: the read lets it go as it ends), reopened
+  by the tab's next read. The agent keeps its own lanes and reaches none of
+  them.
 - **A profile keeps one include list per filtered level** (`Profile::include`,
   `db::Include`; `include_databases` and `include_schemas` in `profiles.toml`,
   each left out when empty, and `[[profiles.include_tables]]`, below). An entry is an exact name or a `*`/`?` glob,

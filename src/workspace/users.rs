@@ -12,6 +12,7 @@
 //! connection, Manual's included, never holds it.
 
 use std::io::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use gpui::WeakEntity;
@@ -32,11 +33,18 @@ pub(super) const ROLE_CHANGE_RUNNING: &str =
 /// The side session a Users and roles tab reads on: opened by its first read
 /// and kept, so a click on a role is a query and not a connect -- TCP, TLS,
 /// authentication and any SSH route, and one more of a login's `CONNECTION
-/// LIMIT` each time. Dropped with the tab, which closes it. A session of an
+/// LIMIT` each time. Dropped with the tab, which closes it, and let go of
+/// with the profile's other sessions (`Profile::drop_sessions`). A session of an
 /// earlier connect of the profile is not used: the profile may have moved
 /// to another database since, and reach is read in the database it is on.
 #[derive(Default)]
-pub(crate) struct RolesSide(Mutex<Option<(u64, Connection)>>);
+pub(crate) struct RolesSide {
+    /// The session, with the connect it was opened under and the release it
+    /// was opened after.
+    kept: Mutex<Option<(u64, u64, Connection)>>,
+    /// How many times it has been let go of ([`Self::release`]).
+    releases: AtomicU64,
+}
 
 impl RolesSide {
     /// `read` on the kept session, opened from `connection` first where
@@ -48,26 +56,45 @@ impl RolesSide {
         generation: u64,
         read: impl FnOnce(&Connection) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        let releases = self.releases.load(Ordering::Acquire);
         let session = match &*kept {
-            Some((opened, session)) if *opened == generation => session.clone(),
+            Some((opened, after, session)) if *opened == generation && *after == releases => {
+                session.clone()
+            }
             _ => {
+                *kept = None;
                 let session = connection.apart()?;
-                *kept = Some((generation, session.clone()));
+                *kept = Some((generation, releases, session.clone()));
                 session
             }
         };
         let result = read(&session);
-        if result.is_err() && session.is_lost() {
+        // Let go of while this read ran: a release could not take the lock.
+        if (result.is_err() && session.is_lost())
+            || self.releases.load(Ordering::Acquire) != releases
+        {
             *kept = None;
         }
         result
     }
 
+    /// Close the kept session: the connection it was opened from has ended,
+    /// and it would otherwise hold its server session, its share of any SSH
+    /// route and a slot of the login's `CONNECTION LIMIT` until the tab
+    /// closes. The tab's next read opens another. Never waits: with a read
+    /// under way the read lets it go as it ends.
+    pub(crate) fn release(&self) {
+        self.releases.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut kept) = self.kept.try_lock() {
+            *kept = None;
+        }
+    }
+
     /// Whether it holds a session, of any connect.
     #[cfg(test)]
     pub(crate) fn is_open(&self) -> bool {
-        self.0
+        self.kept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
@@ -1505,6 +1532,33 @@ mod tests {
             "a later connect's read opens a session of its own"
         );
         assert!(run(&connection, "SELECT * FROM temp.mark").is_err());
+        drop((side, connection));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_release_lets_the_session_go_even_while_a_read_holds_it() {
+        use crate::db::ConnectionConfig;
+        let path =
+            std::env::temp_dir().join(format!("dbdelve-roles-release-{}.db", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        let connection = Connection::open(ConnectionConfig::Sqlite {
+            path: path.display().to_string(),
+            statement_timeout: 0,
+        })
+        .unwrap();
+        let side = RolesSide::default();
+        side.read(&connection, 1, |_| Ok(())).unwrap();
+        side.release();
+        assert!(!side.is_open());
+        side.read(&connection, 1, |_| {
+            side.release();
+            Ok(())
+        })
+        .unwrap();
+        assert!(!side.is_open(), "the read lets it go as it ends");
+        side.read(&connection, 1, |_| Ok(())).unwrap();
+        assert!(side.is_open(), "the next read opens another");
         drop((side, connection));
         let _ = std::fs::remove_file(&path);
     }

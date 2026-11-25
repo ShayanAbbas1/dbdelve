@@ -818,6 +818,13 @@ impl Profile {
         self.bound.clear();
         self.database_catalogs.clear();
         self.session.schema_export = None;
+        // The Users and roles tab's kept session is one more, and stays open
+        // past a disconnect or an idle close unless it is let go of here.
+        for tab in &self.session.objects {
+            if let ObjectBody::Users { side, .. } = &tab.body {
+                side.release();
+            }
+        }
     }
 
     /// Let go of each session open for a database `shown` hides that only the

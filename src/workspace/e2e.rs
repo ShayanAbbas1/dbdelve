@@ -30696,6 +30696,44 @@ fn gone_idle_again(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn the_idle_close_and_a_disconnect_let_the_users_tabs_session_go(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = closing_after_a_minute(cx, "");
+        // The tab's side session, opened as its first read opens it.
+        let open_side = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let tab = users_tab_on(workspace, window, cx);
+                let profile = workspace.profile().expect("in front");
+                let connection = profile.connection().expect("connected");
+                let side = profile
+                    .session
+                    .objects
+                    .iter()
+                    .find_map(|object| match &object.body {
+                        ObjectBody::Users { side, .. } if object.id == tab => Some(side.clone()),
+                        _ => None,
+                    })
+                    .expect("the tab is there");
+                side.read(&connection, profile.generation, |_| Ok(()))
+                    .unwrap();
+                assert!(side.is_open());
+                side
+            })
+        };
+
+        let side = open_side(&workspace, cx);
+        gone_idle_again(&workspace, cx);
+        assert!(!side.is_open(), "the idle close lets it go");
+
+        connect_profile(&workspace, cx, "orders");
+        let side = open_side(&workspace, cx);
+        disconnect(cx);
+        assert!(!side.is_open(), "a disconnect lets it go");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn an_idle_profile_shows_the_reconnect_button(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = closing_after_a_minute(cx, "");
