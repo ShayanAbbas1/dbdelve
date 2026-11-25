@@ -83,7 +83,23 @@ impl Roles {
     /// Why a new role may not be made a member of `name`: it is a
     /// superuser or [`privileged_name`], or belongs to one, however far up.
     /// Inheriting or not: a member can `SET ROLE` to what it belongs to.
+    /// A name the roles read do not hold is refused too, since nothing here
+    /// says what it is, bar the predefined `pg_` roles the read leaves out:
+    /// so is one past the server's 63 bytes, which it cuts to the name of
+    /// another role than the one checked.
     pub fn refuses_membership(&self, name: &str) -> Option<String> {
+        if name.len() > ROLE_NAME_BYTES {
+            return Some(format!(
+                "{name} is longer than the {ROLE_NAME_BYTES} bytes the server keeps of a \
+                 role's name, which would make it another role's."
+            ));
+        }
+        if !name.starts_with("pg_") && self.role(name).is_none() {
+            return Some(format!(
+                "{name} is not a role the server listed; a role made here is a member only of \
+                 one it did."
+            ));
+        }
         let mut seen = vec![name];
         let mut index = 0;
         while let Some(&role) = seen.get(index) {
@@ -110,6 +126,10 @@ impl Roles {
         None
     }
 }
+
+/// How much of a role's name Postgres keeps, `NAMEDATALEN - 1`: a longer one
+/// is cut to this many bytes as it is read.
+const ROLE_NAME_BYTES: usize = 63;
 
 /// The predefined roles a new role is never made a member of from here:
 /// each reaches past the database's own grants, to the server's files and
@@ -1565,6 +1585,38 @@ mod tests {
         }
         assert_eq!(roles.refuses_membership("reporting"), None);
         assert_eq!(roles.refuses_membership("pg_read_all_data"), None);
+    }
+
+    #[test]
+    fn a_membership_is_refused_unless_it_names_a_role_read_exactly() {
+        // Postgres cuts a name to 63 bytes, never inside a character.
+        let long_root = "r".repeat(63);
+        let wide_root = format!("{}é", "w".repeat(61));
+        let roles = Roles {
+            roles: vec![
+                role(&long_root, true),
+                role(&wide_root, true),
+                role("ops", false),
+                role("chained", false),
+                role("reporting", false),
+            ],
+            memberships: vec![
+                ("chained".into(), "ops".into()),
+                ("ops".into(), long_root.clone()),
+            ],
+            ..Roles::default()
+        };
+        for name in [
+            "nobody".to_string(),
+            format!("{long_root}x"),
+            format!("{}éé", "w".repeat(61)),
+            "pg_write_server_files".to_string(),
+            "chained".to_string(),
+            "Reporting".to_string(),
+        ] {
+            assert!(roles.refuses_membership(&name).is_some(), "{name}");
+        }
+        assert_eq!(roles.refuses_membership("reporting"), None);
     }
 
     #[test]
