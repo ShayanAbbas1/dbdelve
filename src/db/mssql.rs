@@ -876,6 +876,22 @@ struct InFlight {
     signing_in: Option<std::net::TcpStream>,
 }
 
+impl InFlight {
+    /// Publishes `socket` as a login's still replaying its startup script,
+    /// for a Cancel to drop. `false`, publishing nothing, when a Cancel for
+    /// the statement waiting on this login came while it signed in, before
+    /// there was a socket to shut: the script would otherwise run unbounded
+    /// for a statement already cancelled. `cancel_queued` stays set, for
+    /// `acquire` to answer that statement with.
+    fn replaying(&mut self, socket: Option<std::net::TcpStream>) -> bool {
+        if self.cancel_queued {
+            return false;
+        }
+        self.signing_in = socket;
+        true
+    }
+}
+
 /// A live connection. Cloneable so a background task can take one without
 /// borrowing the view.
 ///
@@ -1001,7 +1017,11 @@ impl Connection {
         // Session options last on a login are the script's: a login holds them
         // until the connection drops, so replaying here covers every one.
         // Published for the while as a login's, so a Cancel can drop it.
-        self.in_flight().signing_in = socket.try_clone().ok();
+        // A login with no script has nothing left to bound, and `acquire`
+        // still honours the Cancel once it returns.
+        if !self.startup.is_empty() && !self.in_flight().replaying(socket.try_clone().ok()) {
+            return Err(plain_error(super::CANCELLED_QUEUED.into()));
+        }
         let replayed = run_startup(&mut session, &self.startup, &self.server.database);
         self.in_flight().signing_in = None;
         // Only once the script ran: a login it failed is dropped here, and
@@ -3323,6 +3343,23 @@ mod tests {
         // server speaks TLS with a certificate signed by nobody, which `prefer`
         // encrypts to without checking.
         config_from_url(&url).expect("dbdelve_MSSQL_URL should parse")
+    }
+
+    #[test]
+    fn a_cancel_that_arrived_during_the_login_stops_the_startup_script() {
+        let mut waiting = InFlight {
+            queued: 1,
+            ..InFlight::default()
+        };
+        assert!(waiting.replaying(None), "no Cancel: the script replays");
+        let mut cancelled = InFlight {
+            queued: 1,
+            cancel_queued: true,
+            ..InFlight::default()
+        };
+        assert!(!cancelled.replaying(None), "the login is dropped instead");
+        // Kept for `acquire`, which answers the waiting statement with it.
+        assert!(cancelled.cancel_queued);
     }
 
     #[test]
