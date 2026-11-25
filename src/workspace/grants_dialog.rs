@@ -1051,7 +1051,10 @@ fn grants_row(
         .h(px(GRANTS_ROW_HEIGHT))
         .border_t_1()
         .border_color(t.border)
-        .when(row.member || header, |line| line.bg(t.surface))
+        // `frost`, not `surface`: the dialog's card lets the window through on
+        // glass, and an opaque band on it reads as a hole in the frost. On a
+        // solid theme it is `surface` itself.
+        .when(row.member || header, |line| line.bg(t.frost()))
         .debug_selector({
             let name = row.name.clone();
             move || format!("show-grants-row-{name}")
