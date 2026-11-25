@@ -187,6 +187,10 @@ pub(crate) struct Profile {
     /// with the generation the read was issued to: one a reconnect left
     /// behind lands nowhere, and must not hold off the next.
     pub(crate) schema_reads: HashMap<String, u64>,
+    /// The catalog a database switch kept for the connection it opens to
+    /// put back in place of reading it again; see
+    /// `workspace::profiles::keeps_catalog_across_switch`.
+    pub(crate) kept_catalog: Option<(Catalog, Routines)>,
     /// Whether the connection opened on another database than the one the
     /// tabs were opened on, because the picked one was no longer there. What
     /// is left of that database goes on the next frame, which has the window

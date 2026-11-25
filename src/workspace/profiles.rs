@@ -153,6 +153,51 @@ pub(super) fn database_content(
     }
 }
 
+/// Whether `profile`'s catalog stays as it is across a database switch off
+/// `left`, the database the session was on, onto the one its config names
+/// now, which on such a target reconnects rather than reading it all again
+/// over the new connection. Only a
+/// catalog that lists every database as a schema does not depend on which
+/// one the session is on, and even then only where no database list
+/// narrows it (it always shows the session's own) and neither database is
+/// one of the server's own (listed only while it is the session's). One
+/// whose routines are still reading is read again whole: the new generation
+/// turns their answer away.
+fn keeps_catalog_across_switch(profile: &Profile, left: &str) -> bool {
+    catalog_survives_switch(
+        profile.config.target(),
+        &profile.catalog,
+        profile.shown().narrows_catalog(),
+        left,
+        profile.config.database_name().as_deref(),
+    )
+}
+
+/// [`keeps_catalog_across_switch`] of a profile on `target` whose catalog is
+/// `catalog`, `narrowed` by a database list or not, moving off `left` onto
+/// `moved_to`.
+fn catalog_survives_switch(
+    target: Target,
+    catalog: &CatalogState,
+    narrowed: bool,
+    left: &str,
+    moved_to: Option<&str>,
+) -> bool {
+    let Some(moved_to) = moved_to else {
+        return false;
+    };
+    let CatalogState::Loaded(catalog, routines) = catalog else {
+        return false;
+    };
+    let system = |name| target.engine.is_system_database(name);
+    target.catalog_lists_databases()
+        && !matches!(routines, Routines::Loading)
+        && !narrowed
+        && !system(left)
+        && !system(moved_to)
+        && catalog.schemas.iter().any(|schema| schema.name == moved_to)
+}
+
 /// Why a connection save that reconnects is refused.
 const TRANSACTION_BLOCKS_SAVE: &str = "A transaction is open on this connection, and saving \
      reconnects it, which would roll it back. Commit or roll it back first.";
@@ -466,6 +511,7 @@ impl Workspace {
             database_catalogs: HashMap::new(),
             database_catalogs_shown: HashMap::new(),
             schema_reads: HashMap::new(),
+            kept_catalog: None,
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             folds: stored.folds,
@@ -563,6 +609,7 @@ impl Workspace {
             database_catalogs: HashMap::new(),
             database_catalogs_shown: HashMap::new(),
             schema_reads: HashMap::new(),
+            kept_catalog: None,
             left_database: false,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
@@ -1754,6 +1801,14 @@ impl Workspace {
                 false => name,
             });
         let in_session = profile.config.target().switches_database_in_session();
+        // The new connection's connect puts it back rather than reading it all
+        // again ([`keeps_catalog_across_switch`]).
+        if !in_session && keeps_catalog_across_switch(profile, &left.0) {
+            let kept = std::mem::replace(&mut profile.catalog, CatalogState::Loading);
+            if let CatalogState::Loaded(catalog, routines) = kept {
+                profile.kept_catalog = Some((catalog, routines));
+            }
+        }
         self.remember_profiles(cx);
         match in_session {
             true => self.use_database(index, left, cx),
@@ -2577,6 +2632,18 @@ impl Workspace {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
                     };
+                    // Only onto the database it was kept for: one that was
+                    // gone opened where nothing is picked.
+                    let kept = profile.kept_catalog.take().filter(|_| {
+                        unpicked.is_none() && matches!(profile.state, ProfileState::Connected(_))
+                    });
+                    let kept = match kept {
+                        Some((catalog, routines)) => {
+                            profile.catalog = CatalogState::Loaded(catalog, routines);
+                            true
+                        }
+                        None => false,
+                    };
                     // A plugin's driver is the user's own, so what it reached
                     // is news; what a built-in reached is the profile.
                     if let Some(reported) = reported
@@ -2592,7 +2659,10 @@ impl Workspace {
                     workspace.mark_activity(&id, cx);
                     workspace.arm_keep_alive(&id, cx);
                     workspace.arm_idle(&id, cx);
-                    workspace.load_catalog(&id, generation, cx);
+                    match kept {
+                        true => workspace.catalog_kept(&id, generation, cx),
+                        false => workspace.load_catalog(&id, generation, cx),
+                    }
                     workspace.load_import_columns(&id, cx);
                     workspace.reload_front_object(&id, cx);
                     workspace.run_waiting_files(&id, cx);
@@ -2619,9 +2689,28 @@ impl Workspace {
         }
     }
 
+    /// The catalog a database switch kept ([`keeps_catalog_across_switch`])
+    /// brought up to the database the new connection is on: what reads it
+    /// again, the sidebar's open schemas among them, and the database moved to
+    /// if it was listed unread.
+    fn catalog_kept(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let database = profile.active_database();
+        self.catalog_replaced(id, generation, false, cx);
+        if let Some(database) = database {
+            self.read_schema(id, &database, cx);
+        }
+    }
+
     pub(crate) fn load_catalog(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
         if self.issued_to(id, generation).is_some() {
             self.mark_activity(id, cx);
+        }
+        #[cfg(test)]
+        {
+            self.catalog_reads += 1;
         }
         let Some(profile) = self.issued_to(id, generation) else {
             return;
@@ -4786,6 +4875,98 @@ target = 'i-0123456789abcdef0'
         // Blank is wherever the login landed, which the listing names.
         assert!(already_on("", Some("master"), "master"));
         assert!(!already_on("", Some("master"), "tempdb"));
+    }
+
+    /// A switch on a catalog that lists every database keeps it, so one on a
+    /// server with thousands of tables does not read them all again.
+    #[test]
+    fn a_switch_keeps_a_catalog_that_lists_every_database_and_rereads_the_rest() {
+        let schema = |name: &str| crate::db::Schema {
+            name: name.into(),
+            relations: Vec::new(),
+            routines: Vec::new(),
+            sequences: Vec::new(),
+        };
+        let listed = |routines| {
+            CatalogState::Loaded(
+                Catalog {
+                    schemas: vec![schema("app"), schema("other"), schema("mysql")],
+                    ..Catalog::default()
+                },
+                routines,
+            )
+        };
+        let mysql = Target::built_in(Engine::MySql);
+        let loaded = listed(Routines::Loaded);
+        assert!(catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "app",
+            Some("other")
+        ));
+        assert!(catalog_survives_switch(
+            Target::built_in(Engine::MariaDb),
+            &listed(Routines::Skipped),
+            false,
+            "app",
+            Some("other"),
+        ));
+        // The routines' answer would land on the old generation.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &listed(Routines::Loading),
+            false,
+            "app",
+            Some("other")
+        ));
+        // A database list keeps the session's own whatever it says.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            true,
+            "app",
+            Some("other")
+        ));
+        // The server's own is listed only while the session is on it.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "app",
+            Some("mysql")
+        ));
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "mysql",
+            Some("app")
+        ));
+        // One the catalog does not list, or none named.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "app",
+            Some("new")
+        ));
+        assert!(!catalog_survives_switch(mysql, &loaded, false, "app", None));
+        assert!(!catalog_survives_switch(
+            mysql,
+            &CatalogState::Loading,
+            false,
+            "app",
+            Some("other")
+        ));
+        // A catalog of one database is another database's after the move.
+        assert!(!catalog_survives_switch(
+            Target::built_in(Engine::Postgres),
+            &loaded,
+            false,
+            "app",
+            Some("other"),
+        ));
     }
 
     #[test]
