@@ -318,6 +318,13 @@ impl Workspace {
             return;
         };
         let database = arrangement_database(profile, bound.as_deref());
+        // The catalog a bound tab's diagram reads is narrowed by that
+        // database's table lists, the tree's catalog by the own one's.
+        let listed = match bound.as_deref() {
+            Some(database) => profile.shown().in_another_database(database),
+            None => profile.shown(),
+        };
+        // Counted from the narrowed catalog, as the graph is narrowed below.
         let known_tables = match profile.catalog_state_of(bound.as_deref()) {
             CatalogState::Loaded(catalog, _) => drawn_table_count(catalog, &schema),
             _ => None,
@@ -349,7 +356,9 @@ impl Workspace {
             let Some(own) = reading.publish(session) else {
                 return Ok(None);
             };
-            let graph = own.schema_graph(&schema)?;
+            let graph = without_hidden(own.schema_graph(&schema)?, |name| {
+                listed.shows_relation(&schema, name)
+            });
             let keys_only =
                 wanted.unwrap_or(known_tables.unwrap_or(graph.tables.len()) > KEYS_ONLY_ABOVE);
             let scene = Scene::new(layout::schema(&graph, keys_only));
@@ -568,6 +577,44 @@ fn drawn_tables(schema: &crate::db::Schema) -> usize {
     (schema.relations.iter())
         .filter(|relation| drawn_in_diagrams(relation.kind) && relation.partition_of.is_none())
         .count()
+}
+
+/// `graph` without the tables `shows` leaves out, and without the keys to or
+/// from them, so a diagram draws what the tree does. A column keeps its
+/// foreign mark: the key is real, only the table it names is hidden.
+///
+/// ponytail: the hidden tables' columns are still read and dropped here; the
+/// upgrade is a name list in each engine's graph SQL.
+fn without_hidden(
+    graph: crate::db::SchemaGraph,
+    shows: impl Fn(&str) -> bool,
+) -> crate::db::SchemaGraph {
+    use crate::db::KeyTarget;
+    let mut kept_at: Vec<Option<u32>> = Vec::with_capacity(graph.tables.len());
+    let mut tables = Vec::new();
+    for table in graph.tables {
+        if shows(&table.name) {
+            kept_at.push(Some(tables.len() as u32));
+            tables.push(table);
+        } else {
+            kept_at.push(None);
+        }
+    }
+    let at = |table: u32| kept_at.get(table as usize).copied().flatten();
+    let keys = (graph.keys.into_iter())
+        .filter_map(|mut key| {
+            key.table = at(key.table)?;
+            if let KeyTarget::Table { table, .. } = &mut key.referenced {
+                *table = at(*table)?;
+            }
+            Some(key)
+        })
+        .collect();
+    crate::db::SchemaGraph {
+        tables,
+        keys,
+        ..graph
+    }
 }
 
 /// `first`, then the catalog's other schemas that have a table to draw.
@@ -808,6 +855,104 @@ mod tests {
         };
         assert_eq!(drawn_table_count(&catalog, "public"), Some(2));
         assert_eq!(drawn_table_count(&catalog, "other"), None);
+    }
+
+    #[test]
+    fn a_diagram_draws_only_the_tables_the_table_list_shows() {
+        use crate::db::{
+            GraphColumn, GraphKey, GraphTable, Include, KeyTarget, Levels, SchemaGraph, TableFilter,
+        };
+        let column = |name: &str, primary: bool, foreign: bool| GraphColumn {
+            name: name.to_string().into(),
+            type_label: 0,
+            nullable: false,
+            primary,
+            foreign,
+            unique: primary,
+        };
+        let table = |name: &str, columns: Vec<GraphColumn>| GraphTable {
+            name: name.to_string().into(),
+            columns,
+        };
+        let key = |name: &str, table: u32, referenced: KeyTarget| GraphKey {
+            name: name.to_string().into(),
+            table,
+            columns: vec![1],
+            referenced,
+        };
+        let to = |table: u32| KeyTarget::Table {
+            table,
+            columns: vec![0],
+        };
+        let graph = SchemaGraph {
+            schema: "public".into(),
+            tables: vec![
+                table(
+                    "a",
+                    vec![column("id", true, false), column("b_id", true, true)],
+                ),
+                table(
+                    "b",
+                    vec![column("id", true, false), column("c_id", false, true)],
+                ),
+                table(
+                    "c",
+                    vec![column("id", true, false), column("a_id", false, true)],
+                ),
+            ],
+            types: vec!["int".into()],
+            keys: vec![
+                key("a_b", 0, to(1)),
+                key("b_c", 1, to(2)),
+                key("c_a", 2, to(0)),
+                key(
+                    "a_far",
+                    0,
+                    KeyTarget::Elsewhere {
+                        schema: "audit".into(),
+                        table: "log".into(),
+                    },
+                ),
+            ],
+        };
+        let shown = Include::default()
+            .with_tables(vec![TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["a".into(), "c".into()],
+            }])
+            .resolve(Levels::Flat, None, None);
+
+        let drawn = without_hidden(graph, |name| shown.shows_relation("public", name));
+
+        let names: Vec<&str> = drawn
+            .tables
+            .iter()
+            .map(|table| table.name.as_ref())
+            .collect();
+        assert_eq!(names, ["a", "c"]);
+        let keys: Vec<(&str, u32, &KeyTarget)> = (drawn.keys.iter())
+            .map(|key| (key.name.as_ref(), key.table, &key.referenced))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("c_a", 1, &to(0)),
+                (
+                    "a_far",
+                    0,
+                    &KeyTarget::Elsewhere {
+                        schema: "audit".into(),
+                        table: "log".into(),
+                    }
+                ),
+            ],
+            "a key to or from a hidden table goes, the rest point at the kept tables"
+        );
+        assert!(
+            drawn.tables[0].columns[1].foreign,
+            "b_id is still a foreign key; only the table it names is hidden"
+        );
     }
 
     #[test]
