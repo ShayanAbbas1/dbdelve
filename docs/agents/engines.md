@@ -191,7 +191,11 @@ Decided, and not to be re-litigated:
   `sql::leaves` reads as ending the transaction, `still_open` reads it once
   more: a `COMMIT` inside a nested `BEGIN TRANSACTION` takes one level off and
   commits nothing, and the notice says a transaction is still open
-  (`TRANSACTION_STILL_OPEN`), which keeps it open in the workspace.
+  (`TRANSACTION_STILL_OPEN`), which keeps it open in the workspace. It is read
+  off the depth (`outlived_end`): still open when `@@TRANCOUNT` is past the
+  levels the batch opened after its last end, so Manual's reopening `COMMIT;
+  BEGIN TRANSACTION` pair at depth two keeps the record and the switch as they
+  were, rather than starting a new transaction or turning Auto.
 - **`sql_variant` and every CLR type (`geography`, `geometry`, `hierarchyid`,
   system type id 240) panic tiberius part way through a result it cannot
   decode**, which would otherwise close the session and the transaction in it.

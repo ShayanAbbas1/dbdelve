@@ -3227,6 +3227,11 @@ impl Workspace {
                         // which the server rolled back instead.
                         let mut commit_rolled_back = false;
                         let error = result.as_ref().err();
+                        // SQL Server's `COMMIT` at a nesting depth past one,
+                        // which ends a level and commits nothing.
+                        let outlived_end = result
+                            .as_ref()
+                            .is_ok_and(crate::db::transaction_still_open);
                         if let Some((sent, lone, reopens, sent_at, since)) = &ending
                             && (lost || !profile.superseded(*sent_at))
                         {
@@ -3234,16 +3239,15 @@ impl Workspace {
                                 && profile.transaction_failed()
                                 && sql::last_end_commits(engine, sent);
                             left_manual = match reopens {
-                                true => profile.reopen_landed(sent, *since, lost, error),
                                 // An end that left the transaction open ran
-                                // inside it, and the next end still ends it.
-                                false if result
-                                    .as_ref()
-                                    .is_ok_and(crate::db::transaction_still_open) =>
-                                {
+                                // inside it, and the next end still ends it:
+                                // a reopening pair's too, whose `BEGIN` only
+                                // nested one level deeper.
+                                _ if outlived_end => {
                                     profile.record_sent(sent, None);
                                     false
                                 }
+                                true => profile.reopen_landed(sent, *since, lost, error),
                                 false => profile.end_landed(sent, *lone, lost, error),
                             };
                         } else if bound_db.is_none()
@@ -3304,7 +3308,7 @@ impl Workspace {
                         }
                         if profile.session.auto_after_end == Some(tab) {
                             profile.session.auto_after_end = None;
-                            if ended_ok {
+                            if ended_ok && !outlived_end {
                                 profile.auto_commit = true;
                             }
                         }
