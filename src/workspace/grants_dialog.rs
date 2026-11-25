@@ -346,16 +346,19 @@ impl Workspace {
                 mark_chip(Mark::Through, 18., t, mono.clone()),
                 "through a role it belongs to",
             ))
-            .when(!view.of_object, |footer| {
-                footer
-                    .child(legend(
-                        mark_chip(Mark::Public, 18., t, mono.clone()),
-                        "granted to PUBLIC",
-                    ))
-                    .child(legend(
-                        mark_chip(Mark::Blocked, 18., t, mono.clone()),
-                        "granted, but the schema is closed",
-                    ))
+            // Only what the table can show: an engine with no PUBLIC or no
+            // schemas never marks a cell so.
+            .when(!view.of_object && view.matrix.marks(Mark::Public), |footer| {
+                footer.child(legend(
+                    mark_chip(Mark::Public, 18., t, mono.clone()),
+                    "granted to PUBLIC",
+                ))
+            })
+            .when(!view.of_object && view.matrix.marks(Mark::Blocked), |footer| {
+                footer.child(legend(
+                    mark_chip(Mark::Blocked, 18., t, mono.clone()),
+                    "granted, but the schema is closed",
+                ))
             })
             .child(div().flex_1().min_w(px(160.)).line_height(px(layout::chrome(15.))).child(match (editing, view.of_object) {
                 (true, _) => "A click stages a change. Nothing runs before Run, in the review of every statement.",

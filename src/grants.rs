@@ -388,7 +388,9 @@ pub(crate) fn object_rows(
         .collect();
     grantees.sort_unstable();
     grantees.dedup();
-    let owner = (!superuser(&grants.owner)).then_some(grants.owner.as_str());
+    // An engine that records no owner leaves it empty: no row for it.
+    let owner =
+        (!grants.owner.is_empty() && !superuser(&grants.owner)).then_some(grants.owner.as_str());
     let mut picked: Vec<&str> = Vec::new();
     for name in added.iter().map(String::as_str) {
         let listed = name == grants.owner || superuser(name) || grantees.contains(&name);
@@ -406,12 +408,15 @@ pub(crate) fn object_rows(
         let via = if name == grants.owner {
             "owner".to_string()
         } else {
-            match (who(roles, name), count) {
+            let mut via = match (who(roles, name), count) {
                 (Who::NoLogin, 0) => "role, cannot log in".into(),
                 (Who::NoLogin, n) => format!("role, cannot log in · {}", plural(n, "member")),
                 _ if picked => "login · nothing granted yet".into(),
-                _ => "login · direct".into(),
-            }
+                _ if grants_written_on(grants, name) => "login · direct".into(),
+                _ => "login".into(),
+            };
+            via.push_str(&where_written(grants, name));
+            via
         };
         let mut marks = marks_of(Some(name));
         // An owner may grant whatever it holds on its own object, which its
@@ -447,22 +452,26 @@ pub(crate) fn object_rows(
             false => row,
         });
     }
-    top.push(fixed(
-        MatrixRow {
-            // No role's name: PUBLIC is a keyword, never one.
-            key: "\u{1f}PUBLIC".into(),
-            name: "PUBLIC".into(),
-            via: "every role".into(),
-            who: Who::Public,
-            depth: 0,
-            member: false,
-            opened: false,
-            marks: marks_of(None),
-            target: None,
-            edits: Vec::new(),
-        },
-        PUBLIC_FIXED,
-    ));
+    // An engine with no PUBLIC grantee has no row for it: holding nothing
+    // through it would say nothing.
+    top.extend(grants.public.then(|| {
+        fixed(
+            MatrixRow {
+                // No role's name: PUBLIC is a keyword, never one.
+                key: "\u{1f}PUBLIC".into(),
+                name: "PUBLIC".into(),
+                via: "every role".into(),
+                who: Who::Public,
+                depth: 0,
+                member: false,
+                opened: false,
+                marks: marks_of(None),
+                target: None,
+                edits: Vec::new(),
+            },
+            PUBLIC_FIXED,
+        )
+    }));
 
     let query = Query::new(filter);
     let mut fuzzy = Fuzzy::new();
@@ -491,6 +500,44 @@ pub(crate) fn object_rows(
         rows.extend(shown);
     }
     rows
+}
+
+/// Whether `name` holds a grant of a matrix column written on the object
+/// itself.
+fn grants_written_on(grants: &ObjectGrants, name: &str) -> bool {
+    (grants.grants.iter()).any(|grant| {
+        grant.grantee.as_deref() == Some(name)
+            && grant.on.is_none()
+            && grants.privileges.contains(&grant.privilege)
+    })
+}
+
+/// What a grantee's line adds after how it holds: where its grants are
+/// written when not on the object (` · on shop.*`), and the grants no
+/// column of the matrix shows, a column grant's (` · columns: UPDATE (note)`).
+fn where_written(grants: &ObjectGrants, name: &str) -> String {
+    let mut levels: Vec<&str> = Vec::new();
+    let mut unlisted: Vec<&str> = Vec::new();
+    for grant in (grants.grants.iter()).filter(|grant| grant.grantee.as_deref() == Some(name)) {
+        if let Some(level) = grant.on.as_deref()
+            && !levels.contains(&level)
+        {
+            levels.push(level);
+        }
+        if !grants.privileges.contains(&grant.privilege)
+            && !unlisted.contains(&grant.privilege.as_str())
+        {
+            unlisted.push(&grant.privilege);
+        }
+    }
+    let mut text: String = levels
+        .iter()
+        .map(|level| format!(" · on {level}"))
+        .collect();
+    if !unlisted.is_empty() {
+        text.push_str(&format!(" · columns: {}", unlisted.join(", ")));
+    }
+    text
 }
 
 /// The roles Grant to… offers on an object view: every role not listed as a
@@ -676,18 +723,29 @@ pub(crate) struct RoleView {
     /// A superuser holds everything and has nothing to grant.
     superuser: bool,
     pub(crate) sections: Vec<DatabaseSection>,
+    /// Privileges over the server itself, which no database holds
+    /// ([`RoleAccess::server`]).
+    pub(crate) server: Vec<String>,
 }
 
 impl RoleView {
     /// Decide which databases are read: those it can connect to that the
     /// database filter (`shows`) lets through, up to [`MAX_DATABASES_READ`].
+    /// A database whose inside came with the access
+    /// ([`DatabaseAccess::inside`]) is not read again: it is done at once
+    /// where the filter shows it, and counts against no limit.
     pub(crate) fn plan(role: String, access: RoleAccess, shows: impl Fn(&str) -> bool) -> Self {
         let mut pending = 0;
         let sections = access
             .databases
             .into_iter()
-            .map(|database| {
-                let read = if !database.connects() {
+            .map(|mut database| {
+                let read = if let Some(inside) = database.inside.take() {
+                    match shows(&database.name) {
+                        true => Read::Done(inside),
+                        false => Read::Skipped(Skipped::Hidden),
+                    }
+                } else if !database.connects() {
                     Read::Skipped(Skipped::NoConnect)
                 } else if !shows(&database.name) {
                     Read::Skipped(Skipped::Hidden)
@@ -709,6 +767,7 @@ impl RoleView {
             role,
             superuser: access.superuser,
             sections,
+            server: access.server,
         }
     }
 
@@ -973,6 +1032,9 @@ pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Ve
     let mut matches = |name: &str| fuzzy.matches(&query, name);
     let filtering = !filter.trim().is_empty();
     let mut rows = Vec::new();
+    if !filtering {
+        rows.extend(server_notes(&view.server));
+    }
     for section in &view.sections {
         let header = database_row(view, section, columns);
         let Read::Done(grants) = &section.read else {
@@ -984,8 +1046,20 @@ pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Ve
         let database = section.access.name.as_str();
         let mut inside: Vec<MatrixRow> = Vec::new();
         let mut left_out = 0;
+        if grants.flat {
+            // No schema between: the relations sit under the database.
+            let held: Vec<&HeldGrant> = grants.held.iter().collect();
+            inside.extend(relation_rows(
+                &view.role,
+                database,
+                &held,
+                columns,
+                true,
+                &mut matches,
+            ));
+        }
         let mut schemas: Vec<&str> = grants.schemas.iter().map(|s| s.name.as_str()).collect();
-        for held in &grants.held {
+        for held in grants.held.iter().filter(|_| !grants.flat) {
             if !schemas.contains(&held.schema.as_str()) {
                 schemas.push(&held.schema);
             }
@@ -1001,7 +1075,14 @@ pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Ve
                 left_out += 1;
                 continue;
             }
-            let kept = relation_rows(&view.role, database, &relations, columns, &mut matches);
+            let kept = relation_rows(
+                &view.role,
+                database,
+                &relations,
+                columns,
+                false,
+                &mut matches,
+            );
             let mut row = access
                 .map(|schema| schema_row(view, database, schema, columns))
                 .unwrap_or_else(|| schema_row(view, database, &closed(name), columns));
@@ -1025,6 +1106,34 @@ pub(crate) fn role_rows(view: &RoleView, columns: &[String], filter: &str) -> Ve
     rows
 }
 
+/// The lines over every database for what the role holds on the server
+/// itself: one for the privileges, one for each grant line the server wrote
+/// that was not read, as it reads. Keyed apart from any database's rows.
+fn server_notes(server: &[String]) -> Vec<MatrixRow> {
+    let (unread, read): (Vec<&String>, Vec<&String>) =
+        server.iter().partition(|line| line.starts_with("unread: "));
+    let read = (!read.is_empty()).then(|| {
+        let privileges: Vec<&str> = read.iter().map(|line| line.as_str()).collect();
+        format!("Server-wide: {}", privileges.join(", "))
+    });
+    (read.into_iter())
+        .chain(
+            unread
+                .into_iter()
+                .map(|line| format!("Server-wide, {line}")),
+        )
+        .enumerate()
+        .map(|(index, text)| MatrixRow {
+            depth: 0,
+            ..note("", index, text)
+        })
+        .map(|row| MatrixRow {
+            key: format!("\u{1f}server{}", row.key),
+            ..row
+        })
+        .collect()
+}
+
 /// A schema a grant names that the schema read did not list.
 fn closed(name: &str) -> SchemaAccess {
     SchemaAccess {
@@ -1034,12 +1143,15 @@ fn closed(name: &str) -> SchemaAccess {
     }
 }
 
-/// The rows of one schema's relations.
+/// The rows of one schema's relations, or with `flat` of a database that
+/// has no schemas, drawn straight under it, where nothing is out of reach
+/// for want of `USAGE`.
 fn relation_rows(
     role: &str,
     database: &str,
     held: &[&HeldGrant],
     columns: &[String],
+    flat: bool,
     matches: &mut impl FnMut(&str) -> bool,
 ) -> Vec<MatrixRow> {
     let mut rows: Vec<MatrixRow> = Vec::new();
@@ -1061,7 +1173,7 @@ fn relation_rows(
                     name: grant.relation.clone(),
                     via: String::new(),
                     who: Who::Object,
-                    depth: 2,
+                    depth: if flat { 1 } else { 2 },
                     member: false,
                     opened: false,
                     marks: vec![Mark::None; columns.len()],
@@ -1077,7 +1189,7 @@ fn relation_rows(
                     edits: Vec::new(),
                 });
                 through_of.push(Vec::new());
-                usable.push(grant.usable);
+                usable.push(flat || grant.usable);
                 rows.len() - 1
             }
         };
@@ -1500,6 +1612,56 @@ mod tests {
     }
 
     #[test]
+    fn an_object_with_no_owner_or_public_says_where_each_grant_is_written() {
+        let grants = ObjectGrants {
+            public: false,
+            owner: String::new(),
+            sequence: false,
+            privileges: vec!["SELECT".into(), "UPDATE".into()],
+            grants: vec![
+                Grant {
+                    on: Some("shop.*".into()),
+                    ..grant(Some("ana@%"), "SELECT", false)
+                },
+                grant(Some("ana@%"), "UPDATE", false),
+                Grant {
+                    on: Some("*.*".into()),
+                    ..grant(Some("bo@%"), "SELECT", true)
+                },
+                grant(Some("cy@%"), "UPDATE (note, total)", false),
+            ],
+            roles: Roles {
+                roles: vec![
+                    role("ana@%", true, false),
+                    role("bo@%", true, false),
+                    role("cy@%", true, false),
+                ],
+                ..Roles::default()
+            },
+        };
+        let rows = object_rows(&grants, false, "", None, &[]);
+        let lines: Vec<(&str, &str)> = (rows.iter())
+            .map(|row| (row.name.as_str(), row.via.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("ana@%", "login · direct · on shop.*"),
+                ("bo@%", "login · on *.*"),
+                ("cy@%", "login · columns: UPDATE (note, total)"),
+            ],
+            "no owner row, no PUBLIC row"
+        );
+        assert_eq!(rows[0].marks, [Mark::Granted, Mark::Granted]);
+        assert_eq!(rows[1].marks, [Mark::Grantable, Mark::None]);
+        assert_eq!(
+            rows[2].marks,
+            [Mark::None, Mark::None],
+            "a column grant is no cell of the matrix"
+        );
+    }
+
+    #[test]
     fn members_hold_through_their_role_only_where_every_step_inherits() {
         let rows = object_rows(&orders(), true, "", None, &[]);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
@@ -1759,6 +1921,99 @@ mod tests {
         assert_eq!(via("closed"), "takes no connections: not read");
         assert!(via("hidden").starts_with("hidden by the filter: not read"));
         assert_eq!(via("app"), "reading… · connect direct");
+    }
+
+    /// What MySQL's access read answers for `name`: no CONNECT, the inside
+    /// already read, with no schema between.
+    fn flat_database(name: &str, held: Vec<HeldGrant>) -> DatabaseAccess {
+        DatabaseAccess {
+            inside: Some(RoleGrants {
+                database: name.into(),
+                schemas: Vec::new(),
+                held,
+                beyond: Default::default(),
+                flat: true,
+            }),
+            ..database(name, None)
+        }
+    }
+
+    fn flat_grant(database: &str, relation: &str, privilege: &str) -> HeldGrant {
+        HeldGrant {
+            schema: database.into(),
+            // A flat grant may be out of USAGE as read; it never matters.
+            usable: false,
+            ..grant_on(relation, privilege, None)
+        }
+    }
+
+    #[test]
+    fn a_database_whose_inside_came_with_the_access_is_done_at_once() {
+        let many: Vec<DatabaseAccess> = (0..MAX_DATABASES_READ + 2)
+            .map(|at| flat_database(&format!("db{at}"), Vec::new()))
+            .collect();
+        let access = RoleAccess {
+            server: Vec::new(),
+            superuser: false,
+            databases: [vec![flat_database("hidden", Vec::new())], many].concat(),
+        };
+        let view = RoleView::plan("ana@%".into(), access, |name| name != "hidden");
+        assert!(view.pending().is_empty(), "nothing is left to read");
+        assert_eq!(view.sections[0].read, Read::Skipped(Skipped::Hidden));
+        assert!(
+            view.sections[1..]
+                .iter()
+                .all(|section| matches!(section.read, Read::Done(_))),
+            "never counted against the limit, never no CONNECT"
+        );
+    }
+
+    #[test]
+    fn a_flat_database_lists_its_relations_under_it_with_the_server_wide_notes_on_top() {
+        let access = RoleAccess {
+            server: vec![
+                "PROCESS".into(),
+                "PROXY ON 'app'@'%'".into(),
+                "unread: GRANT SOMETHING NEW".into(),
+            ],
+            superuser: false,
+            databases: vec![flat_database(
+                "shop",
+                vec![
+                    flat_grant("shop", "orders", "SELECT"),
+                    flat_grant("shop", "orders (note, total)", "UPDATE"),
+                ],
+            )],
+        };
+        let view = RoleView::plan("ana@%".into(), access, |_| true);
+        let rows = role_rows(&view, &role_columns(&view, false), "");
+        let names: Vec<(&str, u8, Who)> = (rows.iter())
+            .map(|row| (row.name.as_str(), row.depth, row.who))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Server-wide: PROCESS, PROXY ON 'app'@'%'", 0, Who::Note),
+                ("Server-wide, unread: GRANT SOMETHING NEW", 0, Who::Note),
+                ("shop", 0, Who::Database),
+                ("orders", 1, Who::Object),
+                ("orders (note, total)", 1, Who::Object),
+            ]
+        );
+        assert!(
+            rows.iter().all(|row| !row.via.contains("USAGE")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|row| !row.marks.contains(&Mark::Blocked)));
+        let mut keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), rows.len(), "every key is its own");
+        let filtered = role_rows(&view, &role_columns(&view, false), "orders");
+        assert!(
+            filtered.iter().all(|row| row.who != Who::Note),
+            "a note names no row, so a filter leaves it out"
+        );
     }
 
     #[test]

@@ -249,6 +249,11 @@ impl GrantsMatrix {
     pub(crate) fn row(&self, key: &str) -> Option<&crate::grants::MatrixRow> {
         self.unfolded.iter().find(|row| row.key == key)
     }
+
+    /// Whether any cell, folded away or not, is marked `mark`.
+    pub(crate) fn marks(&self, mark: crate::grants::Mark) -> bool {
+        (self.unfolded.iter()).any(|row| row.marks.contains(&mark))
+    }
 }
 
 impl GrantsView {
@@ -1167,6 +1172,8 @@ impl Workspace {
         let shown_database = elsewhere
             .clone()
             .or_else(|| self.profile().and_then(Profile::active_database));
+        // Where the database is the schema, it is named once.
+        let shown_database = shown_database.filter(|database| *database != schema);
         let subtitle = [Some(kind.to_string()), shown_database, Some(schema.clone())]
             .into_iter()
             .flatten()
@@ -1249,7 +1256,7 @@ impl Workspace {
         let request = self.open_grants_view(
             id,
             format!("Grants of {name}"),
-            format!("{kind} · every database it can connect to"),
+            format!("{kind} · every database it reaches"),
             None,
             window,
             cx,

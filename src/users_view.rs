@@ -258,10 +258,13 @@ pub fn reach_sentence(role: &Role, reach: &Reach) -> String {
                 [] => String::new(),
                 through => format!(", through {}", through.join(", ")),
             };
-            format!(
-                "{privileges} on {count} {relations} in {}.{schema}{route}.",
-                reach.database
-            )
+            // Where the database holds its relations with no schema between,
+            // the entry's schema is the database and the reach names none.
+            let place = match reach.database.is_empty() {
+                true => schema,
+                false => format!("{}.{schema}", reach.database),
+            };
+            format!("{privileges} on {count} {relations} in {place}{route}.")
         })
         .collect();
     if reach.owns > 0 {
@@ -278,6 +281,7 @@ pub fn reach_sentence(role: &Role, reach: &Reach) -> String {
         sentences.push(format!("Holds {}.", reach.predefined.join(", ")));
     }
     match sentences.is_empty() {
+        true if reach.database.is_empty() => "No grant on a relation.".into(),
         true => format!("No grant on a relation in {}.", reach.database),
         false => {
             sentences.push("No other grant on a relation.".into());
@@ -1327,6 +1331,38 @@ mod tests {
         assert_eq!(
             reach_sentence(&role("bo", true), &nothing),
             "No grant on a relation in analytics."
+        );
+    }
+
+    #[test]
+    fn a_reach_over_every_database_names_each_database_alone() {
+        let reach = Reach {
+            database: String::new(),
+            entries: vec![
+                ReachEntry {
+                    schema: "shop".into(),
+                    privilege: "SELECT".into(),
+                    relations: 3,
+                    through: Vec::new(),
+                },
+                ReachEntry {
+                    schema: "crm".into(),
+                    privilege: "INSERT".into(),
+                    relations: 1,
+                    through: vec!["app_write@%".into()],
+                },
+            ],
+            owns: 0,
+            predefined: Vec::new(),
+        };
+        assert_eq!(
+            reach_sentence(&role("ana@%", true), &reach),
+            "Select on 3 relations in shop. Insert on 1 relation in crm, through app_write@%. \
+             No other grant on a relation."
+        );
+        assert_eq!(
+            reach_sentence(&role("bo@%", true), &Reach::default()),
+            "No grant on a relation."
         );
     }
 
