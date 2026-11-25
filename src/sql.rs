@@ -1348,8 +1348,9 @@ fn grant_shape(
 
 /// Whether `text` is a SCRAM-SHA-256 verifier the server takes as one,
 /// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`: an
-/// iteration count above 0, a salt that is base64, and two keys that are
-/// base64 of 32 bytes each, as Postgres's `parse_scram_secret` reads it.
+/// iteration count above 0 that fits an `int`, a salt that is base64, and
+/// two keys that are base64 of 32 bytes each, as Postgres's
+/// `parse_scram_secret` reads it.
 /// The server takes a string of any other shape, a prefix-alike or one
 /// that only looks like base64 included, as the password itself.
 fn is_scram_verifier(text: &str) -> bool {
@@ -1368,7 +1369,7 @@ fn is_scram_verifier(text: &str) -> bool {
         return false;
     };
     iterations.bytes().all(|b| b.is_ascii_digit())
-        && iterations.parse::<u32>().is_ok_and(|count| count > 0)
+        && iterations.parse::<i32>().is_ok_and(|count| count > 0)
         && decoded(salt).is_some_and(|salt| !salt.is_empty())
         && decoded(stored).is_some_and(|key| key.len() == KEY_LEN)
         && decoded(server).is_some_and(|key| key.len() == KEY_LEN)
@@ -6585,7 +6586,15 @@ mod tests {
         assert!(is_scram_verifier(&format!(
             "SCRAM-SHA-256$4096:{salt}${key}:{key}"
         )));
+        // The server reads the count into an `int`.
+        assert!(is_scram_verifier(&format!(
+            "SCRAM-SHA-256$2147483647:{salt}${key}:{key}"
+        )));
         for bad in [
+            format!("SCRAM-SHA-256$2147483648:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$4294967295:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$+4096:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$-4096:{salt}${key}:{key}"),
             format!("SCRAM-SHA-256$0:{salt}${key}:{key}"),
             format!("SCRAM-SHA-256$:{salt}${key}:{key}"),
             format!("SCRAM-SHA-256$99999999999:{salt}${key}:{key}"),
