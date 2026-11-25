@@ -182,14 +182,16 @@ ORDER BY ORDINAL_POSITION
 // One row per key part, grouped by `indexes` rather than `GROUP_CONCAT`, which
 // `group_concat_max_len` cuts short without a word. A functional key part has
 // no `COLUMN_NAME`, only an `EXPRESSION`, a column MySQL grew in 8.0.13 and
-// MariaDB lacks. The versioned comment reads it on such a MySQL alone: MariaDB
-// skips one written for a MySQL version.
+// MariaDB lacks. `{key_name}` is `COLUMN_NAME` alone or `COALESCE` with
+// `EXPRESSION`, by whether the server has the column: a `/*!80013 … */` comment
+// would do the same on MySQL and MariaDB, but PolarDB-X parses it as a hint and
+// fails.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
        NON_UNIQUE AS non_unique,
        COLUMN_NAME AS column_name,
        CONCAT(
-           COALESCE(COLUMN_NAME /*!80013 , EXPRESSION */),
+           {key_name},
            COALESCE(CONCAT('(', SUB_PART, ')'), ''),
            CASE WHEN COLLATION = 'D' THEN ' DESC' ELSE '' END
        ) AS key_part
@@ -198,6 +200,25 @@ WHERE TABLE_SCHEMA = {schema}
   AND TABLE_NAME = {relation}
 ORDER BY INDEX_NAME, SEQ_IN_INDEX
 ";
+
+const STATISTICS_HAS_EXPRESSION_SQL: &str = "
+SELECT COUNT(*) AS found
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'information_schema'
+  AND TABLE_NAME = 'STATISTICS'
+  AND COLUMN_NAME = 'EXPRESSION'
+";
+
+fn structure_indexes_sql(has_expression: bool) -> String {
+    STRUCTURE_INDEXES_SQL.replace(
+        "{key_name}",
+        if has_expression {
+            "COALESCE(COLUMN_NAME, EXPRESSION)"
+        } else {
+            "COLUMN_NAME"
+        },
+    )
+}
 
 // `CHECK` is deliberately absent. Its clause lives in
 // `information_schema.CHECK_CONSTRAINTS`, a table MySQL only grew in 8.0.16, and
@@ -1290,11 +1311,27 @@ impl Connection {
         ))?)
     }
 
+    /// A failed probe reads as no column: the key parts then name plain
+    /// columns, as they did before functional ones.
+    fn statistics_has_expression(&self) -> bool {
+        self.engine != Engine::MariaDb
+            && self
+                .internal_query(STATISTICS_HAS_EXPRESSION_SQL)
+                .ok()
+                .and_then(|found| {
+                    optional_cell(&found, found.rows.first()?, "found").map(|n| n != "0")
+                })
+                .unwrap_or(false)
+    }
+
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         let columns =
             self.internal_query(&structure_sql(STRUCTURE_COLUMNS_SQL, schema, relation))?;
-        let indexes =
-            self.internal_query(&structure_sql(STRUCTURE_INDEXES_SQL, schema, relation))?;
+        let indexes = self.internal_query(&structure_sql(
+            &structure_indexes_sql(self.statistics_has_expression()),
+            schema,
+            relation,
+        ))?;
         let constraints = self.internal_query(&structure_sql(
             &STRUCTURE_CONSTRAINTS_SQL.replace("{columns}", CONSTRAINT_COLUMNS_SQL),
             schema,
@@ -2816,6 +2853,16 @@ mod tests {
         };
         assert_eq!(untransactional_reason(&keyless), None);
         assert!(primary_key_columns(&keyless).is_empty());
+    }
+
+    #[test]
+    fn index_sql_reads_the_expression_column_only_when_the_server_has_it() {
+        let with = structure_indexes_sql(true);
+        let without = structure_indexes_sql(false);
+        assert!(with.contains("COALESCE(COLUMN_NAME, EXPRESSION)"));
+        assert!(!without.contains("EXPRESSION"));
+        assert!(!with.contains("{key_name}") && !without.contains("{key_name}"));
+        assert!(!with.contains("/*!") && !without.contains("/*!"));
     }
 
     #[test]
