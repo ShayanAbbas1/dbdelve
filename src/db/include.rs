@@ -79,6 +79,9 @@ fn kept_entries(list: Vec<String>) -> Vec<String> {
 }
 
 impl Include {
+    /// [`ENTRIES_CAP`], for the picker, which refuses a list past it.
+    pub const ENTRIES_CAP: usize = ENTRIES_CAP;
+
     /// What a file held, or what Save is about to write: each entry trimmed,
     /// those left empty dropped, at most [`ENTRIES_CAP`] of each list kept, in
     /// the order written. The table lists start empty; [`Self::with_tables`]

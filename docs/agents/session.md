@@ -107,7 +107,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Save and load both pass the lists through `Include::from_stored` (entries
   trimmed, blanks dropped, at most `ENTRIES_CAP`, 500, per list), so what a
   profile holds is what its file holds and the picker's preview counts only
-  what Save keeps.
+  what Save keeps. A table list is the exception: each tick is an entry, so
+  one past the cap is refused at Save, with the reason in the preview line,
+  rather than cut short.
   Where the catalog lists databases as schemas (MySQL, MariaDB, ClickHouse),
   the hidden count comes from the listing the picker reads
   (`Connection::catalog_databases`: on MySQL and MariaDB every database but

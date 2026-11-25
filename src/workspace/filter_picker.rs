@@ -301,6 +301,19 @@ fn admits(pattern: &str, name: &str) -> bool {
     .shows_database(name)
 }
 
+/// Why Save refuses a table list of `entries`, or `None` when it fits. Each
+/// tick is an entry, so a large schema with a few unticked passes the cap; a
+/// list cut short there would hide the ticks and patterns past it.
+fn too_many_tables(entries: usize) -> Option<String> {
+    let cap = Include::ENTRIES_CAP;
+    (entries > cap).then(|| {
+        format!(
+            "Cannot save {entries} entries: a table list holds at most {cap}. \
+             Tick fewer, or cover them with a pattern such as orders_*."
+        )
+    })
+}
+
 /// How many of the listed relation `names` a table list of `entries` shows.
 fn tables_shown(entries: &[String], names: &[String]) -> usize {
     names
@@ -513,8 +526,9 @@ impl FilterPicker {
             .with_tables(self.saved.tables.clone())
     }
 
-    /// Nothing to write while a section is still being read, or when the lists
-    /// are the ones the profile already holds.
+    /// Nothing to write while a section is still being read, when the lists
+    /// are the ones the profile already holds, or when a table list holds more
+    /// than Save would keep.
     pub(crate) fn can_save(&self) -> bool {
         let written = self.written();
         let unchanged = match &self.tables {
@@ -527,7 +541,11 @@ impl FilterPicker {
             }
             None => unchanged(&written, &self.saved),
         };
-        !self.loading() && !unchanged
+        let refused = self
+            .tables
+            .as_ref()
+            .and_then(|_| too_many_tables(self.databases.entries().len()));
+        !self.loading() && !unchanged && refused.is_none()
     }
 
     /// The line under a list: how many of the listed names the list, as
@@ -563,6 +581,9 @@ impl FilterPicker {
         // The stored rule's own matcher, as `admits` asks it, so the count
         // cannot drift from what Save will show.
         if which == Which::Tables {
+            if let Some(refused) = too_many_tables(entries.len()) {
+                return Some(refused);
+            }
             let count = tables_shown(&entries, names);
             return Some(format!("Showing {count} of {total} {noun}{place}"));
         }
@@ -1763,6 +1784,26 @@ mod tests {
         assert_eq!(tables_shown(&entries(&["orders"]), &names), 1);
         assert_eq!(tables_shown(&entries(&["orders*", "users"]), &names), 3);
         assert_eq!(tables_shown(&entries(&["nothing"]), &names), 0);
+    }
+
+    #[test]
+    fn a_table_list_past_the_cap_is_refused_rather_than_cut_short() {
+        // An 800-table schema with five unticked: one entry per tick.
+        let names: Vec<String> = (0..800).map(|number| format!("t{number:03}")).collect();
+        let written = written_entries(&names[5..], "tmp_*");
+        assert_eq!(written.len(), 796);
+        // What Save would store were it let through: the ticks past the cap
+        // and the pattern after them are gone.
+        let mut include = Include::default();
+        include.set_tables(None, "public", written.clone());
+        assert!(include.tables_of(None, "public").len() < written.len());
+        let refused = too_many_tables(written.len()).expect("Save is refused");
+        assert!(refused.contains("796"), "{refused}");
+        assert_eq!(
+            too_many_tables(Include::ENTRIES_CAP),
+            None,
+            "a full list fits"
+        );
     }
 
     #[test]
