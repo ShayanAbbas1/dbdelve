@@ -123,6 +123,21 @@ pub(crate) enum RoleFormKind {
     Password(String),
 }
 
+/// What a Reset Password review adds when the role is the one the profile
+/// signs in as (`connected`): the password the profile saved stops matching
+/// once the change runs, and only the user knows to update it. Names the
+/// role, never the password.
+fn own_password_note(kind: &RoleFormKind, connected: Option<&str>) -> Option<String> {
+    match kind {
+        RoleFormKind::Password(name) if connected == Some(name.as_str()) => Some(format!(
+            "{name} is the role this connection signs in as: once this runs, the connection's \
+             saved password no longer matches. Update it in the connection's settings, or the \
+             next connect fails."
+        )),
+        _ => None,
+    }
+}
+
 /// The New User, New Role, Edit and Reset Password dialog.
 pub(crate) struct RoleForm {
     pub(crate) profile: String,
@@ -985,10 +1000,22 @@ impl Workspace {
             return;
         };
         let id = form.profile.clone();
+        let connected = (self.profiles.iter())
+            .find(|profile| profile.id == id)
+            .and_then(|profile| profile.config.server())
+            .map(|server| server.user.clone());
+        let own_note = own_password_note(&form.kind, connected.as_deref());
         let reviewed = match self.role_form_statement(form, cx) {
             Ok((sql, title)) => self.review_role_change(&id, title, sql, window, cx),
             Err(message) => Err(message),
         };
+        if let (Ok(()), Some(note)) = (&reviewed, own_note)
+            && let Some(review) = self
+                .profile_mut()
+                .and_then(|profile| profile.session.apply_review.as_mut())
+        {
+            review.notes.push(note);
+        }
         match reviewed {
             Ok(()) => self.role_form = None,
             Err(message) => {
@@ -1561,6 +1588,19 @@ mod tests {
         assert!(side.is_open(), "the next read opens another");
         drop((side, connection));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resetting_the_connections_own_password_says_the_saved_one_stops_matching() {
+        let reset = |name: &str| RoleFormKind::Password(name.into());
+        let note = own_password_note(&reset("ana"), Some("ana")).expect("its own role");
+        assert!(note.contains("saved password"), "{note}");
+        assert_eq!(own_password_note(&reset("bo"), Some("ana")), None);
+        assert_eq!(own_password_note(&reset("ana"), None), None);
+        assert_eq!(
+            own_password_note(&RoleFormKind::New { login: true }, Some("ana")),
+            None
+        );
     }
 
     #[test]
