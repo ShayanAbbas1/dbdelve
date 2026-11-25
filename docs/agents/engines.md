@@ -389,6 +389,30 @@ Decided, and not to be re-litigated:
   driver, so its warnings are not counted. `SHOW WARNINGS` leaves
   `ROW_COUNT()` at -1 for whatever the user runs next; that is accepted, as
   the mysql client's `\W` accepts it, because the warnings' text is the point.
+- **MySQL's and MariaDB's Users and roles are read, never written**
+  (`Target::lists_roles` without `manages_roles`; `db::mysql_roles`). The
+  accounts come from `mysql.user` (MariaDB 10.4 on: with `mysql.global_priv`
+  for lock and password lifetime; no password hash leaves the server, only
+  whether there is one), memberships from MySQL 8's `role_edges` and
+  `default_roles` or MariaDB's `roles_mapping`, and what an account holds from
+  `SHOW GRANTS FOR`, which says every level at once, so one read answers for
+  every database (`DatabaseAccess::inside`, `RoleGrants::flat`: no schema
+  level, no `USAGE`, no owner, no PUBLIC). An account is named `user@host`, a
+  MariaDB role bare; a MySQL 8 role is a locked, passwordless account and is
+  listed as a role. A login that may not read `mysql.user` gets
+  `Roles::denied`, shown in the row's and the tab's place and read again only
+  on Refresh: it is an answer, not a failure to retry. The decisions: a role
+  granted but not a default one is not inherited (not active until `SET
+  ROLE`), unless `activate_all_roles_on_login` is on, and MariaDB's role
+  granted to a role always is; a superuser is an account holding `SELECT`,
+  `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` and `SUPER` (or `ALL
+  PRIVILEGES`) on `*.*` with grant option, an approximation that does not
+  weigh MySQL 8's dynamic `*_ADMIN` privileges; a grant on a database pattern
+  (`db1\_%.*`) reaches every database whose name it matches by `LIKE` and is
+  shown as through that pattern; a `SHOW GRANTS` line the parser cannot read
+  is kept and shown as unread, never dropped. Copy DROP USER is one `DROP
+  USER 'user'@'host';` (`DROP ROLE` for a role) on the clipboard, nothing
+  sent.
 - **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL,
   `EXPLAIN` / `ANALYZE` on MariaDB, and `EXPLAIN QUERY PLAN` on SQLite, which
   has no analyze form, so that mode is not offered there
