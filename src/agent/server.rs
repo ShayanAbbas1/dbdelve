@@ -448,7 +448,7 @@ fn write_before(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> bool {
         {
             return false;
         }
-        match usize::try_from(send_now(fd, rest)) {
+        match usize::try_from(send_now(fd, rest, left)) {
             Ok(0) => return false,
             Ok(sent) => rest = &rest[sent..],
             // No room yet, or a signal: the deadline is checked again first.
@@ -461,20 +461,58 @@ fn write_before(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> bool {
     true
 }
 
-/// Send what of `bytes` fits now, without waiting for room: `send`'s count,
-/// with `EWOULDBLOCK` when nothing fits.
+/// Send what of `bytes` fits now, waiting no longer than `left` for room:
+/// `send`'s count, with `EWOULDBLOCK` when nothing went.
 ///
-/// `MSG_DONTWAIT` says so on Linux. Apple's kernel ignores it on a send, and a
-/// blocking one waits until every byte is in, so there the send carries no
-/// more than the low-water mark: `poll` gives `POLLOUT` only once that much
-/// room is free, so it goes in whole without a wait.
-fn send_now(fd: std::os::fd::RawFd, bytes: &[u8]) -> isize {
+/// `MSG_DONTWAIT` makes it wait not at all on Linux. Apple's kernel ignores
+/// that flag on a send, and its `POLLOUT` on a Unix socket can be given while
+/// the peer has no room, so a blocking send there would wait until every byte
+/// is in. There the socket's send timeout is set to `left` first, which bounds
+/// the send without touching how the hangup reader's reads block, and the send
+/// carries no more than the low-water mark, so a caller reading a little at a
+/// time cannot stretch one send far past it either.
+#[cfg_attr(not(target_vendor = "apple"), allow(unused_variables))]
+fn send_now(fd: std::os::fd::RawFd, bytes: &[u8], left: Duration) -> isize {
     #[cfg(target_vendor = "apple")]
-    let (len, flags) = (bytes.len().min(low_water_mark(fd)), 0);
+    let (len, flags) = {
+        if let Err(error) = set_send_timeout(fd, left) {
+            // Unbounded, the send could wait for ever: read as a failed send.
+            tracing::warn!("agent socket: the send timeout could not be set: {error}");
+            return -1;
+        }
+        (bytes.len().min(low_water_mark(fd)), 0)
+    };
     #[cfg(not(target_vendor = "apple"))]
     let (len, flags) = (bytes.len(), libc::MSG_DONTWAIT);
     // SAFETY: `bytes` is valid for `len <= bytes.len()` bytes for the call.
     unsafe { libc::send(fd, bytes.as_ptr().cast(), len, flags) }
+}
+
+/// Bound every blocking send on the socket to `within`, never less than a
+/// millisecond: a zero timeout is no timeout at all.
+#[cfg(target_vendor = "apple")]
+fn set_send_timeout(fd: std::os::fd::RawFd, within: Duration) -> io::Result<()> {
+    let within = within.max(Duration::from_millis(1));
+    let timeout = libc::timeval {
+        tv_sec: libc::time_t::try_from(within.as_secs()).unwrap_or(libc::time_t::MAX),
+        // Under a million, which every platform's `suseconds_t` holds.
+        tv_usec: within.subsec_micros() as libc::suseconds_t,
+    };
+    // SAFETY: `timeout` is a valid `timeval` for the call, and the length is its size.
+    let set = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            (&raw const timeout).cast(),
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if set == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// The socket's send low-water mark: the room `poll` waits for before it
