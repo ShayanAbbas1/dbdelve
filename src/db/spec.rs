@@ -906,6 +906,10 @@ pub struct Abilities {
     /// [`Connection::roles`](super::Connection::roles) and the statements
     /// [`super::roles`] writes.
     pub manages_roles: bool,
+    /// The server's logins, roles and grants can be read through
+    /// [`Connection::roles`](super::Connection::roles), whether or not
+    /// DBDelve writes changes to them ([`Self::manages_roles`]).
+    pub lists_roles: bool,
     /// Why no transaction spans an import's chunks.
     pub chunk_refusal: Option<&'static str>,
 }
@@ -930,6 +934,7 @@ impl Abilities {
         schema_switch_waits_for_transaction: false,
         draws_diagrams: false,
         manages_roles: false,
+        lists_roles: false,
         chunk_refusal: None,
     };
 
@@ -1036,6 +1041,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         schema_switch_waits_for_transaction: true,
         draws_diagrams: true,
         manages_roles: true,
+        lists_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -1112,6 +1118,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         // No `picks_schema`: the database is the schema.
         catalog_lists_databases: true,
         draws_diagrams: true,
+        lists_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1191,6 +1198,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         catalog_lists_databases: true,
         draws_diagrams: true,
         lists_sequences: true,
+        lists_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks {

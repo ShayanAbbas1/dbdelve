@@ -401,15 +401,18 @@ pub(super) fn role_items(
 
 impl Workspace {
     /// What the connections tree shows of `profile`'s roles: nothing where
-    /// its target manages none or it has not loaded.
+    /// its target lists none.
     pub(crate) fn roles_listing(profile: &Profile) -> Option<RolesListing> {
-        if !profile.config.target().manages_roles() {
+        if !profile.config.target().lists_roles() {
             return None;
         }
         Some(match &profile.roles {
             RolesState::Unloaded => RolesListing::Unloaded,
             RolesState::Loading => RolesListing::Loading,
             RolesState::Failed(message) => RolesListing::Failed(message.clone()),
+            RolesState::Loaded(roles) if roles.denied.is_some() => {
+                RolesListing::Denied(roles.denied.clone().unwrap_or_default())
+            }
             RolesState::Loaded(roles) => RolesListing::Loaded(
                 crate::users_view::ordered(roles)
                     .into_iter()
@@ -425,7 +428,7 @@ impl Workspace {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
             return;
         };
-        if !profile.config.target().manages_roles() {
+        if !profile.config.target().lists_roles() {
             return;
         }
         let Some(connection) = profile.connection() else {
@@ -518,7 +521,8 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
-        if !profile.config.target().manages_roles() {
+        let target = profile.config.target();
+        if !target.lists_roles() {
             return;
         }
         let tab = match self.users_tab_of(id) {
@@ -527,7 +531,8 @@ impl Workspace {
                 let server = profile
                     .active_database()
                     .unwrap_or_else(|| profile.name.clone());
-                let view = cx.new(|cx| UsersView::new(server, cx));
+                let edits = target.manages_roles();
+                let view = cx.new(|cx| UsersView::new(server, edits, cx));
                 let profile_id = id.to_string();
                 cx.subscribe_in(&view, window, move |workspace, view, event, window, cx| {
                     workspace.users_event(&profile_id, view, event, window, cx)
@@ -593,6 +598,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Where roles are only listed no change is offered; one asked for
+        // anyway is not written.
+        let writes = matches!(
+            event,
+            UsersEvent::NewRole { .. }
+                | UsersEvent::Edit(_)
+                | UsersEvent::ResetPassword(_)
+                | UsersEvent::SetLogin(..)
+        );
+        if writes && !self.manages_roles_of(id) {
+            return;
+        }
         match event {
             UsersEvent::Select(name, request) => {
                 self.read_reach(id, view.downgrade(), name.clone(), *request, cx)
@@ -642,7 +659,8 @@ impl Workspace {
         let role = name
             .as_deref()
             .and_then(|name| self.role_of(&profile, name));
-        let actions = crate::sidebar::role_node_actions(node, role.as_ref());
+        let actions =
+            crate::sidebar::role_node_actions(node, role.as_ref(), self.manages_roles_of(&profile));
         Some((profile, name, actions))
     }
 
@@ -667,9 +685,10 @@ impl Workspace {
         self.users_event(profile, &view, &event, window, cx);
     }
 
-    /// Copy Drop Role: the statements that drop `name`, on the clipboard and
-    /// nowhere else. The connection's own user is offered to take over what
-    /// the role owns, and the databases are those already listed.
+    /// Copy DROP ROLE and Copy DROP USER: the statements that drop `name`,
+    /// spelled for the profile's engine, on the clipboard and nowhere else.
+    /// The connection's own user is offered to take over what the role owns,
+    /// and the databases are those already listed.
     fn copy_drop_role(&self, id: &str, name: &str, cx: &mut Context<Self>) {
         let Some(role) = self.role_of(id, name) else {
             return;
@@ -680,8 +699,20 @@ impl Workspace {
         let connected = (profile.config.server())
             .map(|server| server.user.as_str())
             .filter(|user| !user.is_empty());
-        let text = roles::drop_role_text(&role, connected, &profile.databases.names);
+        let text = roles::drop_text(
+            profile.config.engine(),
+            &role,
+            connected,
+            &profile.databases.names,
+        );
         cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// Whether `id`'s roles are edited here, not only listed.
+    fn manages_roles_of(&self, id: &str) -> bool {
+        (self.profiles.iter())
+            .find(|profile| profile.id == id)
+            .is_some_and(|profile| profile.config.target().manages_roles())
     }
 
     fn role_of(&self, id: &str, name: &str) -> Option<Role> {

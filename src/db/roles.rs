@@ -514,6 +514,58 @@ pub fn set_login(name: &str, login: bool) -> String {
     )
 }
 
+/// The statement that drops `role`, spelled for `engine`, for Copy DROP
+/// ROLE and Copy DROP USER: text for the clipboard only, never sent (AGENTS.md,
+/// hard rule 1). Postgres's is [`drop_role_text`]. MySQL's and MariaDB's is
+/// one `DROP USER` for a login or `DROP ROLE` for a role, the account quoted
+/// as `'user'@'host'` (a MariaDB role bare, `'role'`), under a note of what
+/// it removes. `connected` is the user the connection signs in as: an
+/// account of that user gets a warning line, never a refusal.
+pub fn drop_text(
+    engine: Engine,
+    role: &Role,
+    connected: Option<&str>,
+    databases: &[String],
+) -> String {
+    match engine {
+        Engine::MySql | Engine::MariaDb => drop_account_text(role, connected),
+        _ => drop_role_text(role, connected, databases),
+    }
+}
+
+/// [`drop_text`] for a MySQL or MariaDB account.
+fn drop_account_text(role: &Role, connected: Option<&str>) -> String {
+    let flat = |text: &str| text.replace(['\n', '\r'], " ");
+    let account = super::mysql_roles::Account::parse(&role.name);
+    let quoted = account.quoted();
+    let named = flat(&quoted);
+    let login = role.login || role.deactivated();
+    let mut lines = vec![match login {
+        true => format!(
+            "-- DROP USER removes {named} and every grant it holds; what it created stays, and a view, routine, trigger or event it is the DEFINER of fails until another definer is set."
+        ),
+        false => format!(
+            "-- DROP ROLE removes {named} and every grant it holds, from each account it was granted to as well."
+        ),
+    }];
+    if let Some(user) = connected.filter(|user| *user == account.user) {
+        lines.push(format!(
+            "-- Warning: this connection signs in as {}, which may be this account: dropping it locks this login out.",
+            flat(user)
+        ));
+    }
+    if role.superuser {
+        lines.push(format!(
+            "-- Warning: {named} holds every privilege: dropping it removes everything it can do."
+        ));
+    }
+    lines.push(match login {
+        true => format!("DROP USER {quoted};"),
+        false => format!("DROP ROLE {quoted};"),
+    });
+    lines.join("\n")
+}
+
 /// The statements that drop `role`, for Copy DROP ROLE: text for the
 /// clipboard, never sent or put in a buffer (AGENTS.md, hard rule 1), as the
 /// explorer's Copy DROP is. `REASSIGN OWNED` and `DROP OWNED` act on the
@@ -1478,6 +1530,69 @@ mod tests {
             "{root}"
         );
         assert!(root.contains("TO \"ana\";"));
+    }
+
+    #[test]
+    fn a_mysql_login_is_dropped_as_its_quoted_account() {
+        let text = drop_text(
+            Engine::MySql,
+            &plain_role("o'k@corp@%", false),
+            Some("root"),
+            &["shop".to_string()],
+        );
+        assert_eq!(
+            text,
+            "-- DROP USER removes 'o''k@corp'@'%' and every grant it holds; what it created stays, and a view, routine, trigger or event it is the DEFINER of fails until another definer is set.\n\
+             DROP USER 'o''k@corp'@'%';"
+        );
+        let own = drop_text(
+            Engine::MySql,
+            &plain_role("root@localhost", true),
+            Some("root"),
+            &[],
+        );
+        assert!(
+            own.contains("-- Warning: this connection signs in as root, which may be"),
+            "{own}"
+        );
+        assert!(own.contains("-- Warning: 'root'@'localhost' holds every privilege"));
+        assert!(own.ends_with("\nDROP USER 'root'@'localhost';"), "{own}");
+    }
+
+    #[test]
+    fn a_mysql_role_and_a_mariadb_role_are_dropped_as_roles() {
+        let role = |name: &str| Role {
+            login: false,
+            has_password: Some(false),
+            ..plain_role(name, false)
+        };
+        let mysql = drop_text(Engine::MySql, &role("app_read@%"), None, &[]);
+        assert!(
+            mysql.starts_with("-- DROP ROLE removes 'app_read'@'%'"),
+            "{mysql}"
+        );
+        assert!(mysql.ends_with("\nDROP ROLE 'app_read'@'%';"), "{mysql}");
+        let mariadb = drop_text(Engine::MariaDb, &role("o'k"), Some("x"), &[]);
+        assert_eq!(mariadb.lines().count(), 2, "{mariadb}");
+        assert!(mariadb.ends_with("\nDROP ROLE 'o''k';"), "{mariadb}");
+        let postgres = drop_text(Engine::Postgres, &role("ana"), None, &[]);
+        assert_eq!(postgres, drop_role_text(&role("ana"), None, &[]));
+    }
+
+    #[test]
+    fn a_mysql_account_name_cannot_end_the_comment_it_sits_in() {
+        let text = drop_text(
+            Engine::MySql,
+            &plain_role("a\nb@%", false),
+            Some("a\nb"),
+            &[],
+        );
+        let comments = text
+            .lines()
+            .take_while(|line| line.starts_with("--"))
+            .count();
+        assert_eq!(comments, 2, "{text}");
+        assert!(text.ends_with("DROP USER 'a\nb'@'%';"), "{text}");
     }
 
     #[test]

@@ -4261,7 +4261,7 @@ pub(super) fn explorer_menu(
                                 });
                             },
                         ))
-                        .when(target.manages_roles(), |menu| {
+                        .when(target.lists_roles(), |menu| {
                             menu.item(PopupMenuItem::new(NodeAction::ShowGrants.label()).on_click(
                                 move |_, window, cx| {
                                     let node = grants_node.clone();

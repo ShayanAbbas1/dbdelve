@@ -22,7 +22,7 @@ use crate::explorer::{
     saved_query,
 };
 use crate::store::StoredProject;
-use crate::users_view::{NEW_ACTIONS, RoleAction, role_actions};
+use crate::users_view::{RoleAction, new_actions, role_actions};
 
 /// Which sidebar the window draws: today's tree for the connection in front,
 /// or every connection under its project.
@@ -357,7 +357,7 @@ pub(crate) struct Listed<'a> {
     /// `databases`.
     pub(crate) databases_left_out: usize,
     /// What is known of its server's logins and roles, where its target
-    /// manages them; `None` draws no Users and roles row.
+    /// lists them; `None` draws no Users and roles row.
     pub(crate) roles: Option<RolesListing>,
 }
 
@@ -368,6 +368,9 @@ pub(crate) enum RolesListing {
     Unloaded,
     Loading,
     Failed(String),
+    /// Read, and the login may not list accounts: why, in the row's place.
+    /// Not read again until asked, as a loaded listing is not.
+    Denied(String),
     Loaded(Vec<(String, bool)>),
 }
 
@@ -518,7 +521,7 @@ pub(crate) fn node_actions(kind: NodeKind, name: &str, target: Target) -> Vec<No
             if target.copies_ddl() {
                 actions.push(NodeAction::ShowDdl);
             }
-            if target.manages_roles() {
+            if target.lists_roles() {
                 actions.push(NodeAction::ShowGrants);
             }
             actions
@@ -546,11 +549,15 @@ impl NodeAction {
 /// click: the Users and roles row and its group rows a new login or role, a
 /// login's or role's own row what the Users and roles tab's buttons offer
 /// for it (`role`, as read; `None` while it is not, which offers nothing).
-/// Any other node offers none of these.
-pub(crate) fn role_node_actions(node: &Node, role: Option<&Role>) -> Vec<RoleAction> {
+/// Where roles are only listed (`edits` false) nothing new is offered and a
+/// role's row offers only what writes nothing. Any other node offers none
+/// of these.
+pub(crate) fn role_node_actions(node: &Node, role: Option<&Role>, edits: bool) -> Vec<RoleAction> {
     match node {
-        Node::Users { .. } | Node::RoleGroup { .. } => NEW_ACTIONS.to_vec(),
-        Node::Role { .. } => role.map(role_actions).unwrap_or_default(),
+        Node::Users { .. } | Node::RoleGroup { .. } => new_actions(edits).to_vec(),
+        Node::Role { .. } => role
+            .map(|role| role_actions(role, edits))
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -1180,11 +1187,15 @@ fn users_item(
             tree.unloaded.insert(id.clone());
             (false, vec![notice_row(tree, LOADING)])
         }
-        RolesListing::Loading | RolesListing::Failed(_) if search.filtering && !named => {
+        RolesListing::Loading | RolesListing::Failed(_) | RolesListing::Denied(_)
+            if search.filtering && !named =>
+        {
             return None;
         }
         RolesListing::Loading => (followed, vec![notice_row(tree, LOADING)]),
-        RolesListing::Failed(text) => (followed, vec![notice_row(tree, &text)]),
+        RolesListing::Failed(text) | RolesListing::Denied(text) => {
+            (followed, vec![notice_row(tree, &text)])
+        }
         RolesListing::Loaded(roles) => {
             let mut groups = Vec::new();
             let mut total = 0;
@@ -3380,8 +3391,13 @@ mod tests {
         );
         assert_eq!(
             on(table, Engine::MySql),
+            [copy(), NodeAction::ShowDdl, NodeAction::ShowGrants],
+            "a target that lists roles shows grants, whether or not it edits them"
+        );
+        assert_eq!(
+            on(table, Engine::Sqlite),
             [copy(), NodeAction::ShowDdl],
-            "a target that manages no roles shows no grants"
+            "a target that lists no roles shows no grants"
         );
         assert_eq!(
             on(table, Engine::Redis),
@@ -3461,25 +3477,31 @@ mod tests {
         let users = Node::Users {
             profile: "a".into(),
         };
-        assert_eq!(role_node_actions(&users, None), [NewUser, NewRole]);
+        assert_eq!(role_node_actions(&users, None, true), [NewUser, NewRole]);
         assert_eq!(
-            role_node_actions(&Node::RoleGroup { logins: false }, None),
+            role_node_actions(&Node::RoleGroup { logins: false }, None, true),
             [NewUser, NewRole]
         );
+        assert!(role_node_actions(&users, None, false).is_empty());
         assert_eq!(
-            role_node_actions(&role(true), Some(&read(true, None))),
+            role_node_actions(&role(true), Some(&read(true, None)), false),
+            [ShowGrants, CopyDropUser],
+            "where roles are only listed nothing that writes is offered"
+        );
+        assert_eq!(
+            role_node_actions(&role(true), Some(&read(true, None)), true),
             [Edit, ResetPassword, ShowGrants, Deactivate, CopyDropRole]
         );
         assert_eq!(
-            role_node_actions(&role(true), Some(&read(false, Some(true)))),
+            role_node_actions(&role(true), Some(&read(false, Some(true))), true),
             [Edit, ResetPassword, ShowGrants, Reactivate, CopyDropRole]
         );
         assert_eq!(
-            role_node_actions(&role(false), Some(&read(false, None))),
+            role_node_actions(&role(false), Some(&read(false, None)), true),
             [Edit, ShowGrants, AllowLogin, CopyDropRole]
         );
-        assert!(role_node_actions(&role(false), None).is_empty());
-        assert!(role_node_actions(&Node::Group, None).is_empty());
+        assert!(role_node_actions(&role(false), None, true).is_empty());
+        assert!(role_node_actions(&Node::Group, None, true).is_empty());
     }
 
     #[test]
@@ -3567,6 +3589,25 @@ mod tests {
         ] {
             assert!(ids.contains(&row), "{row} is kept with its connection");
         }
+    }
+
+    #[test]
+    fn a_login_that_may_not_list_accounts_says_so_once_and_is_not_read_again() {
+        let tree = super::build(
+            &[],
+            vec![Listed {
+                roles: Some(RolesListing::Denied("no privilege".into())),
+                ..listed("a", "a", Content::Loaded(birds()))
+            }],
+            &opened([connection_row("a"), users_row("a")]),
+            ListingScope::All,
+            None,
+            "",
+        );
+        assert!(!tree.unloaded.contains(&users_row("a")));
+        let notice = format!("{}/notice", users_row("a"));
+        assert!(matches!(tree.nodes.get(&notice), Some(Node::Notice)));
+        assert!(all_ids(&tree.items).contains(&notice));
     }
 
     #[test]

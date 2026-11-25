@@ -435,6 +435,14 @@ impl Target {
     pub fn manages_roles(self) -> bool {
         self.abilities().manages_roles
     }
+
+    /// Whether the connection lists its server's users and roles and shows
+    /// who holds which grant, to read: what [`Self::manages_roles`] also
+    /// writes. A target that lists them but does not manage them offers no
+    /// action that changes an account. Never for a plugin.
+    pub fn lists_roles(self) -> bool {
+        self.abilities().lists_roles
+    }
 }
 
 /// Whether `error` is the user's Cancel landing, in the words each engine's
@@ -739,6 +747,8 @@ mod tests {
                 target.exact_row_estimates(),
                 target.takes_service(),
                 target.draws_diagrams(),
+                target.manages_roles(),
+                target.lists_roles(),
             ]
             .into_iter()
             .chain(
@@ -767,6 +777,27 @@ mod tests {
             .label(),
             "Generic SQL via ODBC"
         );
+    }
+
+    #[test]
+    fn roles_are_listed_on_postgres_mysql_and_mariadb_and_managed_only_on_postgres() {
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            assert_eq!(
+                target.lists_roles(),
+                matches!(engine, Engine::Postgres | Engine::MySql | Engine::MariaDb),
+                "{engine:?}"
+            );
+            assert_eq!(
+                target.manages_roles(),
+                engine == Engine::Postgres,
+                "{engine:?}"
+            );
+            assert!(
+                !target.manages_roles() || target.lists_roles(),
+                "{engine:?}"
+            );
+        }
     }
 
     #[test]

@@ -68,6 +68,9 @@ pub enum RoleAction {
     /// Puts the statements that drop the role on the clipboard, and sends
     /// nothing.
     CopyDropRole,
+    /// Copy DROP ROLE's own text, offered under this name for a login where
+    /// roles are listed but not edited: there the statement is `DROP USER`.
+    CopyDropUser,
 }
 
 impl RoleAction {
@@ -83,6 +86,7 @@ impl RoleAction {
             RoleAction::Reactivate => "Reactivate…",
             RoleAction::AllowLogin => "Allow Login…",
             RoleAction::CopyDropRole => "Copy DROP ROLE",
+            RoleAction::CopyDropUser => "Copy DROP USER",
         }
     }
 
@@ -95,22 +99,39 @@ impl RoleAction {
             RoleAction::Edit => UsersEvent::Edit(name),
             RoleAction::ResetPassword => UsersEvent::ResetPassword(name),
             RoleAction::ShowGrants => UsersEvent::ShowGrants(name),
-            RoleAction::CopyDropRole => UsersEvent::CopyDropRole(name),
+            RoleAction::CopyDropRole | RoleAction::CopyDropUser => UsersEvent::CopyDropRole(name),
             RoleAction::Deactivate => UsersEvent::SetLogin(name, false),
             RoleAction::Reactivate | RoleAction::AllowLogin => UsersEvent::SetLogin(name, true),
         }
     }
 }
 
-/// What a group row and the Users and roles row offer: a new login or role.
-pub const NEW_ACTIONS: [RoleAction; 2] = [RoleAction::NewUser, RoleAction::NewRole];
+/// What a group row and the Users and roles row offer where roles are
+/// edited (`edits`, [`crate::db::Target::manages_roles`]): a new login or
+/// role. Nothing where they are only listed.
+pub fn new_actions(edits: bool) -> &'static [RoleAction] {
+    match edits {
+        true => &[RoleAction::NewUser, RoleAction::NewRole],
+        false => &[],
+    }
+}
 
 /// What `role`'s row offers, in the order its buttons and menus list it.
-/// Deactivate is a login's alone: a NOLOGIN role has nothing to switch off,
-/// it acts only through membership and grants. A login turned off reads as
-/// one only where passwords can be read; elsewhere a role that cannot log in
-/// may be one, so letting it log in again is offered on every such row.
-pub fn role_actions(role: &Role) -> Vec<RoleAction> {
+/// Where roles are only listed (`edits` false) that is Show Grants and the
+/// drop's text, which writes nothing: Copy DROP USER for a login, Copy DROP
+/// ROLE for a role. Deactivate is a login's alone: a NOLOGIN role has
+/// nothing to switch off, it acts only through membership and grants. A
+/// login turned off reads as one only where passwords can be read;
+/// elsewhere a role that cannot log in may be one, so letting it log in
+/// again is offered on every such row.
+pub fn role_actions(role: &Role, edits: bool) -> Vec<RoleAction> {
+    if !edits {
+        let drop = match is_login(role) {
+            true => RoleAction::CopyDropUser,
+            false => RoleAction::CopyDropRole,
+        };
+        return vec![RoleAction::ShowGrants, drop];
+    }
     let mut actions = vec![RoleAction::Edit];
     if is_login(role) {
         actions.push(RoleAction::ResetPassword);
@@ -128,6 +149,9 @@ pub fn role_actions(role: &Role) -> Vec<RoleAction> {
 pub struct UsersView {
     /// The connection and its database, under the title.
     server: SharedString,
+    /// Whether the connection's roles are edited here
+    /// ([`crate::db::Target::manages_roles`]) rather than only listed.
+    edits: bool,
     roles: Loaded<Arc<Roles>>,
     /// The list's rows, built once when the roles land rather than on every
     /// frame: each role, in the order drawn, with what it is a member of.
@@ -337,9 +361,10 @@ fn initials(name: &str) -> String {
 }
 
 impl UsersView {
-    pub fn new(server: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(server: String, edits: bool, cx: &mut Context<Self>) -> Self {
         Self {
             server: server.into(),
+            edits,
             roles: Loaded::Loading,
             listing: Vec::new(),
             selected: None,
@@ -381,6 +406,11 @@ impl UsersView {
         }
     }
 
+    /// Why the connection may not list the server's accounts, once read.
+    pub fn denied(&self) -> Option<&str> {
+        self.roles().and_then(|roles| roles.denied.as_deref())
+    }
+
     pub fn roles(&self) -> Option<&Arc<Roles>> {
         match &self.roles {
             Loaded::Ready(roles) => Some(roles),
@@ -399,6 +429,10 @@ impl UsersView {
             }
             // What a role can reach may have changed with it.
             self.reports = None;
+            // A login that may not list accounts has no Reports to show.
+            if read.denied.is_some() {
+                self.reports_shown = false;
+            }
         }
         self.listing = match &roles {
             Loaded::Ready(read) => listing(read),
@@ -483,6 +517,8 @@ impl UsersView {
         let new_user = cx.listener(|_, _, _, cx| cx.emit(UsersEvent::NewRole { login: true }));
         let new_role = cx.listener(|_, _, _, cx| cx.emit(UsersEvent::NewRole { login: false }));
         let export = cx.listener(|_, _, _, cx| cx.emit(UsersEvent::Export));
+        // A login that may not list accounts has no Reports to read either.
+        let denied = self.denied().is_some();
         div()
             .flex_none()
             .flex()
@@ -513,31 +549,33 @@ impl UsersView {
                     .text_color(t.text_muted)
                     .child(format!("{} · server-wide", self.server)),
             )
-            .child(
-                ui::segmented(t)
-                    .ml(px(14.))
-                    .debug_selector(|| "users-view-switch".into())
-                    .child(
-                        ui::segmented_choice(
-                            "users-tab-users",
-                            crate::sidebar::USERS_AND_ROLES,
-                            !self.reports_shown,
-                            true,
-                            t,
+            .when(!denied, |header| {
+                header.child(
+                    ui::segmented(t)
+                        .ml(px(14.))
+                        .debug_selector(|| "users-view-switch".into())
+                        .child(
+                            ui::segmented_choice(
+                                "users-tab-users",
+                                crate::sidebar::USERS_AND_ROLES,
+                                !self.reports_shown,
+                                true,
+                                t,
+                            )
+                            .on_click(users),
                         )
-                        .on_click(users),
-                    )
-                    .child(
-                        ui::segmented_choice(
-                            "users-tab-reports",
-                            "Reports",
-                            self.reports_shown,
-                            true,
-                            t,
-                        )
-                        .on_click(reports),
-                    ),
-            )
+                        .child(
+                            ui::segmented_choice(
+                                "users-tab-reports",
+                                "Reports",
+                                self.reports_shown,
+                                true,
+                                t,
+                            )
+                            .on_click(reports),
+                        ),
+                )
+            })
             .child(div().flex_1())
             .when(self.reports_shown, |header| {
                 header.child(
@@ -552,17 +590,22 @@ impl UsersView {
                     .on_click(export),
                 )
             })
-            .child(
-                ui::button(
-                    "users-new-user",
-                    "New User…",
-                    Tone::Primary,
-                    Control::Compact,
-                    t,
-                )
-                .on_click(new_user),
-            )
-            .child(outline_button("users-new-role", "New Role…", t, t.text).on_click(new_role))
+            .when(self.edits, |header| {
+                header
+                    .child(
+                        ui::button(
+                            "users-new-user",
+                            "New User…",
+                            Tone::Primary,
+                            Control::Compact,
+                            t,
+                        )
+                        .on_click(new_user),
+                    )
+                    .child(
+                        outline_button("users-new-role", "New Role…", t, t.text).on_click(new_role),
+                    )
+            })
     }
 
     fn list(
@@ -609,7 +652,7 @@ impl UsersView {
             let member_of = member_of.clone();
             let login = role.last_login.clone().unwrap_or_else(|| "—".into());
             let name = role.name.clone();
-            let actions = role_actions(role);
+            let actions = role_actions(role, self.edits);
             let menu_view = view.clone();
             let menu_name = role.name.clone();
             let pick = cx.listener(move |view, _, window, cx| {
@@ -786,7 +829,7 @@ impl UsersView {
             Some(Loaded::Loading) | None => "Reading the grants…".into(),
         };
         let name = role.name.clone();
-        let actions = role_actions(role);
+        let actions = role_actions(role, self.edits);
         panel
             .child(
                 div()
@@ -888,11 +931,18 @@ impl UsersView {
                     .text_size(px(layout::chrome(layout::TEXT_SM)))
                     .line_height(px(layout::chrome(17.)))
                     .text_color(t.text_muted)
-                    .child(
-                        "Every change is shown as the exact statement (CREATE ROLE, ALTER ROLE … \
-                         NOLOGIN) and runs only after you approve it, at a connection mode that \
-                         allows it.",
-                    ),
+                    .child(match self.edits {
+                        true => {
+                            "Every change is shown as the exact statement (CREATE ROLE, ALTER \
+                             ROLE … NOLOGIN) and runs only after you approve it, at a connection \
+                             mode that allows it."
+                        }
+                        false => {
+                            "Read only: these accounts are listed and their grants shown, and \
+                             nothing here changes them. Copy DROP puts the statement on the \
+                             clipboard and runs nothing."
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -1167,6 +1217,14 @@ impl Render for UsersView {
         let t = *theme(cx);
         let mono = fonts(cx).editor.clone();
         let body = match (&self.roles, self.reports_shown) {
+            // Nothing to list, and nothing to retry until asked: Refresh
+            // reads again.
+            (Loaded::Ready(roles), _) if roles.denied.is_some() => div()
+                .p(px(18.))
+                .debug_selector(|| "users-denied".into())
+                .text_color(t.text_muted)
+                .child(roles.denied.clone().unwrap_or_default())
+                .into_any_element(),
             (Loaded::Ready(_), true) => self.reports_body(t, mono.clone()),
             (Loaded::Loading, _) => div()
                 .p(px(18.))
@@ -1304,20 +1362,52 @@ mod tests {
             ..role("intern", false)
         };
         assert_eq!(
-            role_actions(&role("ana", true)),
+            role_actions(&role("ana", true), true),
             [Edit, ResetPassword, ShowGrants, Deactivate, CopyDropRole]
         );
         assert_eq!(
-            role_actions(&off),
+            role_actions(&off, true),
             [Edit, ResetPassword, ShowGrants, Reactivate, CopyDropRole],
             "a turned off login is brought back, not deactivated again"
         );
         assert_eq!(
-            role_actions(&role("reporting", false)),
+            role_actions(&role("reporting", false), true),
             [Edit, ShowGrants, AllowLogin, CopyDropRole],
             "a NOLOGIN role has nothing to switch off and no password to reset"
         );
-        assert_eq!(NEW_ACTIONS, [NewUser, NewRole]);
+        assert_eq!(new_actions(true), [NewUser, NewRole]);
+    }
+
+    #[test]
+    fn where_roles_are_only_listed_a_row_offers_grants_and_the_drops_text() {
+        use RoleAction::*;
+        let off = Role {
+            has_password: Some(true),
+            ..role("intern@%", false)
+        };
+        let mysql8_role = Role {
+            has_password: Some(false),
+            ..role("app_read@%", false)
+        };
+        assert_eq!(
+            role_actions(&role("ana@%", true), false),
+            [ShowGrants, CopyDropUser]
+        );
+        assert_eq!(
+            role_actions(&off, false),
+            [ShowGrants, CopyDropUser],
+            "a turned off login is still a user"
+        );
+        assert_eq!(
+            role_actions(&mysql8_role, false),
+            [ShowGrants, CopyDropRole]
+        );
+        assert!(new_actions(false).is_empty());
+        assert_eq!(CopyDropUser.label(), "Copy DROP USER");
+        assert!(matches!(
+            CopyDropUser.event("ana@%"),
+            UsersEvent::CopyDropRole(n) if n == "ana@%"
+        ));
     }
 
     #[test]
@@ -1369,7 +1459,7 @@ mod tests {
     #[gpui::test]
     fn an_older_read_of_reach_or_reports_never_replaces_a_newer_one(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
-        let view = cx.new(|cx| UsersView::new("main".into(), cx));
+        let view = cx.new(|cx| UsersView::new("main".into(), true, cx));
         let reach = |owns| {
             Loaded::Ready(Reach {
                 owns,

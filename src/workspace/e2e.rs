@@ -7457,7 +7457,7 @@ fn users_tab_on(
     window: &mut Window,
     cx: &mut gpui::Context<Workspace>,
 ) -> u64 {
-    let view = cx.new(|cx| crate::users_view::UsersView::new("main".into(), cx));
+    let view = cx.new(|cx| crate::users_view::UsersView::new("main".into(), true, cx));
     let results = crate::result_grid::new_grid(window, cx);
     let profile = workspace.profile_mut().expect("a connection is in front");
     let id = profile.session.next_object_id;
@@ -7690,6 +7690,133 @@ fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_
             );
             assert!(copied.ends_with("DROP ROLE \"ana\";"), "{copied}");
         });
+        quit(workspace, cx);
+    });
+}
+
+/// The front profile made to read as MySQL, which lists its accounts and
+/// changes none of them, while its live connection stays the SQLite one:
+/// nothing in these tests reaches a server that reads an account.
+fn as_mysql(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+    workspace.update(cx, |workspace, cx| {
+        let profile = workspace.profile_mut().expect("a connection is in front");
+        profile.config = ConnectionConfig::MySql(crate::db::ServerConfig {
+            database: "main".into(),
+            user: "ana".into(),
+            ..Default::default()
+        });
+        let id = profile.id.clone();
+        // The connections tree, where the Users and roles row is.
+        workspace.set_view_mode(crate::sidebar::ViewMode::Complex, cx);
+        workspace.rebuild_connections(cx);
+        id
+    })
+}
+
+#[gpui::test]
+fn a_mysql_connection_lists_its_accounts_and_offers_nothing_that_writes(cx: &mut TestAppContext) {
+    use crate::users_view::RoleAction;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let id = as_mysql(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles =
+                crate::session::RolesState::Loaded(std::sync::Arc::new(crate::db::roles::Roles {
+                    roles: vec![
+                        test_role("ana@%", true),
+                        crate::db::roles::Role {
+                            has_password: Some(false),
+                            ..test_role("app_read@%", false)
+                        },
+                    ],
+                    ..Default::default()
+                }));
+            workspace.rebuild_connections(cx);
+        });
+        let login = crate::sidebar::role_row(&id, true, "ana@%");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let nodes = &workspace.connections.nodes;
+            assert!(nodes.contains_key(&crate::sidebar::users_row(&id)));
+            assert!(nodes.contains_key(&login));
+            assert!(nodes.contains_key(&crate::sidebar::role_row(&id, false, "app_read@%")));
+            let (_, name, actions) = workspace.role_menu(&login).expect("a role's row");
+            assert_eq!(name.as_deref(), Some("ana@%"));
+            assert_eq!(
+                actions,
+                [RoleAction::ShowGrants, RoleAction::CopyDropUser],
+                "nothing that writes"
+            );
+            let (_, _, actions) = workspace
+                .role_menu(&crate::sidebar::users_row(&id))
+                .expect("the Users and roles row");
+            assert!(actions.is_empty(), "no New User… or New Role…");
+
+            // Copy DROP USER puts the account's statement on the clipboard.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+            workspace.run_role_action(&id, RoleAction::CopyDropUser, Some("ana@%"), window, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            let copied = copied.unwrap_or_default();
+            assert!(copied.ends_with("\nDROP USER 'ana'@'%';"), "{copied}");
+            assert!(
+                copied.contains("-- Warning: this connection signs in as ana"),
+                "{copied}"
+            );
+            // A change asked for anyway opens no form.
+            workspace.run_role_action(&id, RoleAction::NewUser, None, window, cx);
+            workspace.run_role_action(&id, RoleAction::Edit, Some("ana@%"), window, cx);
+            assert!(workspace.role_form.is_none());
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("users-row-ana@%").is_some(),
+            "the tab lists it"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_login_that_may_not_list_accounts_says_so_and_is_not_read_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let id = as_mysql(&workspace, cx);
+        let denied = "This login has no privilege to list users.";
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles =
+                crate::session::RolesState::Loaded(std::sync::Arc::new(crate::db::roles::Roles {
+                    denied: Some(denied.into()),
+                    ..Default::default()
+                }));
+            workspace.rebuild_connections(cx);
+        });
+        let users = crate::sidebar::users_row(&id);
+        let loaded = |workspace: &Workspace| {
+            matches!(
+                &workspace.profile().unwrap().roles,
+                crate::session::RolesState::Loaded(roles) if roles.denied.as_deref() == Some(denied)
+            )
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            let notice = format!("{users}/notice");
+            assert!(matches!(
+                workspace.connections.nodes.get(&notice),
+                Some(crate::sidebar::Node::Notice)
+            ));
+            // Opening the row and bringing the tab forward read nothing.
+            workspace.expand_node(&users.clone().into(), cx);
+            assert!(loaded(workspace), "the row's opening read nothing");
+            workspace.open_users(&id, None, window, cx);
+            assert!(loaded(workspace), "the tab's opening read nothing");
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(loaded(workspace)));
+        assert!(
+            cx.debug_bounds("users-denied").is_some(),
+            "the tab says why"
+        );
+        assert!(cx.debug_bounds("users-view-switch").is_none(), "no Reports");
         quit(workspace, cx);
     });
 }
