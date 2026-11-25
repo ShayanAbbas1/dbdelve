@@ -179,6 +179,9 @@ pub(crate) struct Profile {
     /// What each other database's catalog has got to, by name. A database
     /// with no entry has not been asked for.
     pub(crate) database_catalogs: HashMap<String, CatalogState>,
+    /// What each other database's catalog was read under, as `catalog_include`
+    /// is the own one's: a filter saved since may show a schema it lacks.
+    pub(crate) database_catalogs_shown: HashMap<String, Shown>,
     /// Whether the connection opened on another database than the one the
     /// tabs were opened on, because the picked one was no longer there. What
     /// is left of that database goes on the next frame, which has the window
@@ -717,10 +720,17 @@ impl Profile {
     }
 
     /// Whether the catalog read for `database` says what the saved filter
-    /// shows: another database's is dropped and read again on a save, the
-    /// own one only once the read [`Self::catalog_include`] names lands.
+    /// shows: only once a read under the lists saved now has landed
+    /// ([`Self::catalog_include`], [`Self::database_catalogs_shown`]). A save
+    /// keeps another database's catalog until the read it starts lands.
     pub(crate) fn catalog_under_saved_filter(&self, database: Option<&str>) -> bool {
-        database.is_some() || self.catalog_include == self.include
+        match database {
+            Some(database) => self
+                .database_catalogs_shown
+                .get(database)
+                .is_some_and(|read| *read == self.shown().in_another_database(database)),
+            None => self.catalog_include == self.include,
+        }
     }
 
     pub(crate) fn refreshing_schema(&self) -> bool {
@@ -817,6 +827,7 @@ impl Profile {
     pub(crate) fn drop_sessions(&mut self) {
         self.bound.clear();
         self.database_catalogs.clear();
+        self.database_catalogs_shown.clear();
         self.session.schema_export = None;
         // The Users and roles tab's kept session is one more, and stays open
         // past a disconnect or an idle close unless it is let go of here.

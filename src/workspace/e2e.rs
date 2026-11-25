@@ -29647,6 +29647,63 @@ fn a_stored_routine_waits_for_the_catalog_read_under_the_saved_filter(cx: &mut T
     });
 }
 
+/// The same of another database: its catalog was read under the old lists,
+/// so a routine there waits until the read under the saved ones lands.
+#[gpui::test]
+fn a_stored_routine_of_another_database_waits_for_its_catalog_under_the_saved_filter(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.expand_node(&database_row("e2e", "other").into(), cx)
+        });
+        settle(cx);
+        let waiting = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.pending_objects.len()
+            })
+        };
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            assert!(matches!(
+                profile.database_catalogs.get("other"),
+                Some(CatalogState::Loaded(_, crate::session::Routines::Loaded))
+            ));
+            profile.include.schemas = vec!["main".into(), "audit".into()];
+            profile.session.pending_objects.push(store::StoredObject {
+                database: Some("other".into()),
+                schema: "audit".into(),
+                name: "digest()".into(),
+                routine: true,
+                structure: false,
+                diagram: false,
+                diagram_view: None,
+                kind: Default::default(),
+                filter: String::new(),
+                filter_engine: None,
+                origin: None,
+                filters: Vec::new(),
+                active: false,
+                bars: Vec::new(),
+            });
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(waiting(&workspace, cx), 1, "kept for its catalog to come");
+        workspace.update(cx, |workspace, cx| {
+            workspace.reload_database("e2e", "other".into(), cx);
+        });
+        settle(cx);
+        assert_eq!(
+            waiting(&workspace, cx),
+            0,
+            "a catalog read under it lacks it"
+        );
+        quit(workspace, cx);
+    });
+}
+
 fn generation_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) -> u64 {
     workspace.read_with(cx, |workspace, _| {
         workspace

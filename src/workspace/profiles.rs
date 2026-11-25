@@ -464,6 +464,7 @@ impl Workspace {
             roles_request: 0,
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
+            database_catalogs_shown: HashMap::new(),
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             folds: stored.folds,
@@ -559,6 +560,7 @@ impl Workspace {
             roles_request: 0,
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
+            database_catalogs_shown: HashMap::new(),
             left_database: false,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
@@ -2974,6 +2976,9 @@ impl Workspace {
                             database.clone(),
                             CatalogState::Loaded(catalog, Routines::Loading),
                         );
+                        profile
+                            .database_catalogs_shown
+                            .insert(database.clone(), asked);
                         workspace.rebuild_connections(cx);
                         workspace.load_database_routines(&id, &database, generation, cx);
                         workspace.load_database_sizes(&id, &database, generation, cx);

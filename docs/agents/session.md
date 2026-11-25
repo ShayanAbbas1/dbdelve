@@ -103,7 +103,11 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   filter exists to avoid on MySQL, MariaDB and ClickHouse, which push it
   into the catalog SQL. A tab, a pin or a saved query on a hidden object
   survives: a restored routine tab whose schema is hidden stays pending
-  (`Profile::filter_hides`), and a pin there is drawn hidden, not missing
+  (`Profile::filter_hides`), and so does one whose catalog, its own
+  database's or another's, was read under lists saved over since
+  (`Profile::catalog_under_saved_filter`, `catalog_include`,
+  `database_catalogs_shown`), until the read under the saved ones lands; a
+  pin there is drawn hidden, not missing
   (`Shortcut::Member::hidden`), a relation's opening by its name. `Databases::left_out` carries how many it hid, which
   `SidebarTree::totals` turns into the connection row's `1 of 2` while no
   search text is typed.
