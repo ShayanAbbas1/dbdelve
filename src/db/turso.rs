@@ -235,6 +235,7 @@ impl Connection {
         if let Err(error) = outcome {
             return Err(self.rolled_back(outside_a_transaction, error));
         }
+        result.transaction_open = Some(!self.connection.get_auto_commit());
         Ok(result)
     }
 

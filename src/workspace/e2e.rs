@@ -30744,6 +30744,20 @@ fn a_savepoint_keeps_the_idle_close_from_dropping_what_it_holds(cx: &mut TestApp
     });
 }
 
+/// A `RELEASE` run on its own commits the transaction a `SAVEPOINT` opened in
+/// an earlier submission: the engine says so, and the workspace believes it.
+#[gpui::test]
+fn a_release_in_a_later_submission_ends_the_savepoints_transaction(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "SAVEPOINT s");
+        assert!(in_transaction(&workspace, cx), "the SAVEPOINT opened one");
+        run_in_front(&workspace, cx, "RELEASE s");
+        assert!(!in_transaction(&workspace, cx), "the RELEASE committed it");
+        quit(workspace, cx);
+    });
+}
+
 /// A submission sqlparser cannot read that names a `BEGIN` may have left a
 /// transaction open on the session: read as open, as a bound session's
 /// would be, so an idle close does not roll it back.

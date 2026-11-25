@@ -5528,7 +5528,8 @@ impl Leaves {
             // that opened it is settled in [`leaves`]; one opened by an
             // earlier submission is read as nothing here, so a transaction
             // it may have ended is still read as open, the side an idle close
-            // cannot lose work on.
+            // cannot lose work on, until the engine says otherwise once the
+            // run lands (`QueryResult::transaction_open`).
             Statement::Savepoint { .. } if savepoint_opens_transaction(engine) => {
                 self.transaction = Some(true)
             }

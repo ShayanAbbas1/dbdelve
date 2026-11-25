@@ -3262,6 +3262,17 @@ impl Workspace {
                             && rolls_back_to_savepoint
                         {
                             profile.transaction_aborted = false;
+                        } else if bound_db.is_none()
+                            && !alongside
+                            && let (Ok(ran), Some(sent_at)) = (&result, own_sent_at)
+                            && ran.transaction_open == Some(false)
+                        {
+                            // The engine's own word that nothing is open on
+                            // the profile's session (a lane's is a session of
+                            // its own), which the text cannot give: SQLite's
+                            // `RELEASE` of a savepoint an earlier submission
+                            // opened.
+                            left_manual = profile.ended_by_server(sent_at);
                         }
                         let ended_by_server = error.is_some_and(crate::db::transaction_rolled_back);
                         if left_manual && profile.session.auto_after_end != Some(tab) {

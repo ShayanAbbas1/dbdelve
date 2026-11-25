@@ -267,6 +267,7 @@ impl Connection {
         let held = fetch.hold()?;
 
         let (mut result, probed) = ran(&connection, sql, fetch)?;
+        result.transaction_open = Some(!connection.is_autocommit());
 
         // The mutex is not reentrant and `edit_target` runs a pragma through it,
         // so the lock has to go before the question is asked.

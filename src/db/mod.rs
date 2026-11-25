@@ -3729,6 +3729,12 @@ pub struct QueryResult {
     /// Why these rows cannot be written back, where the engine knows and the
     /// user would otherwise be told only that the row has no primary key.
     pub read_only_reason: Option<String>,
+    /// Whether a transaction is open on the session once the submission ran,
+    /// where the engine says so exactly: SQLite's and Turso's autocommit
+    /// flag, which a `RELEASE` of a savepoint an earlier submission opened
+    /// clears without any statement of this one reading as an end. `None`
+    /// where the engine cannot say.
+    pub transaction_open: Option<bool>,
     /// The submission's result sets after this one, in order.
     ///
     /// One level deep and never a tree: a nested `rest` is always empty,
