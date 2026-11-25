@@ -3172,22 +3172,52 @@ fn kept_transaction(sql: &str, result: QueryResult) -> Result<QueryResult, DbErr
 }
 
 /// Says so in `result`'s notice when `sql`, which ran whole and ends the
-/// transaction, left one open: a `COMMIT` takes one level off
-/// `@@TRANCOUNT`, so inside a nested `BEGIN TRANSACTION` it commits nothing.
+/// transaction, left the one it ended open ([`outlived_end`]): a `COMMIT`
+/// takes one level off `@@TRANCOUNT`, so inside a nested `BEGIN
+/// TRANSACTION` it commits nothing. Manual's Commit, which opens the next
+/// transaction behind its end, is asked too.
 fn still_open(session: &mut Session, sql: &str, result: &mut QueryResult) {
-    if crate::sql::leaves(Engine::SqlServer, sql).transaction != Some(false) {
+    if !ends(sql) {
         return;
     }
     let depth = session
         .trip("SELECT @@TRANCOUNT")
         .and_then(Result::ok)
         .and_then(|collected| collected.result.rows.first()?.get(0)?.parse::<u64>().ok());
-    if depth.is_some_and(|depth| depth > 0) {
+    if depth.is_some_and(|depth| outlived_end(sql, depth)) {
         result.notice = Some(match result.notice.take() {
             Some(notice) => format!("{notice}\n\n{}", super::TRANSACTION_STILL_OPEN),
             None => super::TRANSACTION_STILL_OPEN.to_string(),
         });
     }
+}
+
+/// Whether `sql` ends a transaction, where it lands or before a `BEGIN
+/// TRANSACTION` behind it.
+fn ends(sql: &str) -> bool {
+    crate::sql::leaves(Engine::SqlServer, sql).transaction == Some(false)
+        || crate::sql::ends_transaction(Engine::SqlServer, sql)
+}
+
+/// Whether the transaction `sql` ended is still open, `depth` being what
+/// `@@TRANCOUNT` reads once it ran. Read off the depth, not off the batch
+/// succeeding: one that ended the outermost level is left with only the
+/// levels it opened after its last end, so any deeper is the old
+/// transaction still there.
+fn outlived_end(sql: &str, depth: u64) -> bool {
+    if !ends(sql) {
+        return false;
+    }
+    let after = crate::sql::after_last_end(Engine::SqlServer, sql);
+    let opened = crate::sql::Buffer::for_engine(Engine::SqlServer, after)
+        .statements()
+        .iter()
+        .filter(|range| {
+            crate::sql::leaves(Engine::SqlServer, &after[(*range).clone()]).transaction
+                == Some(true)
+        })
+        .count();
+    depth > u64::try_from(opened).unwrap_or(u64::MAX)
 }
 
 fn transaction_outcome(
@@ -3289,6 +3319,23 @@ mod tests {
         // server speaks TLS with a certificate signed by nobody, which `prefer`
         // encrypts to without checking.
         config_from_url(&url).expect("dbdelve_MSSQL_URL should parse")
+    }
+
+    #[test]
+    fn an_end_inside_a_nested_transaction_is_told_by_the_depth_left() {
+        let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
+        // Manual's Commit at depth 2 takes one level off and opens one more:
+        // nothing committed, and the outer transaction is still open.
+        assert!(outlived_end(manual_commit, 2));
+        assert!(!outlived_end(manual_commit, 1));
+        assert!(outlived_end("COMMIT", 1));
+        assert!(!outlived_end("COMMIT", 0));
+        assert!(outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 3));
+        assert!(!outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 2));
+        assert!(!outlived_end("BEGIN TRAN; UPDATE t SET a = 1; COMMIT", 0));
+        // A batch that ends nothing is not asked about.
+        assert!(!outlived_end("SELECT 1", 3));
+        assert!(!outlived_end("BEGIN TRANSACTION", 2));
     }
 
     #[test]
@@ -3433,6 +3480,15 @@ mod tests {
         assert!(crate::db::transaction_still_open(&run("COMMIT")));
         assert!(!crate::db::transaction_still_open(&run("COMMIT")));
         assert!(!crate::db::transaction_still_open(&run("SELECT 1")));
+        // Manual's Commit at depth 2 commits nothing either.
+        run("BEGIN TRANSACTION");
+        run("BEGIN TRANSACTION");
+        let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
+        assert!(crate::db::transaction_still_open(&run(manual_commit)));
+        run("ROLLBACK");
+        run("BEGIN TRANSACTION");
+        assert!(!crate::db::transaction_still_open(&run(manual_commit)));
+        run("ROLLBACK");
     }
 
     #[test]
