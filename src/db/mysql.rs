@@ -521,17 +521,26 @@ fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysq
         // `prefer` amounts to. No other mode falls back, and not where nothing
         // answered at all: plaintext would find nobody there either.
         Err(encrypted) if server.sslmode == SslMode::Prefer && !unusable_address(&encrypted) => {
-            // A server did answer the first attempt, so a plaintext one that
-            // finds nobody must not read as nothing there.
-            Conn::new(over(options, None)).map_err(|plaintext| {
-                if unusable_address(&plaintext) {
-                    encrypted
-                } else {
-                    plaintext
-                }
-            })
+            Conn::new(over(options, None)).map_err(|plaintext| after_prefer(encrypted, plaintext))
         }
         connected => connected,
+    }
+}
+
+/// Which of `prefer`'s two failures to show. A server did answer the encrypted
+/// attempt, so a plaintext one that finds nobody must not read as nothing
+/// there. Nor may one refused for wanting the password in clear text, unless
+/// the server could not take TLS: the encrypted attempt got past that point,
+/// and its error (a rejected token, say) is the one to act on.
+fn after_prefer(encrypted: ::mysql::Error, plaintext: ::mysql::Error) -> ::mysql::Error {
+    let tls_refused = matches!(
+        encrypted,
+        ::mysql::Error::DriverError(::mysql::DriverError::TlsNotSupported)
+    );
+    if unusable_address(&plaintext) || (wants_cleartext(&plaintext) && !tls_refused) {
+        encrypted
+    } else {
+        plaintext
     }
 }
 
@@ -1861,8 +1870,8 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
     if wants_cleartext(error) {
         return plain_error(
             "The server asked for the password in clear text (mysql_clear_password), \
-             which DBDelve sends only over an encrypted connection. Set Encryption to \
-             Require or stricter."
+             which DBDelve sends only over TLS. That needs a server that supports TLS, \
+             with Encryption set to Require or stricter."
                 .into(),
         );
     }
@@ -1871,8 +1880,8 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
 }
 
 /// The driver refusing `mysql_clear_password`, which [`over`] allows on every
-/// encrypted attempt, so this is a plaintext one: `disable`, or `prefer` once
-/// the server did not take TLS.
+/// encrypted attempt, so this is a plaintext one: `disable`, or `prefer`'s retry
+/// after a server that could not take TLS ([`after_prefer`]).
 fn wants_cleartext(error: &::mysql::Error) -> bool {
     use ::mysql::DriverError::{CleartextPluginDisabled, UnknownAuthPlugin};
     matches!(error, ::mysql::Error::DriverError(CleartextPluginDisabled))
@@ -2326,7 +2335,7 @@ mod tests {
             CleartextPluginDisabled,
         ] {
             let message = connect_error(&::mysql::Error::DriverError(refused), &server).message;
-            assert!(message.contains("Set Encryption to Require"), "{message}");
+            assert!(message.contains("Encryption set to Require"), "{message}");
         }
         let other = UnknownAuthPlugin("auth_gssapi_client".into());
         assert!(
@@ -2334,6 +2343,44 @@ mod tests {
                 .message
                 .contains("Encryption")
         );
+    }
+
+    #[test]
+    fn prefer_shows_the_encrypted_error_unless_the_server_refused_tls() {
+        use ::mysql::DriverError::{TlsNotSupported, UnknownAuthPlugin};
+        let cleartext =
+            || ::mysql::Error::DriverError(UnknownAuthPlugin("mysql_clear_password".into()));
+        let denied = || {
+            ::mysql::Error::MySqlError(::mysql::MySqlError {
+                state: "28000".into(),
+                message: "Access denied".into(),
+                code: 1045,
+            })
+        };
+        let refused = || {
+            ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((
+                "127.0.0.1".into(),
+                "refused".into(),
+                std::io::ErrorKind::ConnectionRefused,
+            ))))
+        };
+
+        assert!(matches!(
+            after_prefer(denied(), cleartext()),
+            ::mysql::Error::MySqlError(ref error) if error.code == 1045
+        ));
+        assert!(wants_cleartext(&after_prefer(
+            ::mysql::Error::DriverError(TlsNotSupported),
+            cleartext(),
+        )));
+        assert!(matches!(
+            after_prefer(denied(), refused()),
+            ::mysql::Error::MySqlError(_)
+        ));
+        assert!(matches!(
+            after_prefer(::mysql::Error::DriverError(TlsNotSupported), denied()),
+            ::mysql::Error::MySqlError(_)
+        ));
     }
 
     #[test]
