@@ -252,6 +252,29 @@ pub(crate) fn skips_run_once(opted_in: bool, own_run: bool, mode: Mode, held: bo
     opted_in && own_run && (mode != Mode::ReadOnly || held)
 }
 
+/// Whether an end of the open transaction in `sql` that failed with `error`
+/// left the transaction open; see [`Profile::end_landed`].
+fn failed_end_left_open(engine: Engine, sql: &str, lone: bool, error: &DbError) -> bool {
+    crate::db::sent_nothing(error)
+        || crate::db::transaction_kept_open(error)
+        || (lone && engine.failed_end_keeps_transaction(&error.message))
+        || failed_before_end(engine, sql)
+}
+
+/// Whether a failure of `sql` may have come ahead of its end, which Postgres
+/// then skips with the rest of the submission, leaving the transaction open
+/// and aborted. Only an end that is not the submission's first statement: the
+/// failure may still be the end's own, but read as open the transaction
+/// keeps Roll back offered, while read as ended every later statement fails
+/// with no way out shown.
+fn failed_before_end(engine: Engine, sql: &str) -> bool {
+    engine.failure_aborts_transaction()
+        && crate::sql::Buffer::for_engine(engine, sql)
+            .statements()
+            .first()
+            .is_some_and(|first| !crate::sql::ends_transaction(engine, &sql[first.clone()]))
+}
+
 /// See [`Profile::shortcut_database`]. The shown catalog's own word comes
 /// first: a `USE` of the user's can move the session it was read on without
 /// the profile hearing of it, and a shortcut names what the sidebar shows.
@@ -300,8 +323,10 @@ impl Profile {
     /// ([`crate::db::sent_nothing`]: a Cancel dropped it unsent), or it is a
     /// `lone` end the engine says leaves the transaction open when it fails;
     /// a guess there would keep a flag no COMMIT could clear, or offer a Roll
-    /// Back for work the server had already rolled back. A `lost` session has
-    /// no transaction left to keep.
+    /// Back for work the server had already rolled back. Nor did it on
+    /// Postgres when a statement ahead of the end may have failed
+    /// ([`failed_before_end`]): the end was skipped, and the transaction is
+    /// open and aborted. A `lost` session has no transaction left to keep.
     ///
     /// An end that did end the transaction leaves Manual too, since nothing
     /// is holding one open any more: whether it did, for the caller to say.
@@ -315,17 +340,15 @@ impl Profile {
         lost: bool,
         error: Option<&DbError>,
     ) -> bool {
-        let still_open = !lost
-            && error.is_some_and(|error| {
-                crate::db::sent_nothing(error)
-                    || crate::db::transaction_kept_open(error)
-                    || (lone
-                        && self
-                            .config
-                            .engine()
-                            .failed_end_keeps_transaction(&error.message))
-            });
+        let engine = self.config.engine();
+        let still_open =
+            !lost && error.is_some_and(|error| failed_end_left_open(engine, sql, lone, error));
         if still_open {
+            // What failed ahead of the end aborted the transaction, which
+            // can only be rolled back now.
+            self.transaction_aborted |= error.is_some_and(|error| {
+                !crate::db::sent_nothing(error) && failed_before_end(engine, sql)
+            });
             return false;
         }
         self.record_sent(sql, Some(false));
@@ -385,8 +408,9 @@ impl Profile {
     /// it, and the record is kept until now: only a pair that ran whole ended
     /// the transaction it lists, and starts the record again with what
     /// follows the end. One whose end failed where the engine keeps the
-    /// transaction (SQLite on a deferred constraint) still holds what the
-    /// record lists, so the pair is added to it. Anywhere else the failed end
+    /// transaction (SQLite on a deferred constraint), or never ran behind a
+    /// Postgres failure ahead of it ([`failed_before_end`]), still holds what
+    /// the record lists, so the pair is added to it. Anywhere else the failed end
     /// rolled it back and the `BEGIN` behind it never ran, as Postgres skips
     /// the rest of a submission: nothing is open, and Manual, which promises a
     /// transaction, gives way to Auto. One sent nothing changed nothing, and a
@@ -422,8 +446,10 @@ impl Profile {
                         || self
                             .config
                             .engine()
-                            .failed_end_keeps_transaction(&error.message)) =>
+                            .failed_end_keeps_transaction(&error.message)
+                        || failed_before_end(self.config.engine(), sql)) =>
             {
+                self.transaction_aborted |= failed_before_end(self.config.engine(), sql);
                 self.transaction_statements.push(sql.to_string());
                 false
             }
@@ -5209,6 +5235,27 @@ fn schema_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_postgres_failure_ahead_of_the_end_keeps_the_transaction_open() {
+        let failed = DbError {
+            message: "division by zero".into(),
+            position: None,
+        };
+        let left_open = |engine, sql| failed_end_left_open(engine, sql, true, &failed);
+        // Postgres skips the rest of the submission after the failure, so
+        // the COMMIT never ran: the transaction is open, and aborted.
+        assert!(left_open(Engine::Postgres, "UPDATE t SET a = 1/0; COMMIT"));
+        assert!(left_open(
+            Engine::Postgres,
+            "UPDATE t SET a = 1/0; ROLLBACK"
+        ));
+        // The end failed itself, or ran first and committed before it.
+        assert!(!left_open(Engine::Postgres, "COMMIT"));
+        assert!(!left_open(Engine::Postgres, "COMMIT; UPDATE t SET a = 1/0"));
+        // Elsewhere the end is not known to be skipped.
+        assert!(!left_open(Engine::MySql, "UPDATE t SET a = 1/0; COMMIT"));
+    }
 
     #[test]
     fn a_metadata_read_waits_out_a_begin_being_sent_and_then_stays_off_its_transaction() {
