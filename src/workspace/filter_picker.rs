@@ -314,11 +314,18 @@ fn too_many_tables(entries: usize) -> Option<String> {
     })
 }
 
-/// How many of the listed relation `names` a table list of `entries` shows.
+/// How many of the listed relation `names` a table list of `entries` shows,
+/// by the rule `admits` asks, resolved once rather than per name and entry:
+/// this runs on every draw, over schemas of thousands of tables.
 fn tables_shown(entries: &[String], names: &[String]) -> usize {
+    let shown = Include {
+        databases: entries.to_vec(),
+        ..Include::default()
+    }
+    .resolve(Levels::DatabaseHoldsObjects, None, None);
     names
         .iter()
-        .filter(|name| entries.iter().any(|entry| admits(entry, name)))
+        .filter(|name| shown.shows_database(name))
         .count()
 }
 
@@ -1784,6 +1791,13 @@ mod tests {
         assert_eq!(tables_shown(&entries(&["orders"]), &names), 1);
         assert_eq!(tables_shown(&entries(&["orders*", "users"]), &names), 3);
         assert_eq!(tables_shown(&entries(&["nothing"]), &names), 0);
+        // The count is the one each entry asked alone gives.
+        for list in [&["ORDERS", "?sers"][..], &["*_old", "junk", "o*"], &["*"]] {
+            let one_by_one = (names.iter())
+                .filter(|name| list.iter().any(|entry| admits(entry, name)))
+                .count();
+            assert_eq!(tables_shown(&entries(list), &names), one_by_one, "{list:?}");
+        }
     }
 
     #[test]
