@@ -422,9 +422,10 @@ fn deliver(stream: &UnixStream, reply: &Reply, gone: &AtomicBool, within: Durati
 ///
 /// Not a send timeout: that bounds each wait for buffer space, and a caller
 /// reading a little at a time ends every such wait, so one blocking write
-/// could last for ever. Each send here is `MSG_DONTWAIT`, which leaves the
-/// descriptor's own mode, and so the hangup reader, alone, and the only wait
-/// is a `poll` for room given what is left of the one deadline.
+/// could last for ever. Each send is one that cannot wait ([`send_now`]),
+/// which leaves the descriptor's own mode, and so the hangup reader, alone,
+/// and the only wait is a `poll` for room given what is left of the one
+/// deadline.
 fn write_before(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> bool {
     use std::os::fd::AsRawFd;
 
@@ -447,9 +448,7 @@ fn write_before(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> bool {
         {
             return false;
         }
-        // SAFETY: `rest` is valid for `rest.len()` bytes for the call.
-        let sent = unsafe { libc::send(fd, rest.as_ptr().cast(), rest.len(), libc::MSG_DONTWAIT) };
-        match usize::try_from(sent) {
+        match usize::try_from(send_now(fd, rest)) {
             Ok(0) => return false,
             Ok(sent) => rest = &rest[sent..],
             // No room yet, or a signal: the deadline is checked again first.
@@ -460,6 +459,46 @@ fn write_before(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> bool {
         }
     }
     true
+}
+
+/// Send what of `bytes` fits now, without waiting for room: `send`'s count,
+/// with `EWOULDBLOCK` when nothing fits.
+///
+/// `MSG_DONTWAIT` says so on Linux. Apple's kernel ignores it on a send, and a
+/// blocking one waits until every byte is in, so there the send carries no
+/// more than the low-water mark: `poll` gives `POLLOUT` only once that much
+/// room is free, so it goes in whole without a wait.
+fn send_now(fd: std::os::fd::RawFd, bytes: &[u8]) -> isize {
+    #[cfg(target_vendor = "apple")]
+    let (len, flags) = (bytes.len().min(low_water_mark(fd)), 0);
+    #[cfg(not(target_vendor = "apple"))]
+    let (len, flags) = (bytes.len(), libc::MSG_DONTWAIT);
+    // SAFETY: `bytes` is valid for `len <= bytes.len()` bytes for the call.
+    unsafe { libc::send(fd, bytes.as_ptr().cast(), len, flags) }
+}
+
+/// The socket's send low-water mark: the room `poll` waits for before it
+/// says the socket is writable. One byte when it cannot be read, which still
+/// cannot wait.
+#[cfg(target_vendor = "apple")]
+fn low_water_mark(fd: std::os::fd::RawFd) -> usize {
+    let mut mark: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `mark` and `len` are valid for writes, and `len` is `mark`'s size.
+    let read = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDLOWAT,
+            (&raw mut mark).cast(),
+            &mut len,
+        )
+    };
+    if read == 0 {
+        usize::try_from(mark).unwrap_or(1).max(1)
+    } else {
+        1
+    }
 }
 
 /// A refusal written before the call was ever handed to the window, so there is
@@ -785,14 +824,29 @@ mod tests {
             text: "a".repeat(8 * 1024 * 1024),
         };
         let (server, _silent) = UnixStream::pair().expect("a pair of sockets");
-        let started = Instant::now();
-        assert!(!deliver(
-            &server,
-            &reply,
-            &AtomicBool::new(false),
-            Duration::from_millis(200)
-        ));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        let delivered = ended_within(Duration::from_secs(5), move || {
+            deliver(
+                &server,
+                &reply,
+                &AtomicBool::new(false),
+                Duration::from_millis(200),
+            )
+        });
+        assert!(!delivered);
+    }
+
+    /// What `work` gave, so long as it ended within `limit`. A write that
+    /// waits on the caller would otherwise hold the test, and the suite, for
+    /// as long as the caller does.
+    fn ended_within<T: Send + 'static>(
+        limit: Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, ended) = std::sync::mpsc::channel();
+        thread::spawn(move || _ = done.send(work()));
+        ended
+            .recv_timeout(limit)
+            .unwrap_or_else(|_| panic!("it was still waiting after {limit:?}"))
     }
 
     #[test]
@@ -805,13 +859,14 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
         });
-        let started = Instant::now();
-        assert!(!write_before(
-            &server,
-            &vec![b'a'; 64 * 1024 * 1024],
-            started + Duration::from_millis(300)
-        ));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        let written = ended_within(Duration::from_secs(3), move || {
+            write_before(
+                &server,
+                &vec![b'a'; 64 * 1024 * 1024],
+                Instant::now() + Duration::from_millis(300),
+            )
+        });
+        assert!(!written);
     }
 
     #[test]
