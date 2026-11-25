@@ -514,7 +514,7 @@ fn open(
 }
 
 fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysql::Error> {
-    match Conn::new(over(options.clone(), server, ssl_options(server))) {
+    match Conn::new(over(options.clone(), ssl_options(server))) {
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
         // you can" in one attempt, so this is two — which is what libpq's own
@@ -523,7 +523,7 @@ fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysq
         Err(encrypted) if server.sslmode == SslMode::Prefer && !unusable_address(&encrypted) => {
             // A server did answer the first attempt, so a plaintext one that
             // finds nobody must not read as nothing there.
-            Conn::new(over(options, server, None)).map_err(|plaintext| {
+            Conn::new(over(options, None)).map_err(|plaintext| {
                 if unusable_address(&plaintext) {
                     encrypted
                 } else {
@@ -586,13 +586,17 @@ fn unusable_address(error: &::mysql::Error) -> bool {
     )
 }
 
-/// `options` over `tls`, answering a server that asks for
-/// `mysql_clear_password` only when the password is a command's and goes
-/// encrypted: RDS IAM asks for it, the driver refuses it by default, and a
-/// plaintext socket must never carry a token in the clear. With TLS asked for,
-/// the driver fails rather than carry on unencrypted.
-fn over(options: OptsBuilder, server: &ServerConfig, tls: Option<SslOpts>) -> OptsBuilder {
-    let cleartext = tls.is_some() && server.password_command.is_some();
+/// `options` over `tls`, answering a server that asks for the password in
+/// clear text (`mysql_clear_password`, which RDS IAM and Azure Entra ID use)
+/// only when this attempt goes encrypted. The driver refuses the plugin by
+/// default, as libmysqlclient does, and a plaintext socket must never carry a
+/// password in the clear. With TLS asked for, the driver fails rather than
+/// carry on unencrypted, and `prefer`'s plaintext retry is built without TLS,
+/// so without the plugin. Over TLS it gives away nothing new: a
+/// `caching_sha2_password` server already gets the password in clear text
+/// over TLS whenever its cache misses.
+fn over(options: OptsBuilder, tls: Option<SslOpts>) -> OptsBuilder {
+    let cleartext = tls.is_some();
     options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
 }
 
@@ -1854,8 +1858,28 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
             server.endpoint()
         ));
     }
+    if wants_cleartext(error) {
+        return plain_error(
+            "The server asked for the password in clear text (mysql_clear_password), \
+             which DBDelve sends only over an encrypted connection. Set Encryption to \
+             Require or stricter."
+                .into(),
+        );
+    }
 
     plain_error(describe(error))
+}
+
+/// The driver refusing `mysql_clear_password`, which [`over`] allows on every
+/// encrypted attempt, so this is a plaintext one: `disable`, or `prefer` once
+/// the server did not take TLS.
+fn wants_cleartext(error: &::mysql::Error) -> bool {
+    use ::mysql::DriverError::{CleartextPluginDisabled, UnknownAuthPlugin};
+    matches!(error, ::mysql::Error::DriverError(CleartextPluginDisabled))
+        || matches!(
+            error,
+            ::mysql::Error::DriverError(UnknownAuthPlugin(plugin)) if plugin == "mysql_clear_password"
+        )
 }
 
 /// The opening of a verified apply, `opening`, sent only when the session is
@@ -2270,28 +2294,46 @@ mod tests {
     }
 
     #[test]
-    fn only_a_password_command_over_tls_may_answer_in_cleartext() {
-        let cleartext = |command: bool, sslmode| {
-            let server = ServerConfig {
+    fn only_an_encrypted_attempt_may_answer_in_cleartext() {
+        let cleartext = |sslmode| {
+            let tls = ssl_options(&ServerConfig {
                 sslmode,
-                password_command: command.then(|| crate::db::PasswordCommand {
-                    command: "token".into(),
-                    expires: 0,
-                }),
                 ..ServerConfig::default()
-            };
-            let tls = ssl_options(&server);
+            });
             let opened = |tls| {
-                ::mysql::Opts::from(over(OptsBuilder::new(), &server, tls))
-                    .get_enable_cleartext_plugin()
+                ::mysql::Opts::from(over(OptsBuilder::new(), tls)).get_enable_cleartext_plugin()
             };
-            // The second is `prefer`'s plaintext fallback.
+            // The second is `prefer`'s plaintext retry.
             (opened(tls), opened(None))
         };
-        assert_eq!(cleartext(true, SslMode::Prefer), (true, false));
-        assert_eq!(cleartext(true, SslMode::VerifyFull), (true, false));
-        assert_eq!(cleartext(true, SslMode::Disable), (false, false));
-        assert_eq!(cleartext(false, SslMode::Require), (false, false));
+        assert_eq!(cleartext(SslMode::Disable), (false, false));
+        for mode in [
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyCa,
+            SslMode::VerifyFull,
+        ] {
+            assert_eq!(cleartext(mode), (true, false), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_cleartext_password_says_to_require_encryption() {
+        use ::mysql::DriverError::{CleartextPluginDisabled, UnknownAuthPlugin};
+        let server = ServerConfig::default();
+        for refused in [
+            UnknownAuthPlugin("mysql_clear_password".into()),
+            CleartextPluginDisabled,
+        ] {
+            let message = connect_error(&::mysql::Error::DriverError(refused), &server).message;
+            assert!(message.contains("Set Encryption to Require"), "{message}");
+        }
+        let other = UnknownAuthPlugin("auth_gssapi_client".into());
+        assert!(
+            !connect_error(&::mysql::Error::DriverError(other), &server)
+                .message
+                .contains("Encryption")
+        );
     }
 
     #[test]
