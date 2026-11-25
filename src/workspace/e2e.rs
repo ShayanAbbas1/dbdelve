@@ -31554,3 +31554,319 @@ fn an_end_of_the_transaction_dropped_unsent_leaves_it_open(cx: &mut TestAppConte
         quit(workspace, cx);
     });
 }
+
+/// The profile `id`'s own catalog with `schema` listed unread and none of its
+/// relations, `failed` saying why its last read failed where one did, as a
+/// MySQL 5.x catalog leaves another database; both trees built again over it.
+/// No built-in engine that runs without a server leaves a schema unread, so it
+/// is set by hand.
+fn list_unread(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+    schema: &str,
+    failed: Option<&str>,
+) {
+    workspace.update(cx, |workspace, cx| {
+        let profile = (workspace.profiles.iter_mut())
+            .find(|profile| profile.id == id)
+            .expect("the profile was restored");
+        let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+            panic!("the catalog has not loaded");
+        };
+        catalog
+            .unread
+            .insert(schema.to_string(), failed.map(str::to_string));
+        // What such a catalog holds of it: no relations until it is read.
+        if let Some(listed) = (catalog.schemas.iter_mut()).find(|listed| listed.name == schema) {
+            listed.relations.clear();
+        }
+        workspace.refresh_explorer(id, cx);
+    });
+    settle(cx);
+}
+
+/// The schemas of `id`'s own catalog still unread, and the schema names it
+/// lists.
+fn unread_and_listed(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+) -> (Vec<String>, Vec<String>) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = (workspace.profiles.iter())
+            .find(|profile| profile.id == id)
+            .expect("the profile was restored");
+        match &profile.catalog {
+            CatalogState::Loaded(catalog, _) => (
+                catalog.unread.keys().cloned().collect(),
+                (catalog.schemas.iter())
+                    .map(|schema| schema.name.clone())
+                    .collect(),
+            ),
+            _ => panic!("the catalog has not loaded"),
+        }
+    })
+}
+
+fn relation_reads(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| workspace.relation_reads.clone())
+}
+
+/// The one row an unread schema holds, as the explorer names it.
+fn unread_row(schema: &str) -> String {
+    format!("unread:{}:{schema}", schema.len())
+}
+
+#[gpui::test]
+fn opening_an_unread_database_row_in_the_connections_tree_reads_it_once_and_again_after_a_failure(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_connections_folded(cx);
+        assert_eq!(profile_state(&workspace, cx, "a"), "connected");
+        let schema = scoped_row("a", None, &explorer::schema_row("main"));
+        let unread = scoped_row("a", None, &unread_row("main"));
+        // Opened while it is read, which reads nothing: a row built folded
+        // holds one inert row in place of its own.
+        reveal_connections_row(&workspace, cx, &schema);
+        let at = connections_row(&workspace, cx, &schema).expect("the schema row is listed");
+        click_connections_row(cx, at);
+        assert!(connections_item(&workspace, cx, &schema).unwrap().0);
+        list_unread(&workspace, cx, "a", "main", None);
+        assert!(connections_item(&workspace, cx, &schema).unwrap().0);
+        let children = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            connections_item(workspace, cx, &schema)
+                .expect("the schema row is listed")
+                .1
+        };
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), LOADING.to_string(), true)],
+            "an unread schema holds one inert row saying it is loading"
+        );
+        assert!(relation_reads(&workspace, cx).is_empty());
+
+        // Opened twice before the first read lands: one read.
+        let expand = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.connections.tree.update(cx, |_, cx| {
+                    cx.emit(TreeEvent::Expanded(schema.clone().into()));
+                });
+            });
+        };
+        expand(&workspace, cx);
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"]);
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), LOADING.to_string(), true)],
+            "the row says it is loading while the read is out"
+        );
+
+        settle(cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "a").0,
+            Vec::<String>::new(),
+            "the read landed and the schema is read"
+        );
+        // What SQLite's read of one schema finds is nothing: only MySQL
+        // before 8.0 lists one unread, so its relations cannot be shown here.
+        let landed = connections_item(&workspace, cx, &schema).map(|item| item.1);
+        assert!(
+            landed
+                .unwrap_or_default()
+                .iter()
+                .all(|(id, ..)| *id != unread),
+            "the loading row is gone"
+        );
+
+        // A failed read says why in the row, and opening it reads again.
+        list_unread(&workspace, cx, "a", "main", Some("denied"));
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), "denied".to_string(), true)]
+        );
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main", "main"]);
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), LOADING.to_string(), true)],
+            "the failure gives way to loading while it reads again"
+        );
+        settle(cx);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "a").0,
+            Vec::<String>::new()
+        );
+
+        // Folded and opened again with the mouse, as a person retries.
+        list_unread(&workspace, cx, "a", "main", Some("denied"));
+        let at = connections_row(&workspace, cx, &schema).unwrap();
+        click_connections_row(cx, at);
+        assert!(!connections_item(&workspace, cx, &schema).unwrap().0);
+        assert_eq!(
+            relation_reads(&workspace, cx).len(),
+            2,
+            "folding reads nothing"
+        );
+        let at = connections_row(&workspace, cx, &schema).unwrap();
+        click_connections_row(cx, at);
+        assert_eq!(relation_reads(&workspace, cx), ["main", "main", "main"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "a").0,
+            Vec::<String>::new()
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn opening_an_unread_schema_row_in_the_simple_tree_reads_it_once_and_again_after_a_failure(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let id = front_profile(&workspace, cx);
+        let schema = explorer::schema_row("main");
+        let children = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let tree = workspace
+                    .read(cx)
+                    .profile()
+                    .unwrap()
+                    .session
+                    .explorer_tree
+                    .read(cx);
+                let index = tree.index_of(&schema.clone().into())?;
+                let item = tree.entry(index)?.item().clone();
+                Some(
+                    item.children
+                        .iter()
+                        .map(|child| {
+                            (
+                                child.id.to_string(),
+                                child.label.to_string(),
+                                child.is_disabled(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        let expand = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+                tree.update(cx, |_, cx| {
+                    cx.emit(TreeEvent::Expanded(schema.clone().into()));
+                });
+            });
+        };
+        let loading = vec![(unread_row("main"), LOADING.to_string(), true)];
+
+        list_unread(&workspace, cx, &id, "main", None);
+        assert_eq!(children(&workspace, cx), Some(loading.clone()));
+        expand(&workspace, cx);
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"], "one read");
+        assert_eq!(children(&workspace, cx), Some(loading.clone()));
+        settle(cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, &id).0,
+            Vec::<String>::new()
+        );
+        assert!(
+            children(&workspace, cx)
+                .unwrap_or_default()
+                .iter()
+                .all(|(row, ..)| *row != unread_row("main")),
+            "the loading row is gone"
+        );
+
+        list_unread(&workspace, cx, &id, "main", Some("denied"));
+        assert_eq!(
+            children(&workspace, cx),
+            Some(vec![(unread_row("main"), "denied".to_string(), true)])
+        );
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main", "main"]);
+        assert_eq!(children(&workspace, cx), Some(loading));
+        settle(cx);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, &id).0,
+            Vec::<String>::new()
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn select_database_keeps_a_catalog_listing_every_database_and_reads_the_one_moved_to(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (_mock, workspace, cx) = launch_beside_a_clickhouse_mock(cx);
+        cx.executor().allow_parking();
+        connect_clicks(&workspace, cx);
+        let settled = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = (workspace.profiles.iter())
+                    .find(|profile| profile.id == "clicks")
+                    .unwrap();
+                profile.connection().is_some()
+                    && profile.schema_reads.is_empty()
+                    && matches!(
+                        profile.catalog,
+                        CatalogState::Loaded(_, ref routines)
+                            if !matches!(routines, crate::session::Routines::Loading)
+                    )
+            })
+        };
+        let catalog_reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.catalog_reads)
+        };
+        let switch = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, name: &str| {
+            let (generation, _) = clicks_connection(workspace, cx);
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    assert!(workspace.set_database(name.into(), window, cx));
+                })
+            });
+            drive_until(cx, |cx| {
+                clicks_connection(workspace, cx).0 != generation && settled(workspace, cx)
+            });
+            settle(cx);
+        };
+        drive_until(cx, |cx| settled(&workspace, cx));
+        let both = ["analytics", "dbdelve_dev"].map(String::from).to_vec();
+        assert_eq!(unread_and_listed(&workspace, cx, "clicks").1, both);
+
+        // Listed unread, as a MySQL 5.x catalog lists every database but the
+        // own one: the switch keeps the catalog and reads the one moved to.
+        list_unread(&workspace, cx, "clicks", "analytics", None);
+        let reads = catalog_reads(&workspace, cx);
+        switch(&workspace, cx, "analytics");
+        assert_eq!(catalog_reads(&workspace, cx), reads, "nothing read again");
+        assert_eq!(relation_reads(&workspace, cx), ["analytics"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "clicks"),
+            (Vec::new(), both.clone()),
+            "the kept catalog, with the database moved to read"
+        );
+
+        // Back onto one the catalog has read: kept, and nothing read at all.
+        switch(&workspace, cx, "dbdelve_dev");
+        assert_eq!(catalog_reads(&workspace, cx), reads);
+        assert_eq!(relation_reads(&workspace, cx), ["analytics"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "clicks"),
+            (Vec::new(), both)
+        );
+
+        quit(workspace, cx);
+    });
+}
