@@ -20,7 +20,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ::mysql::consts::{ColumnFlags, ColumnType};
@@ -206,8 +206,14 @@ SELECT COUNT(*) AS found
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA = 'information_schema'
   AND TABLE_NAME = 'STATISTICS'
-  AND COLUMN_NAME = 'EXPRESSION'
+  AND UPPER(COLUMN_NAME) = 'EXPRESSION'
 ";
+
+/// `None` when the probe failed or answered nothing readable.
+fn expression_probe(found: Result<QueryResult, DbError>) -> Option<bool> {
+    let found = found.ok()?;
+    optional_cell(&found, found.rows.first()?, "found").map(|n| n != "0")
+}
 
 fn structure_indexes_sql(has_expression: bool) -> String {
     STRUCTURE_INDEXES_SQL.replace(
@@ -704,6 +710,10 @@ pub struct Connection {
     side: Arc<Mutex<Option<Conn>>>,
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
     graph: GraphCancel,
+    /// Whether `information_schema.STATISTICS` has an `EXPRESSION` column,
+    /// asked once per session: Structure would otherwise pay a round trip for
+    /// it on every open.
+    statistics_expression: Arc<OnceLock<bool>>,
 }
 
 impl Connection {
@@ -726,6 +736,7 @@ impl Connection {
                 address,
                 side: Arc::default(),
                 graph: GraphCancel::default(),
+                statistics_expression: Arc::default(),
             })
         })
     }
@@ -742,6 +753,7 @@ impl Connection {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
             ..self.clone()
         })
     }
@@ -767,6 +779,7 @@ impl Connection {
             // Its own: a Cancel on this session would otherwise drop the next
             // statement of a diagram read on the first.
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
             ..self.clone()
         })
     }
@@ -1293,6 +1306,7 @@ impl Connection {
             address: self.address,
             side: Arc::default(),
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
         };
         assemble_sizes(
             side.internal_query(
@@ -1311,17 +1325,20 @@ impl Connection {
         ))?)
     }
 
-    /// A failed probe reads as no column: the key parts then name plain
-    /// columns, as they did before functional ones.
+    /// A failed probe reads as no column for this call only, so a transient
+    /// error is asked again rather than hiding functional key parts for good.
     fn statistics_has_expression(&self) -> bool {
-        self.engine != Engine::MariaDb
-            && self
-                .internal_query(STATISTICS_HAS_EXPRESSION_SQL)
-                .ok()
-                .and_then(|found| {
-                    optional_cell(&found, found.rows.first()?, "found").map(|n| n != "0")
-                })
-                .unwrap_or(false)
+        if self.engine == Engine::MariaDb {
+            return false;
+        }
+        if let Some(known) = self.statistics_expression.get() {
+            return *known;
+        }
+        let probed = expression_probe(self.internal_query(STATISTICS_HAS_EXPRESSION_SQL));
+        if let Some(known) = probed {
+            let _ = self.statistics_expression.set(known);
+        }
+        probed.unwrap_or(false)
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -2863,6 +2880,29 @@ mod tests {
         assert!(!without.contains("EXPRESSION"));
         assert!(!with.contains("{key_name}") && !without.contains("{key_name}"));
         assert!(!with.contains("/*!") && !without.contains("/*!"));
+    }
+
+    #[test]
+    fn expression_probe_reads_the_count_and_a_failure_is_unknown() {
+        let answered = |count: &str| {
+            Ok(QueryResult {
+                columns: vec![Column {
+                    name: "found".into(),
+                    data_type: None,
+                }],
+                rows: crate::db::rows(vec![vec![Some(count.to_string())]]),
+                ..QueryResult::default()
+            })
+        };
+        assert_eq!(expression_probe(answered("1")), Some(true));
+        assert_eq!(expression_probe(answered("0")), Some(false));
+        assert_eq!(expression_probe(Ok(QueryResult::default())), None);
+        assert_eq!(expression_probe(Err(plain_error("down".into()))), None);
+    }
+
+    #[test]
+    fn the_expression_probe_ignores_the_case_a_column_is_reported_in() {
+        assert!(STATISTICS_HAS_EXPRESSION_SQL.contains("UPPER(COLUMN_NAME) = 'EXPRESSION'"));
     }
 
     #[test]
