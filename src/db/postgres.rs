@@ -3,7 +3,7 @@ use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -1136,6 +1136,23 @@ pub struct Connection {
     /// from here on takes the hold before the startup script replays, so the
     /// script never runs unheld. Shared with the sessions opened beside it.
     held: Arc<AtomicBool>,
+    /// Whether the server keeps an inherit option per membership (Postgres 16
+    /// on). Fixed for the server's life, so the role reads probe it once; the
+    /// password probe is not kept, as `SET ROLE` changes what the session may read.
+    per_membership: Arc<OnceLock<bool>>,
+}
+
+/// What `cell` holds, or what `probe` learns and `cell` then keeps. A failed
+/// probe keeps nothing, so the next read asks again.
+fn cached_once(
+    cell: &OnceLock<bool>,
+    probe: impl FnOnce() -> Result<bool, DbError>,
+) -> Result<bool, DbError> {
+    if let Some(known) = cell.get() {
+        return Ok(*known);
+    }
+    let learned = probe()?;
+    Ok(*cell.get_or_init(|| learned))
 }
 
 #[derive(Clone)]
@@ -1328,6 +1345,7 @@ impl Connection {
             startup: startup.into(),
             after_startup_search_path,
             held: Arc::new(AtomicBool::new(held)),
+            per_membership: Arc::default(),
         })
     }
 
@@ -2093,10 +2111,17 @@ impl Connection {
                  THEN 'y' ELSE 'n' END AS per_membership",
         )?;
         let row = probe.rows.first().cloned().unwrap_or_default();
+        let per_membership = required_cell(&probe, &row, "per_membership")? == "y";
+        _ = self.per_membership.set(per_membership);
         Ok((
             required_cell(&probe, &row, "passwords")? == "y",
-            required_cell(&probe, &row, "per_membership")? == "y",
+            per_membership,
         ))
+    }
+
+    /// [`Self::role_catalog`]'s second answer, asked of the server once.
+    fn per_membership(&self) -> Result<bool, DbError> {
+        cached_once(&self.per_membership, || Ok(self.role_catalog()?.1))
     }
 
     pub fn roles(&self) -> Result<super::roles::Roles, DbError> {
@@ -2119,7 +2144,7 @@ impl Connection {
 
     pub fn role_reach(&self, name: &str) -> Result<super::roles::Reach, DbError> {
         use super::roles::{assemble_reach, owns_sql, reach_sql};
-        let (_, per_membership) = self.role_catalog()?;
+        let per_membership = self.per_membership()?;
         let reach = self.internal_query(&reach_sql(name, per_membership))?;
         let owns = self.internal_query(&owns_sql(name, per_membership))?;
         assemble_reach(&reach, &owns)
@@ -2127,7 +2152,7 @@ impl Connection {
 
     pub fn role_grants(&self, name: &str) -> Result<super::roles::RoleGrants, DbError> {
         use super::roles::{assemble_role_grants, owns_sql, role_grants_sql, schema_access_sql};
-        let (_, per_membership) = self.role_catalog()?;
+        let per_membership = self.per_membership()?;
         let held = self.internal_query(&role_grants_sql(name, per_membership))?;
         let schemas = self.internal_query(&schema_access_sql(name, per_membership))?;
         let owns = self.internal_query(&owns_sql(name, per_membership))?;
@@ -2137,7 +2162,7 @@ impl Connection {
     /// What the role `name` holds on every database of the server.
     pub fn role_access(&self, name: &str) -> Result<super::roles::RoleAccess, DbError> {
         use super::roles::{assemble_role_access, database_access_sql};
-        let (_, per_membership) = self.role_catalog()?;
+        let per_membership = self.per_membership()?;
         assemble_role_access(&self.internal_query(&database_access_sql(name, per_membership))?)
     }
 
@@ -3317,6 +3342,24 @@ fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_probe_that_succeeded_is_not_asked_again_but_a_failed_one_is() {
+        let cell = OnceLock::new();
+        let asked = std::cell::Cell::new(0);
+        let failing = || {
+            asked.set(asked.get() + 1);
+            Err(plain_error("down".into()))
+        };
+        assert!(cached_once(&cell, failing).is_err());
+        let learn = || {
+            asked.set(asked.get() + 1);
+            Ok(true)
+        };
+        assert!(cached_once(&cell, learn).unwrap());
+        assert!(cached_once(&cell, learn).unwrap());
+        assert_eq!(asked.get(), 2);
+    }
+
     use super::*;
     use crate::db::{
         ApplyOutcome, CancelToken, Drift, FetchedCell, ForeignKey, IndexKind, RelationKind,
