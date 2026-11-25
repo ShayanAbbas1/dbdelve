@@ -465,6 +465,7 @@ impl Workspace {
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
             database_catalogs_shown: HashMap::new(),
+            schema_reads: HashMap::new(),
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             folds: stored.folds,
@@ -561,6 +562,7 @@ impl Workspace {
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
             database_catalogs_shown: HashMap::new(),
+            schema_reads: HashMap::new(),
             left_database: false,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
@@ -3209,6 +3211,7 @@ impl Workspace {
         self.install_completions(id, cx);
         self.rebuild_explorer(id, keep, cx);
         self.catalog_landed(id, cx);
+        self.read_open_schemas(id, cx);
     }
 
     /// Fill the routines in behind the relations already on screen.
@@ -3310,7 +3313,30 @@ impl Workspace {
     /// With Show sizes off nothing is asked: a role whose statistics read takes
     /// locks or opens every table is never sent it. Nor is it below the
     /// profile's `Sizes` depth: sizes load only when both allow it.
+    ///
+    /// A catalog that left schemas unread asks for the sizes of those it read
+    /// alone, so a sizes read never opens every table on such a server.
     fn load_sizes(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let only = self
+            .issued_to(id, generation)
+            .and_then(|profile| match &profile.catalog {
+                CatalogState::Loaded(catalog, _) if !catalog.unread.is_empty() => {
+                    Some(catalog.read_schemas())
+                }
+                _ => None,
+            });
+        self.load_sizes_of(id, generation, only, cx);
+    }
+
+    /// [`Self::load_sizes`] of the schemas `only` names, or of every one the
+    /// filter shows.
+    fn load_sizes_of(
+        &mut self,
+        id: &str,
+        generation: u64,
+        only: Option<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.settings.show_sizes {
             return;
         }
@@ -3325,7 +3351,10 @@ impl Workspace {
         {
             self.size_reads += 1;
         }
-        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes(&shown));
+        let sizes_task = spawn_blocking(cx.background_executor(), move || match only {
+            Some(schemas) => connection.sizes_of(&schemas),
+            None => connection.sizes(&shown),
+        });
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -3347,6 +3376,103 @@ impl Workspace {
                 .ok();
         })
         .detach();
+    }
+
+    /// Read the relations of `schema`, which the profile's own catalog lists
+    /// unread ([`crate::db::Catalog::unread`]), now that its row was opened;
+    /// then its sizes, behind them as at connect. Nothing for a schema that is
+    /// read or being read. A failure is said in the schema's row, and opening
+    /// the row again reads it again.
+    pub(crate) fn read_schema(&mut self, id: &str, schema: &str, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter_mut().find(|found| found.id == id) else {
+            return;
+        };
+        let generation = profile.generation;
+        if profile.schema_reads.get(schema) == Some(&generation) {
+            return;
+        }
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+            return;
+        };
+        let Some(state) = catalog.unread.get_mut(schema) else {
+            return;
+        };
+        // What a failed read said gives way to `Loading…` while it reads again.
+        *state = None;
+        profile.schema_reads.insert(schema.to_string(), generation);
+        let shown = profile.shown();
+        #[cfg(test)]
+        self.relation_reads.push(schema.to_string());
+        let task = spawn_blocking(cx.background_executor(), {
+            let schema = schema.to_string();
+            move || connection.schema_relations(&schema, &shown)
+        });
+        self.rebuild_explorer(id, true, cx);
+        let (id, schema) = (id.to_string(), schema.to_string());
+        cx.spawn(async move |workspace, cx| {
+            let result = task.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                profile.schema_reads.remove(&schema);
+                let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+                    return;
+                };
+                // A refresh since has read it, or listed it no more.
+                let Some(state) = catalog.unread.get_mut(&schema) else {
+                    return;
+                };
+                let read = match result {
+                    Ok(read) => {
+                        catalog.read_relations(&schema, read);
+                        true
+                    }
+                    Err(error) => {
+                        *state = Some(error.message);
+                        false
+                    }
+                };
+                workspace.install_completions(&id, cx);
+                workspace.rebuild_explorer(&id, true, cx);
+                workspace.catalog_landed(&id, cx);
+                if read {
+                    workspace.load_sizes_of(&id, generation, Some(vec![schema]), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Read every unread schema of `id`'s catalog whose row is open: one the
+    /// user left open in either tree comes back open, and no `Expanded` is
+    /// heard for a row that was built open.
+    fn read_open_schemas(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter().find(|found| found.id == id) else {
+            return;
+        };
+        let CatalogState::Loaded(catalog, _) = &profile.catalog else {
+            return;
+        };
+        let open: Vec<String> = catalog
+            .unread
+            .keys()
+            .filter(|schema| {
+                let row = explorer::schema_row(schema);
+                profile.folds.get(&row) == Some(&true)
+                    || profile
+                        .open_rows
+                        .contains(&crate::sidebar::scoped_row(id, None, &row))
+            })
+            .cloned()
+            .collect();
+        for schema in open {
+            self.read_schema(id, &schema, cx);
+        }
     }
 
     /// Point this profile's editor at what its catalog now holds.

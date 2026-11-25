@@ -468,6 +468,16 @@ Decided, and not to be re-litigated:
   `Catalog::by_name` is the display order. Until `Routines::Loaded`, a stored
   routine tab stays pending rather than being resolved against a catalog that
   cannot have it yet.
+- **MySQL before 8.0 reads one database's relations at a time.** It has no
+  data dictionary: `information_schema.TABLES` opens every table's `.frm` for
+  `TABLE_TYPE`, so the whole server's relations took seconds (2.5 s cold for
+  26,000 tables) where one database by `TABLE_SCHEMA =` equality took 0.03 s.
+  `mysql::Connection` reads the server's version at open; on such a server the
+  catalog lists every database and reads the connection's own alone, the rest
+  left in `Catalog::unread` until their rows open (`Connection::schema_relations`,
+  merged by `Catalog::read_relations`), and sizes are read only for the
+  databases read (`Connection::sizes_of`). MariaDB and MySQL 8 read as before.
+  An unread database offers nothing to completion or Go to Object until opened.
 - **Sequences are their own kind, read in the second half.** They are never a
   relation, so no preview, DROP, TRUNCATE, insert or import path can reach one.
   `Connection::routines` reads them only where `Abilities.lists_sequences` is

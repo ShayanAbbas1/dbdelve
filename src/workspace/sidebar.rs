@@ -821,6 +821,20 @@ impl Workspace {
                     self.open_database(&id, database, cx);
                 }
             }
+            // A schema of the connection's own catalog listed unread is read
+            // when its row opens.
+            Some(Node::Row { leaf: None }) => {
+                let read = model::unscoped(id).and_then(|scoped| {
+                    let schema = schema_row_name(scoped.inner)?;
+                    scoped
+                        .database
+                        .is_none()
+                        .then(|| (scoped.profile.to_string(), schema.to_string()))
+                });
+                if let Some((profile, schema)) = read {
+                    self.read_schema(&profile, &schema, cx);
+                }
+            }
             // Read when first opened, and again after a failure.
             Some(Node::Users { profile }) => {
                 let profile = profile.clone();

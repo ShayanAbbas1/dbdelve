@@ -69,6 +69,12 @@ pub fn schema_row(name: &str) -> String {
     format!("{SCHEMA_ROW}{name}")
 }
 
+/// The one row an unread schema holds ([`Catalog::unread`]). Its id starts
+/// where no other row's does, and names the schema after its length.
+fn unread_row(schema: &str) -> String {
+    format!("unread:{}:{schema}", schema.len())
+}
+
 /// Whether each top-level row of an unfiltered sidebar opens: as `saved`
 /// says where it names the row, and otherwise a schema only when it is
 /// `within`, the one the connection works in (`Profile::explorer_opens_on`),
@@ -468,6 +474,15 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
 
             if !schema_matches && groups.is_empty() {
                 return None;
+            }
+            // A schema whose relations are not read yet holds one row saying
+            // so until its row is opened and they are.
+            if let Some(failed) = catalog.unread.get(&schema.name) {
+                let text = failed.as_deref().unwrap_or(crate::sidebar::LOADING);
+                groups.insert(
+                    0,
+                    TreeItem::new(unread_row(&schema.name), text.to_string()).disabled(true),
+                );
             }
 
             Some(
@@ -1775,6 +1790,35 @@ mod tests {
             database: None,
             ..Default::default()
         }
+    }
+
+    /// An unread schema is a folder holding one row that says it is loading,
+    /// or why its read failed, ahead of the routines already read of it.
+    #[test]
+    fn an_unread_schema_holds_one_row_saying_it_is_loading_or_why_not() {
+        let mut catalog = catalog();
+        catalog.schemas[0].relations.clear();
+        catalog.unread.insert("analytics".into(), None);
+        let explorer = tree(&catalog, "");
+        let analytics = &explorer.items[0];
+        assert_eq!(analytics.children.len(), 1);
+        assert_eq!(
+            analytics.children[0].label.as_ref(),
+            crate::sidebar::LOADING
+        );
+        assert!(analytics.children[0].is_disabled());
+        assert!(
+            explorer.items[1]
+                .children
+                .iter()
+                .all(|row| !row.is_disabled())
+        );
+
+        catalog
+            .unread
+            .insert("analytics".into(), Some("denied".into()));
+        let explorer = tree(&catalog, "");
+        assert_eq!(explorer.items[0].children[0].label.as_ref(), "denied");
     }
 
     fn partitioned_catalog() -> Catalog {

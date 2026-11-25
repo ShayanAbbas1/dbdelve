@@ -2539,6 +2539,47 @@ impl Connection {
         Ok(shown.narrow_sizes(sizes))
     }
 
+    /// The relations of `schema` alone, a schema the catalog listed as
+    /// [`Catalog::unread`], narrowed by `shown`'s table list for it, for
+    /// [`Catalog::read_relations`] to put in place. Only MySQL before 8.0
+    /// leaves a schema unread; every other connection answers none.
+    pub fn schema_relations(&self, schema: &str, shown: &Shown) -> Result<Catalog, DbError> {
+        let catalog = match self {
+            Self::MySql(connection) => connection.schema_relations(schema),
+            Self::Postgres(_)
+            | Self::SqlServer(_)
+            | Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::DuckDb(_)
+            | Self::Snowflake(_)
+            | Self::ClickHouse(_)
+            | Self::MongoDb(_)
+            | Self::Redis(_)
+            | Self::External(_) => Ok(Catalog::default()),
+        }?;
+        Ok(shown.narrow_catalog(catalog))
+    }
+
+    /// [`Self::sizes`] of the named schemas alone, server-listed names: those
+    /// a catalog with [`Catalog::unread`] schemas has read, so the numbers
+    /// never cost opening every table on the server. Only MySQL leaves a
+    /// schema unread, so only it is asked; the rest answer none.
+    pub fn sizes_of(&self, schemas: &[String]) -> Result<Sizes, DbError> {
+        match self {
+            Self::MySql(connection) => connection.sizes_of(schemas),
+            Self::Postgres(_)
+            | Self::SqlServer(_)
+            | Self::Sqlite(_)
+            | Self::Turso(_)
+            | Self::DuckDb(_)
+            | Self::Snowflake(_)
+            | Self::ClickHouse(_)
+            | Self::MongoDb(_)
+            | Self::Redis(_)
+            | Self::External(_) => Ok(Sizes::new()),
+        }
+    }
+
     /// The foreign keys of other relations that point at this one, for the
     /// arrow that opens them. Snowflake declares its keys and enforces none of
     /// them, and its exported-keys listing is not one this has been checked
@@ -3398,6 +3439,15 @@ pub struct Catalog {
     /// apart from `schemas`, so nothing that offers objects (the tree,
     /// completion, Go to Object) can see them.
     pub hidden_relations: std::collections::HashMap<String, Vec<(String, RelationKind)>>,
+    /// The schemas listed with their relations not read yet, by name, each
+    /// with why its last read failed, where one did. Only a catalog that lists
+    /// databases as schemas on a server where reading every database's
+    /// relations at once opens every table (MySQL before 8.0) leaves any: the
+    /// connection's own database is read, and another when its row is opened
+    /// ([`Connection::schema_relations`], [`Catalog::read_relations`]). Set
+    /// only by the engine's read, so [`Catalog::merge`], [`Catalog::set_sizes`]
+    /// and the narrowing leave it alone.
+    pub unread: std::collections::BTreeMap<String, Option<String>>,
 }
 
 /// The relations of one schema, as the table filter splits them: those the
@@ -3497,6 +3547,42 @@ impl Catalog {
                 None => self.schemas.push(schema),
             }
         }
+    }
+
+    /// The relations a read of `schema` alone found ([`Self::unread`]), put on
+    /// the schema of that name here with what its table list hid, and the
+    /// schema no longer unread. Its routines, sequences and sizes stay. A
+    /// schema not here goes on the end, as [`Self::merge`] adds one.
+    pub fn read_relations(&mut self, schema: &str, mut read: Self) {
+        self.unread.remove(schema);
+        if let Some(hidden) = read.hidden_relations.remove(schema) {
+            self.hidden_relations.insert(schema.to_string(), hidden);
+        }
+        let relations = read
+            .schemas
+            .into_iter()
+            .find(|found| found.name == schema)
+            .map(|found| found.relations)
+            .unwrap_or_default();
+        match self.schemas.iter_mut().find(|found| found.name == schema) {
+            Some(existing) => existing.relations = relations,
+            None => self.schemas.push(Schema {
+                name: schema.to_string(),
+                relations,
+                routines: Vec::new(),
+                sequences: Vec::new(),
+            }),
+        }
+    }
+
+    /// The schemas whose relations were read, which is every one but those
+    /// [`Self::unread`] names.
+    pub fn read_schemas(&self) -> Vec<String> {
+        self.schemas
+            .iter()
+            .filter(|schema| !self.unread.contains_key(&schema.name))
+            .map(|schema| schema.name.clone())
+            .collect()
     }
 
     /// Put each schema's sequences on the schema of that name here, pushing a
@@ -7140,6 +7226,47 @@ mod tests {
         assert_eq!(main.routines.len(), 1);
         assert_eq!(main.routines[0].name, "f");
         assert_eq!(main.sequences, ["s"]);
+    }
+
+    /// An unread schema's relations, read later, land on it whatever has
+    /// landed meanwhile, and only that schema stops being unread. A routines
+    /// merge or sizes in between keep it unread.
+    #[test]
+    fn an_unread_schemas_relations_land_on_it_and_it_alone_stops_being_unread() {
+        let mut screen = Catalog {
+            schemas: vec![schema("own", &["t"], &[]), schema("other", &[], &[])],
+            unread: [("other".to_string(), None), ("third".to_string(), None)].into(),
+            ..Default::default()
+        };
+        screen.merge(Catalog {
+            schemas: vec![schema("other", &[], &["f"])],
+            ..Default::default()
+        });
+        screen.set_sizes(&Sizes::new());
+        assert_eq!(screen.unread.len(), 2);
+        assert_eq!(screen.read_schemas(), ["own"]);
+
+        let mut read = Catalog {
+            schemas: vec![schema("other", &["a", "b"], &[])],
+            ..Default::default()
+        };
+        read.hidden_relations
+            .insert("other".into(), vec![("c".into(), RelationKind::Table)]);
+        screen.read_relations("other", read);
+
+        let other = &screen.schemas[1];
+        assert_eq!(other.relations.len(), 2);
+        assert_eq!(other.routines.len(), 1, "the routines stay");
+        assert_eq!(screen.hidden_in("other"), 1);
+        assert_eq!(screen.unread.keys().collect::<Vec<_>>(), ["third"]);
+        assert_eq!(screen.read_schemas(), ["own", "other"]);
+
+        // A schema the listing did not hold goes on the end, empty if the
+        // read found nothing.
+        screen.read_relations("third", Catalog::default());
+        assert_eq!(screen.schemas[2].name, "third");
+        assert!(screen.schemas[2].relations.is_empty());
+        assert!(screen.unread.is_empty());
     }
 
     #[test]

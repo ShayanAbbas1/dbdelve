@@ -1473,7 +1473,10 @@ fn scoped_item(
     // A folder of shortcuts counts its members even with none; an object and
     // a member of a folder are one row each and hold nothing to count.
     let schema = is_schema_row(&item.id);
+    // An unread schema holds one row saying so, and a count of nothing.
+    let unread = schema && item.children.iter().all(TreeItem::is_disabled) && item.is_folder();
     let counted = !rows.leaves.contains_key(item.id.as_str())
+        && !unread
         && (item.is_folder() || schema || matches!(shortcut, Some(Shortcut::Folder(_))));
     if let Some(shortcut) = shortcut {
         tree.shortcuts.insert(id.clone(), shortcut);

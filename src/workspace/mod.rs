@@ -301,6 +301,9 @@ pub(crate) struct Workspace {
     /// How many routine reads were started, counted as `size_reads` is.
     #[cfg(test)]
     pub(crate) routine_reads: usize,
+    /// The schemas whose relations were read one at a time, in order.
+    #[cfg(test)]
+    pub(crate) relation_reads: Vec<String>,
     /// How many keep-alive rounds pinged, which run on the blocking pool where
     /// nothing can be counted.
     #[cfg(test)]
@@ -682,6 +685,8 @@ impl Workspace {
             size_reads: 0,
             #[cfg(test)]
             routine_reads: 0,
+            #[cfg(test)]
+            relation_reads: Vec::new(),
             #[cfg(test)]
             pings: 0,
             focus: cx.focus_handle(),

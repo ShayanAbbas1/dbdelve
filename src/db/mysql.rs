@@ -108,15 +108,22 @@ SELECT TABLE_SCHEMA AS schema_name,
            WHEN TABLE_TYPE IN {views} THEN 'view'
        END AS relation_kind
 FROM information_schema.TABLES
-WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE()){only}
+WHERE {schemas}
   AND (TABLE_TYPE IN {tables} OR TABLE_TYPE IN {views})
 ORDER BY TABLE_SCHEMA, TABLE_NAME
 ";
 
+/// The schemas [`RELATIONS_SQL`] reads on a server with a data dictionary:
+/// every one but the server's own, unless it is the one selected.
+const EVERY_SCHEMA: &str = "(TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE()){only}";
+
 // Apart from `RELATIONS_SQL` because naming `DATA_LENGTH` makes the server open
-// every table for its engine's statistics, where the name and type alone come
-// from the data dictionary. `TABLE_ROWS` is InnoDB's sampled estimate, from the
-// same statistics.
+// every table for its engine's statistics, where on MySQL 8 the name and type
+// alone come from the data dictionary. Before 8.0 there is none and the type
+// opens each table's definition file too, which is why such a server's
+// relations are read one database at a time (`Connection::lists_lazily`), and
+// its sizes only for the databases read. `TABLE_ROWS` is InnoDB's sampled
+// estimate, from the same statistics.
 const SIZES_SQL: &str = "
 SELECT TABLE_SCHEMA AS schema_name,
        TABLE_NAME AS relation_name,
@@ -201,10 +208,30 @@ fn catalog_databases_sql() -> String {
 
 fn relations_sql(engine: Engine, names: Option<&[String]>) -> String {
     RELATIONS_SQL
+        .replace("{schemas}", EVERY_SCHEMA)
         .replace("{system}", SYSTEM_SCHEMAS)
         .replace("{tables}", TABLES)
         .replace("{views}", VIEWS)
         .replace("{only}", &only_clause(engine, "TABLE_SCHEMA", names))
+}
+
+/// [`RELATIONS_SQL`] for one server-listed schema, by equality: the one
+/// predicate a server before 8.0 answers without opening every database's
+/// tables. The name is quoted by the engine.
+fn schema_relations_sql(engine: Engine, schema: &str) -> String {
+    RELATIONS_SQL
+        .replace(
+            "{schemas}",
+            &format!("TABLE_SCHEMA = {}", engine.quote_literal(schema)),
+        )
+        .replace("{tables}", TABLES)
+        .replace("{views}", VIEWS)
+}
+
+/// Whether a server reads its catalog lazily: MySQL before 8.0, which has no
+/// data dictionary. MariaDB never, whatever its version.
+fn lists_lazily(engine: Engine, version: (u16, u16, u16)) -> bool {
+    engine == Engine::MySql && version < (8, 0, 0)
 }
 
 fn sizes_sql(engine: Engine, names: Option<&[String]>) -> String {
@@ -880,6 +907,12 @@ pub struct Connection {
     /// user, and one reset, takes the hold before the startup script runs,
     /// so the script never runs unheld.
     held: Arc<AtomicBool>,
+    /// MySQL before 8.0, which keeps no data dictionary: `information_schema`
+    /// opens a table's definition file for its type, so the catalog reads the
+    /// relations of the connection's own database alone and lists the rest
+    /// unread ([`super::Catalog::unread`]). MariaDB is never: its catalog read
+    /// is left as it was.
+    lists_lazily: bool,
 }
 
 /// The profile's startup statements on `connection`, in the order written.
@@ -905,7 +938,9 @@ impl Connection {
                 session_options(server, engine, dial)
             })?;
             set_time_zone(&mut connection, server, engine)?;
+            let lists_lazily = lists_lazily(engine, connection.server_version());
             Ok(Self {
+                lists_lazily,
                 connection_id: connection.connection_id(),
                 server: server.clone(),
                 engine,
@@ -1531,6 +1566,9 @@ impl Connection {
     /// The listing is [`Self::catalog_databases`], so the `left_out` returned
     /// is on the unfiltered tree's basis.
     pub fn catalog(&self, shown: &Shown) -> Result<Catalog, DbError> {
+        if self.lists_lazily {
+            return self.catalog_lazily(shown);
+        }
         let matched = if shown.narrows_catalog() {
             shown.matched_databases(&self.catalog_databases()?, self.engine)
         } else {
@@ -1560,6 +1598,65 @@ impl Connection {
             }
         }
         catalog.left_out = left_out;
+        Ok(catalog)
+    }
+
+    /// [`Self::catalog`] on a server before 8.0: every database the tree
+    /// draws is listed, and the relations of the session's own alone are
+    /// read. The rest are [`Catalog::unread`] until their rows are opened
+    /// ([`Self::schema_relations`]).
+    ///
+    /// ponytail: an unread database offers nothing to completion, Go to Object
+    /// or the table filter's list until its row is opened. The upgrade is
+    /// reading the names alone of every database, which a server before 8.0
+    /// can answer without opening a table, and the kinds as each is opened.
+    fn catalog_lazily(&self, shown: &Shown) -> Result<Catalog, DbError> {
+        let listed = self.catalog_databases()?;
+        let matched = shown.matched_databases(&listed, self.engine);
+        let left_out = matched.as_ref().map_or(0, |(_, left_out)| *left_out);
+        let drawn = |name: &String| {
+            matched
+                .as_ref()
+                .is_none_or(|(names, _)| names.contains(name))
+        };
+        let own = listed.current.as_ref().filter(|name| drawn(name));
+        let mut catalog = match own {
+            Some(own) => assemble_catalog(
+                self.internal_query(&schema_relations_sql(self.engine, own))?,
+                QueryResult::default(),
+            )?,
+            None => Catalog::default(),
+        };
+        for name in listed.names.iter().filter(|name| drawn(name)) {
+            if catalog.schemas.iter().any(|schema| &schema.name == name) {
+                continue;
+            }
+            if Some(name) != own {
+                catalog.unread.insert(name.clone(), None);
+            }
+            catalog.schemas.push(Schema {
+                name: name.clone(),
+                relations: Vec::new(),
+                routines: Vec::new(),
+                sequences: Vec::new(),
+            });
+        }
+        catalog.left_out = left_out;
+        Ok(catalog)
+    }
+
+    /// The relations of `schema`, a server-listed name, alone.
+    pub fn schema_relations(&self, schema: &str) -> Result<Catalog, DbError> {
+        let relations = self.internal_query(&schema_relations_sql(self.engine, schema))?;
+        let mut catalog = assemble_catalog(relations, QueryResult::default())?;
+        if catalog.schemas.is_empty() {
+            catalog.schemas.push(Schema {
+                name: schema.to_string(),
+                relations: Vec::new(),
+                routines: Vec::new(),
+                sequences: Vec::new(),
+            });
+        }
         Ok(catalog)
     }
 
@@ -1603,8 +1700,29 @@ impl Connection {
     /// user's query waits on. The side connection is dropped on return; a
     /// filter that matches nothing still opens it, to list there.
     pub fn sizes(&self, shown: &Shown) -> Result<Sizes, DbError> {
+        let side = self.sizes_session()?;
+        let matched = side.matched(shown)?;
+        let names = matched.as_ref().map(|(names, _)| names.as_slice());
+        if names.is_some_and(<[String]>::is_empty) {
+            return Ok(Sizes::new());
+        }
+        assemble_sizes(side.internal_query(&sizes_sql(self.engine, names))?)
+    }
+
+    /// [`Self::sizes`] of the server-listed `schemas` alone, on the same
+    /// connection of its own.
+    pub fn sizes_of(&self, schemas: &[String]) -> Result<Sizes, DbError> {
+        if schemas.is_empty() {
+            return Ok(Sizes::new());
+        }
+        let side = self.sizes_session()?;
+        assemble_sizes(side.internal_query(&sizes_sql(self.engine, Some(schemas)))?)
+    }
+
+    /// The connection a sizes read runs on, dropped when it returns.
+    fn sizes_session(&self) -> Result<Self, DbError> {
         let connection = connect(&self.server, self.engine, self.dial()?)?;
-        let side = Self {
+        Ok(Self {
             connection_id: connection.connection_id(),
             server: self.server.clone(),
             engine: self.engine,
@@ -1617,13 +1735,8 @@ impl Connection {
             // Reads of DBDelve's own, never a statement of the user's.
             startup: Arc::default(),
             held: self.held.clone(),
-        };
-        let matched = side.matched(shown)?;
-        let names = matched.as_ref().map(|(names, _)| names.as_slice());
-        if names.is_some_and(<[String]>::is_empty) {
-            return Ok(Sizes::new());
-        }
-        assemble_sizes(side.internal_query(&sizes_sql(self.engine, names))?)
+            lists_lazily: self.lists_lazily,
+        })
     }
 
     pub fn references(&self, schema: &str, relation: &str) -> Result<Vec<Reference>, DbError> {
@@ -2546,6 +2659,53 @@ mod tests {
         .expect("connection should open")
     }
 
+    /// A server before 8.0 lists every database and reads the relations of
+    /// the connection's own alone; another's are read when asked for, and
+    /// sizes only for the ones named. Needs `dbdelve_MYSQL56_URL` naming a
+    /// database that holds a table, on a server with another that does too.
+    #[test]
+    #[ignore = "requires a MySQL before 8.0 configured through dbdelve_MYSQL56_URL"]
+    fn live_a_server_before_8_reads_another_databases_relations_when_asked() {
+        let url = std::env::var("dbdelve_MYSQL56_URL").expect("dbdelve_MYSQL56_URL is required");
+        let config = config_from_url(&url).expect("dbdelve_MYSQL56_URL should parse");
+        let own = config.database.clone();
+        let connection = Connection::open(
+            &ServerConfig {
+                sslmode: SslMode::Disable,
+                ..config
+            },
+            Engine::MySql,
+        )
+        .expect("connection should open");
+        assert!(connection.lists_lazily);
+
+        let catalog = connection.catalog(&Shown::everything()).unwrap();
+        assert!(!catalog.unread.contains_key(&own));
+        let mine = catalog.schemas.iter().find(|schema| schema.name == own);
+        assert!(mine.is_some_and(|schema| !schema.relations.is_empty()));
+        let other = catalog
+            .unread
+            .keys()
+            .next()
+            .expect("another database is listed unread")
+            .clone();
+        assert!(catalog.unread.values().all(Option::is_none));
+        for schema in catalog.schemas.iter().filter(|schema| schema.name != own) {
+            assert!(schema.relations.is_empty(), "{}", schema.name);
+        }
+
+        let read = connection.schema_relations(&other).unwrap();
+        assert_eq!(read.schemas.len(), 1);
+        assert_eq!(read.schemas[0].name, other);
+        let mut merged = catalog.clone();
+        merged.read_relations(&other, read);
+        assert!(!merged.unread.contains_key(&other));
+        assert_eq!(merged.read_schemas().len(), 2);
+
+        let sizes = connection.sizes_of(std::slice::from_ref(&own)).unwrap();
+        assert_eq!(sizes.keys().collect::<Vec<_>>(), [&own]);
+    }
+
     #[test]
     fn a_mysql_count_is_the_matched_number_read_by_position_and_refuses_when_changed_disagrees() {
         // Matched, changed and warnings, in that order, whatever the language.
@@ -2865,6 +3025,31 @@ ORDER BY 1, 2
                 assert!(sql.contains("AND routine.ROUTINE_SCHEMA IN ('app')"));
             }
         }
+    }
+
+    /// Before 8.0 `TABLE_TYPE` opens a table's definition file, so a read of
+    /// every schema's relations opens every table on the server. Such a
+    /// server's relations are read one schema at a time, by equality.
+    #[test]
+    fn a_server_without_a_data_dictionary_reads_one_schemas_relations_by_equality() {
+        assert!(lists_lazily(Engine::MySql, (5, 6, 21)));
+        assert!(lists_lazily(Engine::MySql, (5, 7, 44)));
+        assert!(!lists_lazily(Engine::MySql, (8, 0, 0)));
+        assert!(!lists_lazily(Engine::MariaDb, (5, 5, 5)));
+        assert!(!lists_lazily(Engine::MariaDb, (10, 6, 0)));
+
+        let sql = schema_relations_sql(Engine::MySql, "my'db");
+        assert!(sql.contains("WHERE TABLE_SCHEMA = 'my''db'\n"), "{sql}");
+        assert!(!sql.contains("NOT IN"), "{sql}");
+        assert!(!sql.contains(" IN ('my"), "{sql}");
+        assert!(!sql.contains('{'), "{sql}");
+        // The same columns and kinds as the whole server's read.
+        let every = relations_sql(Engine::MySql, None);
+        assert_eq!(
+            sql.split("WHERE").next(),
+            every.split("WHERE").next(),
+            "{sql}"
+        );
     }
 
     #[test]

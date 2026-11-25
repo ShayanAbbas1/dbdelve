@@ -182,6 +182,11 @@ pub(crate) struct Profile {
     /// What each other database's catalog was read under, as `catalog_include`
     /// is the own one's: a filter saved since may show a schema it lacks.
     pub(crate) database_catalogs_shown: HashMap<String, Shown>,
+    /// The schemas of the profile's own catalog whose relations are being
+    /// read now, each one its row asked for ([`crate::db::Catalog::unread`]),
+    /// with the generation the read was issued to: one a reconnect left
+    /// behind lands nowhere, and must not hold off the next.
+    pub(crate) schema_reads: HashMap<String, u64>,
     /// Whether the connection opened on another database than the one the
     /// tabs were opened on, because the picked one was no longer there. What
     /// is left of that database goes on the next frame, which has the window
@@ -1822,6 +1827,12 @@ impl Session {
             let id = id.clone();
             move |workspace, tree, event: &TreeEvent, cx| {
                 workspace.remember_fold(&id, &tree, event, cx);
+                // A schema listed unread is read when its row opens.
+                if let TreeEvent::Expanded(row) = event
+                    && let Some(schema) = crate::explorer::schema_row_name(row)
+                {
+                    workspace.read_schema(&id, schema, cx);
+                }
             }
         })
         .detach();
