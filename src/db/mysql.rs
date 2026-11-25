@@ -182,9 +182,10 @@ ORDER BY ORDINAL_POSITION
 // One row per key part, grouped by `indexes` rather than `GROUP_CONCAT`, which
 // `group_concat_max_len` cuts short without a word. A functional key part has
 // no `COLUMN_NAME`, only an `EXPRESSION`, a column MySQL grew in 8.0.13 and
-// MariaDB lacks. `{key_name}` is `COLUMN_NAME` alone or `COALESCE` with
-// `EXPRESSION`, by whether the server has the column: a `/*!80013 … */` comment
-// would do the same on MySQL and MariaDB, but PolarDB-X parses it as a hint and
+// MariaDB lacks. `{key_name}` names the expression where the server has the
+// column and a placeholder where it does not, so such a key part is shown
+// rather than failing the whole tab. A `/*!80013 … */` comment would pick the
+// column on MySQL and MariaDB alike, but PolarDB-X parses it as a hint and
 // fails.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
@@ -201,18 +202,34 @@ WHERE TABLE_SCHEMA = {schema}
 ORDER BY INDEX_NAME, SEQ_IN_INDEX
 ";
 
-const STATISTICS_HAS_EXPRESSION_SQL: &str = "
-SELECT COUNT(*) AS found
-FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = 'information_schema'
-  AND TABLE_NAME = 'STATISTICS'
-  AND UPPER(COLUMN_NAME) = 'EXPRESSION'
-";
+// Asks the table the index query reads, not the catalog's description of it:
+// servers that emulate `information_schema` disagree on how they report
+// either. An empty result still describes its columns.
+const STATISTICS_COLUMNS_SQL: &str = "SELECT * FROM information_schema.STATISTICS LIMIT 0";
 
-/// `None` when the probe failed or answered nothing readable.
-fn expression_probe(found: Result<QueryResult, DbError>) -> Option<bool> {
-    let found = found.ok()?;
-    optional_cell(&found, found.rows.first()?, "found").map(|n| n != "0")
+/// `None` when the probe failed, which says nothing about the column.
+fn expression_probe(described: Result<QueryResult, DbError>) -> Option<bool> {
+    let described = described.ok()?;
+    Some(
+        described
+            .columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case("EXPRESSION")),
+    )
+}
+
+/// The cached answer, or the probe's when it has one. A failed probe reads as
+/// no column for this call only and is asked again next time: a wrong `false`
+/// kept for the session would label every functional key part a placeholder.
+fn cached_probe(cell: &OnceLock<bool>, probe: impl FnOnce() -> Option<bool>) -> bool {
+    if let Some(known) = cell.get() {
+        return *known;
+    }
+    let probed = probe();
+    if let Some(known) = probed {
+        let _ = cell.set(known);
+    }
+    probed.unwrap_or(false)
 }
 
 fn structure_indexes_sql(has_expression: bool) -> String {
@@ -221,7 +238,7 @@ fn structure_indexes_sql(has_expression: bool) -> String {
         if has_expression {
             "COALESCE(COLUMN_NAME, EXPRESSION)"
         } else {
-            "COLUMN_NAME"
+            "COALESCE(COLUMN_NAME, '(expression)')"
         },
     )
 }
@@ -1325,20 +1342,10 @@ impl Connection {
         ))?)
     }
 
-    /// A failed probe reads as no column for this call only, so a transient
-    /// error is asked again rather than hiding functional key parts for good.
     fn statistics_has_expression(&self) -> bool {
-        if self.engine == Engine::MariaDb {
-            return false;
-        }
-        if let Some(known) = self.statistics_expression.get() {
-            return *known;
-        }
-        let probed = expression_probe(self.internal_query(STATISTICS_HAS_EXPRESSION_SQL));
-        if let Some(known) = probed {
-            let _ = self.statistics_expression.set(known);
-        }
-        probed.unwrap_or(false)
+        cached_probe(&self.statistics_expression, || {
+            expression_probe(self.internal_query(STATISTICS_COLUMNS_SQL))
+        })
     }
 
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
@@ -2882,27 +2889,81 @@ mod tests {
         assert!(!with.contains("/*!") && !without.contains("/*!"));
     }
 
-    #[test]
-    fn expression_probe_reads_the_count_and_a_failure_is_unknown() {
-        let answered = |count: &str| {
-            Ok(QueryResult {
-                columns: vec![Column {
-                    name: "found".into(),
+    fn described(names: &[&str]) -> Result<QueryResult, DbError> {
+        Ok(QueryResult {
+            columns: names
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
                     data_type: None,
-                }],
-                rows: crate::db::rows(vec![vec![Some(count.to_string())]]),
-                ..QueryResult::default()
-            })
-        };
-        assert_eq!(expression_probe(answered("1")), Some(true));
-        assert_eq!(expression_probe(answered("0")), Some(false));
-        assert_eq!(expression_probe(Ok(QueryResult::default())), None);
+                })
+                .collect(),
+            ..QueryResult::default()
+        })
+    }
+
+    #[test]
+    fn expression_probe_finds_the_column_in_any_case() {
+        for name in ["EXPRESSION", "expression", "Expression"] {
+            assert_eq!(
+                expression_probe(described(&["TABLE_NAME", name])),
+                Some(true)
+            );
+        }
+        assert_eq!(
+            expression_probe(described(&["TABLE_NAME", "COLUMN_NAME"])),
+            Some(false)
+        );
+        assert_eq!(expression_probe(described(&[])), Some(false));
+    }
+
+    #[test]
+    fn a_failed_probe_is_unknown() {
         assert_eq!(expression_probe(Err(plain_error("down".into()))), None);
     }
 
     #[test]
-    fn the_expression_probe_ignores_the_case_a_column_is_reported_in() {
-        assert!(STATISTICS_HAS_EXPRESSION_SQL.contains("UPPER(COLUMN_NAME) = 'EXPRESSION'"));
+    fn a_failed_probe_is_asked_again_and_an_answer_is_kept() {
+        let cell = OnceLock::new();
+        assert!(!cached_probe(&cell, || None));
+        assert!(cell.get().is_none());
+        assert!(cached_probe(&cell, || Some(true)));
+        assert!(cached_probe(&cell, || panic!("answered already")));
+
+        let negative = OnceLock::new();
+        assert!(!cached_probe(&negative, || Some(false)));
+        assert!(!cached_probe(&negative, || panic!("answered already")));
+    }
+
+    #[test]
+    fn indexes_assemble_when_a_functional_key_part_has_no_column_name() {
+        let result = QueryResult {
+            columns: ["object_name", "non_unique", "column_name", "key_part"]
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            rows: crate::db::rows(vec![
+                vec![
+                    Some("by_lower".into()),
+                    Some("1".into()),
+                    None,
+                    Some("(expression)".into()),
+                ],
+                vec![
+                    Some("by_lower".into()),
+                    Some("1".into()),
+                    Some("id".into()),
+                    Some("id".into()),
+                ],
+            ]),
+            ..QueryResult::default()
+        };
+        let indexes = assemble_indexes(&result).unwrap();
+        assert_eq!(indexes[0].columns, ["(expression)", "id"]);
+        assert_eq!(indexes[0].definition, "INDEX (id)");
     }
 
     #[test]
