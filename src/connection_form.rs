@@ -132,9 +132,9 @@ pub(crate) struct ConnectionForm {
     /// the same ones, are there from the start rather than fading in again.
     pub(crate) backdrop_shown: bool,
     /// The target the target-dependent placeholders were last written for,
-    /// whether a service was typed then, the root certificate's, and the
-    /// password's.
-    pub(crate) placeholders_for: Option<(Target, bool, &'static str, &'static str)>,
+    /// whether a service was typed then, the root certificate's, the
+    /// password's, and whether the host is an SRV name.
+    pub(crate) placeholders_for: Option<(Target, bool, &'static str, &'static str, bool)>,
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
@@ -731,13 +731,25 @@ impl ConnectionForm {
             self.typed_password_command(cx).is_some(),
             self.editing.is_some(),
         );
-        let written = (self.target(), beside_a_service, root_certificate, password);
+        let srv_name = self.host_is_srv_name();
+        let written = (
+            self.target(),
+            beside_a_service,
+            root_certificate,
+            password,
+            srv_name,
+        );
         if self.placeholders_for == Some(written) {
             return;
         }
         self.placeholders_for = Some(written);
         let blank = if beside_a_service {
             from_the_service(placeholders(self.target()))
+        } else if srv_name {
+            Placeholders {
+                host: "Required",
+                ..placeholders(self.target())
+            }
         } else {
             placeholders(self.target())
         };
@@ -855,13 +867,20 @@ impl ConnectionForm {
         })
     }
 
+    /// Whether the host is an SRV name, which is looked up rather than
+    /// connected to and so has no default.
+    fn host_is_srv_name(&self) -> bool {
+        self.srv && self.engine.resolves_srv()
+    }
+
     pub(crate) fn server(&self, cx: &App) -> Result<ServerConfig, String> {
         self.server_requiring(&["Username"], cx)
     }
 
-    /// The server fields, with the host and whichever of `required` always
-    /// required: MongoDB asks for no username, since a server without
-    /// authentication is an ordinary one there.
+    /// The server fields, with whichever of `required` always required:
+    /// MongoDB asks for no username, since a server without authentication is
+    /// an ordinary one there. A blank host is the engine's default one, except
+    /// beside a service or an SRV name, which `localhost` cannot stand in for.
     fn server_requiring(&self, required: &[&str], cx: &App) -> Result<ServerConfig, String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let host = read(&self.host);
@@ -875,6 +894,9 @@ impl ConnectionForm {
         // answers for the rest, and says so on connect if it does not.
         if user.is_empty() && required.contains(&"Username") && service.is_none() {
             return Err("Username is required.".into());
+        }
+        if host.is_empty() && service.is_none() && self.host_is_srv_name() {
+            return Err("Host is required.".into());
         }
         let host = host_or_default(host, self.engine, service.is_some());
 
@@ -1101,12 +1123,21 @@ pub(crate) fn summary(target: Target, srv: bool, typed: &Typed) -> Option<String
             (!typed.account.is_empty()).then(|| signed_in(database(typed.account.to_string())))
         }
         Fields::Server => {
-            if typed.host.is_empty() && typed.service.is_none() {
+            let hostless = typed.host.is_empty() && typed.service.is_none();
+            // The default host stands in only once the form says something
+            // else about where it points: a user on its own points nowhere.
+            let says_where = !typed.port.is_empty() || !typed.database.is_empty();
+            if hostless && (srv && engine.resolves_srv() || !says_where) {
                 return None;
             }
+            let host = if hostless {
+                engine.spec().hints.host
+            } else {
+                typed.host
+            };
             // An SRV name takes no port, so whatever the hidden field holds
             // is not where it points.
-            let place = match (typed.host, typed.port, typed.service) {
+            let place = match (host, typed.port, typed.service) {
                 ("", _, Some(service)) => format!("service {service}"),
                 (host, port, _) if !(port.is_empty() || srv && engine.resolves_srv()) => {
                     format!("{host}:{port}")
@@ -1390,6 +1421,26 @@ pub(crate) fn password_to_persist(config: &ConnectionConfig, origin: Origin) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::db::{ConnectionConfig, ServerConfig, SslMode};
+
+    #[test]
+    fn a_blank_host_shows_the_default_in_the_summary_except_for_an_srv_name() {
+        let typed = Typed {
+            port: "5432",
+            database: "shop",
+            user: "root",
+            ..Typed::default()
+        };
+        assert_eq!(
+            summary(Target::built_in(Engine::Postgres), false, &typed).as_deref(),
+            Some("root@localhost:5432/shop")
+        );
+        assert_eq!(
+            summary(Target::built_in(Engine::MongoDb), true, &typed),
+            None
+        );
+    }
 
     #[test]
     fn a_blank_host_is_the_one_the_placeholder_shows() {
@@ -1424,8 +1475,6 @@ mod tests {
         assert!(!name_is_automatic("Production", "shop"));
         assert!(!name_is_automatic("Production", ""));
     }
-    use super::*;
-    use crate::db::{ConnectionConfig, ServerConfig, SslMode};
 
     fn fields(host: &str, port: &str) -> [String; 5] {
         [
