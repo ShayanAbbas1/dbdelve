@@ -288,6 +288,29 @@ fn written_entries(ticked: &[String], patterns: &str) -> Vec<String> {
     merged(ticked.iter().map(String::as_str).chain(patterns.split(',')))
 }
 
+/// `ticked` with `gone` taken out. Unticking the last name while no pattern
+/// is typed leaves `always_shown` (the own database, or the active schema)
+/// ticked in its place: its row is drawn ticked, and an empty list would show
+/// every name rather than it alone.
+fn untick(
+    ticked: &[String],
+    gone: &[String],
+    patterns: &[String],
+    always_shown: Option<&str>,
+) -> Vec<String> {
+    let left: Vec<String> = ticked
+        .iter()
+        .filter(|name| !gone.contains(name))
+        .cloned()
+        .collect();
+    let emptied =
+        left.len() < ticked.len() && written_entries(&left, &patterns.join(",")).is_empty();
+    match always_shown {
+        Some(name) if emptied => vec![name.to_string()],
+        _ => left,
+    }
+}
+
 /// Whether `pattern` admits `name`, by the rule the read sites apply: asked of
 /// the stored rule's own matcher, so the preview cannot drift from what Save
 /// will show. The databases list stands for any list here; a name this admits
@@ -374,6 +397,17 @@ impl FilterPicker {
             Which::Schemas => self.schema_hint(name),
             Which::Tables => None,
         }
+    }
+
+    /// The listed name of `which` that is shown whatever the list says.
+    fn always_shown(&self, which: Which) -> Option<String> {
+        let Listing::Loaded(names) = &self.section(which)?.listing else {
+            return None;
+        };
+        names
+            .iter()
+            .find(|name| self.hint(which, name).is_some())
+            .cloned()
     }
 
     /// What a listed row says about itself: why it is shown whatever the list
@@ -982,14 +1016,19 @@ impl Workspace {
     }
 
     fn tick_name(&mut self, which: Which, name: &str, on: bool, cx: &mut Context<Self>) {
-        let Some(section) = self
-            .filter_picker
-            .as_mut()
-            .and_then(|picker| picker.section_mut(which))
-        else {
+        let Some(picker) = self.filter_picker.as_mut() else {
             return;
         };
-        section.ticked.retain(|ticked| ticked != name);
+        let always_shown = picker.always_shown(which);
+        let Some(section) = picker.section_mut(which) else {
+            return;
+        };
+        section.ticked = untick(
+            &section.ticked,
+            &[name.to_string()],
+            &section.patterns,
+            always_shown.as_deref(),
+        );
         if on {
             section.ticked.push(name.to_string());
         }
@@ -1015,6 +1054,7 @@ impl Workspace {
             .map(|(index, _)| names[index].clone())
             .filter(|name| !on || picker.listed_hint(which, name).is_none())
             .collect();
+        let always_shown = picker.always_shown(which);
         let Some(section) = self
             .filter_picker
             .as_mut()
@@ -1022,7 +1062,12 @@ impl Workspace {
         else {
             return;
         };
-        section.ticked.retain(|ticked| !drawn.contains(ticked));
+        section.ticked = untick(
+            &section.ticked,
+            &drawn,
+            &section.patterns,
+            always_shown.as_deref(),
+        );
         if on {
             section.ticked.extend(drawn);
         }
@@ -1842,6 +1887,34 @@ mod tests {
         assert!(!lists_schemas(Levels::DatabaseIsSchema));
         assert!(!lists_schemas(Levels::DatabaseHoldsObjects));
         assert!(!lists_schemas(Levels::Flat));
+    }
+
+    #[test]
+    fn unticking_the_last_name_leaves_the_always_shown_one_as_the_list() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            untick(&names(&["other"]), &names(&["other"]), &[], Some("own")),
+            ["own"],
+            "only the own row is left ticked, so the list is it alone"
+        );
+        assert_eq!(
+            untick(&names(&["a", "b"]), &names(&["a"]), &[], Some("own")),
+            ["b"]
+        );
+        assert_eq!(
+            untick(&names(&["a"]), &names(&["a"]), &names(&["x*"]), Some("own")),
+            Vec::<String>::new(),
+            "a typed pattern is still the list"
+        );
+        assert_eq!(
+            untick(&[], &names(&["a"]), &[], Some("own")),
+            Vec::<String>::new(),
+            "nothing was unticked: showing all stays showing all"
+        );
+        assert_eq!(
+            untick(&names(&["a"]), &names(&["a"]), &[], None),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

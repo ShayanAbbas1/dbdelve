@@ -3156,6 +3156,60 @@ fn the_picker_lists_the_own_databases_schemas_and_saves_both_lists(cx: &mut Test
     });
 }
 
+#[gpui::test]
+fn unticking_every_other_database_saves_the_own_one_alone_not_show_all(cx: &mut TestAppContext) {
+    use super::filter_picker::Which;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        click_selector(cx, "filter-picker-row-databases-1");
+        click_selector(cx, "filter-picker-row-databases-1");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["e2e"]);
+            assert_eq!(
+                picker.preview(Which::Databases).as_deref(),
+                Some("Showing 1 of 3 databases")
+            );
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.databases, ["e2e"]);
+            let row = connection_row("e2e");
+            assert_eq!(workspace.connections.counts.get(&row), Some(&1));
+            assert_eq!(workspace.connections.totals.get(&row), Some(&3));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn unticking_every_other_schema_saves_the_active_one_alone_not_show_all(cx: &mut TestAppContext) {
+    use super::filter_picker::Which;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_schemas_with_the_picker_open(cx);
+        click_selector(cx, "filter-picker-row-schemas-0");
+        click_selector(cx, "filter-picker-row-schemas-0");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.schemas.as_ref().unwrap().ticked, ["main"]);
+            assert_eq!(
+                picker.preview(Which::Schemas).as_deref(),
+                Some("Showing 1 of 3 schemas in e2e")
+            );
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.schemas, ["main"]);
+        });
+        assert_eq!(own_catalog(&workspace, cx).0, ["main"]);
+        quit(workspace, cx);
+    });
+}
+
 /// The DuckDB connection of `launch_duckdb_seeded` with `extra` and `more`
 /// schemas beside `main`, connected and in front, and the picker open over it.
 fn three_schemas_with_the_picker_open(
@@ -3228,7 +3282,11 @@ fn saving_the_filter_while_the_catalog_loads_is_not_lost(cx: &mut TestAppContext
             workspace.refresh_schema(cx);
             workspace.save_filter(cx);
             let profile = workspace.profile().expect("the connection is in front");
-            assert!(profile.include.schemas.is_empty());
+            assert_eq!(
+                profile.include.schemas,
+                ["main"],
+                "unticking the last leaves the active schema alone"
+            );
             assert!(profile.reread_after_load);
         });
         settle(cx);
@@ -3237,7 +3295,7 @@ fn saving_the_filter_while_the_catalog_loads_is_not_lost(cx: &mut TestAppContext
             assert!(!profile.reread_after_load);
             assert_eq!(profile.generation, generation);
         });
-        assert_eq!(own_catalog(&workspace, cx).0, ["extra", "main", "more"]);
+        assert_eq!(own_catalog(&workspace, cx).0, ["main"]);
         quit(workspace, cx);
     });
 }
@@ -4038,13 +4096,13 @@ fn tab_walks_the_filter_picker_and_escape_hands_the_keyboard_back(cx: &mut TestA
         assert_eq!(ticked(cx), ["other", "scratch"]);
         press(cx, "tab");
         press(cx, "enter");
-        assert!(ticked(cx).is_empty());
+        assert_eq!(ticked(cx), ["e2e"], "the own row is all Clear leaves");
 
         // The checklist: `space` ticks the focused row, the next row is
         // passed, then the pattern field.
         press(cx, "tab");
         press(cx, "space");
-        assert_eq!(ticked(cx), ["other"]);
+        assert_eq!(ticked(cx), ["e2e", "other"]);
         press(cx, "tab");
         press(cx, "tab");
         assert_eq!(focus(cx), "databases patterns");
@@ -4070,7 +4128,7 @@ fn tab_walks_the_filter_picker_and_escape_hands_the_keyboard_back(cx: &mut TestA
         );
         workspace.read_with(cx, |workspace, _| {
             let profile = workspace.profile().expect("the connection is in front");
-            assert_eq!(profile.include.databases, ["other", "sc*"]);
+            assert_eq!(profile.include.databases, ["e2e", "other", "sc*"]);
         });
 
         // `escape` from the search box closes it and hands the keyboard back.
