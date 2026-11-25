@@ -11,6 +11,7 @@ mod e2e;
 mod editing;
 mod exports;
 use exports::ExportMenu;
+use transactions::Leaving;
 mod files;
 mod filter_picker;
 mod filters;
@@ -514,6 +515,8 @@ pub(crate) struct Workspace {
     /// Whether Quit is asking first, a transaction being open that quitting
     /// would roll back.
     pub(crate) quit_prompt: bool,
+    /// What the quit question's Quit does: quit, or the restart that asked.
+    pub(crate) leaving: Leaving,
     /// That timer; replaced, the one before it stops.
     profiles_save: Option<gpui::Task<()>>,
 }
@@ -696,6 +699,7 @@ impl Workspace {
             themes_revision: 0,
             profiles_unsaved: false,
             quit_prompt: false,
+            leaving: Leaving::Quit,
             profiles_save: None,
         };
 
@@ -1367,7 +1371,7 @@ impl Workspace {
             _ = workspace.update(cx, |workspace, cx| match installed {
                 Ok(installed) => {
                     tracing::info!("restarting into the update");
-                    restart_into(installed, cx);
+                    workspace.leave(Leaving::Restart(Some(installed)), cx);
                 }
                 Err(reason) => {
                     if let Some(update) = workspace.update.as_mut() {
@@ -1457,15 +1461,20 @@ impl Workspace {
             }
             update::State::Superseded(installed) => {
                 let installed = installed.clone();
+                let workspace = cx.weak_entity();
                 (
                     "Restart to update".into(),
                     Rc::new(move |menu| {
                         let installed = installed.clone();
+                        let workspace = workspace.clone();
                         menu.label(format!("{name} was updated since it started."))
-                            .item(
-                                PopupMenuItem::new(format!("Restart {name}"))
-                                    .on_click(move |_, _, cx| restart_into(installed.clone(), cx)),
-                            )
+                            .item(PopupMenuItem::new(format!("Restart {name}")).on_click(
+                                move |_, _, cx| {
+                                    let leaving = Leaving::Restart(Some(installed.clone()));
+                                    _ = workspace
+                                        .update(cx, |workspace, cx| workspace.leave(leaving, cx));
+                                },
+                            ))
                             .separator()
                             .link("Release notes", url.clone())
                     }),
@@ -2030,6 +2039,9 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::previous_profile))
                 .on_action(cx.listener(Self::open_logs_folder))
                 .on_action(cx.listener(Self::copy_diagnostics))
+                // Every surface, or Quit reaches the app's own and quits
+                // unasked over an open transaction.
+                .on_action(cx.listener(Self::quit))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
@@ -2080,6 +2092,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))
+                .on_action(cx.listener(Self::quit))
                 .child(titlebar(
                     t,
                     None,
@@ -3306,14 +3319,6 @@ pub(crate) fn opacity_from_percent_input(typed: &str, current: f32) -> f32 {
         return current;
     }
     (percent / 100.0).clamp(theme::OPACITY_MIN, theme::OPACITY_MAX)
-}
-
-/// Through the platform's quit, as Quit goes, so buffers and profiles are
-/// written on the way out exactly as they are then.
-fn restart_into(installed: std::path::PathBuf, cx: &mut App) {
-    update::before_restart();
-    cx.set_restart_path(installed);
-    cx.restart();
 }
 
 #[cfg(test)]

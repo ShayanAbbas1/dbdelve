@@ -10,6 +10,33 @@
 use super::*;
 use crate::session::AutoCommitPrompt;
 
+/// How the app goes once it may: what the quit question's Quit carries out.
+/// A restart ends every session as a quit does, so it asks the same question.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum Leaving {
+    #[default]
+    Quit,
+    /// Into this install, or into the running one when `None`.
+    Restart(Option<std::path::PathBuf>),
+}
+
+impl Leaving {
+    /// Through the platform's quit either way, so buffers and profiles are
+    /// written on the way out exactly as they are then.
+    fn go(self, cx: &mut App) {
+        match self {
+            Self::Quit => cx.quit(),
+            Self::Restart(install) => {
+                update::before_restart();
+                if let Some(install) = install {
+                    cx.set_restart_path(install);
+                }
+                cx.restart();
+            }
+        }
+    }
+}
+
 impl Workspace {
     /// Turn each statement committing on its own off or back on.
     ///
@@ -233,8 +260,16 @@ impl Workspace {
     /// Quit, unless a transaction is open that quitting would roll back: then
     /// ask first. Quit again, or its button, quits whatever is open.
     pub(crate) fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+        self.leave(Leaving::Quit, cx);
+    }
+
+    /// Quit or restart, asking first as Quit does.
+    pub(crate) fn leave(&mut self, leaving: Leaving, cx: &mut Context<Self>) {
         if self.may_quit(cx) {
-            cx.quit();
+            self.leaving = Leaving::Quit;
+            leaving.go(cx);
+        } else {
+            self.leaving = leaving;
         }
     }
 
@@ -265,12 +300,13 @@ impl Workspace {
     /// The quit question's Quit.
     pub(crate) fn confirm_quit(&mut self, cx: &mut Context<Self>) {
         self.quit_prompt = true;
-        cx.quit();
+        std::mem::take(&mut self.leaving).go(cx);
     }
 
     /// Close the quit question and keep going.
     pub(crate) fn cancel_quit(&mut self, cx: &mut Context<Self>) -> bool {
         let asked = std::mem::take(&mut self.quit_prompt);
+        self.leaving = Leaving::Quit;
         if asked {
             self.refocus_front();
             cx.notify();

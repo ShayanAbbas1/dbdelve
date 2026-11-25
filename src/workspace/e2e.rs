@@ -28781,6 +28781,84 @@ fn quit_asks_first_over_the_connection_form(cx: &mut TestAppContext) {
     });
 }
 
+/// `main`'s app-level Quit, which quits unasked: whatever surface lets the
+/// action through to it quits over an open transaction. Whether it was
+/// reached.
+fn app_quit_reached(cx: &mut VisualTestContext) -> Rc<std::cell::Cell<bool>> {
+    let reached = Rc::new(std::cell::Cell::new(false));
+    let flag = reached.clone();
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &crate::actions::Quit, _| flag.set(true));
+    });
+    reached
+}
+
+/// The Quit chord over the connection form asks as it does over a tab, rather
+/// than falling through to the app's quit.
+#[gpui::test]
+fn the_quit_chord_over_the_connection_form_asks_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let app_quit = app_quit_reached(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_command(&workspace, cx, Command::NewConnection);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-q");
+        settle(cx);
+        assert!(!app_quit.get(), "the app did not quit");
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        quit(workspace, cx);
+    });
+}
+
+/// The welcome surface, with a transaction still open on a connection behind
+/// it, asks too.
+#[gpui::test]
+fn the_quit_chord_over_the_welcome_surface_asks_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let app_quit = app_quit_reached(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        // Where disconnecting another connection leaves the window: no
+        // profile in front, this one's session still open behind it.
+        workspace.update(cx, |workspace, cx| {
+            workspace.active = None;
+            workspace.welcome_needs_focus = true;
+            cx.notify();
+        });
+        settle(cx);
+        cx.simulate_keystrokes("secondary-q");
+        settle(cx);
+        assert!(!app_quit.get(), "the app did not quit");
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        quit(workspace, cx);
+    });
+}
+
+/// A restart ends every session as a quit does, so it asks the same question,
+/// and Cancel forgets it: a Quit after that quits rather than restarts.
+#[gpui::test]
+fn a_restart_asks_first_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        workspace.update(cx, |workspace, cx| {
+            workspace.leave(super::Leaving::Restart(None), cx)
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.leaving, super::Leaving::Quit));
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// A save that reconnects would drop the session holding the transaction:
 /// it is refused, and the form stays open.
 #[gpui::test]

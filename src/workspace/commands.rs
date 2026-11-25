@@ -959,7 +959,9 @@ impl Workspace {
             Command::ShowStructureSection(section) => self.show_structure_section(section, cx),
             Command::DownloadUpdate(url) => cx.open_url(&url),
             Command::InstallUpdate => self.install_update(cx),
-            Command::RestartIntoUpdate(installed) => restart_into(installed, cx),
+            Command::RestartIntoUpdate(installed) => {
+                self.leave(Leaving::Restart(Some(installed)), cx)
+            }
         }
     }
 }
