@@ -766,7 +766,13 @@ pub(crate) fn role_columns(view: &RoleView, editing: bool) -> Vec<String> {
 /// What one way of holding a privilege shows as: the strongest source's.
 fn source_mark(sources: &[Source]) -> Mark {
     match sources.first() {
-        Some(Source::Superuser | Source::Owner(_) | Source::Direct) => Mark::Granted,
+        Some(
+            Source::Superuser
+            | Source::Owner(_)
+            | Source::Direct
+            | Source::Global
+            | Source::Pattern(_),
+        ) => Mark::Granted,
         Some(Source::Via(_) | Source::Predefined(_) | Source::Implicit) => Mark::Through,
         Some(Source::Public) => Mark::Public,
         None => Mark::None,
@@ -1443,6 +1449,7 @@ mod tests {
 
     fn grant(grantee: Option<&str>, privilege: &str, grantable: bool) -> Grant {
         Grant {
+            on: None,
             grantee: grantee.map(str::to_string),
             privilege: privilege.into(),
             grantable,
@@ -1451,6 +1458,7 @@ mod tests {
 
     fn orders() -> ObjectGrants {
         ObjectGrants {
+            public: true,
             owner: "app_owner".into(),
             sequence: false,
             privileges: vec!["SELECT".into(), "INSERT".into()],
@@ -1460,6 +1468,7 @@ mod tests {
                 grant(Some("reporting"), "SELECT", false),
             ],
             roles: Roles {
+                denied: None,
                 roles: vec![
                     role("postgres", true, true),
                     role("app_owner", true, false),
@@ -1528,11 +1537,13 @@ mod tests {
         // R holds SELECT. A belongs to R without inheriting, B with. X
         // belongs to both and is reached through A first; Y belongs to X.
         let grants = ObjectGrants {
+            public: true,
             owner: "owner".into(),
             sequence: false,
             privileges: vec!["SELECT".into()],
             grants: vec![grant(Some("r"), "SELECT", false)],
             roles: Roles {
+                denied: None,
                 roles: ["owner", "r", "a", "b", "x", "y"]
                     .into_iter()
                     .map(|name| role(name, false, false))
@@ -1614,6 +1625,7 @@ mod tests {
         let mut view = RoleView::plan(
             "ana".into(),
             RoleAccess {
+                server: Vec::new(),
                 superuser: false,
                 databases: vec![database("d", Some(Source::Public))],
             },
@@ -1700,6 +1712,7 @@ mod tests {
 
     fn database(name: &str, connect: Option<Source>) -> DatabaseAccess {
         DatabaseAccess {
+            inside: None,
             name: name.into(),
             allows_connections: true,
             rights: connect
@@ -1717,6 +1730,7 @@ mod tests {
         let mut closed = database("closed", Some(Source::Public));
         closed.allows_connections = false;
         let access = RoleAccess {
+            server: Vec::new(),
             superuser: false,
             databases: vec![
                 database("app", Some(Source::Direct)),
@@ -1750,6 +1764,7 @@ mod tests {
     #[test]
     fn a_superuser_is_listed_everywhere_it_connects_and_read_nowhere() {
         let access = RoleAccess {
+            server: Vec::new(),
             superuser: true,
             databases: vec![
                 database("a", Some(Source::Direct)),
@@ -1768,6 +1783,7 @@ mod tests {
     #[test]
     fn no_more_than_the_limit_is_read() {
         let access = RoleAccess {
+            server: Vec::new(),
             superuser: false,
             databases: (0..MAX_DATABASES_READ + 3)
                 .map(|n| database(&format!("db{n:02}"), Some(Source::Public)))
@@ -1784,6 +1800,7 @@ mod tests {
     #[test]
     fn a_failed_database_is_its_own_row_and_the_others_still_land() {
         let access = RoleAccess {
+            server: Vec::new(),
             superuser: false,
             databases: vec![
                 database("a", Some(Source::Public)),
@@ -1823,6 +1840,7 @@ mod tests {
         let mut view = RoleView::plan(
             "ana".into(),
             RoleAccess {
+                server: Vec::new(),
                 superuser: false,
                 databases: vec![database("shop", Some(Source::Public))],
             },
@@ -1882,6 +1900,7 @@ mod tests {
         let mut view = RoleView::plan(
             "ana".into(),
             RoleAccess {
+                server: Vec::new(),
                 superuser: false,
                 databases: vec![database("shop", Some(Source::Owner(None)))],
             },
@@ -2156,8 +2175,10 @@ mod tests {
         let mut view = RoleView::plan(
             "ana".into(),
             RoleAccess {
+                server: Vec::new(),
                 superuser: false,
                 databases: vec![DatabaseAccess {
+                    inside: None,
                     name: "d".into(),
                     allows_connections: true,
                     rights: vec![
@@ -2278,6 +2299,7 @@ mod tests {
         let view = RoleView::plan(
             "root".into(),
             RoleAccess {
+                server: Vec::new(),
                 superuser: true,
                 databases: vec![database("d", Some(Source::Superuser))],
             },

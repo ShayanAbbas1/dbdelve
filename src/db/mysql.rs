@@ -1234,8 +1234,37 @@ impl Connection {
 
     /// dbdelve's own SQL. Its rows are never editable, so it does not pay for the
     /// round trip that reads a primary key.
-    fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
+    pub(super) fn internal_query(&self, sql: &str) -> Result<QueryResult, DbError> {
         self.run(sql, false, Fetch::default(), false)
+    }
+
+    /// Whether the server refuses `probe` for want of a privilege
+    /// ([`super::mysql_roles::DENIED_CODES`]), which is an answer, where any
+    /// other failure is an error. The code is on the driver's error alone,
+    /// so this does not go through [`Self::internal_query`].
+    pub(super) fn refuses(&self, probe: &str) -> Result<bool, DbError> {
+        let mut connection = self.connection.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        match connection.query_drop(probe) {
+            Ok(()) => Ok(false),
+            Err(::mysql::Error::MySqlError(error))
+                if super::mysql_roles::DENIED_CODES.contains(&error.code) =>
+            {
+                Ok(true)
+            }
+            Err(error) => Err(query_error(&error)),
+        }
+    }
+
+    /// The server's version as its handshake gave it.
+    pub(super) fn server_version(&self) -> Result<(u16, u16, u16), DbError> {
+        let connection = self.connection.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        Ok(connection.server_version())
     }
 
     /// `ask` on the side session, opened if there is none. A failure is taken

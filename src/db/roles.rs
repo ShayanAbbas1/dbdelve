@@ -1,9 +1,9 @@
 //! A server's logins and roles, who holds which grant on an object, and the
 //! statements that change a role, as plain data.
 //!
-//! Read only where [`super::Target::manages_roles`]: Postgres today. What
-//! crosses out of `src/db/` is the rendered names and flags below, never a
-//! catalog row. What the server does not record is `None`, never a guess:
+//! Postgres reads and writes them; MySQL and MariaDB only read them, from
+//! their grant tables and `SHOW GRANTS` (`mysql_roles`). What crosses out of
+//! `src/db/` is the rendered names and flags below, never a catalog row. What the server does not record is `None`, never a guess:
 //! Postgres keeps no last login anywhere a client can read.
 
 use super::{DbError, Engine, QueryResult, optional_cell, plain_error, required_cell};
@@ -48,6 +48,10 @@ pub struct Roles {
     /// Whether the server records logins at all, so a missing
     /// [`Role::last_login`] means never rather than unknown.
     pub records_logins: bool,
+    /// Why the connection may not list the server's accounts, where it may
+    /// not: a login without the privilege is an answer to show, not a
+    /// failure to retry. Every list above is empty then.
+    pub denied: Option<String>,
 }
 
 impl Roles {
@@ -164,6 +168,10 @@ pub struct Grant {
     pub privilege: String,
     /// Whether the grantee may grant it on.
     pub grantable: bool,
+    /// Where the grant is written when it is not on the object itself, as
+    /// the server spells the level: `*.*`, `shop.*`, a database pattern
+    /// `db1\_%.*`. A MySQL grant reaches a table from any of them.
+    pub on: Option<String>,
 }
 
 /// Who holds what on one object.
@@ -177,6 +185,9 @@ pub struct ObjectGrants {
     pub roles: Roles,
     /// A sequence, which a grant names `ON SEQUENCE`.
     pub sequence: bool,
+    /// Whether the engine has a PUBLIC grantee at all, so that holding
+    /// nothing through it says something.
+    pub public: bool,
 }
 
 /// Where a privilege a role holds comes from.
@@ -189,6 +200,11 @@ pub enum Source {
     Owner(Option<String>),
     /// A grant to the role itself.
     Direct,
+    /// A grant on every database of the server, `*.*`.
+    Global,
+    /// A grant on every database whose name matches a `LIKE` pattern, as
+    /// the grant spells it.
+    Pattern(String),
     /// A grant to a role it inherits from: the grantee, not every role on
     /// the way to it.
     Via(String),
@@ -209,6 +225,8 @@ impl Source {
             Self::Owner(None) => "owner".into(),
             Self::Owner(Some(role)) => format!("owner, as {role}"),
             Self::Direct => "direct".into(),
+            Self::Global => "global, *.*".into(),
+            Self::Pattern(pattern) => format!("through {pattern}"),
             Self::Via(role) => format!("through {role}"),
             Self::Public => "PUBLIC".into(),
             Self::Predefined(roles) => roles.clone(),
@@ -218,15 +236,17 @@ impl Source {
 
     /// Strongest first: what a role holds of its own before what it inherits,
     /// and PUBLIC, which every role holds, last.
-    fn rank(&self) -> u8 {
+    pub(super) fn rank(&self) -> u8 {
         match self {
             Self::Superuser => 0,
             Self::Owner(_) => 1,
             Self::Direct => 2,
-            Self::Via(_) => 3,
-            Self::Predefined(_) => 4,
-            Self::Public => 5,
-            Self::Implicit => 6,
+            Self::Global => 3,
+            Self::Pattern(_) => 4,
+            Self::Via(_) => 5,
+            Self::Predefined(_) => 6,
+            Self::Public => 7,
+            Self::Implicit => 8,
         }
     }
 }
@@ -250,6 +270,10 @@ pub struct DatabaseAccess {
     pub allows_connections: bool,
     /// The database privileges the role holds, effective ones only.
     pub rights: Vec<Right>,
+    /// What the role holds inside the database, where the read that found
+    /// the database said that too: MySQL's `SHOW GRANTS` lists every level
+    /// at once, so there is nothing left to read per database.
+    pub inside: Option<RoleGrants>,
 }
 
 impl DatabaseAccess {
@@ -266,6 +290,9 @@ impl DatabaseAccess {
 pub struct RoleAccess {
     pub superuser: bool,
     pub databases: Vec<DatabaseAccess>,
+    /// Privileges over the server itself that no database holds, as they
+    /// read: `PROCESS`, `PROXY ON 'app'@'%'`, `RELOAD (grantable)`.
+    pub server: Vec<String>,
 }
 
 /// What a role holds on one schema of a database.
@@ -296,6 +323,10 @@ pub struct RoleGrants {
     /// short: a superuser bypasses them, an owner holds everything on what
     /// it owns, which is left out, and a predefined role reaches further.
     pub beyond: Beyond,
+    /// The database holds its relations with no schema between, as MySQL's
+    /// does: every [`HeldGrant::schema`] is the database's own name and
+    /// `schemas` is empty, so nothing is missing for want of `USAGE`.
+    pub flat: bool,
 }
 
 /// What a role holds past its grants on relations.
@@ -1021,6 +1052,7 @@ pub(super) fn assemble_role_grants(
         schemas: Vec::new(),
         held: Vec::new(),
         beyond,
+        flat: false,
     };
     for row in &schemas.rows {
         let owns = required_cell(schemas, row, "owns")?;
@@ -1061,6 +1093,7 @@ pub(super) fn assemble_role_access(access: &QueryResult) -> Result<RoleAccess, D
             name: required_cell(access, row, "database")?.to_string(),
             allows_connections: yes(access, row, "allows")?,
             rights: assemble_rights(access, row, &DATABASE_PRIVILEGES, assembled.superuser, &[])?,
+            inside: None,
         });
     }
     Ok(assembled)
@@ -1265,6 +1298,7 @@ pub(super) fn assemble_grants(result: &QueryResult, roles: Roles) -> Result<Obje
             grantee: optional_cell(result, row, "grantee").map(str::to_string),
             privilege: privilege.to_string(),
             grantable: yes(result, row, "grantable")?,
+            on: None,
         });
     }
     Ok(ObjectGrants {
@@ -1273,6 +1307,7 @@ pub(super) fn assemble_grants(result: &QueryResult, roles: Roles) -> Result<Obje
         grants,
         roles,
         sequence: kind == "S",
+        public: true,
     })
 }
 
@@ -1553,6 +1588,7 @@ mod tests {
     #[test]
     fn a_new_role_is_never_made_a_member_of_a_way_into_superuser() {
         let roles = Roles {
+            denied: None,
             roles: vec![
                 role("root", true),
                 role("admins", false),

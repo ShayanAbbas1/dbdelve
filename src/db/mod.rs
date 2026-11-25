@@ -33,6 +33,7 @@ mod include;
 mod mongo;
 mod mssql;
 mod mysql;
+mod mysql_roles;
 pub(crate) mod odbc_string;
 mod password_command;
 pub(crate) mod plugin;
@@ -2766,11 +2767,13 @@ impl Connection {
     }
 
     /// The server's logins and roles and who belongs to whom. Asked only
-    /// where [`Target::manages_roles`], on a connection from
-    /// [`Connection::apart`].
+    /// where [`Target::manages_roles`] or the target lists roles, on a
+    /// connection from [`Connection::apart`]. A login that may not list
+    /// accounts gets [`roles::Roles::denied`], not an error.
     pub fn roles(&self) -> Result<roles::Roles, DbError> {
         match self {
             Self::Postgres(connection) => connection.roles(),
+            Self::MySql(connection) => connection.roles(),
             _ => Err(plain_error("This connection lists no roles.".into())),
         }
     }
@@ -2779,32 +2782,40 @@ impl Connection {
     pub fn object_grants(&self, schema: &str, name: &str) -> Result<roles::ObjectGrants, DbError> {
         match self {
             Self::Postgres(connection) => connection.object_grants(schema, name),
+            Self::MySql(connection) => connection.object_grants(schema, name),
             _ => Err(plain_error("This connection lists no grants.".into())),
         }
     }
 
-    /// What the role `name` can reach in the connection's database.
+    /// What the role `name` can reach in the connection's database; on
+    /// MySQL and MariaDB, in every database, whose name each entry carries.
     pub fn role_reach(&self, name: &str) -> Result<roles::Reach, DbError> {
         match self {
             Self::Postgres(connection) => connection.role_reach(name),
+            Self::MySql(connection) => connection.role_reach(name),
             _ => Err(plain_error("This connection lists no grants.".into())),
         }
     }
 
     /// What the role `name` holds on every database of the server, read in
-    /// the connection's own: the catalogs it reads are shared.
+    /// the connection's own: the catalogs it reads are shared. On MySQL and
+    /// MariaDB it says what is inside each database too
+    /// ([`roles::DatabaseAccess::inside`]).
     pub fn role_access(&self, name: &str) -> Result<roles::RoleAccess, DbError> {
         match self {
             Self::Postgres(connection) => connection.role_access(name),
+            Self::MySql(connection) => connection.role_access(name),
             _ => Err(plain_error("This connection lists no grants.".into())),
         }
     }
 
     /// What the role `name` holds on the schemas and relations of the
-    /// connection's database.
+    /// connection's database. Postgres only: MySQL's comes with
+    /// [`Self::role_access`].
     pub fn role_grants(&self, name: &str) -> Result<roles::RoleGrants, DbError> {
         match self {
             Self::Postgres(connection) => connection.role_grants(name),
+            Self::MySql(connection) => connection.role_grants(name),
             _ => Err(plain_error("This connection lists no grants.".into())),
         }
     }
@@ -2813,6 +2824,7 @@ impl Connection {
     pub fn role_reports(&self, roles: &roles::Roles) -> Result<roles::Reports, DbError> {
         match self {
             Self::Postgres(connection) => connection.role_reports(roles),
+            Self::MySql(connection) => connection.role_reports(roles),
             _ => Err(plain_error("This connection lists no roles.".into())),
         }
     }

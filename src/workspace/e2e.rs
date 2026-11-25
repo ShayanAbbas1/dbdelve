@@ -6652,16 +6652,19 @@ fn birds_grants() -> crate::db::roles::ObjectGrants {
         last_login: None,
     };
     ObjectGrants {
+        public: true,
         owner: "keeper".into(),
         sequence: false,
         privileges: vec!["SELECT".into(), "INSERT".into()],
         grants: vec![
             Grant {
+                on: None,
                 grantee: Some("keeper".into()),
                 privilege: "SELECT".into(),
                 grantable: false,
             },
             Grant {
+                on: None,
                 grantee: Some("watchers".into()),
                 privilege: "SELECT".into(),
                 grantable: false,
@@ -6687,6 +6690,7 @@ fn show_grants_of_a_role_lists_each_database_and_a_failed_read_stays_in_its_own(
         use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
         let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
         let database = |name: String, connects: bool| DatabaseAccess {
+            inside: None,
             name,
             allows_connections: true,
             rights: connects
@@ -6709,6 +6713,7 @@ fn show_grants_of_a_role_lists_each_database_and_a_failed_read_stays_in_its_own(
                 cx,
             );
             let access = RoleAccess {
+                server: Vec::new(),
                 superuser: false,
                 databases: vec![
                     database("main".into(), true),
@@ -6842,11 +6847,13 @@ fn crowded_grants(roles: usize) -> crate::db::roles::ObjectGrants {
     use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
     let names = (0..roles).map(|ix| format!("role{ix:05}"));
     ObjectGrants {
+        public: true,
         owner: "role00000".into(),
         sequence: false,
         privileges: vec!["SELECT".into(), "INSERT".into()],
         grants: (names.clone())
             .map(|grantee| Grant {
+                on: None,
                 grantee: Some(grantee),
                 privilege: "SELECT".into(),
                 grantable: false,
@@ -6962,10 +6969,12 @@ fn open_role_with_members(
     };
     let names: Vec<String> = (0..members).map(|ix| format!("m{ix:04}")).collect();
     let grants = ObjectGrants {
+        public: true,
         owner: "keeper".into(),
         sequence: false,
         privileges: vec!["SELECT".into()],
         grants: vec![Grant {
+            on: None,
             grantee: Some("crowd".into()),
             privilege: "SELECT".into(),
             grantable: false,
@@ -7268,8 +7277,10 @@ fn show_grants_of_a_role_lists_every_privilege_in_edit_mode(cx: &mut TestAppCont
                 cx,
             );
             let access = RoleAccess {
+                server: Vec::new(),
                 superuser: false,
                 databases: vec![DatabaseAccess {
+                    inside: None,
                     name: "locked".into(),
                     allows_connections: true,
                     rights: vec![Right {
