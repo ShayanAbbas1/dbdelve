@@ -2919,9 +2919,12 @@ impl Workspace {
             // one row is the whole answer.
             let read_back = verified_read;
             // A connection of the lane's own that failed is gone with it, and
-            // says nothing about the profile's.
+            // says nothing about the profile's; nor does a role change's, run
+            // on a session apart, whose probe would wait on the session's lock
+            // behind another tab's long statement.
             let failed = result.is_err() || matches!(read_back, Some(Err(_)));
-            let lost = !alongside && failed && connection.is_lost();
+            let apart = role_change && generated && verification.is_none() && binding.is_none();
+            let lost = !alongside && !apart && failed && connection.is_lost();
             (
                 result,
                 lost,
