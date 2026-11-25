@@ -138,6 +138,10 @@ pub(crate) struct ConnectionForm {
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
+    /// The name the app itself last wrote into the name field: a URL import's,
+    /// or the default of the profile the form was opened on. A name that still
+    /// equals it was never the user's.
+    pub(crate) auto_name: String,
     /// What a duplicate takes from the connection it copies, given on save.
     pub(crate) shortcuts: Shortcuts,
     pub(crate) folds: BTreeMap<String, bool>,
@@ -497,6 +501,7 @@ impl ConnectionForm {
             backdrop_shown: false,
             placeholders_for: None,
             last_url: SharedString::default(),
+            auto_name: String::new(),
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
             _subscriptions: subscriptions,
@@ -529,6 +534,7 @@ impl ConnectionForm {
         form.name.update(cx, |name, cx| {
             name.set_value(profile.name.clone(), window, cx);
         });
+        form.auto_name = default_profile_name(&profile.config);
         for secret in [&form.password, &form.ssh_passphrase] {
             secret.update(cx, |secret, cx| {
                 secret.set_value("", window, cx);
@@ -567,6 +573,7 @@ impl ConnectionForm {
         form.name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
         });
+        form.auto_name = default_profile_name(&config);
         form
     }
 
@@ -866,12 +873,10 @@ impl ConnectionForm {
         // Blank database is the one the server signs the login into, which is
         // what a profile that moves between databases starts on. A service
         // answers for the rest, and says so on connect if it does not.
-        for (label, value) in [("Host", &host), ("Username", &user)] {
-            let needed = label == "Host" || required.contains(&label);
-            if value.is_empty() && needed && service.is_none() {
-                return Err(format!("{label} is required."));
-            }
+        if user.is_empty() && required.contains(&"Username") && service.is_none() {
+            return Err("Username is required.".into());
         }
+        let host = host_or_default(host, self.engine, service.is_some());
 
         let port = parse_port("Port", &port)?;
 
@@ -1286,6 +1291,23 @@ impl Reported {
     }
 }
 
+/// A blank host is the one the placeholder shows, as a blank port is the
+/// engine's own. Beside a service it stays blank: the service names the host.
+fn host_or_default(host: String, engine: Engine, has_service: bool) -> String {
+    if host.is_empty() && !has_service {
+        engine.spec().hints.host.to_string()
+    } else {
+        host
+    }
+}
+
+/// Whether a name in the field may be replaced by one derived from a URL: it
+/// is blank, or it is still the one the app wrote last.
+pub(crate) fn name_is_automatic(current: &str, auto_name: &str) -> bool {
+    let current = current.trim();
+    current.is_empty() || current == auto_name
+}
+
 /// What a profile is called when nobody has named it: the database for an
 /// engine that has one, the host when the database was left to the server, and
 /// the file for an engine that is one.
@@ -1368,6 +1390,40 @@ pub(crate) fn password_to_persist(config: &ConnectionConfig, origin: Origin) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_blank_host_is_the_one_the_placeholder_shows() {
+        for engine in [
+            Engine::Postgres,
+            Engine::MySql,
+            Engine::Redis,
+            Engine::MongoDb,
+        ] {
+            assert_eq!(
+                host_or_default(String::new(), engine, false),
+                engine.spec().hints.host
+            );
+            assert_eq!(host_or_default(String::new(), engine, false), "localhost");
+        }
+        assert_eq!(
+            host_or_default("db.example.test".into(), Engine::MySql, false),
+            "db.example.test"
+        );
+    }
+
+    #[test]
+    fn a_blank_host_beside_a_service_stays_blank() {
+        assert_eq!(host_or_default(String::new(), Engine::Postgres, true), "");
+    }
+
+    #[test]
+    fn only_a_blank_or_app_written_name_gives_way_to_a_url() {
+        assert!(name_is_automatic("", ""));
+        assert!(name_is_automatic("  ", "shop"));
+        assert!(name_is_automatic("shop", "shop"));
+        assert!(!name_is_automatic("Production", "shop"));
+        assert!(!name_is_automatic("Production", ""));
+    }
     use super::*;
     use crate::db::{ConnectionConfig, ServerConfig, SslMode};
 
