@@ -5292,6 +5292,9 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
                 Some(Keyword::PRAGMA) => tokens.contains(&Token::Eq),
                 _ => false,
             };
+            if defines_stored_program(engine, &tokens) {
+                leaves.transaction = Some(false);
+            }
         }
     }
     leaves.settings |= touches_session(engine, sql);
@@ -5299,8 +5302,8 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
 }
 
 /// Whether `sql` may leave a transaction open where [`leaves`] cannot say:
-/// text sqlparser cannot read that names a `BEGIN` or `START TRANSACTION`
-/// the server may well read, or transaction control among other statements,
+/// text sqlparser cannot read with a statement that starts `BEGIN` or
+/// `START TRANSACTION`, which the server may well read, or transaction control among other statements,
 /// which an error part way through stops short of a `COMMIT` that would end
 /// it.
 pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
@@ -5326,21 +5329,54 @@ pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
     let tokens = Tokenizer::new(dialect.as_ref(), sql)
         .tokenize()
         .unwrap_or_default();
-    let keywords: Vec<Keyword> = tokens
-        .iter()
-        .filter_map(|token| match token {
-            Token::Word(word) => Some(word.keyword),
-            _ => None,
+    if defines_stored_program(engine, &tokens) {
+        return false;
+    }
+    // Only where a statement starts: a `BEGIN` inside one is a compound
+    // block's, which opens no transaction.
+    statement_heads(&tokens).any(|keywords| match keywords.first() {
+        Some(Keyword::BEGIN) => true,
+        Some(Keyword::START) => keywords.get(1) == Some(&Keyword::TRANSACTION),
+        _ => false,
+    })
+}
+
+/// The first two keywords of each `;`-separated piece of `tokens`, which is
+/// as near to where a statement starts as text the grammar cannot read gets.
+fn statement_heads(tokens: &[Token]) -> impl Iterator<Item = Vec<Keyword>> + '_ {
+    tokens
+        .split(|token| *token == Token::SemiColon)
+        .map(|piece| {
+            piece
+                .iter()
+                .filter_map(|token| match token {
+                    Token::Word(word) => Some(word.keyword),
+                    _ => None,
+                })
+                .take(2)
+                .collect()
         })
-        .collect();
-    keywords
-        .iter()
-        .enumerate()
-        .any(|(at, keyword)| match keyword {
-            Keyword::BEGIN => true,
-            Keyword::START => keywords.get(at + 1) == Some(&Keyword::TRANSACTION),
-            _ => false,
-        })
+}
+
+/// Whether unreadable `tokens` define a stored program on MySQL or MariaDB:
+/// a `CREATE` naming a `PROCEDURE`, `FUNCTION`, `TRIGGER` or `EVENT` before
+/// its body. The `BEGIN … END` that body holds runs only when the program
+/// does, and the `CREATE` commits the open transaction as any DDL there does.
+fn defines_stored_program(engine: Engine, tokens: &[Token]) -> bool {
+    let mut keywords = tokens.iter().filter_map(|token| match token {
+        Token::Word(word) => Some(word.keyword),
+        _ => None,
+    });
+    implicitly_commits(engine)
+        && keywords.next() == Some(Keyword::CREATE)
+        && keywords
+            .take_while(|keyword| !matches!(keyword, Keyword::BEGIN | Keyword::DO))
+            .any(|keyword| {
+                matches!(
+                    keyword,
+                    Keyword::PROCEDURE | Keyword::FUNCTION | Keyword::TRIGGER | Keyword::EVENT
+                )
+            })
 }
 
 /// Whether `sql` ends a transaction somewhere in it. A submission can end the
@@ -12382,6 +12418,38 @@ mod tests {
                 "{statement}"
             );
         }
+    }
+
+    #[test]
+    fn a_stored_program_body_unread_on_mysql_ends_the_transaction() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for statement in [
+                "CREATE PROCEDURE p() BEGIN SELECT 1; END",
+                "CREATE DEFINER = CURRENT_USER PROCEDURE p()\nBEGIN\n  DECLARE x INT;\n  \
+                 BEGIN\n    SET x = 1;\n  END;\n  SELECT x;\nEND",
+                "CREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW BEGIN SET NEW.b = 1; END",
+                "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN DELETE FROM a; END",
+            ] {
+                assert!(
+                    !transaction_uncertain(engine, statement),
+                    "{engine:?} {statement}"
+                );
+                assert_eq!(
+                    leaves(engine, statement).transaction,
+                    Some(false),
+                    "{engine:?} {statement}"
+                );
+            }
+        }
+        // A `BEGIN` that starts a statement the grammar cannot read still
+        // counts, at the head of the text or after a `;`.
+        for statement in ["BEGIN WORK\nselec 1", "selec 1;\nBEGIN"] {
+            assert!(
+                transaction_uncertain(Engine::MySql, statement),
+                "{statement}"
+            );
+        }
+        assert!(!transaction_uncertain(Engine::MySql, "selec begin"));
     }
 
     #[test]
