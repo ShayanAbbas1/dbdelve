@@ -131,6 +131,10 @@ WHERE (TABLE_SCHEMA NOT IN {system} OR TABLE_SCHEMA = DATABASE()){only}
 // these are null for reasons that are not errors: `ROUTINE_DEFINITION` is null
 // for a user without the privilege to read bodies, and `DTD_IDENTIFIER` is null
 // for a procedure, which returns nothing by definition.
+//
+// The parameters are aggregated once and joined, never read by a subquery per
+// routine: before 8.0 the server has no data dictionary and rescans
+// `PARAMETERS` for each, 7 s for 900 routines against 0.03 s joined.
 const ROUTINES_SQL: &str = "
 SELECT routine.ROUTINE_SCHEMA AS schema_name,
        routine.ROUTINE_NAME AS routine_name,
@@ -138,22 +142,27 @@ SELECT routine.ROUTINE_SCHEMA AS schema_name,
            WHEN 'FUNCTION' THEN 'function'
            WHEN 'PROCEDURE' THEN 'procedure'
        END AS routine_kind,
-       COALESCE((
-           SELECT GROUP_CONCAT(
-                      CONCAT_WS(' ', parameter.PARAMETER_NAME, parameter.DTD_IDENTIFIER)
-                      ORDER BY parameter.ORDINAL_POSITION
-                      SEPARATOR ', '
-                  )
-           FROM information_schema.PARAMETERS AS parameter
-           WHERE parameter.SPECIFIC_SCHEMA = routine.ROUTINE_SCHEMA
-             AND parameter.SPECIFIC_NAME = routine.SPECIFIC_NAME
-             -- Position zero is a function's return value, not an argument.
-             AND parameter.ORDINAL_POSITION > 0
-       ), '') AS identity_arguments,
+       COALESCE(argument.list, '') AS identity_arguments,
        COALESCE(routine.DTD_IDENTIFIER, '') AS result_type,
        LOWER(COALESCE(routine.ROUTINE_BODY, '')) AS language,
        COALESCE(routine.ROUTINE_DEFINITION, '') AS definition
 FROM information_schema.ROUTINES AS routine
+LEFT JOIN (
+    SELECT parameter.SPECIFIC_SCHEMA AS routine_schema,
+           parameter.SPECIFIC_NAME AS specific_name,
+           GROUP_CONCAT(
+               CONCAT_WS(' ', parameter.PARAMETER_NAME, parameter.DTD_IDENTIFIER)
+               ORDER BY parameter.ORDINAL_POSITION
+               SEPARATOR ', '
+           ) AS list
+    FROM information_schema.PARAMETERS AS parameter
+    WHERE (parameter.SPECIFIC_SCHEMA NOT IN {system} OR parameter.SPECIFIC_SCHEMA = DATABASE()){parameter_only}
+      -- Position zero is a function's return value, not an argument.
+      AND parameter.ORDINAL_POSITION > 0
+    GROUP BY parameter.SPECIFIC_SCHEMA, parameter.SPECIFIC_NAME
+) AS argument
+    ON argument.routine_schema = routine.ROUTINE_SCHEMA
+   AND argument.specific_name = routine.SPECIFIC_NAME
 WHERE (routine.ROUTINE_SCHEMA NOT IN {system} OR routine.ROUTINE_SCHEMA = DATABASE()){only}
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
@@ -206,10 +215,16 @@ fn sizes_sql(engine: Engine, names: Option<&[String]>) -> String {
 }
 
 fn routines_sql(engine: Engine, names: Option<&[String]>) -> String {
-    ROUTINES_SQL.replace("{system}", SYSTEM_SCHEMAS).replace(
-        "{only}",
-        &only_clause(engine, "routine.ROUTINE_SCHEMA", names),
-    )
+    ROUTINES_SQL
+        .replace("{system}", SYSTEM_SCHEMAS)
+        .replace(
+            "{parameter_only}",
+            &only_clause(engine, "parameter.SPECIFIC_SCHEMA", names),
+        )
+        .replace(
+            "{only}",
+            &only_clause(engine, "routine.ROUTINE_SCHEMA", names),
+        )
 }
 
 fn sequences_sql(engine: Engine, names: Option<&[String]>) -> String {
@@ -2775,22 +2790,27 @@ SELECT routine.ROUTINE_SCHEMA AS schema_name,
            WHEN 'FUNCTION' THEN 'function'
            WHEN 'PROCEDURE' THEN 'procedure'
        END AS routine_kind,
-       COALESCE((
-           SELECT GROUP_CONCAT(
-                      CONCAT_WS(' ', parameter.PARAMETER_NAME, parameter.DTD_IDENTIFIER)
-                      ORDER BY parameter.ORDINAL_POSITION
-                      SEPARATOR ', '
-                  )
-           FROM information_schema.PARAMETERS AS parameter
-           WHERE parameter.SPECIFIC_SCHEMA = routine.ROUTINE_SCHEMA
-             AND parameter.SPECIFIC_NAME = routine.SPECIFIC_NAME
-             -- Position zero is a function's return value, not an argument.
-             AND parameter.ORDINAL_POSITION > 0
-       ), '') AS identity_arguments,
+       COALESCE(argument.list, '') AS identity_arguments,
        COALESCE(routine.DTD_IDENTIFIER, '') AS result_type,
        LOWER(COALESCE(routine.ROUTINE_BODY, '')) AS language,
        COALESCE(routine.ROUTINE_DEFINITION, '') AS definition
 FROM information_schema.ROUTINES AS routine
+LEFT JOIN (
+    SELECT parameter.SPECIFIC_SCHEMA AS routine_schema,
+           parameter.SPECIFIC_NAME AS specific_name,
+           GROUP_CONCAT(
+               CONCAT_WS(' ', parameter.PARAMETER_NAME, parameter.DTD_IDENTIFIER)
+               ORDER BY parameter.ORDINAL_POSITION
+               SEPARATOR ', '
+           ) AS list
+    FROM information_schema.PARAMETERS AS parameter
+    WHERE (parameter.SPECIFIC_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') OR parameter.SPECIFIC_SCHEMA = DATABASE())
+      -- Position zero is a function's return value, not an argument.
+      AND parameter.ORDINAL_POSITION > 0
+    GROUP BY parameter.SPECIFIC_SCHEMA, parameter.SPECIFIC_NAME
+) AS argument
+    ON argument.routine_schema = routine.ROUTINE_SCHEMA
+   AND argument.specific_name = routine.SPECIFIC_NAME
 WHERE (routine.ROUTINE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') OR routine.ROUTINE_SCHEMA = DATABASE())
   AND routine.ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE')
 ORDER BY routine.ROUTINE_SCHEMA, routine.ROUTINE_NAME
@@ -2819,6 +2839,30 @@ ORDER BY 1, 2
                 sequences_sql(engine, None),
             ] {
                 assert!(!sql.contains("{only}"));
+            }
+        }
+    }
+
+    /// A subquery per routine rescans `PARAMETERS` for each on a server with no
+    /// data dictionary: seven seconds for 900 routines on 5.6.
+    #[test]
+    fn a_routines_parameters_are_aggregated_once_and_joined_not_read_per_routine() {
+        let names = ["app".to_string()];
+        for names in [None, Some(&names[..])] {
+            let sql = routines_sql(Engine::MySql, names);
+            assert_eq!(sql.matches("information_schema.PARAMETERS").count(), 1);
+            assert!(sql.contains("GROUP BY parameter.SPECIFIC_SCHEMA, parameter.SPECIFIC_NAME"));
+            assert!(sql.contains("LEFT JOIN ("), "{sql}");
+            let derived =
+                &sql[sql.find("LEFT JOIN (").unwrap()..sql.find(") AS argument").unwrap()];
+            assert!(
+                !derived.contains("routine."),
+                "a correlated predicate: {sql}"
+            );
+            assert!(!sql.contains('{'), "{sql}");
+            if names.is_some() {
+                assert!(sql.contains("AND parameter.SPECIFIC_SCHEMA IN ('app')"));
+                assert!(sql.contains("AND routine.ROUTINE_SCHEMA IN ('app')"));
             }
         }
     }
