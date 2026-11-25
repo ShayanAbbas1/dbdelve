@@ -374,8 +374,10 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   session with a `MULTI` open too, where a `PING` would be queued. A Postgres
   or Redis ping with no answer within `db::PING_WITHIN` closes its session
   before letting go of it, so the next statement finds it lost instead of
-  waiting behind the ping; MySQL's driver has no read bound to set on an open
-  session, so its `COM_PING` has none. A ping writes no profile field: it is not
+  waiting behind the ping. A MySQL or MariaDB `COM_PING` gets the same bound
+  and the same close by setting its socket's timeouts for the ping alone, on
+  Unix only: the driver exposes no socket on Windows, where the ping has no
+  bound. A ping writes no profile field: it is not
   the user's activity. In the e2e harness `run_until_parked` does not jump to
   timers but `advance_clock` fires them, and a test that then blocks on a
   future must drop an armed timer first (`set_behaviour` with `keep_alive:

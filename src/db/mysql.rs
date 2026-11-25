@@ -1019,7 +1019,9 @@ impl Connection {
     /// One `COM_PING` on the session. A statement holding the connection is
     /// the session in use, so the ping is skipped, never queued behind it; a
     /// poisoned lock is a session every later statement would fail on, as
-    /// [`Connection::is_lost`] counts it.
+    /// [`Connection::is_lost`] counts it. One with no answer within
+    /// [`super::PING_WITHIN`] takes the session with it (`bounded`); on
+    /// Windows the driver exposes no socket to bound, so it waits.
     pub fn ping(&self) -> Result<(), DbError> {
         let mut connection = match self.connection.try_lock() {
             Ok(connection) => connection,
@@ -1031,7 +1033,11 @@ impl Connection {
                 });
             }
         };
-        connection.ping().map_err(|error| query_error(&error))
+        #[cfg(unix)]
+        let pinged = bounded(&mut *connection, super::PING_WITHIN, Conn::ping);
+        #[cfg(not(unix))]
+        let pinged = connection.ping();
+        pinged.map_err(|error| query_error(&error))
     }
 
     fn dial(&self) -> Result<Option<SocketAddr>, DbError> {
@@ -2316,6 +2322,39 @@ fn interrupted(error: &::mysql::Error) -> bool {
     matches!(error, ::mysql::Error::MySqlError(error) if error.code == 1317)
 }
 
+/// `ping` with `within` as the read and write bound of `socket`, which the
+/// driver offers no way to set on an open session, so it is set on the
+/// descriptor. The session's own bounds go back after; when they cannot, or
+/// the ping failed on the wire, the socket is shut, its stream being
+/// mid-packet: the next statement then finds the session lost at once rather
+/// than reading the ping's late answer as its own.
+#[cfg(unix)]
+fn bounded<S: std::os::fd::AsRawFd, T>(
+    socket: &mut S,
+    within: Duration,
+    ping: impl FnOnce(&mut S) -> Result<T, ::mysql::Error>,
+) -> Result<T, ::mysql::Error> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: the descriptor stays owned by `socket`, which outlives this
+    // borrow; `ManuallyDrop` keeps it from being closed here. Only socket
+    // options are set through it, and a Unix socket takes the same ones.
+    let raw = std::mem::ManuallyDrop::new(unsafe {
+        std::net::TcpStream::from_raw_fd(socket.as_raw_fd())
+    });
+    let own = (raw.read_timeout()?, raw.write_timeout()?);
+    raw.set_read_timeout(Some(within))?;
+    raw.set_write_timeout(Some(within))?;
+    let pinged = ping(socket);
+    let restored = raw
+        .set_read_timeout(own.0)
+        .and_then(|()| raw.set_write_timeout(own.1));
+    if restored.is_err() || matches!(pinged, Err(::mysql::Error::IoError(_))) {
+        _ = raw.shutdown(std::net::Shutdown::Both);
+    }
+    restored?;
+    pinged
+}
+
 fn query_error(error: &::mysql::Error) -> DbError {
     DbError {
         message: describe(error),
@@ -2421,6 +2460,52 @@ mod tests {
         ColumnDefinition, FetchedCell, ForeignKey, IndexKind, RelationKind, RoutineKind,
         VerifiedStep,
     };
+
+    /// A socket with a peer that accepts and never writes, as a blackholed
+    /// link looks from this end.
+    #[cfg(unix)]
+    fn unanswered() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        (socket, peer)
+    }
+
+    #[cfg(unix)]
+    fn read_one(socket: &mut std::net::TcpStream) -> Result<usize, ::mysql::Error> {
+        std::io::Read::read(socket, &mut [0; 1]).map_err(::mysql::Error::from)
+    }
+
+    /// A ping with no answer gives up within its bound rather than holding the
+    /// session's mutex for good, and shuts the socket, whose stream is now
+    /// mid-packet: the next statement fails at once instead of reading the
+    /// late answer as its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_ping_with_no_answer_gives_up_within_its_bound_and_shuts_the_socket() {
+        let (mut socket, _peer) = unanswered();
+        let started = Instant::now();
+        let pinged = bounded(&mut socket, Duration::from_millis(200), read_one);
+        assert!(pinged.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(read_one(&mut socket).ok(), Some(0), "the socket is shut");
+    }
+
+    /// One that is answered leaves the session's own bound as it was.
+    #[cfg(unix)]
+    #[test]
+    fn an_answered_ping_puts_the_sessions_bound_back() {
+        let (mut socket, mut peer) = unanswered();
+        std::io::Write::write_all(&mut peer, b"x").unwrap();
+        let pinged = bounded(&mut socket, Duration::from_millis(200), read_one);
+        assert_eq!(pinged.ok(), Some(1));
+        assert_eq!(socket.read_timeout().unwrap(), None);
+        assert_eq!(socket.write_timeout().unwrap(), None);
+    }
 
     /// The server the `live_` tests talk to, from `dbdelve_MYSQL_URL` or
     /// `dbdelve_MARIADB_URL`.
