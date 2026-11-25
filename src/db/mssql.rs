@@ -3279,9 +3279,13 @@ fn transaction_outcome(
 /// What a failed batch did to the transaction open before it, now that none
 /// is: `XACT_ABORT` rolled it back, unless the batch may have committed it
 /// first (`COMMIT; SELECT 1/0`), which leaves the depth at zero just the same.
+/// So may a procedure, whose body is not in the text: one that commits and
+/// returns raises error 266 with nothing rolled back (`sql::runs_unseen`).
 /// A batch dbdelve brackets commits only the level it opened.
 fn ended_outcome(sql: &str, bracketed: bool) -> &'static str {
-    match !bracketed && crate::sql::may_commit(Engine::SqlServer, sql) {
+    let may_commit = crate::sql::may_commit(Engine::SqlServer, sql)
+        || crate::sql::runs_unseen(Engine::SqlServer, sql);
+    match !bracketed && may_commit {
         true => super::TRANSACTION_ENDED,
         false => super::TRANSACTION_ROLLED_BACK,
     }
@@ -3336,6 +3340,23 @@ mod tests {
         // A batch that ends nothing is not asked about.
         assert!(!outlived_end("SELECT 1", 3));
         assert!(!outlived_end("BEGIN TRANSACTION", 2));
+    }
+
+    #[test]
+    fn a_procedure_that_ended_the_transaction_is_never_said_to_have_rolled_back() {
+        // A procedure that commits and returns raises error 266; its body is
+        // not in the text, so how the transaction ended is not known.
+        for sql in [
+            "EXEC dbo.p",
+            "EXECUTE dbo.p @a = 1",
+            "UPDATE t SET a = 1; EXEC dbo.p",
+        ] {
+            assert_eq!(
+                ended_outcome(sql, false),
+                crate::db::TRANSACTION_ENDED,
+                "{sql}"
+            );
+        }
     }
 
     #[test]
