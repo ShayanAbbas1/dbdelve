@@ -86,6 +86,12 @@ config `dev/ssh/setup.sh` generates, an `ssh -F` rather than a connection
 string); the `linux` job in `ci.yml` has the values
 for the dev databases. It has no Snowflake account, so it skips the Snowflake
 live tests but for the one that needs none; the mock tests stand in for them.
+CI runs every ignored test (`--run-ignored all`), so a live test against a
+server CI does not have must return early when its variable is unset, never
+panic. The MySQL users-and-roles and pre-8.0 tests are such: they read
+hand-seeded servers through `dbdelve_MYSQL56_URL`, `dbdelve_MYSQL_ROLES_URL`,
+`dbdelve_MARIADB_ROLES_URL` and the `*_NOPRIV_URL` logins (see the tests in
+`src/db/mysql_roles.rs` for what each is seeded with), and skip without them.
 CI has one job per platform: each lints and runs the unit tests (on Windows the
 storage tests are what exercise the `APPDATA` paths), and Linux alone runs the
 live tests, since macOS runners have no Docker. They run under nextest there,

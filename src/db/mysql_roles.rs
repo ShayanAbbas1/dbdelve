@@ -2418,19 +2418,25 @@ mod tests {
     }
 
     /// A connection to the server `variable` names, plaintext as the test
-    /// servers speak.
-    fn live(variable: &str, engine: Engine) -> super::super::mysql::Connection {
-        let url = std::env::var(variable).unwrap_or_else(|_| panic!("{variable} is required"));
+    /// servers speak, or `None` when it is not set. These servers are seeded
+    /// by hand (`docs/agents/dev-databases.md`); CI runs every ignored test and
+    /// has none of them, so an unset variable skips rather than fails.
+    fn live(variable: &str, engine: Engine) -> Option<super::super::mysql::Connection> {
+        let Ok(url) = std::env::var(variable) else {
+            eprintln!("skipped: {variable} is not set");
+            return None;
+        };
         let config = super::super::mysql::config_from_url(&url)
             .unwrap_or_else(|_| panic!("{variable} should parse"));
-        super::super::mysql::Connection::open(
+        let connection = super::super::mysql::Connection::open(
             &super::super::ServerConfig {
                 sslmode: super::super::SslMode::Disable,
                 ..config
             },
             engine,
         )
-        .expect("connection should open")
+        .unwrap_or_else(|error| panic!("{variable}: the connection should open: {error:?}"));
+        Some(connection)
     }
 
     fn listed<'a>(roles: &'a Roles, name: &str) -> &'a Role {
@@ -2444,7 +2450,9 @@ mod tests {
     #[test]
     #[ignore = "requires a MySQL 5.6 configured through dbdelve_MYSQL56_URL"]
     fn live_users_and_grants_on_mysql_56() {
-        let connection = live("dbdelve_MYSQL56_URL", Engine::MySql);
+        let Some(connection) = live("dbdelve_MYSQL56_URL", Engine::MySql) else {
+            return;
+        };
         let roles = connection.roles().unwrap();
         assert_eq!(roles.denied, None);
         for name in [
@@ -2519,7 +2527,9 @@ mod tests {
     /// default, `reader` holds `shop_read` but not by default, and
     /// `shop_write` holds `shop_read`.
     fn live_roles(variable: &str, engine: Engine, role: &dyn Fn(&str) -> String) {
-        let connection = live(variable, engine);
+        let Some(connection) = live(variable, engine) else {
+            return;
+        };
         let roles = connection.roles().unwrap();
         assert_eq!(roles.denied, None);
         let (read, write) = (role("shop_read"), role("shop_write"));
@@ -2596,17 +2606,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a MySQL 8 configured through dbdelve_MYSQL_URL"]
+    #[ignore = "requires a seeded MySQL 8 configured through dbdelve_MYSQL_ROLES_URL"]
     fn live_users_and_grants_on_mysql_8() {
-        live_roles("dbdelve_MYSQL_URL", Engine::MySql, &|name| {
+        live_roles("dbdelve_MYSQL_ROLES_URL", Engine::MySql, &|name| {
             format!("{name}@%")
         });
     }
 
     #[test]
-    #[ignore = "requires a MariaDB configured through dbdelve_MARIADB_URL"]
+    #[ignore = "requires a seeded MariaDB configured through dbdelve_MARIADB_ROLES_URL"]
     fn live_users_and_grants_on_mariadb() {
-        live_roles("dbdelve_MARIADB_URL", Engine::MariaDb, &|name| {
+        live_roles("dbdelve_MARIADB_ROLES_URL", Engine::MariaDb, &|name| {
             name.to_string()
         });
     }
@@ -2621,7 +2631,9 @@ mod tests {
             ("dbdelve_MYSQL_NOPRIV_URL", Engine::MySql),
             ("dbdelve_MARIADB_NOPRIV_URL", Engine::MariaDb),
         ] {
-            let connection = live(variable, engine);
+            let Some(connection) = live(variable, engine) else {
+                continue;
+            };
             let roles = connection.roles().unwrap();
             assert_eq!(roles.denied.as_deref(), Some(DENIED), "{variable}");
             assert!(roles.roles.is_empty(), "{variable}");
