@@ -1336,7 +1336,7 @@ fn host_or_default(host: String, engine: Engine, has_service: bool) -> String {
 /// is blank, or it is still the one the app wrote last.
 pub(crate) fn name_is_automatic(current: &str, auto_name: &str) -> bool {
     let current = current.trim();
-    current.is_empty() || current == auto_name
+    current.is_empty() || current == auto_name.trim()
 }
 
 /// What a profile is called when nobody has named it: the database for an
@@ -1472,6 +1472,7 @@ mod tests {
         assert!(name_is_automatic("", ""));
         assert!(name_is_automatic("  ", "shop"));
         assert!(name_is_automatic("shop", "shop"));
+        assert!(name_is_automatic(" shop ", " shop "));
         assert!(!name_is_automatic("Production", "shop"));
         assert!(!name_is_automatic("Production", ""));
     }
