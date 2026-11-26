@@ -50,8 +50,14 @@ from [the latest release][releases].
 or unzip the zip and run `dbdelve.exe`. The installer asks for AppData (just
 for you) or Program Files (all users).
 
-Updating, the `.dmg`, Linux requirements, building from source and where your
-data lives are all in [docs/install.md](docs/install.md).
+**Nix** (NixOS, or Nix on Linux or Apple Silicon macOS): the repo is a flake.
+
+```sh
+nix profile install github:ShayanAbbas1/dbdelve
+```
+
+Updating, the `.dmg`, Linux requirements, the Nix flake's other uses, building
+from source and where your data lives are all in [docs/install.md](docs/install.md).
 
 [releases]: https://github.com/ShayanAbbas1/dbdelve/releases/latest
 
