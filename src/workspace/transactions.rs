@@ -182,6 +182,19 @@ impl Workspace {
         let begin = (reopen && !auto_commit)
             .then(|| engine.begins_transaction())
             .flatten();
+        // A statement still out on the session may run after the pair, in
+        // the transaction it opens: the pair waits for it, so the record of
+        // that transaction is what ran in it.
+        if begin.is_some() && self.profile().is_some_and(Profile::own_session_running) {
+            self.note(
+                format!(
+                    "A statement is still running on this connection, so the {verb} was not \
+                     sent. Wait for it to finish, or cancel it, then try again."
+                ),
+                cx,
+            );
+            return Some(false);
+        }
         let statement = match begin {
             Some(begin) => format!("{verb};\n\n{begin};"),
             None => verb.to_string(),

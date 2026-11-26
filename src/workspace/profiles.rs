@@ -18,7 +18,7 @@ use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::palette::SchemaPick;
 use crate::session::{
-    Behaviour, Bound, BoundSession, Depth, EditMode, MAX_IDLE_TIMEOUT, MAX_KEEP_ALIVE,
+    Behaviour, Bound, BoundSession, Depth, EditMode, KeptCatalog, MAX_IDLE_TIMEOUT, MAX_KEEP_ALIVE,
     MIN_KEEP_ALIVE, STALE_ROWS, restored_shortcuts,
 };
 use crate::sidebar::OPEN_ROWS_CAP;
@@ -492,6 +492,7 @@ impl Workspace {
             held: false,
             holds: Arc::default(),
             in_transaction: false,
+            autocommit_off: false,
             transaction_aborted: false,
             transaction_statements: Vec::new(),
             transaction_sends: Arc::default(),
@@ -590,6 +591,7 @@ impl Workspace {
             held: false,
             holds: Arc::default(),
             in_transaction: false,
+            autocommit_off: false,
             transaction_aborted: false,
             transaction_statements: Vec::new(),
             transaction_sends: Arc::default(),
@@ -1806,7 +1808,11 @@ impl Workspace {
         if !in_session && keeps_catalog_across_switch(profile, &left.0) {
             let kept = std::mem::replace(&mut profile.catalog, CatalogState::Loading);
             if let CatalogState::Loaded(catalog, routines) = kept {
-                profile.kept_catalog = Some((catalog, routines));
+                profile.kept_catalog = Some(KeptCatalog {
+                    config: profile.config.clone(),
+                    catalog,
+                    routines,
+                });
             }
         }
         self.remember_profiles(cx);
@@ -1867,6 +1873,7 @@ impl Workspace {
         profile.idle_task = None;
         profile.state = ProfileState::Idle;
         profile.in_transaction = false;
+        profile.autocommit_off = false;
         profile.transaction_statements.clear();
         profile.transaction_in_flight = None;
         profile.session.auto_after_end = None;
@@ -2014,6 +2021,15 @@ impl Workspace {
         // Its tables, and the keys read of them, are the database's being left.
         if let Some(profile) = self.profile_mut() {
             profile.session.schema_export = None;
+        }
+        // A Show Grants of one of its objects reads and writes through the
+        // connection's own session, which the switch moves: left open, its
+        // staged changes would run on the same-named object of the next.
+        if (self.grants_view.as_ref()).is_some_and(|view| {
+            view.profile == profile_id
+                && (view.object.as_ref()).is_some_and(|object| object.database.is_none())
+        }) {
+            self.grants_view = None;
         }
         for id in closing {
             self.close_object(id, window, cx);
@@ -2477,6 +2493,11 @@ impl Workspace {
         profile.auto_commit = true;
         profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
+        // A catalog a switch kept belongs to the connection that switch
+        // opens; a later edit retargeting the profile supersedes it.
+        if (profile.kept_catalog.as_ref()).is_some_and(|kept| kept.config != profile.config) {
+            profile.kept_catalog = None;
+        }
         // Every structure still out was asked on the old generation, and
         // `issued_to` drops its answer. A structure tab counts an entry here as
         // asked and waits on it, so one caught mid-load would sit on Loading
@@ -2638,7 +2659,9 @@ impl Workspace {
                         unpicked.is_none() && matches!(profile.state, ProfileState::Connected(_))
                     });
                     let kept = match kept {
-                        Some((catalog, routines)) => {
+                        Some(KeptCatalog {
+                            catalog, routines, ..
+                        }) => {
                             profile.catalog = CatalogState::Loaded(catalog, routines);
                             true
                         }

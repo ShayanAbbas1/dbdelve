@@ -2641,6 +2641,17 @@ impl Workspace {
             leaves.transaction = leaves
                 .transaction
                 .or_else(|| sql::transaction_uncertain(engine, text).then_some(true));
+            // MySQL's `autocommit` turned on commits only from off: from on,
+            // a `START TRANSACTION`'s writes are still pending after it.
+            if leaves.transaction == Some(false)
+                && !profile.autocommit_off
+                && sql::ends_by_autocommit_alone(engine, text)
+            {
+                leaves.transaction = None;
+            }
+            if let Some(on) = sql::autocommit_assigned(engine, text) {
+                profile.autocommit_off = !on;
+            }
             // An end that opens the next transaction behind it, as Manual's
             // Commit sends it, keeps the record until it lands too: if its
             // end fails, the transaction the record lists can still be open.

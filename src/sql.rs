@@ -5302,6 +5302,44 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
     leaves
 }
 
+/// MySQL's `autocommit` as the last assignment of it in `sql` leaves it:
+/// `Some(true)` on, `Some(false)` off, `None` where no statement assigns it.
+pub(crate) fn autocommit_assigned(engine: Engine, sql: &str) -> Option<bool> {
+    if !implicitly_commits(engine) {
+        return None;
+    }
+    let dialect = dialect(engine)?;
+    let statements = SqlParser::parse_sql(dialect.as_ref(), sql).ok()?;
+    (statements.iter().rev()).find_map(|statement| match statement {
+        Statement::Set(set) => transaction_by_setting(&set.to_string()).map(|open| !open),
+        _ => None,
+    })
+}
+
+/// Whether the end [`leaves`] reads in `sql` rests on `autocommit` turned on
+/// alone: the last statement of it that opens or ends a transaction is that
+/// assignment, which commits only where `autocommit` was off.
+pub(crate) fn ends_by_autocommit_alone(engine: Engine, sql: &str) -> bool {
+    if !implicitly_commits(engine) {
+        return false;
+    }
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    let last = (statements.iter().rev()).find_map(|statement| {
+        let mut one = Leaves::default();
+        one.add(engine, statement);
+        one.transaction.map(|open| (open, statement))
+    });
+    matches!(
+        last,
+        Some((false, Statement::Set(set))) if transaction_by_setting(&set.to_string()) == Some(false)
+    )
+}
+
 /// Whether `sql` may leave a transaction open where [`leaves`] cannot say:
 /// text sqlparser cannot read with a statement that starts `BEGIN` or
 /// `START TRANSACTION`, which the server may well read, or transaction control among other statements,
@@ -12792,6 +12830,37 @@ mod tests {
         ] {
             assert_eq!(leaves(engine, statement), expected, "{statement}");
         }
+    }
+
+    /// `SET autocommit = 1` commits only from off, so whether it ended the
+    /// transaction depends on what the session held before it.
+    #[test]
+    fn an_autocommit_on_alone_is_told_apart_from_a_commit() {
+        for (sql, alone) in [
+            ("SET autocommit = 1", true),
+            ("SET SESSION autocommit = 1", true),
+            ("UPDATE t SET a = 1; SET autocommit = ON", true),
+            ("SET autocommit = 1; COMMIT", false),
+            ("COMMIT", false),
+            ("SET autocommit = 0", false),
+            ("SET autocommit = 1; START TRANSACTION", false),
+        ] {
+            assert_eq!(ends_by_autocommit_alone(Engine::MySql, sql), alone, "{sql}");
+        }
+        assert!(!ends_by_autocommit_alone(Engine::Postgres, "COMMIT"));
+        assert_eq!(
+            autocommit_assigned(Engine::MySql, "SET autocommit = 0"),
+            Some(false)
+        );
+        assert_eq!(
+            autocommit_assigned(Engine::MariaDb, "SET autocommit = 0; SET autocommit = 1"),
+            Some(true)
+        );
+        assert_eq!(autocommit_assigned(Engine::MySql, "SELECT 1"), None);
+        assert_eq!(
+            autocommit_assigned(Engine::SqlServer, "SET IMPLICIT_TRANSACTIONS ON"),
+            None
+        );
     }
 
     #[test]

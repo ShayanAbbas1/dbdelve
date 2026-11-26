@@ -109,6 +109,12 @@ pub(crate) struct Profile {
     /// queue's reads would not see. Read off what was sent, not asked of the
     /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
     pub(crate) in_transaction: bool,
+    /// Whether the user's own statements turned MySQL's `autocommit` off on
+    /// this session, read off what was sent like `in_transaction`. Turning
+    /// it on commits the open transaction only from off: from on it is a
+    /// no-op that leaves a `START TRANSACTION`'s writes pending. Cleared on
+    /// connect, which opens autocommitting.
+    pub(crate) autocommit_off: bool,
     /// Whether a statement failed inside that transaction on an engine that
     /// then refuses everything but its end (Postgres), whose `COMMIT` rolls
     /// it back. Read only through [`Self::transaction_failed`], and cleared
@@ -190,7 +196,7 @@ pub(crate) struct Profile {
     /// The catalog a database switch kept for the connection it opens to
     /// put back in place of reading it again; see
     /// `workspace::profiles::keeps_catalog_across_switch`.
-    pub(crate) kept_catalog: Option<(Catalog, Routines)>,
+    pub(crate) kept_catalog: Option<KeptCatalog>,
     /// Whether the connection opened on another database than the one the
     /// tabs were opened on, because the picked one was no longer there. What
     /// is left of that database goes on the next frame, which has the window
@@ -909,6 +915,18 @@ impl Profile {
     /// statements run on, which a verified apply's own `BEGIN` and `COMMIT`
     /// would end: the profile's own for a tab of its database, the bound
     /// session's for a tab bound to another.
+    /// Whether a statement of a tab running on the profile's own session is
+    /// still out. One sent before an end that opens the next transaction
+    /// behind it may run after that pair, inside the transaction it opens,
+    /// where the record, started again from the pair, would not list it.
+    pub(crate) fn own_session_running(&self) -> bool {
+        let session = &self.session;
+        let tabs = (session.queries.iter().map(|tab| Tab::Query(tab.id)))
+            .chain(session.objects.iter().map(|tab| Tab::Object(tab.id)));
+        tabs.into_iter()
+            .any(|tab| session.running(tab) && self.binding_of(tab).is_none())
+    }
+
     pub(crate) fn transaction_open_for(&self, tab: Tab) -> bool {
         match self.binding_of(tab) {
             Some(binding) => self.bound_write_refusal(&binding).is_some(),
@@ -1445,6 +1463,10 @@ pub(crate) struct GrantRun {
     pub(crate) batches: Vec<crate::db::roles::GrantBatch>,
     /// The Show Grants dialog it was written from, read again once it ran.
     pub(crate) request: u64,
+    /// The profile generation and own database the batches were written
+    /// under: a batch for the own database names none, so after a reconnect
+    /// or a switch it would run somewhere the review did not show.
+    pub(crate) written_on: (u64, Option<String>),
     /// The run out, by its Cancel, while one is: a second Run waits for it.
     pub(crate) running: Option<crate::db::CancelToken>,
     /// A Cancel was sent to it.
@@ -1560,6 +1582,16 @@ pub(crate) struct InsertField {
     /// `Engine::new_row_sends_empty`: whether an emptied field is `''` or left
     /// out.
     pub(crate) sends_empty: bool,
+}
+
+/// A catalog a database switch kept, with the configuration the switch
+/// reconnects with. Only that connection may put it back: an edit made while
+/// it opens can point the profile at another server, whose catalog this is
+/// not.
+pub(crate) struct KeptCatalog {
+    pub(crate) config: ConnectionConfig,
+    pub(crate) catalog: Catalog,
+    pub(crate) routines: Routines,
 }
 
 /// Rows on their way into a table.
