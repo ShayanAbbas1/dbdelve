@@ -740,6 +740,12 @@ impl ConnectionForm {
     /// Written whenever any of that has changed since, along with a new
     /// form's Host while it still holds the one the app wrote.
     pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
+        if self
+            .auto_host
+            .is_some_and(|written| self.host.read(cx).value().trim() != written)
+        {
+            self.auto_host = None;
+        }
         let beside_a_service = self.typed_service(cx).is_some();
         let root_certificate = root_certificate_placeholder(self.sslmode, beside_a_service);
         let password = password_placeholder(

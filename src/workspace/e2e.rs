@@ -5673,6 +5673,23 @@ fn a_new_server_form_starts_on_localhost_until_something_else_names_the_host(
         set_form_value(&workspace, cx, |form| &form.service, "analytics");
         assert_eq!(host(cx), "db.example.test");
 
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        set_form_value(&workspace, cx, |form| &form.service, "analytics");
+        assert_eq!(host(cx), "");
+        set_form_value(&workspace, cx, |form| &form.host, "db.example.test");
+        set_form_value(&workspace, cx, |form| &form.host, "");
+        set_form_value(&workspace, cx, |form| &form.service, "");
+        assert_eq!(
+            host(cx),
+            "",
+            "a host typed and cleared beside a service stays cleared"
+        );
+
         quit(workspace, cx);
     });
 }
