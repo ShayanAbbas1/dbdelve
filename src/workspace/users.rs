@@ -237,6 +237,11 @@ pub(crate) struct GrantsMatrix {
     pub(crate) rows: std::sync::Arc<[crate::grants::MatrixRow]>,
     /// Every row, as built from the grants, the filter and the members switch.
     unfolded: Vec<crate::grants::MatrixRow>,
+    /// Whether any cell, folded away or not, is granted to PUBLIC, and
+    /// whether any is granted under a closed schema: the legend shows only
+    /// the marks the table can show.
+    public: bool,
+    blocked: bool,
     /// How many times it was built, for a test to count.
     pub(crate) built: usize,
     filter: String,
@@ -250,9 +255,14 @@ impl GrantsMatrix {
         self.unfolded.iter().find(|row| row.key == key)
     }
 
-    /// Whether any cell, folded away or not, is marked `mark`.
-    pub(crate) fn marks(&self, mark: crate::grants::Mark) -> bool {
-        (self.unfolded.iter()).any(|row| row.marks.contains(&mark))
+    /// Whether any cell, folded away or not, is granted to PUBLIC.
+    pub(crate) fn marks_public(&self) -> bool {
+        self.public
+    }
+
+    /// Whether any cell, folded away or not, is granted under a closed schema.
+    pub(crate) fn marks_blocked(&self) -> bool {
+        self.blocked
     }
 }
 
@@ -287,10 +297,17 @@ impl GrantsView {
             }
             _ => (Vec::new(), Vec::new()),
         };
+        let marks = |mark| rows.iter().any(|row| row.marks.contains(&mark));
+        let (public, blocked) = (
+            marks(crate::grants::Mark::Public),
+            marks(crate::grants::Mark::Blocked),
+        );
         self.matrix = GrantsMatrix {
             columns,
             rows: crate::grants::folded(&rows, &self.collapsed).into(),
             unfolded: rows,
+            public,
+            blocked,
             built: self.matrix.built + 1,
             filter,
             with_members: self.with_members,

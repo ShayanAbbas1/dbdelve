@@ -505,15 +505,15 @@ impl FilterPicker {
         ))
     }
 
-    /// What a listed row says of what it is, besides why it is shown: the
-    /// kind of a relation that is not a plain table.
-    pub(crate) fn kind_note(&self, name: &str) -> Option<&'static str> {
-        let (_, kind) = self
-            .tables
-            .as_ref()?
-            .kinds
-            .iter()
-            .find(|(listed, _)| listed == name)?;
+    /// What the table list's row `index` says of what it is, besides why it
+    /// is shown: the kind of a relation that is not a plain table. The list
+    /// is `kinds`' names in its order, so the row's entry is the one at its
+    /// index, with no search per drawn row.
+    pub(crate) fn kind_note(&self, which: Which, index: usize) -> Option<&'static str> {
+        if which != Which::Tables {
+            return None;
+        }
+        let (_, kind) = self.tables.as_ref()?.kinds.get(index)?;
         kind_hint(*kind)
     }
 
@@ -1301,7 +1301,7 @@ impl Workspace {
                                     ),
                                 ),
                         )
-                        .children(hint.or_else(|| picker.kind_note(listed)).map(|hint| {
+                        .children(hint.or_else(|| picker.kind_note(which, index)).map(|hint| {
                             div()
                                 .flex_none()
                                 .whitespace_nowrap()

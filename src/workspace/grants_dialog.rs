@@ -348,13 +348,13 @@ impl Workspace {
             ))
             // Only what the table can show: an engine with no PUBLIC or no
             // schemas never marks a cell so.
-            .when(!view.of_object && view.matrix.marks(Mark::Public), |footer| {
+            .when(!view.of_object && view.matrix.marks_public(), |footer| {
                 footer.child(legend(
                     mark_chip(Mark::Public, 18., t, mono.clone()),
                     "granted to PUBLIC",
                 ))
             })
-            .when(!view.of_object && view.matrix.marks(Mark::Blocked), |footer| {
+            .when(!view.of_object && view.matrix.marks_blocked(), |footer| {
                 footer.child(legend(
                     mark_chip(Mark::Blocked, 18., t, mono.clone()),
                     "granted, but the schema is closed",

@@ -4331,8 +4331,9 @@ fn filter_tables_on_a_schema_menu_saves_a_ticked_list_and_rereads_without_reconn
                 ]),
                 "every relation of the schema, with no read"
             );
-            assert_eq!(picker.kind_note("recent"), Some("view"));
-            assert_eq!(picker.kind_note("orders"), None);
+            assert_eq!(picker.kind_note(Which::Tables, 2), Some("view"), "recent");
+            assert_eq!(picker.kind_note(Which::Tables, 1), None, "orders");
+            assert_eq!(picker.kind_note(Which::Databases, 2), None);
             assert_eq!(
                 picker.preview(Which::Tables).as_deref(),
                 Some("Showing all 4 tables in main")
