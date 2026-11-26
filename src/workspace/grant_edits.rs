@@ -6,14 +6,27 @@
 //! gated by `sql::is_generated_grant_change` as the review is written and by
 //! the connection's mode at Run. Each goes to the session of its database
 //! (`route_in`, `run_routed`) and runs on a session of its own beside it
-//! (`Connection::generated_apart`), as a role change does: a transaction the
+//! (`Connection::generated_apart_settled`), as a role change does: a transaction the
 //! user has open never holds it, nor would its rollback undo it.
 
 use super::*;
 
+use crate::db::ApartOutcome;
 use crate::db::roles::{self, GrantBatch};
 use crate::session::GrantRun;
 use crate::users_view::Loaded;
+
+/// Said when Run finds the connection opened again or moved to another
+/// database since the review was written.
+const MOVED_SINCE_REVIEW: &str = "Not sent: the connection was opened again or moved to another \
+     database since these changes were reviewed. Close this and review them again.";
+
+/// Why a grant run stopped at a batch.
+struct RunFailure {
+    message: String,
+    /// The session was lost with the batch out: it may have committed.
+    unknown: bool,
+}
 
 impl Workspace {
     /// Whether the dialog in front may be put in Edit mode: its grants are
@@ -114,6 +127,7 @@ impl Workspace {
             return Err("The connection is not open.".into());
         };
         let own = profile.active_database();
+        let generation = profile.generation;
         let tab = profile.session.active;
         let batches =
             roles::grant_statements(&crate::grants::on_own_session(changes, own.as_deref()));
@@ -147,6 +161,7 @@ impl Workspace {
                 .into(),
         });
         let sql = crate::grants::review_text(&batches, own.as_deref());
+        let written_on = (generation, own);
         if let Some(profile) = self.profile_mut() {
             profile.session.apply_review = Some(ApplyReview {
                 tab,
@@ -161,6 +176,7 @@ impl Workspace {
                 grants: Some(GrantRun {
                     batches,
                     request,
+                    written_on,
                     running: None,
                     cancelling: false,
                 }),
@@ -181,6 +197,16 @@ impl Workspace {
             return;
         };
         if run.running.is_some() {
+            return;
+        }
+        // A batch of the own database names none: since a reconnect or a
+        // switch it would run where the review does not say.
+        if run.written_on != (profile.generation, profile.active_database()) {
+            if let Some(review) = (self.profile_mut()).and_then(|p| p.session.apply_review.as_mut())
+            {
+                review.error = Some(MOVED_SINCE_REVIEW.into());
+            }
+            cx.notify();
             return;
         }
         let (batches, request) = (run.batches.clone(), run.request);
@@ -222,7 +248,7 @@ impl Workspace {
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             let mut applied = 0;
-            let mut failure = None;
+            let mut failure: Option<RunFailure> = None;
             for batch in &batches {
                 let (sql, token) = (batch.sql.clone(), cancel.clone());
                 let task = workspace
@@ -234,20 +260,33 @@ impl Workspace {
                             &profile_id,
                             opened,
                             routed,
-                            move |connection| connection.generated_apart(&sql, &token).map(|_| ()),
+                            move |connection| Ok(connection.generated_apart_settled(&sql, &token)),
                             cx,
                         ))
                     })
                     .ok()
                     .flatten();
-                let result = match task {
-                    Some(task) => task.await.map_err(|error| error.message),
-                    None => Err("The connection was closed or opened again since Run.".into()),
+                let outcome = match task {
+                    Some(task) => task.await.unwrap_or_else(ApartOutcome::Failed),
+                    None => ApartOutcome::Failed(DbError {
+                        message: "The connection was closed or opened again since Run.".into(),
+                        position: None,
+                    }),
                 };
-                match result {
-                    Ok(()) => applied += 1,
-                    Err(message) => {
-                        failure = Some(message);
+                match outcome {
+                    ApartOutcome::Applied => applied += 1,
+                    ApartOutcome::Failed(error) => {
+                        failure = Some(RunFailure {
+                            message: error.message,
+                            unknown: false,
+                        });
+                        break;
+                    }
+                    ApartOutcome::Unknown(error) => {
+                        failure = Some(RunFailure {
+                            message: error.message,
+                            unknown: true,
+                        });
                         break;
                     }
                 }
@@ -260,10 +299,13 @@ impl Workspace {
     }
 
     /// A grant run ended, `applied` batches in, and `failure` the next one's
-    /// error if it stopped there. Success closes the review; a failure is
-    /// said in it, the staged changes kept. Either way, once anything
-    /// applied, the dialog reads the grants again and the changes that
-    /// landed leave what is staged.
+    /// error if it stopped there. Success closes the review. A failure is
+    /// said in it, the staged changes kept, and the batches that committed
+    /// leave it, so Run again never sends them twice. A batch whose outcome
+    /// is unknown closes it instead: what it holds may have applied, and
+    /// only a review written from the grants as read again can say what is
+    /// left. Once anything may have applied, the dialog reads the grants
+    /// again and the changes that landed leave what is staged.
     #[allow(clippy::too_many_arguments)]
     fn land_grant_run(
         &mut self,
@@ -272,7 +314,7 @@ impl Workspace {
         cancel: &crate::db::CancelToken,
         batches: &[GrantBatch],
         applied: usize,
-        failure: Option<String>,
+        failure: Option<RunFailure>,
         cx: &mut Context<Self>,
     ) {
         let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
@@ -286,11 +328,13 @@ impl Workspace {
                 })
                 .collect()
         };
-        let said = failure.map(|error| {
+        let unknown = failure.as_ref().is_some_and(|failure| failure.unknown);
+        let said = failure.map(|failure| {
             crate::grants::run_failure(
                 &names(&batches[..applied]),
                 &names(&batches[applied..=applied])[0],
-                &error,
+                &failure.message,
+                failure.unknown,
                 &names(&batches[applied + 1..]),
             )
         });
@@ -301,12 +345,19 @@ impl Workspace {
         });
         match (ours, said) {
             (true, None) => profile.session.apply_review = None,
+            (true, Some(said)) if unknown => {
+                profile.session.apply_review = None;
+                self.note(said, cx);
+            }
             (true, Some(said)) => {
                 if let Some(review) = profile.session.apply_review.as_mut() {
                     review.error = Some(said);
                     if let Some(run) = review.grants.as_mut() {
                         run.running = None;
                         run.cancelling = false;
+                        run.batches.drain(..applied.min(run.batches.len()));
+                        review.sql =
+                            crate::grants::review_text(&run.batches, run.written_on.1.as_deref());
                     }
                 }
             }
@@ -314,7 +365,7 @@ impl Workspace {
             (false, Some(said)) => self.note(said, cx),
             (false, None) => {}
         }
-        if applied > 0 {
+        if applied > 0 || unknown {
             self.reread_grants(id, request, cx);
         }
         cx.notify();

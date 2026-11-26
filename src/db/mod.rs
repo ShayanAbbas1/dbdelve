@@ -2294,6 +2294,27 @@ impl Connection {
         })
     }
 
+    /// [`Self::generated_apart`] for a batch whose outcome the caller has to
+    /// tell apart: a failure says whether the side session was lost with
+    /// the batch out, when a `COMMIT` may have landed with no answer back,
+    /// rather than rolled back or never sent.
+    pub fn generated_apart_settled(&self, sql: &str, cancel: &CancelToken) -> ApartOutcome {
+        let side = match self.apart() {
+            Ok(side) => side,
+            Err(error) => return ApartOutcome::Failed(error),
+        };
+        let result = running_on(cancel, &side, |hold, _| match hold() {
+            true => side.generated(sql, cancel, None, None).map(|_| true),
+            false => Ok(false),
+        });
+        match result {
+            Ok(true) => ApartOutcome::Applied,
+            Ok(false) => ApartOutcome::Failed(plain_error("Cancelled before it was sent.".into())),
+            Err(error) if side.is_lost() => ApartOutcome::Unknown(error),
+            Err(error) => ApartOutcome::Failed(error),
+        }
+    }
+
     /// [`Self::apart`] for reading what a file will run elsewhere: on Postgres
     /// its `search_path` is empty, so the catalog's text names every schema
     /// ([`postgres::Connection::alongside_unpathed`]). Every other
@@ -4190,6 +4211,17 @@ pub enum UpdateSpelling {
     Update,
     /// `ALTER TABLE t UPDATE … WHERE … SETTINGS mutations_sync = 2`.
     AlterUpdate,
+}
+
+/// How a batch run on a side session of its own ended.
+#[derive(Debug)]
+pub enum ApartOutcome {
+    Applied,
+    /// The server refused it, or it was never sent: nothing of it applied.
+    Failed(DbError),
+    /// The session was lost with the batch out: whether it committed is not
+    /// known.
+    Unknown(DbError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

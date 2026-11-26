@@ -129,6 +129,19 @@ pub(crate) struct EditObject {
     pub(crate) name: String,
 }
 
+/// A matrix row's key from the names that place it, `U+001F` between them.
+/// Postgres allows that character, and a backslash, in a quoted name, so
+/// each name has both escaped first: schema `a\u{1f}b` with relation `c`
+/// and schema `a` with relation `b\u{1f}c` key two rows, not one, and the
+/// edit a click stages goes to the row it was made on. A name with neither
+/// keys as itself.
+pub(crate) fn row_key(names: &[&str]) -> String {
+    (names.iter())
+        .map(|name| name.replace('\\', "\\\\").replace('\u{1f}', "\\x1f"))
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
+}
+
 /// What a cell says in Edit mode: what is staged on it, else what a click on
 /// it does, else why a click does nothing.
 pub(crate) fn edit_tooltip(
@@ -654,7 +667,7 @@ fn members_of(
                 let marks = through_marks(inherits);
                 let (target, edits) = object_edits(grants, edit, name, Some(role), &marks);
                 rows.push(MatrixRow {
-                    key: format!("{role}\u{1f}{name}"),
+                    key: row_key(&[role, name]),
                     name: name.to_string(),
                     via: via(name, through),
                     who: who(roles, name),
@@ -913,7 +926,7 @@ fn database_row(view: &RoleView, section: &DatabaseSection, columns: &[String]) 
     };
     let blocked = matches!(section.read, Read::Skipped(Skipped::NoConnect));
     MatrixRow {
-        key: format!("{}\u{1f}", access.name),
+        key: row_key(&[&access.name, ""]),
         name: access.name.clone(),
         via: [status, (!blocked && !rights.is_empty()).then_some(rights)]
             .into_iter()
@@ -950,7 +963,7 @@ fn schema_row(
         (schema.owns > 0).then(|| format!("owns {}", plural(schema.owns as usize, "relation")));
     let rights = rights_text(&schema.rights);
     MatrixRow {
-        key: format!("{database}\u{1f}{}\u{1f}", schema.name),
+        key: row_key(&[database, &schema.name, ""]),
         name: schema.name.clone(),
         via: [
             Some(rights).filter(|rights| !rights.is_empty()),
@@ -977,7 +990,7 @@ fn schema_row(
 
 fn note(database: &str, index: usize, text: String) -> MatrixRow {
     MatrixRow {
-        key: format!("{database}\u{1f}\u{1f}note{index}"),
+        key: row_key(&[database, "", &format!("note{index}")]),
         name: text,
         via: String::new(),
         who: Who::Note,
@@ -1169,7 +1182,7 @@ fn relation_rows(
                 }
                 placed.insert(key, rows.len());
                 rows.push(MatrixRow {
-                    key: format!("{database}\u{1f}{}\u{1f}{}", grant.schema, grant.relation),
+                    key: row_key(&[database, &grant.schema, &grant.relation]),
                     name: grant.relation.clone(),
                     via: String::new(),
                     who: Who::Object,
@@ -1425,24 +1438,32 @@ pub(crate) fn review_text(batches: &[GrantBatch], own: Option<&str>) -> String {
 
 /// What a grant run that stopped at the database `failed` says: which ran
 /// their statements, that the failing one applied none of its own (its
-/// batch is one submission, one transaction), and which were never sent.
+/// batch is one submission, one transaction) or, `unknown`, that the session
+/// was lost with it out so nobody can say, and which were never sent.
 pub(crate) fn run_failure(
     applied: &[String],
     failed: &str,
     error: &str,
+    unknown: bool,
     unsent: &[String],
 ) -> String {
-    let mut said = match applied {
-        [] => "Nothing was applied.".to_string(),
-        _ => format!("Applied in {}.", applied.join(", ")),
+    let mut said = match (applied, unknown) {
+        ([], false) => vec!["Nothing was applied.".to_string()],
+        ([], true) => Vec::new(),
+        _ => vec![format!("Applied in {}.", applied.join(", "))],
     };
-    said.push_str(&format!(
-        " In {failed}, none of its statements applied: {error}"
-    ));
+    said.push(match unknown {
+        false => format!("In {failed}, none of its statements applied: {error}"),
+        true => format!(
+            "In {failed}, the connection was lost before the server answered, so whether its \
+             statements applied is not known: {error} The grants were read again; review what \
+             is still staged before running it."
+        ),
+    });
     if !unsent.is_empty() {
-        said.push_str(&format!(" Not sent to {}.", unsent.join(", ")));
+        said.push(format!("Not sent to {}.", unsent.join(", ")));
     }
-    said
+    said.join(" ")
 }
 
 #[cfg(test)]
@@ -2657,15 +2678,45 @@ mod tests {
     }
 
     #[test]
+    fn row_keys_of_names_holding_the_separator_stay_apart() {
+        assert_ne!(
+            row_key(&["db", "a\u{1f}b", "c"]),
+            row_key(&["db", "a", "b\u{1f}c"])
+        );
+        assert_ne!(row_key(&["a\\", "b"]), row_key(&["a", "\\b"]));
+        assert_ne!(row_key(&["a\\x1f", "b"]), row_key(&["a\u{1f}", "b"]));
+        assert_eq!(row_key(&["watchers", "ana"]), "watchers\u{1f}ana");
+        assert_eq!(row_key(&["locked", ""]), "locked\u{1f}");
+    }
+
+    #[test]
     fn a_failed_run_says_what_applied_and_what_was_never_sent() {
         assert_eq!(
-            run_failure(&[], "main", "permission denied", &["other".into()]),
+            run_failure(&[], "main", "permission denied", false, &["other".into()]),
             "Nothing was applied. In main, none of its statements applied: permission denied \
              Not sent to other."
         );
         assert_eq!(
-            run_failure(&["main".into()], "other", "boom", &[]),
+            run_failure(&["main".into()], "other", "boom", false, &[]),
             "Applied in main. In other, none of its statements applied: boom"
+        );
+    }
+
+    /// A batch out when the session went has no answer to say it rolled back:
+    /// its `COMMIT` may have landed.
+    #[test]
+    fn a_run_lost_with_a_batch_out_says_its_outcome_is_unknown() {
+        let said = run_failure(&[], "main", "connection reset", true, &["other".into()]);
+        assert_eq!(
+            said,
+            "In main, the connection was lost before the server answered, so whether its \
+             statements applied is not known: connection reset The grants were read again; \
+             review what is still staged before running it. Not sent to other."
+        );
+        assert!(!said.contains("none of its statements applied"), "{said}");
+        assert!(
+            run_failure(&["main".into()], "other", "reset", true, &[])
+                .starts_with("Applied in main. In other, the connection was lost")
         );
     }
 

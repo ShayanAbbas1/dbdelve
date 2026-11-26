@@ -206,7 +206,8 @@ impl Workspace {
         };
         let session = &profile.session;
         // The user's own work: a transaction would be rolled back, a statement
-        // cancelled, an import or export left half done, and edits lost.
+        // cancelled, an import, export or grant run left half done, and edits
+        // lost.
         profile.any_transaction_open()
             || session.queries.iter().any(|tab| {
                 session.running(Tab::Query(tab.id))
@@ -221,6 +222,9 @@ impl Workspace {
                 .any(|tab| session.running(Tab::Object(tab.id)))
             || self.running_import_into(&profile.id).is_some()
             || session.exporting.is_some()
+            || (session.apply_review.as_ref())
+                .and_then(|review| review.grants.as_ref())
+                .is_some_and(|run| run.running.is_some())
             || unapplied_edits_of(profile, cx).is_some()
     }
 
