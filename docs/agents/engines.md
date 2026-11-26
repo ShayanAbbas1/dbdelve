@@ -1167,3 +1167,48 @@ Decided, and not to be re-litigated:
   (`EngineSpec::dbms_names`), suggests that dialect, one click to take it; a
   dialect that also has a built-in driver says what the built-in does that
   the plugin cannot.
+
+## Oracle
+
+Oracle runs on its own driver (`src/db/oracle.rs`, the vendored `oracledb`, see
+`stack.md`) and is at the **read-only tier**: `Abilities::NONE`, so no cell
+edits, inserts or imports until the writes below are admitted. A profile's
+Database field is a **service name** (Easy Connect cannot name a SID), which is
+why the DBeaver and TablePlus importers still refuse Oracle: their connections
+may name a SID, and an imported profile that cannot connect is worse than none.
+
+- **Nothing is committed for the user.** Oracle has no autocommit and DBDelve
+  adds none: a `DML` stays in the user's transaction, and the result's notice
+  says to run `COMMIT`. A session dropped with work open rolls it back.
+- **`''` is NULL.** A catalog column meant to be empty arrives NULL, which the
+  shared assemblers refuse; `oracle::emptied` gives those columns the empty
+  string back. A grid cell that is empty reads as NULL for the same reason.
+- **Pages are `OFFSET n ROWS FETCH NEXT m ROWS ONLY`**, ordered by
+  `(SELECT NULL FROM DUAL)` when nothing else orders them
+  (`Paging::OffsetFetchDual`; Oracle has no `FROM`-less `SELECT`).
+  `sql::unpaged` reads both spellings back. A top-100 is
+  `FETCH FIRST 100 ROWS ONLY` (`SelectTop::FetchFirst`).
+- **The parser stays `Generic`.** It is the strictest: a function call it does
+  not know needs Read-write, and `seq.NEXTVAL` is read as the advance it is.
+  sqlparser's Oracle dialect would loosen both, and the Read-only hold is the
+  gate alone (`ReadOnlySession::None`: `SET TRANSACTION READ ONLY` ends with the
+  transaction).
+- **A PL/SQL block gets its `;` back.** The statement splitter drops a final
+  `;`, which SQL must not have and a block must; the driver restores it when
+  the statement is PL/SQL. It is the one place the text sent differs from the
+  text cut.
+- **`sslmode`.** `disable` is plaintext. `prefer` tries TLS, then plaintext,
+  but only when the TLS attempt failed below the login: a refused password is
+  never sent twice, which would count twice against an account lockout.
+  `require`, `verify-ca` and `verify-full` all verify the certificate, as the
+  driver always does, so they ask for no less than the mode says. The
+  certificate field is the wallet directory (`ewallet.pem`). Through a tunnel
+  the three refuse by name: the driver verifies against the address it dials.
+- **Cancel** sends the driver's interrupt on plain TCP, and the session
+  survives. Over TLS it shuts the socket and the session is lost
+  (`Connection::is_lost`); `target::cancel_cost` tells the user.
+- **Writes wait on** a transaction the apply can bracket (`BEGIN` opens a PL/SQL
+  block, and a transaction opens itself with the first statement:
+  `Transaction` has no Oracle spelling yet) and on the write gate reading
+  Oracle's date literals, which it does not. The planned answer is session
+  `NLS_*` settings and string literals, not a wider whitelist.

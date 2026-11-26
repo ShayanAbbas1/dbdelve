@@ -63,11 +63,11 @@ from source and where your data lives are all in [docs/install.md](docs/install.
 
 ## Supported databases
 
-Postgres, MySQL, MariaDB, SQLite, Turso, DuckDB, Snowflake, SQL Server, MongoDB,
+Postgres, MySQL, MariaDB, SQLite, Turso, DuckDB, Snowflake, SQL Server, Oracle, MongoDB,
 Redis (and Valkey, KeyDB, Dragonfly) and ClickHouse.
 
 Any other database with an ODBC driver is reachable through the bundled ODBC
-bridge, with that driver installed: IBM Db2, Oracle, SAP HANA, SAP ASE
+bridge, with that driver installed: IBM Db2, SAP HANA, SAP ASE
 (Sybase), Informix, Teradata, Vertica, Exasol, Firebird, Amazon Redshift,
 Google BigQuery, Databricks, Apache Hive, Trino and Presto, Dremio,
 InterSystems IRIS, Microsoft Access and more. See

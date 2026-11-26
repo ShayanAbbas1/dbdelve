@@ -123,3 +123,23 @@ future anywhere DBDelve spawns one still panics.
 manifests: bans, licenses and sources. Its license list is the permissive
 licenses the graph holds; copyleft is admitted per crate in `exceptions`, never
 added to `allow`.
+
+## oracledb is vendored
+
+`oracledb` (Oracle's own pure-Rust driver, no Instant Client) is vendored in
+`vendor/oracledb` through `[patch.crates-io]`, pinned exactly to a beta
+(`26.0.0-beta.6`); its errors and API change between betas, so it is not bumped
+unasked. Two changes, each marked `dbdelve patch`, re-applied by hand on a bump:
+
+- Its `rustls` dependency takes `ring` with default features off. Left alone
+  the manifest selects `aws-lc-rs`, which builds C and assembly beside the
+  `ring` every other crate here shares; `transport.rs`'s fallback provider is
+  `ring`'s too. `cargo tree -i aws-lc-rs` has to stay empty.
+- `Connection::interrupt_handle()` and `InterruptHandle::interrupt()`: the crate
+  has no way to stop a call from another thread. On plain TCP it sends the
+  interrupt marker the driver already sends when a call timeout expires, so the
+  session and its transaction survive. Over TLS a second writer would corrupt
+  the record layer, so the socket is shut down and the session is lost.
+
+The driver is blocking, so it runs on `workspace::spawn_blocking` like `mysql`
+and `rusqlite`; there is no tokio runtime for it.

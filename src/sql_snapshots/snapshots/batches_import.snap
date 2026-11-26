@@ -1601,6 +1601,163 @@ source: src/sql_snapshots.rs
 [mssql] relation backslash · skip=true
   error: |This engine cannot skip rows that already exist.|
 
+[oracle] base · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] base · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] json cell · skip=false
+  |INSERT INTO "public"."accounts" ("id", "doc") VALUES ('1', '{"a":[1,"it''s",null,{"b":true}],"c":"x\\\\\\\\y"}')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] json cell · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] json null and scalar · skip=false
+  |INSERT INTO "public"."accounts" ("doc") VALUES ('null'),|
+  |('"text"'),|
+  |('7')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] json null and scalar · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] missing cell · skip=false
+  error: |A value is missing from a row to insert.|
+
+[oracle] missing cell · skip=true
+  error: |A value is missing from a row to insert.|
+
+[oracle] empty columns · skip=false
+  error: |There is nothing in this row to insert.|
+
+[oracle] empty columns · skip=true
+  error: |There is nothing in this row to insert.|
+
+[oracle] empty rows · skip=false
+  error: |There are no rows to insert.|
+
+[oracle] empty rows · skip=true
+  error: |There are no rows to insert.|
+
+[oracle] big numbers · skip=false
+  |INSERT INTO "public"."accounts" ("n") VALUES ('9223372036854775807'),|
+  |('9223372036854775808'),|
+  |('0.1'),|
+  |('12345678901234567890')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] big numbers · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] conflict column we"ird · skip=false
+  |INSERT INTO "public"."accounts" ("we""ird") VALUES ('v')|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] conflict column we"ird · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] conflict column back`tick · skip=false
+  |INSERT INTO "public"."accounts" ("back`tick") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] conflict column back`tick · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] conflict column it's · skip=false
+  |INSERT INTO "public"."accounts" ("it's") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] conflict column it's · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] conflict column [x] · skip=false
+  |INSERT INTO "public"."accounts" ("[x]") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] conflict column [x] · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] conflict column a.b · skip=false
+  |INSERT INTO "public"."accounts" ("a.b") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] conflict column a.b · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] conflict column  · skip=false
+  |INSERT INTO "public"."accounts" ("") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] conflict column  · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] operator column · skip=false
+  |INSERT INTO "public"."accounts" ("$set") VALUES ('v')|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] operator column · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation plain · skip=false
+  |INSERT INTO "public"."accounts" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation plain · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation quotes · skip=false
+  |INSERT INTO "my ""odd"" schema"."it's `tick` ""dq""" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation quotes · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation unicode · skip=false
+  |INSERT INTO "données"."Ünïcødé 表" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation unicode · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation reserved · skip=false
+  |INSERT INTO "select"."order" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation reserved · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation mixed case · skip=false
+  |INSERT INTO "Sales"."OrderLines" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation mixed case · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation brackets and dots · skip=false
+  |INSERT INTO "[dbo]"."a.b" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation brackets and dots · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
+[oracle] relation backslash · skip=false
+  |INSERT INTO "back\\slash"."trail\\" ("id", "Name", "flag", "at") VALUES ('1', 'it''s \\ é', 'true', '2024-01-02T03:04:05.123Z'),|
+  |('-2.5', NULL, 'false', '')|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] relation backslash · skip=true
+  error: |This engine cannot skip rows that already exist.|
+
 [mongodb] base · skip=false
   |db.getCollection("accounts").insertMany([{"id": 1, "Name": "it's \\\\ é", "flag": true, "at": ISODate("2024-01-02T03:04:05.123Z")},|
   |{"id": -2.5, "Name": null, "flag": false, "at": ""}])|

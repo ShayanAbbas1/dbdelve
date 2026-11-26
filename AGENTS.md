@@ -1,8 +1,8 @@
 # AGENTS.md
 
 DBDelve is a native database client in Rust on GPUI for macOS, Linux and Windows,
-speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, MongoDB,
-Redis and ClickHouse, and, through a bundled ODBC bridge, anything an ODBC
+speaking Postgres, MySQL, MariaDB, SQLite, DuckDB, Snowflake, SQL Server, Oracle,
+MongoDB, Redis and ClickHouse, and, through a bundled ODBC bridge, anything an ODBC
 driver reaches.
 
 The split everything below leans on is _whose SQL it is_. An editor buffer is
@@ -207,7 +207,8 @@ in the graph.
   changes what DBDelve sends to the server. Treat them like the driver pins.
 - **gpui and gpui-component are vendored** under `vendor/` through
   `[patch.crates-io]`: five crates, for the backdrop blur and for a renderer
-  blend-factor fix that keeps glass from going grey. `Cargo.toml` says which
+  blend-factor fix that keeps glass from going grey. A sixth, `oracledb`, is
+  vendored for its own reasons (`docs/agents/stack.md`). `Cargo.toml` says which
   patch each crate carries and when it can be dropped. Every change there is
   marked `dbdelve patch` and re-applied by hand on a bump, so anything that can
   live in DBDelve's own code goes there instead.
@@ -251,6 +252,7 @@ postgresql://dbdelve:dbdelve@127.0.0.1:55432/dbdelve_dev
 mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
 mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
+oracle://dbdelve:dbdelve@127.0.0.1:51521/FREEPDB1?sslmode=disable
 redis://dbdelve:dbdelve@127.0.0.1:56379/0
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable

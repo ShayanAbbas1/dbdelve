@@ -533,6 +533,65 @@ source: src/sql_snapshots.rs
   |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
 
+[oracle] id
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] composite
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] awkward column
+  |DELETE FROM "public"."accounts" WHERE "we""ird" = '1'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[oracle] empty keys
+  (none)
+
+[oracle] value single quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = 'it''s'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] value backslash before quote
+  |DELETE FROM "public"."accounts" WHERE "Name" = '\\'''|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key=exact:true superset:false subset:false other:false
+
+[oracle] value unicode
+  |DELETE FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] binary
+  |DELETE FROM "public"."accounts" WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] relation plain
+  |DELETE FROM "public"."accounts" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] relation quotes
+  |DELETE FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:false superset:false subset:false other:false
+
+[oracle] relation unicode
+  |DELETE FROM "données"."Ünïcødé 表" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] relation reserved
+  |DELETE FROM "select"."order" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] relation mixed case
+  |DELETE FROM "Sales"."OrderLines" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] relation brackets and dots
+  |DELETE FROM "[dbo]"."a.b" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false
+
+[oracle] relation backslash
+  |DELETE FROM "back\\slash"."trail\\" WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) matches_key=exact:true superset:false subset:false other:false
+
 [generic] id
   |DELETE FROM "public"."accounts" WHERE "id" = '7'|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None matches_key=exact:true superset:false subset:false other:false

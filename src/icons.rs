@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 86] = [
+const ICONS: [(&str, &IconData); 87] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -112,6 +112,7 @@ const ICONS: [(&str, &IconData); 86] = [
     ("icons/engine-snowflake.svg", icondata_si::SiSnowflake),
     ("icons/engine-clickhouse.svg", icondata_si::SiClickhouse),
     ("icons/engine-sqlserver.svg", icondata_lu::LuServer),
+    ("icons/engine-oracle.svg", icondata_lu::LuHardDrive),
     ("icons/engine-mongodb.svg", icondata_si::SiMongodb),
     ("icons/engine-redis.svg", icondata_si::SiRedis),
     ("icons/engine-generic.svg", icondata_lu::LuDatabase),

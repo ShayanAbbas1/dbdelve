@@ -280,6 +280,37 @@ source: src/sql_snapshots.rs
 [mssql] update => (none)
 [mssql] unpaged preview => |[] (0 keys)|
 [mssql] paged preview => |[] (0 keys)|
+[oracle] no order by => |[] (0 keys)|
+[oracle] simple => |[a asc=true] (1 keys)|
+[oracle] desc then bare => |[a asc=false ; b asc=true] (2 keys)|
+[oracle] lower-case desc => |[a asc=false] (1 keys)|
+[oracle] asc spelled out => |[a asc=true] (1 keys)|
+[oracle] ordinal => |[1 asc=true] (1 keys)|
+[oracle] expression => |[lower(a) asc=false ; b + 1 asc=true] (2 keys)|
+[oracle] double-quoted => |["Name" asc=false ; "id" asc=true] (2 keys)|
+[oracle] double-quoted, escaped quote => (none)
+[oracle] backticked, escaped tick => (none)
+[oracle] backticked => |[`Name` asc=false ; `id` asc=true] (2 keys)|
+[oracle] bracketed => (none)
+[oracle] subquery only => |[] (0 keys)|
+[oracle] subquery and outer => |[b asc=false] (1 keys)|
+[oracle] then limit => |[a asc=false] (1 keys)|
+[oracle] then limit offset => |[a asc=true] (1 keys)|
+[oracle] then offset fetch => (none)
+[oracle] where, group by, order by => |[a asc=false] (1 keys)|
+[oracle] union ordered => |[a asc=false] (1 keys)|
+[oracle] cte => |[a asc=true] (1 keys)|
+[oracle] trailing comment => |[a asc=true] (1 keys)|
+[oracle] semicolon => |[a asc=true] (1 keys)|
+[oracle] two statements => (none)
+[oracle] nulls first => (none)
+[oracle] order by all => (none)
+[oracle] explain => (none)
+[oracle] no from => (none)
+[oracle] unparseable => (none)
+[oracle] update => (none)
+[oracle] unpaged preview => |[] (0 keys)|
+[oracle] paged preview => |[] (0 keys)|
 [mongodb] no order by => (none)
 [mongodb] simple => (none)
 [mongodb] desc then bare => (none)

@@ -6884,6 +6884,760 @@ source: src/sql_snapshots.rs
 [mssql] we"ird Between · half range
   (none)
 
+[oracle] Name Equals · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Equals · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Equals · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '\\''' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Equals · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Equals · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Equals · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '100%_[x]' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Equals · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '*?[a]\\' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Equals · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotEquals · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotEquals · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotEquals · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '\\''' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name NotEquals · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name NotEquals · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotEquals · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '100%_[x]' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotEquals · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '*?[a]\\' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name NotEquals · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Contains · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Contains · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%it''s%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Contains · backslash before quote
+  (none)
+
+[oracle] Name Contains · odd backslashes then quote
+  (none)
+
+[oracle] Name Contains · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Contains · like metacharacters
+  (none)
+
+[oracle] Name Contains · glob metacharacters
+  (none)
+
+[oracle] Name Contains · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotContains · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" NOT LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotContains · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" NOT LIKE '%it''s%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotContains · backslash before quote
+  (none)
+
+[oracle] Name NotContains · odd backslashes then quote
+  (none)
+
+[oracle] Name NotContains · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" NOT LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotContains · like metacharacters
+  (none)
+
+[oracle] Name NotContains · glob metacharacters
+  (none)
+
+[oracle] Name NotContains · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" NOT LIKE '%%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name StartsWith · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE 'ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name StartsWith · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE 'it''s%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name StartsWith · backslash before quote
+  (none)
+
+[oracle] Name StartsWith · odd backslashes then quote
+  (none)
+
+[oracle] Name StartsWith · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name StartsWith · like metacharacters
+  (none)
+
+[oracle] Name StartsWith · glob metacharacters
+  (none)
+
+[oracle] Name StartsWith · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name EndsWith · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name EndsWith · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name EndsWith · backslash before quote
+  (none)
+
+[oracle] Name EndsWith · odd backslashes then quote
+  (none)
+
+[oracle] Name EndsWith · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name EndsWith · like metacharacters
+  (none)
+
+[oracle] Name EndsWith · glob metacharacters
+  (none)
+
+[oracle] Name EndsWith · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Greater · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" > 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Greater · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" > 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Greater · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" > '\\''' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Greater · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" > 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Greater · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" > '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Greater · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" > '100%_[x]' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Greater · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" > '*?[a]\\' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Greater · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" > '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name GreaterOrEqual · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name GreaterOrEqual · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name GreaterOrEqual · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= '\\''' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name GreaterOrEqual · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name GreaterOrEqual · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name GreaterOrEqual · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= '100%_[x]' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name GreaterOrEqual · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= '*?[a]\\' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name GreaterOrEqual · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" >= '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Less · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" < 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Less · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" < 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Less · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" < '\\''' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Less · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" < 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Less · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" < '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Less · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" < '100%_[x]' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Less · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" < '*?[a]\\' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Less · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" < '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name LessOrEqual · plain
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name LessOrEqual · single quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name LessOrEqual · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= '\\''' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name LessOrEqual · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name LessOrEqual · unicode
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name LessOrEqual · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= '100%_[x]' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name LessOrEqual · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= '*?[a]\\' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name LessOrEqual · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" <= '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name IsNull · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" IS NULL LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name IsNotNull · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" IS NOT NULL LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name IsEmpty · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name IsNotEmpty · empty
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name InList · list
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('a', 'it''s', 'b') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name InList · blank list
+  (none)
+
+[oracle] Name NotInList · list
+  |SELECT * FROM "public"."accounts" WHERE "Name" NOT IN ('a', 'it''s', 'b') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name NotInList · blank list
+  (none)
+
+[oracle] Name Between · range
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Between · dated range
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '2024-01-01' AND '2024-12-31' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Between · half range
+  (none)
+
+[oracle] Name Regex · plain
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", 'ok') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Regex · single quote
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", 'it''s') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Regex · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", '\\''') LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Regex · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", 'a\\\\\\''b') LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Regex · unicode
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", '李小龍 ünï 😀') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Regex · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", '100%_[x]') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Name Regex · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", '*?[a]\\') LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] Name Regex · empty
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("Name", '') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Equals · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = 'ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Equals · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Equals · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = '\\''' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Equals · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Equals · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Equals · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = '100%_[x]' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Equals · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = '*?[a]\\' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Equals · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotEquals · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> 'ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotEquals · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotEquals · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '\\''' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird NotEquals · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird NotEquals · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotEquals · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '100%_[x]' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotEquals · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '*?[a]\\' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird NotEquals · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Contains · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Contains · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%it''s%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Contains · backslash before quote
+  (none)
+
+[oracle] we"ird Contains · odd backslashes then quote
+  (none)
+
+[oracle] we"ird Contains · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Contains · like metacharacters
+  (none)
+
+[oracle] we"ird Contains · glob metacharacters
+  (none)
+
+[oracle] we"ird Contains · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotContains · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" NOT LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotContains · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" NOT LIKE '%it''s%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotContains · backslash before quote
+  (none)
+
+[oracle] we"ird NotContains · odd backslashes then quote
+  (none)
+
+[oracle] we"ird NotContains · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" NOT LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotContains · like metacharacters
+  (none)
+
+[oracle] we"ird NotContains · glob metacharacters
+  (none)
+
+[oracle] we"ird NotContains · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" NOT LIKE '%%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird StartsWith · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE 'ok%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird StartsWith · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE 'it''s%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird StartsWith · backslash before quote
+  (none)
+
+[oracle] we"ird StartsWith · odd backslashes then quote
+  (none)
+
+[oracle] we"ird StartsWith · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird StartsWith · like metacharacters
+  (none)
+
+[oracle] we"ird StartsWith · glob metacharacters
+  (none)
+
+[oracle] we"ird StartsWith · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird EndsWith · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird EndsWith · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird EndsWith · backslash before quote
+  (none)
+
+[oracle] we"ird EndsWith · odd backslashes then quote
+  (none)
+
+[oracle] we"ird EndsWith · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird EndsWith · like metacharacters
+  (none)
+
+[oracle] we"ird EndsWith · glob metacharacters
+  (none)
+
+[oracle] we"ird EndsWith · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" LIKE '%' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Greater · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > 'ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Greater · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Greater · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > '\\''' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Greater · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Greater · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Greater · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > '100%_[x]' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Greater · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > '*?[a]\\' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Greater · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" > '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird GreaterOrEqual · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= 'ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird GreaterOrEqual · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird GreaterOrEqual · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '\\''' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird GreaterOrEqual · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird GreaterOrEqual · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird GreaterOrEqual · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '100%_[x]' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird GreaterOrEqual · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '*?[a]\\' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird GreaterOrEqual · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" >= '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Less · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < 'ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Less · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Less · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < '\\''' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Less · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Less · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Less · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < '100%_[x]' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Less · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < '*?[a]\\' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Less · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" < '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird LessOrEqual · plain
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= 'ok' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird LessOrEqual · single quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird LessOrEqual · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '\\''' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird LessOrEqual · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= 'a\\\\\\''b' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird LessOrEqual · unicode
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird LessOrEqual · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '100%_[x]' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird LessOrEqual · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '*?[a]\\' LIMIT 1000|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird LessOrEqual · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <= '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird IsNull · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" IS NULL LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird IsNotNull · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" IS NOT NULL LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird IsEmpty · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" = '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird IsNotEmpty · empty
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" <> '' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird InList · list
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" IN ('a', 'it''s', 'b') LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird InList · blank list
+  (none)
+
+[oracle] we"ird NotInList · list
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" NOT IN ('a', 'it''s', 'b') LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird NotInList · blank list
+  (none)
+
+[oracle] we"ird Between · range
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Between · dated range
+  |SELECT * FROM "public"."accounts" WHERE "we""ird" BETWEEN '2024-01-01' AND '2024-12-31' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Between · half range
+  (none)
+
+[oracle] we"ird Regex · plain
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", 'ok') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Regex · single quote
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", 'it''s') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Regex · backslash before quote
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", '\\''') LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Regex · odd backslashes then quote
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", 'a\\\\\\''b') LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Regex · unicode
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", '李小龍 ünï 😀') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Regex · like metacharacters
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", '100%_[x]') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] we"ird Regex · glob metacharacters
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", '*?[a]\\') LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] we"ird Regex · empty
+  |SELECT * FROM "public"."accounts" WHERE REGEXP_LIKE("we""ird", '') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
 [mongodb] Name Equals · plain
   |db.getCollection("accounts").find({"Name": {"$eq": "ok"}}).limit(1000)|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None

@@ -85,6 +85,28 @@ services:
       timeout: 5s
       retries: 60
 
+  oracle:
+    # A named release, not latest, so a new server reaches the live tests through
+    # a commit. `-slim-faststart` ships the database already created, so the
+    # container is up in seconds rather than the minutes a first start takes.
+    image: gvenzl/oracle-free:23.9-slim-faststart
+    environment:
+      ORACLE_PASSWORD: DbDelve_OracleSys1
+      APP_USER: dbdelve
+      APP_USER_PASSWORD: dbdelve
+    ports:
+      - "${DBDELVE_ORACLE_PORT:-51521}:1521"
+    volumes:
+      - dbdelve-oracle-data:/opt/oracle/oradata
+      - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      # A row count as the app login: the listener answers before the seed has
+      # run, and `type_gallery` is the last table it creates.
+      test: ["CMD-SHELL", "echo 'SELECT COUNT(*) FROM type_gallery;' | sqlplus -s dbdelve/dbdelve@//localhost:1521/FREEPDB1 | grep -q 2"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+
   mongo:
     # Not 8.0 or latest: on a Linux kernel 6.19+ (current Docker Desktop VMs)
     # they refuse to start (SERVER-121912). 8.2 is the line that boots there.
@@ -218,6 +240,7 @@ volumes:
   dbdelve-mysql-data:
   dbdelve-mariadb-data:
   dbdelve-mssql-data:
+  dbdelve-oracle-data:
   dbdelve-mongo-data:
   dbdelve-clickhouse-data:
   dbdelve-db2-data:

@@ -371,7 +371,11 @@ fn update_batches_per_engine() {
 fn expect_by_engine(engine: Engine, skip: bool) -> bool {
     match engine {
         // Each has `SkipDuplicates::None`: no clause to skip a row that exists.
-        Engine::Snowflake | Engine::SqlServer | Engine::ClickHouse | Engine::Generic => !skip,
+        Engine::Snowflake
+        | Engine::SqlServer
+        | Engine::ClickHouse
+        | Engine::Oracle
+        | Engine::Generic => !skip,
         Engine::Redis => false,
         _ => true,
     }

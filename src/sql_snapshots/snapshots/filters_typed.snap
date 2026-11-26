@@ -6482,6 +6482,726 @@ source: src/sql_snapshots.rs
   |SELECT * FROM "public"."accounts" WHERE "Name" = N'' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
+[oracle] Equals none · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals none · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals none · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals none · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals none · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varchar(20) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varchar(20) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varchar(20) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals nvarchar(20) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals nvarchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals nvarchar(20) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals nvarchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals nvarchar(20) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals int · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals int · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals int · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals int · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals int · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bit · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bit · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bit · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bit · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bit · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals datetime · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals datetime · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals datetime · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals datetime · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals datetime · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals date · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals date · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals date · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals date · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals date · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varbinary(16) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varbinary(16) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varbinary(16) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varbinary(16) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals varbinary(16) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals uniqueidentifier · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals uniqueidentifier · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals uniqueidentifier · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals uniqueidentifier · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals uniqueidentifier · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bytea · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bytea · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bytea · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bytea · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Equals bytea · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals none · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals none · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals none · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals none · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals none · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varchar(20) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varchar(20) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varchar(20) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals nvarchar(20) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals nvarchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals nvarchar(20) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals nvarchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals nvarchar(20) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals int · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals int · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals int · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals int · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals int · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bit · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bit · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bit · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bit · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bit · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals datetime · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals datetime · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals datetime · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals datetime · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals datetime · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals date · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals date · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals date · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals date · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals date · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varbinary(16) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varbinary(16) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varbinary(16) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varbinary(16) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals varbinary(16) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals uniqueidentifier · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals uniqueidentifier · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals uniqueidentifier · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals uniqueidentifier · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals uniqueidentifier · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bytea · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> 'ok' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bytea · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '李小龍 ünï 😀' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bytea · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '0xDEADbeef' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bytea · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '2024-01-02 03:04:05.123' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] NotEquals bytea · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" <> '42' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains none · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains none · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains none · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains none · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains none · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varchar(20) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varchar(20) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varchar(20) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains nvarchar(20) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains nvarchar(20) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains nvarchar(20) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains nvarchar(20) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains nvarchar(20) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains int · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains int · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains int · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains int · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains int · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bit · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bit · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bit · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bit · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bit · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains datetime · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains datetime · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains datetime · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains datetime · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains datetime · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains date · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains date · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains date · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains date · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains date · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varbinary(16) · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varbinary(16) · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varbinary(16) · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varbinary(16) · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains varbinary(16) · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains uniqueidentifier · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains uniqueidentifier · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains uniqueidentifier · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains uniqueidentifier · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains uniqueidentifier · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bytea · ok
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%ok%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bytea · 李小龍 ünï 😀
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%李小龍 ünï 😀%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bytea · 0xDEADbeef
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%0xDEADbeef%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bytea · 2024-01-02 03:04:05.123
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%2024-01-02 03:04:05.123%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Contains bytea · 42
+  |SELECT * FROM "public"."accounts" WHERE "Name" LIKE '%42%' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList none · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList varchar(20) · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList nvarchar(20) · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList int · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList bit · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList datetime · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList date · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList varbinary(16) · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList uniqueidentifier · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] InList bytea · 1, 2
+  |SELECT * FROM "public"."accounts" WHERE "Name" IN ('1', '2') LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between none · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between varchar(20) · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between nvarchar(20) · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between int · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between bit · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between datetime · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between date · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between varbinary(16) · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between uniqueidentifier · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] Between bytea · 1..9
+  |SELECT * FROM "public"."accounts" WHERE "Name" BETWEEN '1' AND '9' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty none · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty varchar(20) · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty nvarchar(20) · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty int · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty bit · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty datetime · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty date · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty varbinary(16) · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty uniqueidentifier · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] IsEmpty bytea · 
+  |SELECT * FROM "public"."accounts" WHERE "Name" = '' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
 [generic] Equals none · ok
   |SELECT * FROM "public"."accounts" WHERE "Name" = 'ok' LIMIT 1000|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None

@@ -386,6 +386,44 @@ source: src/sql_snapshots.rs
 [mssql] empty
   error: |There are no edits to apply.|
 
+[oracle] mixed bracketed
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '6';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] one delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] one update
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '5';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] one insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] marks only
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '8';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] adds only
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', 'a');|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('10', 'b');|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] an insert holding a null
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] empty
+  error: |There are no edits to apply.|
+
 [generic] mixed bracketed
   |BEGIN;|
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|

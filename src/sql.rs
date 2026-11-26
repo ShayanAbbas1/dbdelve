@@ -355,6 +355,19 @@ pub fn paged(engine: Engine, statement: &str, key: &[String]) -> Option<String> 
     }
 }
 
+/// What an `OFFSET … FETCH` page is ordered by when nothing orders it: a
+/// constant, so the clause is satisfied and no row order is promised.
+const UNORDERED: &str = " ORDER BY (SELECT NULL)";
+/// [`UNORDERED`] as Oracle spells it, which has no `SELECT` without a `FROM`.
+const UNORDERED_DUAL: &str = " ORDER BY (SELECT NULL FROM DUAL)";
+
+fn unordered(paging: Paging) -> &'static str {
+    match paging {
+        Paging::OffsetFetchDual => UNORDERED_DUAL.trim_start(),
+        _ => UNORDERED.trim_start(),
+    }
+}
+
 /// A generated preview's page, spelled the way `spec` reads one.
 ///
 /// Every engine but SQL Server takes the `LIMIT … OFFSET …` a preview is
@@ -413,7 +426,7 @@ pub(crate) fn sql_paged(spec: &EngineSpec, statement: &str, key: &[String]) -> O
         Some(_) => String::new(),
         None => {
             key.iter()
-                .fold("ORDER BY (SELECT NULL)".to_string(), |order, column| {
+                .fold(unordered(spec.sql.paging).to_string(), |order, column| {
                     format!("{order}, {}", spec.quote_identifier(column))
                 })
                 + " "
@@ -440,9 +453,13 @@ pub fn unpaged(statement: &str) -> String {
         rows.parse::<usize>().ok()?;
         // A sort the user asked for ends in its direction, never in a quoted
         // key column, so one inside a filter's string literal is left alone.
-        let head = head
-            .rsplit_once(" ORDER BY (SELECT NULL)")
-            .filter(|(_, key)| key.is_empty() || (key.starts_with(", ") && key.ends_with('"')))
+        let head = [UNORDERED, UNORDERED_DUAL]
+            .iter()
+            .find_map(|marker| {
+                head.rsplit_once(*marker).filter(|(_, key)| {
+                    key.is_empty() || (key.starts_with(", ") && key.ends_with('"'))
+                })
+            })
             .map_or(head, |(head, _)| head);
         Some(format!("{head} LIMIT {rows} OFFSET {offset}"))
     };
@@ -8899,8 +8916,23 @@ mod tests {
                  ORDER BY \"id\" DESC OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
             )
         );
+        // Oracle takes the same clause, ordered by what it can spell: a scalar
+        // subquery on `DUAL`, and no `FROM`-less `SELECT`.
+        let unsorted = paged(Engine::Oracle, &statement(" LIMIT 1000"), &["id".into()]).unwrap();
+        assert_eq!(
+            unsorted,
+            "SELECT * FROM \"dbo\".\"accounts\" ORDER BY (SELECT NULL FROM DUAL), \"id\" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY"
+        );
+        assert_eq!(unpaged(&unsorted), statement(" LIMIT 1000 OFFSET 0"));
+        assert_eq!(
+            paged(Engine::Oracle, &sorted, &[]).as_deref(),
+            paged(Engine::SqlServer, &sorted, &[]).as_deref()
+        );
         // Every other engine runs the statement the gate read, unchanged.
-        for engine in Engine::ALL.into_iter().filter(|e| *e != Engine::SqlServer) {
+        for engine in Engine::ALL
+            .into_iter()
+            .filter(|e| !matches!(e, Engine::SqlServer | Engine::Oracle))
+        {
             assert_eq!(
                 paged(engine, &sorted, &[]).as_deref(),
                 Some(sorted.as_str()),

@@ -562,6 +562,7 @@ impl Workspace {
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
             | ConnectionConfig::SqlServer(server)
+            | ConnectionConfig::Oracle(server)
             | ConnectionConfig::ClickHouse(server)
             | ConnectionConfig::Redis(server)
             | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
@@ -3424,6 +3425,7 @@ fn stored_config(
         | Engine::MySql
         | Engine::MariaDb
         | Engine::SqlServer
+        | Engine::Oracle
         | Engine::ClickHouse
         | Engine::MongoDb
         | Engine::Redis => {
@@ -3446,6 +3448,7 @@ fn stored_config(
                 Engine::MySql => ConnectionConfig::MySql(server),
                 Engine::MariaDb => ConnectionConfig::MariaDb(server),
                 Engine::SqlServer => ConnectionConfig::SqlServer(server),
+                Engine::Oracle => ConnectionConfig::Oracle(server),
                 Engine::ClickHouse => ConnectionConfig::ClickHouse(server),
                 Engine::Redis => ConnectionConfig::Redis(server),
                 Engine::MongoDb => ConnectionConfig::MongoDb(crate::db::MongoConfig {

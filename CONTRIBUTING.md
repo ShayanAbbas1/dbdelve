@@ -38,7 +38,7 @@ To see the ODBC tile, stage the bridge first with `dev/plugins.sh` (`--release` 
 release profile, `--echo` to add the test plugin). On Linux the bridge links the
 system unixODBC, so building it needs `sudo apt install unixodbc-dev`.
 
-`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, MongoDB, Redis and ClickHouse dev databases (see
+`docker compose up -d` starts the Postgres, MySQL, MariaDB, SQL Server, Oracle, MongoDB, Redis and ClickHouse dev databases (see
 `compose.yaml`). It also starts two SSH bastions for testing tunnels;
 `dev/ssh/setup.sh` generates a key and an `ssh_config` for them into
 `dev/ssh/.generated/` (gitignored). `compose.yaml` pins the project name to
@@ -55,6 +55,7 @@ mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 redis://dbdelve:dbdelve@127.0.0.1:56379/0
 clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable
+oracle://dbdelve:dbdelve@127.0.0.1:51521/FREEPDB1?sslmode=disable
 ```
 
 The MongoDB service is `mongo` in `compose.yaml`, on port 57017; its seed is
@@ -114,6 +115,7 @@ export dbdelve_MARIADB_URL=mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
 export dbdelve_MONGO_URL=mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
 export dbdelve_REDIS_URL=redis://dbdelve:dbdelve@127.0.0.1:56379/0
 export dbdelve_CLICKHOUSE_URL='clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable'
+export dbdelve_ORACLE_URL='oracle://dbdelve:dbdelve@127.0.0.1:51521/FREEPDB1?sslmode=disable'
 export dbdelve_SQLITE_PATH=$(pwd)/dev/dbdelve_dev.db
 
 cargo test -- --include-ignored
@@ -246,7 +248,7 @@ chore(release): bump version to 0.3.8
 
 | Scope         | Covers                                                                  |
 | ------------- | ----------------------------------------------------------------------- |
-| `postgres`, `mysql`, `sqlite`, `mssql`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb`, `clickhouse` | One engine's module in `src/db/` (MySQL covers MariaDB) |
+| `postgres`, `mysql`, `sqlite`, `mssql`, `oracle`, `mongo`, `redis`, `snowflake`, `turso`, `duckdb`, `clickhouse` | One engine's module in `src/db/` (MySQL covers MariaDB) |
 | `db`          | Engine dispatch and what every engine shares (`src/db/mod.rs`)          |
 | `ssh`         | SSH tunnels                                                             |
 | `plugins`     | The plugin host, the protocol and the bridges under `plugins/`          |

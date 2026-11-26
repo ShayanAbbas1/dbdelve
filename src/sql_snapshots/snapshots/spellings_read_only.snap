@@ -19,6 +19,8 @@ source: src/sql_snapshots.rs
 [clickhouse] read_only=false => (none)
 [mssql] read_only=true => (none)
 [mssql] read_only=false => (none)
+[oracle] read_only=true => (none)
+[oracle] read_only=false => (none)
 [mongodb] read_only=true => (none)
 [mongodb] read_only=false => (none)
 [redis] read_only=true => (none)

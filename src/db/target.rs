@@ -7,7 +7,7 @@ use super::plugin::Plugin;
 use super::spec::Abilities;
 use super::{
     DbError, Engine, Fields, RelationKind, SchemaExport, ServerConfig, Syntax, clickhouse, duckdb,
-    external, mssql, postgres, redis, turso,
+    external, mssql, oracle, postgres, redis, turso,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -424,6 +424,7 @@ pub fn is_cancel(target: Target, error: &DbError) -> bool {
         // The second is dbdelve's own, a cancel between partitions.
         Engine::Snowflake => matches!(message, "SQL execution canceled" | "Cancelled."),
         Engine::SqlServer => message.starts_with(mssql::CANCELLED),
+        Engine::Oracle => oracle::is_cancel(message),
         Engine::MongoDb => message == "Cancelled.",
         Engine::Redis => message == redis::CANCELLED,
         Engine::ClickHouse => message == clickhouse::CANCELLED,
@@ -487,6 +488,13 @@ pub fn cancel_cost(
         Engine::Redis => Some(
             "A cancel closes the session it lands on: a MULTI or WATCH it held is gone, and the \
              next command opens a new one."
+                .into(),
+        ),
+        // Over TLS the driver can only shut the socket; in the clear it asks
+        // the server to stop the call, and the session stays.
+        Engine::Oracle => Some(
+            "On an encrypted connection a cancel closes the session: a transaction it held is \
+             rolled back, and the next statement opens a new one."
                 .into(),
         ),
         Engine::ClickHouse if !reads => Some(
@@ -801,7 +809,7 @@ mod tests {
                 }
                 Engine::MySql | Engine::MariaDb | Engine::ClickHouse => Levels::DatabaseIsSchema,
                 Engine::MongoDb | Engine::Redis => Levels::DatabaseHoldsObjects,
-                Engine::Sqlite | Engine::Turso | Engine::Generic => Levels::Flat,
+                Engine::Sqlite | Engine::Turso | Engine::Oracle | Engine::Generic => Levels::Flat,
             };
             assert_eq!(Target::built_in(engine).levels(), levels, "{engine:?}");
             // A plugin has none of the abilities whatever dialect it speaks.

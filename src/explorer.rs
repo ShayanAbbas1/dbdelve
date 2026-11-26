@@ -1382,6 +1382,10 @@ pub fn select_top_sql(engine: Engine, schema: &str, relation: &str) -> Option<St
                 SelectTop::Top => {
                     format!("SELECT TOP 100 * FROM {}", spec.qualified(schema, relation))
                 }
+                SelectTop::FetchFirst => format!(
+                    "SELECT * FROM {} FETCH FIRST 100 ROWS ONLY",
+                    spec.qualified(schema, relation)
+                ),
             }
         }
         Syntax::Mongo => mql::browse::find_preview(relation, "", Some(100), 0),
