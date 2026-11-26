@@ -604,12 +604,16 @@ impl Workspace {
 
         let engine = config.engine();
         let sslmode = config.server().map(|server| server.sslmode);
+        let has_server = config.server().is_some();
         let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
             // A URL for another kind of engine unmounts the field it was
             // pasted into, and `set_target` hands focus on.
             form.set_target(crate::db::Target::built_in(engine));
             form.srv = srv;
+            if has_server {
+                form.auto_host = None;
+            }
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
                 // cannot land in a form still set to `prefer`.

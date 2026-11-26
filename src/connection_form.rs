@@ -142,6 +142,10 @@ pub(crate) struct ConnectionForm {
     /// or the default of the profile the form was opened on. A name that still
     /// equals it was never the user's.
     pub(crate) auto_name: String,
+    /// The host the app itself last wrote into a new form, which follows the
+    /// target for as long as the field still holds it. `None` when the host
+    /// came from a profile or a URL, which nothing rewrites.
+    pub(crate) auto_host: Option<&'static str>,
     /// What a duplicate takes from the connection it copies, given on save.
     pub(crate) shortcuts: Shortcuts,
     pub(crate) folds: BTreeMap<String, bool>,
@@ -246,11 +250,20 @@ impl ConnectionForm {
                 .placeholder("DSN or connection string")
                 .default_value(value(external.map(|external| external.connection.as_str())))
         });
+        let engine = config.map(ConnectionConfig::engine).unwrap_or_default();
+        let auto_host = config
+            .is_none()
+            .then(|| prefilled_host(Target::built_in(engine), false, false));
         let host = cx.new(|cx| {
-            InputState::new(window, cx).default_value(value(
-                server
-                    .map(|server| server.host.as_str())
-                    .or_else(|| account.and_then(|account| account.host.as_deref())),
+            InputState::new(window, cx).default_value(auto_host.map_or_else(
+                || {
+                    value(
+                        server
+                            .map(|server| server.host.as_str())
+                            .or_else(|| account.and_then(|account| account.host.as_deref())),
+                    )
+                },
+                str::to_string,
             ))
         });
         let port = cx.new(|cx| {
@@ -449,7 +462,7 @@ impl ConnectionForm {
         let mut form = Self {
             needs_focus: None,
             url,
-            engine: config.map(ConnectionConfig::engine).unwrap_or_default(),
+            engine,
             driver: config.map_or(Driver::BuiltIn, |config| config.target().driver),
             name,
             color: None,
@@ -502,6 +515,7 @@ impl ConnectionForm {
             placeholders_for: None,
             last_url: SharedString::default(),
             auto_name: String::new(),
+            auto_host,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
             _subscriptions: subscriptions,
@@ -723,7 +737,8 @@ impl ConnectionForm {
     /// The placeholders that say what a blank field means, which is the
     /// engine's to say: its port, whether it asks for a user, what it names
     /// a connection after, unless a service answers for the blank instead.
-    /// Written whenever any of that has changed since.
+    /// Written whenever any of that has changed since, along with a new
+    /// form's Host while it still holds the one the app wrote.
     pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
         let beside_a_service = self.typed_service(cx).is_some();
         let root_certificate = root_certificate_placeholder(self.sslmode, beside_a_service);
@@ -743,6 +758,15 @@ impl ConnectionForm {
             return;
         }
         self.placeholders_for = Some(written);
+        let host = prefilled_host(self.target(), beside_a_service, srv_name);
+        if let Some(written_host) = self.auto_host
+            && written_host != host
+            && self.host.read(cx).value().trim() == written_host
+        {
+            self.auto_host = Some(host);
+            self.host
+                .update(cx, |input, cx| input.set_value(host, window, cx));
+        }
         let blank = if beside_a_service {
             from_the_service(placeholders(self.target()))
         } else if srv_name {
@@ -877,10 +901,9 @@ impl ConnectionForm {
         self.server_requiring(&["Username"], cx)
     }
 
-    /// The server fields, with whichever of `required` always required:
-    /// MongoDB asks for no username, since a server without authentication is
-    /// an ordinary one there. A blank host is the engine's default one, except
-    /// beside a service or an SRV name, which `localhost` cannot stand in for.
+    /// The server fields, with the host and whichever of `required` always
+    /// required: MongoDB asks for no username, since a server without
+    /// authentication is an ordinary one there.
     fn server_requiring(&self, required: &[&str], cx: &App) -> Result<ServerConfig, String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let host = read(&self.host);
@@ -892,13 +915,12 @@ impl ConnectionForm {
         // Blank database is the one the server signs the login into, which is
         // what a profile that moves between databases starts on. A service
         // answers for the rest, and says so on connect if it does not.
-        if user.is_empty() && required.contains(&"Username") && service.is_none() {
-            return Err("Username is required.".into());
+        for (label, value) in [("Host", &host), ("Username", &user)] {
+            let needed = label == "Host" || required.contains(&label);
+            if value.is_empty() && needed && service.is_none() {
+                return Err(format!("{label} is required."));
+            }
         }
-        if host.is_empty() && service.is_none() && self.host_is_srv_name() {
-            return Err("Host is required.".into());
-        }
-        let host = host_or_default(host, self.engine, service.is_some());
 
         let port = parse_port("Port", &port)?;
 
@@ -1123,21 +1145,12 @@ pub(crate) fn summary(target: Target, srv: bool, typed: &Typed) -> Option<String
             (!typed.account.is_empty()).then(|| signed_in(database(typed.account.to_string())))
         }
         Fields::Server => {
-            let hostless = typed.host.is_empty() && typed.service.is_none();
-            // The default host stands in only once the form says something
-            // else about where it points: a user on its own points nowhere.
-            let says_where = !typed.port.is_empty() || !typed.database.is_empty();
-            if hostless && (srv && engine.resolves_srv() || !says_where) {
+            if typed.host.is_empty() && typed.service.is_none() {
                 return None;
             }
-            let host = if hostless {
-                engine.spec().hints.host
-            } else {
-                typed.host
-            };
             // An SRV name takes no port, so whatever the hidden field holds
             // is not where it points.
-            let place = match (host, typed.port, typed.service) {
+            let place = match (typed.host, typed.port, typed.service) {
                 ("", _, Some(service)) => format!("service {service}"),
                 (host, port, _) if !(port.is_empty() || srv && engine.resolves_srv()) => {
                     format!("{host}:{port}")
@@ -1322,13 +1335,15 @@ impl Reported {
     }
 }
 
-/// A blank host is the one the placeholder shows, as a blank port is the
-/// engine's own. Beside a service it stays blank: the service names the host.
-fn host_or_default(host: String, engine: Engine, has_service: bool) -> String {
-    if host.is_empty() && !has_service {
-        engine.spec().hints.host.to_string()
+/// What a new form's Host holds until the user types one: the engine's own
+/// hint, as an editable value, so a blank Host can stay an error. Blank where
+/// something else names the host: a service, an SRV name, Snowflake's account
+/// (whose host shares the field), or a target with no host at all.
+fn prefilled_host(target: Target, beside_a_service: bool, srv_name: bool) -> &'static str {
+    if target.fields() == Fields::Server && !beside_a_service && !srv_name {
+        target.engine.spec().hints.host
     } else {
-        host
+        ""
     }
 }
 
@@ -1425,46 +1440,35 @@ mod tests {
     use crate::db::{ConnectionConfig, ServerConfig, SslMode};
 
     #[test]
-    fn a_blank_host_shows_the_default_in_the_summary_except_for_an_srv_name() {
-        let typed = Typed {
-            port: "5432",
-            database: "shop",
-            user: "root",
-            ..Typed::default()
-        };
-        assert_eq!(
-            summary(Target::built_in(Engine::Postgres), false, &typed).as_deref(),
-            Some("root@localhost:5432/shop")
-        );
-        assert_eq!(
-            summary(Target::built_in(Engine::MongoDb), true, &typed),
-            None
-        );
-    }
-
-    #[test]
-    fn a_blank_host_is_the_one_the_placeholder_shows() {
+    fn a_new_form_prefills_the_host_only_where_it_is_a_servers_own() {
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            let expected = match engine.fields() {
+                Fields::Server => "localhost",
+                Fields::File | Fields::Account | Fields::ConnectionString => "",
+            };
+            assert_eq!(prefilled_host(target, false, false), expected, "{engine:?}");
+            assert_eq!(prefilled_host(target, true, false), "", "{engine:?}");
+        }
         for engine in [
             Engine::Postgres,
             Engine::MySql,
-            Engine::Redis,
             Engine::MongoDb,
+            Engine::Redis,
         ] {
             assert_eq!(
-                host_or_default(String::new(), engine, false),
+                prefilled_host(Target::built_in(engine), false, false),
                 engine.spec().hints.host
             );
-            assert_eq!(host_or_default(String::new(), engine, false), "localhost");
         }
         assert_eq!(
-            host_or_default("db.example.test".into(), Engine::MySql, false),
-            "db.example.test"
+            prefilled_host(Target::built_in(Engine::Snowflake), false, false),
+            ""
         );
-    }
-
-    #[test]
-    fn a_blank_host_beside_a_service_stays_blank() {
-        assert_eq!(host_or_default(String::new(), Engine::Postgres, true), "");
+        assert_eq!(
+            prefilled_host(Target::built_in(Engine::MongoDb), false, true),
+            ""
+        );
     }
 
     #[test]
