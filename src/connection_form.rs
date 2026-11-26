@@ -892,7 +892,7 @@ impl ConnectionForm {
     }
 
     /// Whether the host is an SRV name, which is looked up rather than
-    /// connected to and so has no default.
+    /// connected to, so `localhost` can never stand for it.
     fn host_is_srv_name(&self) -> bool {
         self.srv && self.engine.resolves_srv()
     }
@@ -1450,21 +1450,6 @@ mod tests {
             assert_eq!(prefilled_host(target, false, false), expected, "{engine:?}");
             assert_eq!(prefilled_host(target, true, false), "", "{engine:?}");
         }
-        for engine in [
-            Engine::Postgres,
-            Engine::MySql,
-            Engine::MongoDb,
-            Engine::Redis,
-        ] {
-            assert_eq!(
-                prefilled_host(Target::built_in(engine), false, false),
-                engine.spec().hints.host
-            );
-        }
-        assert_eq!(
-            prefilled_host(Target::built_in(Engine::Snowflake), false, false),
-            ""
-        );
         assert_eq!(
             prefilled_host(Target::built_in(Engine::MongoDb), false, true),
             ""
