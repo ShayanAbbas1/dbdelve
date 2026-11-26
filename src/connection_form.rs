@@ -769,7 +769,7 @@ impl ConnectionForm {
         }
         let blank = if beside_a_service {
             from_the_service(placeholders(self.target()))
-        } else if srv_name {
+        } else if self.target().fields() == Fields::Server {
             Placeholders {
                 host: "Required",
                 ..placeholders(self.target())
