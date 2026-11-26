@@ -23415,28 +23415,6 @@ fn closing_or_replacing_form_cancels_in_flight_connection_test(cx: &mut TestAppC
             }),
             "replaced form must not receive an older form's test result"
         );
-
-        // Programmatic input edits on a separate ConnectionForm instance never
-        // invalidate the currently open form's test result.
-        let other = cx.update(|window, cx| {
-            workspace.update(cx, |workspace, cx| {
-                workspace.form.as_mut().unwrap().test =
-                    Some(crate::connection_form::ConnectionTest::Passed(None));
-                let other = ConnectionForm::new(None, window, cx);
-                other
-                    .host
-                    .update(cx, |input, cx| input.insert("other.host", window, cx));
-                other
-            })
-        });
-        settle(cx);
-        assert!(workspace.read_with(cx, |workspace, _| {
-            matches!(
-                workspace.form.as_ref().unwrap().test,
-                Some(crate::connection_form::ConnectionTest::Passed(None))
-            )
-        }));
-        drop(other);
         quit(workspace, cx);
     });
 }

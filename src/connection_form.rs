@@ -424,9 +424,7 @@ impl ConnectionForm {
             }
         }));
         // Every field that affects how DBDelve connects invalidates the last
-        // Test result (and cancels an in-flight one by dropping it). Guard on
-        // this form's own entity so an edit on one form can never clear another.
-        let form_id = host.entity_id();
+        // Test result (and cancels an in-flight one by dropping it).
         for input in [
             &path,
             &connection,
@@ -457,33 +455,25 @@ impl ConnectionForm {
             &service,
             &statement_timeout,
         ] {
-            subscriptions.push(
-                cx.subscribe(input, move |workspace, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        if let Some(form) = &mut workspace.form
-                            && form.host.entity_id() == form_id
-                        {
-                            form.test = None;
-                        }
-                        cx.notify();
+            subscriptions.push(cx.subscribe(input, |workspace, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(form) = &mut workspace.form {
+                        form.test = None;
                     }
-                }),
-            );
+                    cx.notify();
+                }
+            }));
         }
 
         for input in [&ssm_aws_cli, &ssm_plugin] {
-            subscriptions.push(
-                cx.subscribe(input, move |workspace, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        if let Some(form) = &mut workspace.form
-                            && form.host.entity_id() == form_id
-                        {
-                            form.ssm_dependencies = None;
-                        }
-                        cx.notify();
+            subscriptions.push(cx.subscribe(input, |workspace, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(form) = &mut workspace.form {
+                        form.ssm_dependencies = None;
                     }
-                }),
-            );
+                    cx.notify();
+                }
+            }));
         }
         let mut form = Self {
             needs_focus: None,
