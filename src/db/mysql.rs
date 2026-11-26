@@ -20,7 +20,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ::mysql::consts::{ColumnFlags, ColumnType};
@@ -182,14 +182,17 @@ ORDER BY ORDINAL_POSITION
 // One row per key part, grouped by `indexes` rather than `GROUP_CONCAT`, which
 // `group_concat_max_len` cuts short without a word. A functional key part has
 // no `COLUMN_NAME`, only an `EXPRESSION`, a column MySQL grew in 8.0.13 and
-// MariaDB lacks. The versioned comment reads it on such a MySQL alone: MariaDB
-// skips one written for a MySQL version.
+// MariaDB lacks. `{key_name}` names the expression where the server has the
+// column and a placeholder where it does not, so such a key part is shown
+// rather than failing the whole tab. A `/*!80013 … */` comment would pick the
+// column on MySQL and MariaDB alike, but PolarDB-X parses it as a hint and
+// fails.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
        NON_UNIQUE AS non_unique,
        COLUMN_NAME AS column_name,
        CONCAT(
-           COALESCE(COLUMN_NAME /*!80013 , EXPRESSION */),
+           {key_name},
            COALESCE(CONCAT('(', SUB_PART, ')'), ''),
            CASE WHEN COLLATION = 'D' THEN ' DESC' ELSE '' END
        ) AS key_part
@@ -198,6 +201,47 @@ WHERE TABLE_SCHEMA = {schema}
   AND TABLE_NAME = {relation}
 ORDER BY INDEX_NAME, SEQ_IN_INDEX
 ";
+
+// Asks the table the index query reads, not the catalog's description of it:
+// servers that emulate `information_schema` disagree on how they report
+// either. An empty result still describes its columns.
+const STATISTICS_COLUMNS_SQL: &str = "SELECT * FROM information_schema.STATISTICS LIMIT 0";
+
+/// `None` when the probe failed, which says nothing about the column.
+fn expression_probe(described: Result<QueryResult, DbError>) -> Option<bool> {
+    let described = described.ok()?;
+    Some(
+        described
+            .columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case("EXPRESSION")),
+    )
+}
+
+/// The cached answer, or the probe's when it has one. A failed probe reads as
+/// no column for this call only and is asked again next time: a wrong `false`
+/// kept for the session would label every functional key part a placeholder.
+fn cached_probe(cell: &OnceLock<bool>, probe: impl FnOnce() -> Option<bool>) -> bool {
+    if let Some(known) = cell.get() {
+        return *known;
+    }
+    let probed = probe();
+    if let Some(known) = probed {
+        let _ = cell.set(known);
+    }
+    probed.unwrap_or(false)
+}
+
+fn structure_indexes_sql(has_expression: bool) -> String {
+    STRUCTURE_INDEXES_SQL.replace(
+        "{key_name}",
+        if has_expression {
+            "COALESCE(COLUMN_NAME, EXPRESSION)"
+        } else {
+            "COALESCE(COLUMN_NAME, '(expression)')"
+        },
+    )
+}
 
 // `CHECK` is deliberately absent. Its clause lives in
 // `information_schema.CHECK_CONSTRAINTS`, a table MySQL only grew in 8.0.16, and
@@ -514,24 +558,33 @@ fn open(
 }
 
 fn handshake(options: OptsBuilder, server: &ServerConfig) -> Result<Conn, ::mysql::Error> {
-    match Conn::new(over(options.clone(), server, ssl_options(server))) {
+    match Conn::new(over(options.clone(), ssl_options(server))) {
         // `prefer` is the one rung where a weaker connection is reachable, and
         // reaching it is what the word means. The driver cannot say "encrypt if
         // you can" in one attempt, so this is two — which is what libpq's own
         // `prefer` amounts to. No other mode falls back, and not where nothing
         // answered at all: plaintext would find nobody there either.
         Err(encrypted) if server.sslmode == SslMode::Prefer && !unusable_address(&encrypted) => {
-            // A server did answer the first attempt, so a plaintext one that
-            // finds nobody must not read as nothing there.
-            Conn::new(over(options, server, None)).map_err(|plaintext| {
-                if unusable_address(&plaintext) {
-                    encrypted
-                } else {
-                    plaintext
-                }
-            })
+            Conn::new(over(options, None)).map_err(|plaintext| after_prefer(encrypted, plaintext))
         }
         connected => connected,
+    }
+}
+
+/// Which of `prefer`'s two failures to show. A server did answer the encrypted
+/// attempt, so a plaintext one that finds nobody must not read as nothing
+/// there. Nor may one refused for wanting the password in clear text, unless
+/// the server could not take TLS: the encrypted attempt got past that point,
+/// and its error (a rejected token, say) is the one to act on.
+fn after_prefer(encrypted: ::mysql::Error, plaintext: ::mysql::Error) -> ::mysql::Error {
+    let tls_refused = matches!(
+        encrypted,
+        ::mysql::Error::DriverError(::mysql::DriverError::TlsNotSupported)
+    );
+    if unusable_address(&plaintext) || (wants_cleartext(&plaintext) && !tls_refused) {
+        encrypted
+    } else {
+        plaintext
     }
 }
 
@@ -586,14 +639,25 @@ fn unusable_address(error: &::mysql::Error) -> bool {
     )
 }
 
-/// `options` over `tls`, answering a server that asks for
-/// `mysql_clear_password` only when the password is a command's and goes
-/// encrypted: RDS IAM asks for it, the driver refuses it by default, and a
-/// plaintext socket must never carry a token in the clear. With TLS asked for,
-/// the driver fails rather than carry on unencrypted.
-fn over(options: OptsBuilder, server: &ServerConfig, tls: Option<SslOpts>) -> OptsBuilder {
-    let cleartext = tls.is_some() && server.password_command.is_some();
-    options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
+/// `options` over `tls`, answering a server that asks for the password in
+/// clear text (`mysql_clear_password`, which RDS IAM and Azure Entra ID use)
+/// only when this attempt goes encrypted. The driver refuses the plugin by
+/// default, as libmysqlclient does, and a plaintext socket must never carry a
+/// password in the clear. With TLS asked for, the driver fails rather than
+/// carry on unencrypted, and `prefer`'s plaintext retry is built without TLS,
+/// so without the plugin. Over TLS it gives away nothing new: a
+/// `caching_sha2_password` server already gets the password in clear text
+/// over TLS whenever its cache misses.
+fn over(options: OptsBuilder, tls: Option<SslOpts>) -> OptsBuilder {
+    let encrypted = tls.is_some();
+    let options = options.ssl_opts(tls).enable_cleartext_plugin(encrypted);
+    // The driver would otherwise leave a TLS login on loopback for the server's
+    // Unix socket, which carries no TLS, and the cleartext password with it.
+    if encrypted {
+        options.prefer_socket(false)
+    } else {
+        options
+    }
 }
 
 /// Another session at the server `dial` names, as the one a profile keeps.
@@ -683,6 +747,10 @@ pub struct Connection {
     side: Arc<Mutex<Option<Conn>>>,
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
     graph: GraphCancel,
+    /// Whether `information_schema.STATISTICS` has an `EXPRESSION` column,
+    /// asked once per session: Structure would otherwise pay a round trip for
+    /// it on every open.
+    statistics_expression: Arc<OnceLock<bool>>,
 }
 
 impl Connection {
@@ -705,6 +773,7 @@ impl Connection {
                 address,
                 side: Arc::default(),
                 graph: GraphCancel::default(),
+                statistics_expression: Arc::default(),
             })
         })
     }
@@ -721,6 +790,7 @@ impl Connection {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
             ..self.clone()
         })
     }
@@ -746,6 +816,7 @@ impl Connection {
             // Its own: a Cancel on this session would otherwise drop the next
             // statement of a diagram read on the first.
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
             ..self.clone()
         })
     }
@@ -1272,6 +1343,7 @@ impl Connection {
             address: self.address,
             side: Arc::default(),
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
         };
         assemble_sizes(
             side.internal_query(
@@ -1290,11 +1362,20 @@ impl Connection {
         ))?)
     }
 
+    fn statistics_has_expression(&self) -> bool {
+        cached_probe(&self.statistics_expression, || {
+            expression_probe(self.internal_query(STATISTICS_COLUMNS_SQL))
+        })
+    }
+
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         let columns =
             self.internal_query(&structure_sql(STRUCTURE_COLUMNS_SQL, schema, relation))?;
-        let indexes =
-            self.internal_query(&structure_sql(STRUCTURE_INDEXES_SQL, schema, relation))?;
+        let indexes = self.internal_query(&structure_sql(
+            &structure_indexes_sql(self.statistics_has_expression()),
+            schema,
+            relation,
+        ))?;
         let constraints = self.internal_query(&structure_sql(
             &STRUCTURE_CONSTRAINTS_SQL.replace("{columns}", CONSTRAINT_COLUMNS_SQL),
             schema,
@@ -1854,8 +1935,28 @@ fn connect_error(error: &::mysql::Error, server: &ServerConfig) -> DbError {
             server.endpoint()
         ));
     }
+    if wants_cleartext(error) {
+        return plain_error(
+            "The server asked for the password in clear text (mysql_clear_password), \
+             which DBDelve sends only over TLS. That needs a server that supports TLS, \
+             with Encryption set to Require or stricter."
+                .into(),
+        );
+    }
 
     plain_error(describe(error))
+}
+
+/// The driver refusing `mysql_clear_password`, which [`over`] allows on every
+/// encrypted attempt, so this is a plaintext one: `disable`, or `prefer`'s retry
+/// after a server that could not take TLS ([`after_prefer`]).
+fn wants_cleartext(error: &::mysql::Error) -> bool {
+    use ::mysql::DriverError::{CleartextPluginDisabled, UnknownAuthPlugin};
+    matches!(error, ::mysql::Error::DriverError(CleartextPluginDisabled))
+        || matches!(
+            error,
+            ::mysql::Error::DriverError(UnknownAuthPlugin(plugin)) if plugin == "mysql_clear_password"
+        )
 }
 
 /// The opening of a verified apply, `opening`, sent only when the session is
@@ -2270,28 +2371,98 @@ mod tests {
     }
 
     #[test]
-    fn only_a_password_command_over_tls_may_answer_in_cleartext() {
-        let cleartext = |command: bool, sslmode| {
-            let server = ServerConfig {
+    fn an_encrypted_attempt_never_moves_to_the_unix_socket() {
+        let prefers_socket = |tls| {
+            ::mysql::Opts::from(over(OptsBuilder::new().prefer_socket(true), tls))
+                .get_prefer_socket()
+        };
+        let tls = ssl_options(&ServerConfig {
+            sslmode: SslMode::Require,
+            ..ServerConfig::default()
+        });
+        assert!(!prefers_socket(tls));
+        assert!(prefers_socket(None));
+    }
+
+    #[test]
+    fn only_an_encrypted_attempt_may_answer_in_cleartext() {
+        let cleartext = |sslmode| {
+            let tls = ssl_options(&ServerConfig {
                 sslmode,
-                password_command: command.then(|| crate::db::PasswordCommand {
-                    command: "token".into(),
-                    expires: 0,
-                }),
                 ..ServerConfig::default()
-            };
-            let tls = ssl_options(&server);
+            });
             let opened = |tls| {
-                ::mysql::Opts::from(over(OptsBuilder::new(), &server, tls))
-                    .get_enable_cleartext_plugin()
+                ::mysql::Opts::from(over(OptsBuilder::new(), tls)).get_enable_cleartext_plugin()
             };
-            // The second is `prefer`'s plaintext fallback.
+            // The second is `prefer`'s plaintext retry.
             (opened(tls), opened(None))
         };
-        assert_eq!(cleartext(true, SslMode::Prefer), (true, false));
-        assert_eq!(cleartext(true, SslMode::VerifyFull), (true, false));
-        assert_eq!(cleartext(true, SslMode::Disable), (false, false));
-        assert_eq!(cleartext(false, SslMode::Require), (false, false));
+        assert_eq!(cleartext(SslMode::Disable), (false, false));
+        for mode in [
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyCa,
+            SslMode::VerifyFull,
+        ] {
+            assert_eq!(cleartext(mode), (true, false), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_cleartext_password_says_to_require_encryption() {
+        use ::mysql::DriverError::{CleartextPluginDisabled, UnknownAuthPlugin};
+        let server = ServerConfig::default();
+        for refused in [
+            UnknownAuthPlugin("mysql_clear_password".into()),
+            CleartextPluginDisabled,
+        ] {
+            let message = connect_error(&::mysql::Error::DriverError(refused), &server).message;
+            assert!(message.contains("Encryption set to Require"), "{message}");
+        }
+        let other = UnknownAuthPlugin("auth_gssapi_client".into());
+        assert!(
+            !connect_error(&::mysql::Error::DriverError(other), &server)
+                .message
+                .contains("Encryption")
+        );
+    }
+
+    #[test]
+    fn prefer_shows_the_encrypted_error_unless_the_server_refused_tls() {
+        use ::mysql::DriverError::{TlsNotSupported, UnknownAuthPlugin};
+        let cleartext =
+            || ::mysql::Error::DriverError(UnknownAuthPlugin("mysql_clear_password".into()));
+        let denied = || {
+            ::mysql::Error::MySqlError(::mysql::MySqlError {
+                state: "28000".into(),
+                message: "Access denied".into(),
+                code: 1045,
+            })
+        };
+        let refused = || {
+            ::mysql::Error::DriverError(::mysql::DriverError::CouldNotConnect(Some((
+                "127.0.0.1".into(),
+                "refused".into(),
+                std::io::ErrorKind::ConnectionRefused,
+            ))))
+        };
+
+        assert!(matches!(
+            after_prefer(denied(), cleartext()),
+            ::mysql::Error::MySqlError(ref error) if error.code == 1045
+        ));
+        assert!(wants_cleartext(&after_prefer(
+            ::mysql::Error::DriverError(TlsNotSupported),
+            cleartext(),
+        )));
+        assert!(matches!(
+            after_prefer(denied(), refused()),
+            ::mysql::Error::MySqlError(_)
+        ));
+        assert!(matches!(
+            after_prefer(::mysql::Error::DriverError(TlsNotSupported), denied()),
+            ::mysql::Error::MySqlError(_)
+        ));
     }
 
     #[test]
@@ -2816,6 +2987,93 @@ mod tests {
         };
         assert_eq!(untransactional_reason(&keyless), None);
         assert!(primary_key_columns(&keyless).is_empty());
+    }
+
+    #[test]
+    fn index_sql_reads_the_expression_column_only_when_the_server_has_it() {
+        let with = structure_indexes_sql(true);
+        let without = structure_indexes_sql(false);
+        assert!(with.contains("COALESCE(COLUMN_NAME, EXPRESSION)"));
+        assert!(!without.contains("EXPRESSION"));
+        assert!(!with.contains("{key_name}") && !without.contains("{key_name}"));
+        assert!(!with.contains("/*!") && !without.contains("/*!"));
+    }
+
+    fn described(names: &[&str]) -> Result<QueryResult, DbError> {
+        Ok(QueryResult {
+            columns: names
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            ..QueryResult::default()
+        })
+    }
+
+    #[test]
+    fn expression_probe_finds_the_column_in_any_case() {
+        for name in ["EXPRESSION", "expression", "Expression"] {
+            assert_eq!(
+                expression_probe(described(&["TABLE_NAME", name])),
+                Some(true)
+            );
+        }
+        assert_eq!(
+            expression_probe(described(&["TABLE_NAME", "COLUMN_NAME"])),
+            Some(false)
+        );
+        assert_eq!(expression_probe(described(&[])), Some(false));
+    }
+
+    #[test]
+    fn a_failed_probe_is_unknown() {
+        assert_eq!(expression_probe(Err(plain_error("down".into()))), None);
+    }
+
+    #[test]
+    fn a_failed_probe_is_asked_again_and_an_answer_is_kept() {
+        let cell = OnceLock::new();
+        assert!(!cached_probe(&cell, || None));
+        assert!(cell.get().is_none());
+        assert!(cached_probe(&cell, || Some(true)));
+        assert!(cached_probe(&cell, || panic!("answered already")));
+
+        let negative = OnceLock::new();
+        assert!(!cached_probe(&negative, || Some(false)));
+        assert!(!cached_probe(&negative, || panic!("answered already")));
+    }
+
+    #[test]
+    fn indexes_assemble_when_a_functional_key_part_has_no_column_name() {
+        let result = QueryResult {
+            columns: ["object_name", "non_unique", "column_name", "key_part"]
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            rows: crate::db::rows(vec![
+                vec![
+                    Some("by_lower".into()),
+                    Some("1".into()),
+                    None,
+                    Some("(expression)".into()),
+                ],
+                vec![
+                    Some("by_lower".into()),
+                    Some("1".into()),
+                    Some("id".into()),
+                    Some("id".into()),
+                ],
+            ]),
+            ..QueryResult::default()
+        };
+        let indexes = assemble_indexes(&result).unwrap();
+        assert_eq!(indexes[0].columns, ["(expression)", "id"]);
+        assert_eq!(indexes[0].definition, "INDEX (id)");
     }
 
     #[test]

@@ -172,6 +172,50 @@ is on the machine (`choco install innosetup`). Passwords go in Credential
 Manager. The window draws its own title bar, buttons included. Chords are
 the same as macOS with Ctrl in place of Cmd.
 
+## Nix
+
+The repo is a flake for x86_64 and aarch64 Linux and Apple Silicon macOS. It
+builds DBDelve and the ODBC bridge from source, so the first install compiles
+the whole app.
+
+Try it without installing:
+
+```sh
+nix run github:ShayanAbbas1/dbdelve
+```
+
+Install it into your profile:
+
+```sh
+nix profile install github:ShayanAbbas1/dbdelve
+```
+
+That follows `main`. To stay on a release, name its tag:
+`github:ShayanAbbas1/dbdelve/v0.8.0`.
+
+On NixOS or nix-darwin, add the flake as an input and use its overlay:
+
+```nix
+{
+  inputs.dbdelve.url = "github:ShayanAbbas1/dbdelve";
+
+  # in a NixOS or nix-darwin module:
+  nixpkgs.overlays = [ inputs.dbdelve.overlays.default ];
+  environment.systemPackages = [ pkgs.dbdelve ];
+}
+```
+
+Or skip the overlay and use
+`inputs.dbdelve.packages.${pkgs.stdenv.hostPlatform.system}.default`. On macOS
+the package holds `DBDelve.app`, and nix-darwin links it into
+`/Applications/Nix Apps`.
+
+A Nix install doesn't update itself. Update it with Nix:
+`nix profile upgrade dbdelve`, or `nix flake update dbdelve` and a rebuild.
+
+`nix develop` opens a shell with the pinned Rust toolchain and the libraries
+the build needs.
+
 ## Other databases through ODBC
 
 Databases without a built-in engine, such as IBM Db2, connect through the ODBC

@@ -7,7 +7,9 @@ use super::*;
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::tree::{TreeEvent, TreeState};
 
-use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
+use crate::connection_form::{
+    ConnectionTest, Reported, duplicate_profile_name, keep_schema, name_is_automatic,
+};
 use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
@@ -540,16 +542,22 @@ impl Workspace {
             }
         };
 
+        let name = default_profile_name(&config);
+        let name_is_automatic =
+            name_is_automatic(form.name.read(cx).value().as_ref(), &form.auto_name);
+        if name_is_automatic {
+            form.auto_name = name.clone();
+        }
+
         // Only the fields the URL's own engine has. Blanking the others would
         // throw away a half-typed connection to a different database, which the
         // user never asked to lose by pasting a URL.
         let filled = match &config {
             ConnectionConfig::Sqlite { path, .. }
             | ConnectionConfig::Turso { path, .. }
-            | ConnectionConfig::DuckDb { path, .. } => vec![
-                (&form.name, default_profile_name(&config)),
-                (&form.path, path.clone()),
-            ],
+            | ConnectionConfig::DuckDb { path, .. } => {
+                vec![(&form.name, name.clone()), (&form.path, path.clone())]
+            }
             ConnectionConfig::Postgres(crate::db::PostgresConfig { server, .. })
             | ConnectionConfig::MySql(server)
             | ConnectionConfig::MariaDb(server)
@@ -557,7 +565,7 @@ impl Workspace {
             | ConnectionConfig::ClickHouse(server)
             | ConnectionConfig::Redis(server)
             | ConnectionConfig::MongoDb(crate::db::MongoConfig { server, .. }) => vec![
-                (&form.name, default_profile_name(&config)),
+                (&form.name, name.clone()),
                 (&form.host, server.host.clone()),
                 (
                     &form.port,
@@ -587,18 +595,25 @@ impl Workspace {
             .chain(mongo.map(|mongo| (&form.options, mongo.options.clone())))
             .chain(service);
         for (input, value) in filled {
+            if input == &form.name && !name_is_automatic {
+                continue;
+            }
             let input = input.clone();
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
 
         let engine = config.engine();
         let sslmode = config.server().map(|server| server.sslmode);
+        let has_server = config.server().is_some();
         let srv = mongo.is_some_and(|mongo| mongo.srv);
         if let Some(form) = &mut self.form {
             // A URL for another kind of engine unmounts the field it was
             // pasted into, and `set_target` hands focus on.
             form.set_target(crate::db::Target::built_in(engine));
             form.srv = srv;
+            if has_server {
+                form.auto_host = None;
+            }
             if let Some(sslmode) = sslmode {
                 // The URL's own mode, so pasting one that demands verification
                 // cannot land in a form still set to `prefer`.
