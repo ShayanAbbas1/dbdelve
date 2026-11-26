@@ -605,8 +605,15 @@ fn unusable_address(error: &::mysql::Error) -> bool {
 /// `caching_sha2_password` server already gets the password in clear text
 /// over TLS whenever its cache misses.
 fn over(options: OptsBuilder, tls: Option<SslOpts>) -> OptsBuilder {
-    let cleartext = tls.is_some();
-    options.ssl_opts(tls).enable_cleartext_plugin(cleartext)
+    let encrypted = tls.is_some();
+    let options = options.ssl_opts(tls).enable_cleartext_plugin(encrypted);
+    // The driver would otherwise leave a TLS login on loopback for the server's
+    // Unix socket, which carries no TLS, and the cleartext password with it.
+    if encrypted {
+        options.prefer_socket(false)
+    } else {
+        options
+    }
 }
 
 /// Another session at the server `dial` names, as the one a profile keeps.
@@ -2300,6 +2307,20 @@ mod tests {
         let verify_full = ssl_options(&server(SslMode::VerifyFull)).expect("a connector is built");
         assert!(!verify_full.accept_invalid_certs());
         assert!(!verify_full.skip_domain_validation());
+    }
+
+    #[test]
+    fn an_encrypted_attempt_never_moves_to_the_unix_socket() {
+        let prefers_socket = |tls| {
+            ::mysql::Opts::from(over(OptsBuilder::new().prefer_socket(true), tls))
+                .get_prefer_socket()
+        };
+        let tls = ssl_options(&ServerConfig {
+            sslmode: SslMode::Require,
+            ..ServerConfig::default()
+        });
+        assert!(!prefers_socket(tls));
+        assert!(prefers_socket(None));
     }
 
     #[test]
