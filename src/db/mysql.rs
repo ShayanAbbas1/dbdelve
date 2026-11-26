@@ -20,7 +20,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ::mysql::consts::{ColumnFlags, ColumnType};
@@ -182,14 +182,17 @@ ORDER BY ORDINAL_POSITION
 // One row per key part, grouped by `indexes` rather than `GROUP_CONCAT`, which
 // `group_concat_max_len` cuts short without a word. A functional key part has
 // no `COLUMN_NAME`, only an `EXPRESSION`, a column MySQL grew in 8.0.13 and
-// MariaDB lacks. The versioned comment reads it on such a MySQL alone: MariaDB
-// skips one written for a MySQL version.
+// MariaDB lacks. `{key_name}` names the expression where the server has the
+// column and a placeholder where it does not, so such a key part is shown
+// rather than failing the whole tab. A `/*!80013 … */` comment would pick the
+// column on MySQL and MariaDB alike, but PolarDB-X parses it as a hint and
+// fails.
 const STRUCTURE_INDEXES_SQL: &str = "
 SELECT INDEX_NAME AS object_name,
        NON_UNIQUE AS non_unique,
        COLUMN_NAME AS column_name,
        CONCAT(
-           COALESCE(COLUMN_NAME /*!80013 , EXPRESSION */),
+           {key_name},
            COALESCE(CONCAT('(', SUB_PART, ')'), ''),
            CASE WHEN COLLATION = 'D' THEN ' DESC' ELSE '' END
        ) AS key_part
@@ -198,6 +201,47 @@ WHERE TABLE_SCHEMA = {schema}
   AND TABLE_NAME = {relation}
 ORDER BY INDEX_NAME, SEQ_IN_INDEX
 ";
+
+// Asks the table the index query reads, not the catalog's description of it:
+// servers that emulate `information_schema` disagree on how they report
+// either. An empty result still describes its columns.
+const STATISTICS_COLUMNS_SQL: &str = "SELECT * FROM information_schema.STATISTICS LIMIT 0";
+
+/// `None` when the probe failed, which says nothing about the column.
+fn expression_probe(described: Result<QueryResult, DbError>) -> Option<bool> {
+    let described = described.ok()?;
+    Some(
+        described
+            .columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case("EXPRESSION")),
+    )
+}
+
+/// The cached answer, or the probe's when it has one. A failed probe reads as
+/// no column for this call only and is asked again next time: a wrong `false`
+/// kept for the session would label every functional key part a placeholder.
+fn cached_probe(cell: &OnceLock<bool>, probe: impl FnOnce() -> Option<bool>) -> bool {
+    if let Some(known) = cell.get() {
+        return *known;
+    }
+    let probed = probe();
+    if let Some(known) = probed {
+        let _ = cell.set(known);
+    }
+    probed.unwrap_or(false)
+}
+
+fn structure_indexes_sql(has_expression: bool) -> String {
+    STRUCTURE_INDEXES_SQL.replace(
+        "{key_name}",
+        if has_expression {
+            "COALESCE(COLUMN_NAME, EXPRESSION)"
+        } else {
+            "COALESCE(COLUMN_NAME, '(expression)')"
+        },
+    )
+}
 
 // `CHECK` is deliberately absent. Its clause lives in
 // `information_schema.CHECK_CONSTRAINTS`, a table MySQL only grew in 8.0.16, and
@@ -683,6 +727,10 @@ pub struct Connection {
     side: Arc<Mutex<Option<Conn>>>,
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
     graph: GraphCancel,
+    /// Whether `information_schema.STATISTICS` has an `EXPRESSION` column,
+    /// asked once per session: Structure would otherwise pay a round trip for
+    /// it on every open.
+    statistics_expression: Arc<OnceLock<bool>>,
 }
 
 impl Connection {
@@ -705,6 +753,7 @@ impl Connection {
                 address,
                 side: Arc::default(),
                 graph: GraphCancel::default(),
+                statistics_expression: Arc::default(),
             })
         })
     }
@@ -721,6 +770,7 @@ impl Connection {
             connection_id: connection.connection_id(),
             connection: Arc::new(Mutex::new(connection)),
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
             ..self.clone()
         })
     }
@@ -746,6 +796,7 @@ impl Connection {
             // Its own: a Cancel on this session would otherwise drop the next
             // statement of a diagram read on the first.
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
             ..self.clone()
         })
     }
@@ -1272,6 +1323,7 @@ impl Connection {
             address: self.address,
             side: Arc::default(),
             graph: GraphCancel::default(),
+            statistics_expression: Arc::default(),
         };
         assemble_sizes(
             side.internal_query(
@@ -1290,11 +1342,20 @@ impl Connection {
         ))?)
     }
 
+    fn statistics_has_expression(&self) -> bool {
+        cached_probe(&self.statistics_expression, || {
+            expression_probe(self.internal_query(STATISTICS_COLUMNS_SQL))
+        })
+    }
+
     pub fn structure(&self, schema: &str, relation: &str) -> Result<Structure, DbError> {
         let columns =
             self.internal_query(&structure_sql(STRUCTURE_COLUMNS_SQL, schema, relation))?;
-        let indexes =
-            self.internal_query(&structure_sql(STRUCTURE_INDEXES_SQL, schema, relation))?;
+        let indexes = self.internal_query(&structure_sql(
+            &structure_indexes_sql(self.statistics_has_expression()),
+            schema,
+            relation,
+        ))?;
         let constraints = self.internal_query(&structure_sql(
             &STRUCTURE_CONSTRAINTS_SQL.replace("{columns}", CONSTRAINT_COLUMNS_SQL),
             schema,
@@ -2816,6 +2877,93 @@ mod tests {
         };
         assert_eq!(untransactional_reason(&keyless), None);
         assert!(primary_key_columns(&keyless).is_empty());
+    }
+
+    #[test]
+    fn index_sql_reads_the_expression_column_only_when_the_server_has_it() {
+        let with = structure_indexes_sql(true);
+        let without = structure_indexes_sql(false);
+        assert!(with.contains("COALESCE(COLUMN_NAME, EXPRESSION)"));
+        assert!(!without.contains("EXPRESSION"));
+        assert!(!with.contains("{key_name}") && !without.contains("{key_name}"));
+        assert!(!with.contains("/*!") && !without.contains("/*!"));
+    }
+
+    fn described(names: &[&str]) -> Result<QueryResult, DbError> {
+        Ok(QueryResult {
+            columns: names
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            ..QueryResult::default()
+        })
+    }
+
+    #[test]
+    fn expression_probe_finds_the_column_in_any_case() {
+        for name in ["EXPRESSION", "expression", "Expression"] {
+            assert_eq!(
+                expression_probe(described(&["TABLE_NAME", name])),
+                Some(true)
+            );
+        }
+        assert_eq!(
+            expression_probe(described(&["TABLE_NAME", "COLUMN_NAME"])),
+            Some(false)
+        );
+        assert_eq!(expression_probe(described(&[])), Some(false));
+    }
+
+    #[test]
+    fn a_failed_probe_is_unknown() {
+        assert_eq!(expression_probe(Err(plain_error("down".into()))), None);
+    }
+
+    #[test]
+    fn a_failed_probe_is_asked_again_and_an_answer_is_kept() {
+        let cell = OnceLock::new();
+        assert!(!cached_probe(&cell, || None));
+        assert!(cell.get().is_none());
+        assert!(cached_probe(&cell, || Some(true)));
+        assert!(cached_probe(&cell, || panic!("answered already")));
+
+        let negative = OnceLock::new();
+        assert!(!cached_probe(&negative, || Some(false)));
+        assert!(!cached_probe(&negative, || panic!("answered already")));
+    }
+
+    #[test]
+    fn indexes_assemble_when_a_functional_key_part_has_no_column_name() {
+        let result = QueryResult {
+            columns: ["object_name", "non_unique", "column_name", "key_part"]
+                .iter()
+                .map(|name| Column {
+                    name: (*name).into(),
+                    data_type: None,
+                })
+                .collect(),
+            rows: crate::db::rows(vec![
+                vec![
+                    Some("by_lower".into()),
+                    Some("1".into()),
+                    None,
+                    Some("(expression)".into()),
+                ],
+                vec![
+                    Some("by_lower".into()),
+                    Some("1".into()),
+                    Some("id".into()),
+                    Some("id".into()),
+                ],
+            ]),
+            ..QueryResult::default()
+        };
+        let indexes = assemble_indexes(&result).unwrap();
+        assert_eq!(indexes[0].columns, ["(expression)", "id"]);
+        assert_eq!(indexes[0].definition, "INDEX (id)");
     }
 
     #[test]
