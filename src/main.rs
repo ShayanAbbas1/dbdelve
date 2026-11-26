@@ -64,8 +64,8 @@ use actions::{
     AddFilter, ApplyEdits, CancelQuery, ClearFilter, CloseAllTabs, CloseTab, CollapseAllSchemas,
     CommandPalette, CopyCell, CopyDiagnostics, CopyPlan, CopyResults, CopyRow, CopyRows,
     CopySelection, CustomRowLimit, CycleMode, DeleteRow, DiscardEdits, Disconnect, EditCell,
-    ExpandAllSchemas, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn,
-    HideColumn, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
+    ExpandAllSchemas, ExplainQuery, FollowForeignKey, FormatQuery, FuzzyOpen, GoToColumn, Hide,
+    HideColumn, HideOthers, ImportConnections, ImportRows, ImportRowsFromClipboard, LimitTarget,
     MenuImportRowsFromClipboard, Minimize, MoveTabLeft, MoveTabRight, NewConnection, NewProject,
     NewQuery, NewRow, NextEdit, NextPage, NextProfile, NextResult, NextTab, OpenLogsFolder,
     OpenReference, OpenSettings, OpenSqlFiles, PreviousEdit, PreviousPage, PreviousProfile,
@@ -73,10 +73,10 @@ use actions::{
     RemoveFilter, RequestWriteMode, ResetConfirmations, ResetEditorZoom, RunQuery, SaveQuery,
     SaveQueryAs, SearchEverything, SelectDatabase, SelectTheme, SetDefault, SetDefaultRowLimit,
     SetEmpty, SetFilterColumn, SetFilterOperator, SetFilterRaw, SetMode, SetNull, SetQueryLimit,
-    SetRowLimit, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences, SortActiveColumn,
-    SortColumn, SubmitConnection, SwitchConnection, ToggleComment, ToggleFilterJoin,
-    ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit, ToggleRowPanel, ToggleSidebar,
-    ToggleStructure, ZoomEditorIn, ZoomEditorOut,
+    SetRowLimit, ShowAll, ShowAllColumns, ShowEditor, ShowMessages, ShowReferences,
+    SortActiveColumn, SortColumn, SubmitConnection, SwitchConnection, ToggleComment,
+    ToggleFilterJoin, ToggleNextJoin, TogglePinColumn, ToggleResults, ToggleRowEdit,
+    ToggleRowPanel, ToggleSidebar, ToggleStructure, ZoomEditorIn, ZoomEditorOut,
 };
 use completion::SchemaCompletions;
 use connection_form::{ConnectionForm, default_profile_name};
@@ -281,6 +281,9 @@ fn main() {
                     }
                 });
             });
+            cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
+            cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+            cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
             cx.set_menus(app_menus(false));
 
             // The platform titlebar is kept only for its window buttons on macOS:
@@ -356,11 +359,28 @@ pub(crate) fn app_menus(imports_rows: bool) -> Vec<Menu> {
         Menu {
             name: name.into(),
             disabled: false,
-            items: vec![
+            items: [
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action(format!("Quit {name}"), Quit),
-            ],
+            ]
+            .into_iter()
+            // AppKit's standard Hide group. GPUI builds the menu bar from
+            // scratch, so an app gets these only by listing them.
+            .chain(
+                cfg!(target_os = "macos")
+                    .then(|| {
+                        [
+                            MenuItem::action(format!("Hide {name}"), Hide),
+                            MenuItem::action("Hide Others", HideOthers),
+                            MenuItem::action("Show All", ShowAll),
+                            MenuItem::separator(),
+                        ]
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain([MenuItem::action(format!("Quit {name}"), Quit)])
+            .collect(),
         },
         Menu {
             name: "File".into(),
