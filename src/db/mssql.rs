@@ -1600,9 +1600,9 @@ impl Connection {
         }
         if let Ok(collected) = &mut result
             && origin == Origin::User
-            && before.is_some()
+            && let Some(before) = before
         {
-            still_open(session, sql, &mut collected.result);
+            still_open(session, sql, before, &mut collected.result);
         }
         // After a failure too: a batch that moved the session and then failed
         // leaves it moved all the same.
@@ -3195,16 +3195,23 @@ fn kept_transaction(sql: &str, result: QueryResult) -> Result<QueryResult, DbErr
 /// transaction, left the one it ended open ([`outlived_end`]): a `COMMIT`
 /// takes one level off `@@TRANCOUNT`, so inside a nested `BEGIN
 /// TRANSACTION` it commits nothing. Manual's Commit, which opens the next
-/// transaction behind its end, is asked too.
-fn still_open(session: &mut Session, sql: &str, result: &mut QueryResult) {
+/// transaction behind its end, is asked too. `before` is the depth the
+/// batch started at.
+fn still_open(session: &mut Session, sql: &str, before: u64, result: &mut QueryResult) {
     if !ends(sql) {
         return;
     }
-    let depth = session
-        .trip("SELECT @@TRANCOUNT")
-        .and_then(Result::ok)
-        .and_then(|collected| collected.result.rows.first()?.get(0)?.parse::<u64>().ok());
-    if depth.is_some_and(|depth| outlived_end(sql, depth)) {
+    let read = session
+        .trip("SELECT @@TRANCOUNT, @@OPTIONS & 2")
+        .and_then(Result::ok);
+    let row = read
+        .as_ref()
+        .and_then(|collected| collected.result.rows.first());
+    let depth = row.and_then(|row| row.get(0)?.parse::<u64>().ok());
+    let implicit = row
+        .and_then(|row| row.get(1)?.parse::<u64>().ok())
+        .is_some_and(|bit| bit != 0);
+    if depth.is_some_and(|depth| outlived_end(sql, before, depth, implicit)) {
         result.notice = Some(match result.notice.take() {
             Some(notice) => format!("{notice}\n\n{}", super::TRANSACTION_STILL_OPEN),
             None => super::TRANSACTION_STILL_OPEN.to_string(),
@@ -3219,25 +3226,64 @@ fn ends(sql: &str) -> bool {
         || crate::sql::ends_transaction(Engine::SqlServer, sql)
 }
 
-/// Whether the transaction `sql` ended is still open, `depth` being what
-/// `@@TRANCOUNT` reads once it ran. Read off the depth, not off the batch
-/// succeeding: one that ended the outermost level is left with only the
-/// levels it opened after its last end, so any deeper is the old
-/// transaction still there.
-fn outlived_end(sql: &str, depth: u64) -> bool {
+/// Whether the transaction `sql` ended is still open, `before` being what
+/// `@@TRANCOUNT` read as the batch started and `depth` what it reads once
+/// it ran, with `implicit` transactions on or not.
+///
+/// A batch that opens with a lone `COMMIT`, as Manual's Commit does, is
+/// told by `before`: the `COMMIT` takes one level off it, so what is left
+/// of the old transaction is that, whatever the statements behind it open.
+/// The final depth cannot say it with `IMPLICIT_TRANSACTIONS` on: the
+/// `BEGIN TRANSACTION` behind a `COMMIT` that ended the old one opens two
+/// levels, the implicit one and its own, which reads as the old one left.
+///
+/// Any other batch is read off `depth`: one that ended the outermost level
+/// is left with only the levels it opened after its last end, so any deeper
+/// is the old transaction still there. With implicit transactions on, the
+/// statements after the end may also have opened one more implicitly, and
+/// only a depth beyond that says the old one is left.
+fn outlived_end(sql: &str, before: u64, depth: u64, implicit: bool) -> bool {
     if !ends(sql) {
         return false;
     }
     let after = crate::sql::after_last_end(Engine::SqlServer, sql);
-    let opened = crate::sql::Buffer::for_engine(Engine::SqlServer, after)
-        .statements()
+    let (whole, rest) = (
+        crate::sql::Buffer::for_engine(Engine::SqlServer, sql),
+        crate::sql::Buffer::for_engine(Engine::SqlServer, after),
+    );
+    let (statements, behind) = (whole.statements(), rest.statements());
+    let lone_commit = statements.len() == behind.len() + 1
+        && (statements.first()).is_some_and(|first| is_commit(&sql[first.clone()]));
+    if lone_commit {
+        return before > 1;
+    }
+    let opened = behind
         .iter()
         .filter(|range| {
             crate::sql::leaves(Engine::SqlServer, &after[(*range).clone()]).transaction
                 == Some(true)
         })
         .count();
-    depth > u64::try_from(opened).unwrap_or(u64::MAX)
+    let opened = u64::try_from(opened).unwrap_or(u64::MAX);
+    let implicitly = u64::from(implicit && !behind.is_empty());
+    depth > opened.saturating_add(implicitly)
+}
+
+/// Whether `statement` is a plain `COMMIT`, which takes one level off
+/// `@@TRANCOUNT` at any depth.
+fn is_commit(statement: &str) -> bool {
+    let words: Vec<String> = (statement.split_whitespace())
+        .map(|word| word.trim_end_matches(';').to_ascii_uppercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    matches!(
+        words
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["COMMIT"] | ["COMMIT", "TRAN" | "TRANSACTION" | "WORK"]
+    )
 }
 
 fn transaction_outcome(
@@ -3367,16 +3413,38 @@ mod tests {
         let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
         // Manual's Commit at depth 2 takes one level off and opens one more:
         // nothing committed, and the outer transaction is still open.
-        assert!(outlived_end(manual_commit, 2));
-        assert!(!outlived_end(manual_commit, 1));
-        assert!(outlived_end("COMMIT", 1));
-        assert!(!outlived_end("COMMIT", 0));
-        assert!(outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 3));
-        assert!(!outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 2));
-        assert!(!outlived_end("BEGIN TRAN; UPDATE t SET a = 1; COMMIT", 0));
+        assert!(outlived_end(manual_commit, 2, 2, false));
+        assert!(!outlived_end(manual_commit, 1, 1, false));
+        assert!(outlived_end("COMMIT", 2, 1, false));
+        assert!(!outlived_end("COMMIT", 1, 0, false));
+        assert!(outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 2, 3, false));
+        assert!(!outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 1, 2, false));
+        assert!(!outlived_end(
+            "BEGIN TRAN; UPDATE t SET a = 1; COMMIT",
+            0,
+            0,
+            false
+        ));
         // A batch that ends nothing is not asked about.
-        assert!(!outlived_end("SELECT 1", 3));
-        assert!(!outlived_end("BEGIN TRANSACTION", 2));
+        assert!(!outlived_end("SELECT 1", 3, 3, false));
+        assert!(!outlived_end("BEGIN TRANSACTION", 2, 2, false));
+    }
+
+    /// With `IMPLICIT_TRANSACTIONS` on, the `BEGIN TRANSACTION` behind a
+    /// `COMMIT` that ended the old transaction opens two levels: the depth
+    /// after reads as the old one left, and only the depth before can say.
+    #[test]
+    fn an_implicit_transaction_opened_behind_a_commit_is_not_the_old_one() {
+        let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
+        assert!(!outlived_end(manual_commit, 1, 2, true), "committed");
+        assert!(
+            outlived_end(manual_commit, 2, 2, true),
+            "nested: one level left"
+        );
+        assert!(!outlived_end("ROLLBACK; UPDATE t SET a = 1", 3, 1, true));
+        assert!(outlived_end("ROLLBACK; UPDATE t SET a = 1", 3, 2, true));
+        assert!(is_commit("COMMIT") && is_commit("commit tran;") && is_commit("COMMIT WORK"));
+        assert!(!is_commit("COMMIT TRAN named") && !is_commit("ROLLBACK"));
     }
 
     #[test]
