@@ -3036,13 +3036,15 @@ impl Render for Workspace {
                     ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
                     ("end-transaction", self.render_end_transaction(cx)),
+                    ("import-choice", self.render_import_choice(cx)),
+                    // Below the quit question, which its Restart can raise:
+                    // the question has to be the dialog in front then.
+                    ("stable-import", self.render_stable_import(cx)),
                     ("quit", self.render_quit(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),
                     ("stale-edit", self.render_stale_edit(cx)),
-                    ("import-choice", self.render_import_choice(cx)),
-                    ("stable-import", self.render_stable_import(cx)),
                 ],
                 window,
                 cx,
