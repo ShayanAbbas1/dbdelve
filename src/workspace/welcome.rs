@@ -871,15 +871,7 @@ impl Workspace {
         let Some(form) = &self.form else {
             return;
         };
-        if let Recognised::File(_) = recognised {
-            let name = default_profile_name(&ConnectionConfig::Sqlite {
-                path: text.clone(),
-                statement_timeout: 0,
-            });
-            let (path, name_input) = (form.path.clone(), form.name.clone());
-            path.update(cx, |input, cx| input.set_value(text, window, cx));
-            name_input.update(cx, |input, cx| input.set_value(name, window, cx));
-        } else if engine.fields() != Fields::Account {
+        if engine.fields() != Fields::Account {
             let url = form.url.clone();
             url.update(cx, |input, cx| input.set_value(text, window, cx));
             self.fill_from_url(window, cx);

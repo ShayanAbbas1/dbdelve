@@ -132,12 +132,20 @@ pub(crate) struct ConnectionForm {
     /// the same ones, are there from the start rather than fading in again.
     pub(crate) backdrop_shown: bool,
     /// The target the target-dependent placeholders were last written for,
-    /// whether a service was typed then, the root certificate's, and the
-    /// password's.
-    pub(crate) placeholders_for: Option<(Target, bool, &'static str, &'static str)>,
+    /// whether a service was typed then, the root certificate's, the
+    /// password's, and whether the host is an SRV name.
+    pub(crate) placeholders_for: Option<(Target, bool, &'static str, &'static str, bool)>,
     /// The URL field as of its last change, to tell a URL pasted whole from
     /// one being typed.
     pub(crate) last_url: SharedString,
+    /// The name the app itself last wrote into the name field: a URL import's,
+    /// or the default of the profile the form was opened on. A name that still
+    /// equals it was never the user's.
+    pub(crate) auto_name: String,
+    /// The host the app itself last wrote into a new form, which follows the
+    /// target for as long as the field still holds it. `None` when the host
+    /// came from a profile or a URL, which nothing rewrites.
+    pub(crate) auto_host: Option<&'static str>,
     /// What a duplicate takes from the connection it copies, given on save.
     pub(crate) shortcuts: Shortcuts,
     pub(crate) folds: BTreeMap<String, bool>,
@@ -242,11 +250,20 @@ impl ConnectionForm {
                 .placeholder("DSN or connection string")
                 .default_value(value(external.map(|external| external.connection.as_str())))
         });
+        let engine = config.map(ConnectionConfig::engine).unwrap_or_default();
+        let auto_host = config
+            .is_none()
+            .then(|| prefilled_host(Target::built_in(engine), false, false));
         let host = cx.new(|cx| {
-            InputState::new(window, cx).default_value(value(
-                server
-                    .map(|server| server.host.as_str())
-                    .or_else(|| account.and_then(|account| account.host.as_deref())),
+            InputState::new(window, cx).default_value(auto_host.map_or_else(
+                || {
+                    value(
+                        server
+                            .map(|server| server.host.as_str())
+                            .or_else(|| account.and_then(|account| account.host.as_deref())),
+                    )
+                },
+                str::to_string,
             ))
         });
         let port = cx.new(|cx| {
@@ -445,7 +462,7 @@ impl ConnectionForm {
         let mut form = Self {
             needs_focus: None,
             url,
-            engine: config.map(ConnectionConfig::engine).unwrap_or_default(),
+            engine,
             driver: config.map_or(Driver::BuiltIn, |config| config.target().driver),
             name,
             color: None,
@@ -497,6 +514,8 @@ impl ConnectionForm {
             backdrop_shown: false,
             placeholders_for: None,
             last_url: SharedString::default(),
+            auto_name: String::new(),
+            auto_host,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
             _subscriptions: subscriptions,
@@ -529,6 +548,7 @@ impl ConnectionForm {
         form.name.update(cx, |name, cx| {
             name.set_value(profile.name.clone(), window, cx);
         });
+        form.auto_name = default_profile_name(&profile.config);
         for secret in [&form.password, &form.ssh_passphrase] {
             secret.update(cx, |secret, cx| {
                 secret.set_value("", window, cx);
@@ -567,6 +587,7 @@ impl ConnectionForm {
         form.name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
         });
+        form.auto_name = default_profile_name(&config);
         form
     }
 
@@ -716,21 +737,49 @@ impl ConnectionForm {
     /// The placeholders that say what a blank field means, which is the
     /// engine's to say: its port, whether it asks for a user, what it names
     /// a connection after, unless a service answers for the blank instead.
-    /// Written whenever any of that has changed since.
+    /// Written whenever any of that has changed since, along with a new
+    /// form's Host while it still holds the one the app wrote.
     pub(crate) fn sync_placeholders(&mut self, window: &mut Window, cx: &mut App) {
+        if self
+            .auto_host
+            .is_some_and(|written| self.host.read(cx).value().trim() != written)
+        {
+            self.auto_host = None;
+        }
         let beside_a_service = self.typed_service(cx).is_some();
         let root_certificate = root_certificate_placeholder(self.sslmode, beside_a_service);
         let password = password_placeholder(
             self.typed_password_command(cx).is_some(),
             self.editing.is_some(),
         );
-        let written = (self.target(), beside_a_service, root_certificate, password);
+        let srv_name = self.host_is_srv_name();
+        let written = (
+            self.target(),
+            beside_a_service,
+            root_certificate,
+            password,
+            srv_name,
+        );
         if self.placeholders_for == Some(written) {
             return;
         }
         self.placeholders_for = Some(written);
+        let host = prefilled_host(self.target(), beside_a_service, srv_name);
+        if let Some(written_host) = self.auto_host
+            && written_host != host
+            && self.host.read(cx).value().trim() == written_host
+        {
+            self.auto_host = Some(host);
+            self.host
+                .update(cx, |input, cx| input.set_value(host, window, cx));
+        }
         let blank = if beside_a_service {
             from_the_service(placeholders(self.target()))
+        } else if self.target().fields() == Fields::Server {
+            Placeholders {
+                host: "Required",
+                ..placeholders(self.target())
+            }
         } else {
             placeholders(self.target())
         };
@@ -846,6 +895,12 @@ impl ConnectionForm {
             statement_timeout: self.statement_timeout(cx)?,
             schema: None,
         })
+    }
+
+    /// Whether the host is an SRV name, which is looked up rather than
+    /// connected to, so `localhost` can never stand for it.
+    fn host_is_srv_name(&self) -> bool {
+        self.srv && self.engine.resolves_srv()
     }
 
     pub(crate) fn server(&self, cx: &App) -> Result<ServerConfig, String> {
@@ -1286,6 +1341,25 @@ impl Reported {
     }
 }
 
+/// What a new form's Host holds until the user types one: the engine's own
+/// hint, as an editable value, so a blank Host can stay an error. Blank where
+/// something else names the host: a service, an SRV name, Snowflake's account
+/// (whose host shares the field), or a target with no host at all.
+fn prefilled_host(target: Target, beside_a_service: bool, srv_name: bool) -> &'static str {
+    if target.fields() == Fields::Server && !beside_a_service && !srv_name {
+        target.engine.spec().hints.host
+    } else {
+        ""
+    }
+}
+
+/// Whether a name in the field may be replaced by one derived from a URL: it
+/// is blank, or it is still the one the app wrote last.
+pub(crate) fn name_is_automatic(current: &str, auto_name: &str) -> bool {
+    let current = current.trim();
+    current.is_empty() || current == auto_name.trim()
+}
+
 /// What a profile is called when nobody has named it: the database for an
 /// engine that has one, the host when the database was left to the server, and
 /// the file for an engine that is one.
@@ -1370,6 +1444,33 @@ pub(crate) fn password_to_persist(config: &ConnectionConfig, origin: Origin) -> 
 mod tests {
     use super::*;
     use crate::db::{ConnectionConfig, ServerConfig, SslMode};
+
+    #[test]
+    fn a_new_form_prefills_the_host_only_where_it_is_a_servers_own() {
+        for engine in Engine::ALL {
+            let target = Target::built_in(engine);
+            let expected = match engine.fields() {
+                Fields::Server => "localhost",
+                Fields::File | Fields::Account | Fields::ConnectionString => "",
+            };
+            assert_eq!(prefilled_host(target, false, false), expected, "{engine:?}");
+            assert_eq!(prefilled_host(target, true, false), "", "{engine:?}");
+        }
+        assert_eq!(
+            prefilled_host(Target::built_in(Engine::MongoDb), false, true),
+            ""
+        );
+    }
+
+    #[test]
+    fn only_a_blank_or_app_written_name_gives_way_to_a_url() {
+        assert!(name_is_automatic("", ""));
+        assert!(name_is_automatic("  ", "shop"));
+        assert!(name_is_automatic("shop", "shop"));
+        assert!(name_is_automatic(" shop ", " shop "));
+        assert!(!name_is_automatic("Production", "shop"));
+        assert!(!name_is_automatic("Production", ""));
+    }
 
     fn fields(host: &str, port: &str) -> [String; 5] {
         [

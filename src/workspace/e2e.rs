@@ -5558,6 +5558,195 @@ fn picking_the_odbc_tile_puts_the_keyboard_in_its_connection_string(cx: &mut Tes
     });
 }
 
+type FormField = fn(&ConnectionForm) -> &Entity<InputState>;
+
+fn form_value(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    field: FormField,
+) -> String {
+    cx.update(|_, cx| {
+        let form = workspace.read(cx).form.as_ref().expect("the form is open");
+        field(form).read(cx).value().to_string()
+    })
+}
+
+fn set_form_value(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    field: FormField,
+    value: &str,
+) {
+    cx.update(|window, cx| {
+        let input = field(workspace.read(cx).form.as_ref().unwrap()).clone();
+        input.update(cx, |input, cx| {
+            input.set_value(value.to_string(), window, cx)
+        });
+    });
+    settle(cx);
+}
+
+fn update_form(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    change: impl FnOnce(&mut ConnectionForm),
+) {
+    workspace.update(cx, |workspace, cx| {
+        change(workspace.form.as_mut().unwrap());
+        cx.notify();
+    });
+    settle(cx);
+}
+
+fn form_error(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| {
+        let form = workspace.read(cx).form.as_ref().unwrap();
+        form.config(cx).err()
+    })
+}
+
+/// A new server form starts on the engine's own host, typed in and editable,
+/// and follows the engine, a service and an SRV name only while it still
+/// holds that host. Blank is an error again.
+#[gpui::test]
+fn a_new_server_form_starts_on_localhost_until_something_else_names_the_host(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        let host = |cx: &mut VisualTestContext| form_value(&workspace, cx, |form| &form.host);
+        let retarget = |cx: &mut VisualTestContext, engine: Engine| {
+            update_form(&workspace, cx, |form| {
+                form.set_target(crate::db::Target::built_in(engine));
+            });
+        };
+
+        assert_eq!(host(cx), "localhost");
+        for engine in [Engine::MySql, Engine::ClickHouse, Engine::Redis] {
+            retarget(cx, engine);
+            assert_eq!(host(cx), "localhost", "{engine:?}");
+        }
+        retarget(cx, Engine::Sqlite);
+        assert_eq!(host(cx), "");
+        retarget(cx, Engine::Snowflake);
+        assert_eq!(host(cx), "", "Snowflake's host field is the account's");
+        retarget(cx, Engine::Postgres);
+        assert_eq!(host(cx), "localhost");
+
+        set_form_value(&workspace, cx, |form| &form.service, "analytics");
+        assert_eq!(host(cx), "", "the service names the host");
+        assert_eq!(form_error(&workspace, cx), None);
+        set_form_value(&workspace, cx, |form| &form.service, "");
+        assert_eq!(host(cx), "localhost");
+
+        retarget(cx, Engine::MongoDb);
+        update_form(&workspace, cx, |form| form.srv = true);
+        assert_eq!(host(cx), "", "an SRV name has no default");
+        assert_eq!(
+            form_error(&workspace, cx).as_deref(),
+            Some("Host is required.")
+        );
+        update_form(&workspace, cx, |form| form.srv = false);
+        assert_eq!(host(cx), "localhost");
+
+        retarget(cx, Engine::Postgres);
+        set_form_value(&workspace, cx, |form| &form.user, "reader");
+        assert_eq!(form_error(&workspace, cx), None);
+        set_form_value(&workspace, cx, |form| &form.host, "");
+        assert_eq!(
+            form_error(&workspace, cx).as_deref(),
+            Some("Host is required.")
+        );
+        retarget(cx, Engine::MySql);
+        assert_eq!(host(cx), "", "a host the user cleared stays cleared");
+
+        set_form_value(&workspace, cx, |form| &form.host, "db.example.test");
+        for engine in [Engine::Sqlite, Engine::Snowflake, Engine::Postgres] {
+            retarget(cx, engine);
+        }
+        set_form_value(&workspace, cx, |form| &form.service, "analytics");
+        assert_eq!(host(cx), "db.example.test");
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        set_form_value(&workspace, cx, |form| &form.service, "analytics");
+        assert_eq!(host(cx), "");
+        set_form_value(&workspace, cx, |form| &form.host, "db.example.test");
+        set_form_value(&workspace, cx, |form| &form.host, "");
+        set_form_value(&workspace, cx, |form| &form.service, "");
+        assert_eq!(
+            host(cx),
+            "",
+            "a host typed and cleared beside a service stays cleared"
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+/// A host that came from a saved profile or a URL is never the app's to
+/// rewrite: no prefill, and a blank one stays blank and is refused.
+#[gpui::test]
+fn an_edited_or_imported_form_keeps_the_host_it_was_given(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        let config = ConnectionConfig::Postgres(crate::db::PostgresConfig {
+            server: crate::db::ServerConfig {
+                user: "reader".into(),
+                ..Default::default()
+            },
+            service: Some("analytics".into()),
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.form = Some(ConnectionForm::new(Some(&config), window, cx));
+            });
+        });
+        settle(cx);
+        let host = |cx: &mut VisualTestContext| form_value(&workspace, cx, |form| &form.host);
+        assert_eq!(host(cx), "");
+        assert_eq!(form_error(&workspace, cx), None);
+        set_form_value(&workspace, cx, |form| &form.service, "");
+        assert_eq!(host(cx), "");
+        assert_eq!(
+            form_error(&workspace, cx).as_deref(),
+            Some("Host is required.")
+        );
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+            });
+        });
+        settle(cx);
+        set_form_value(
+            &workspace,
+            cx,
+            |form| &form.url,
+            "mongodb://reader@localhost/app",
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.fill_from_url(window, cx)
+        });
+        settle(cx);
+        assert_eq!(host(cx), "localhost");
+        update_form(&workspace, cx, |form| form.srv = true);
+        assert_eq!(host(cx), "localhost", "the URL named this host");
+
+        quit(workspace, cx);
+    });
+}
+
 /// Read-only picked while a connect is under way finds no connection to hold
 /// (`set_mode`), so the session that lands is opened again under it rather
 /// than left as the Read-write it set out as, with Read-only on screen.
