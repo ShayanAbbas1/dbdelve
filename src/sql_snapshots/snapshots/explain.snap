@@ -241,6 +241,30 @@ source: src/sql_snapshots.rs
 
 [mssql] delete · Analyze
   (none)
+[oracle] plain · Plan · explainable => |ok|
+
+[oracle] plain · Plan
+  (none)
+[oracle] filtered · Plan · explainable => |ok|
+
+[oracle] filtered · Plan
+  (none)
+[oracle] delete · Plan · explainable => |ok|
+
+[oracle] delete · Plan
+  (none)
+[oracle] plain · Analyze · explainable => |ok|
+
+[oracle] plain · Analyze
+  (none)
+[oracle] filtered · Analyze · explainable => |ok|
+
+[oracle] filtered · Analyze
+  (none)
+[oracle] delete · Analyze · explainable => |ok|
+
+[oracle] delete · Analyze
+  (none)
 [mongodb] plain · Plan · explainable => |ok|
 
 [mongodb] plain · Plan

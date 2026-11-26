@@ -1,0 +1,266 @@
+# <a name="releasenotes"></a> rust-oracledb Release Notes
+
+## rust-oracledb 26.0.0-beta.6 (November 12, 2026)
+
+1.  Compilation is now deliberately restricted to 64-bit architectures in order
+    to simplify handling of usize and u64.
+1.  Added support for binding Arrow Decimal256 arrays to NUMBER and fetching
+    NUMBER values as Decimal256 using a requested Arrow schema.
+1.  Added support for binding Arrow timestamp arrays with non-empty timezone
+    metadata as `TIMESTAMP WITH TIME ZONE`. Values are normalized to UTC; the
+    input timezone name is not retained.
+1.  Added methods
+    [Connection::query_arrow_batches()](crate::Connection::query_arrow_batches),
+    [Statement::query_arrow_batches()](crate::Statement::query_arrow_batches),
+    and [StatementBuilder::arrow_batch_size()](crate::StatementBuilder::arrow_batch_size)
+    for processing query results incrementally with Arrow
+    ([issue 52](https://github.com/oracle/rust-oracledb/issues/52)).
+1.  Added support for proxy user authentication
+    ([issue 56](https://github.com/oracle/rust-oracledb/issues/56)).
+1.  Added support for authentication with the Oracle Database 11g password
+    verifier. An error is returned for any unknown password verifiers
+    ([issue 63](https://github.com/oracle/rust-oracledb/issues/63)).
+1.  Added support for processing `ALTER SESSION SET CONTAINER` statements which
+    cause a renegotiation to take place, avoiding the ORA-24964 error
+    ([issue 82](https://github.com/oracle/rust-oracledb/issues/82)).
+1.  Added support for FLOAT(p) columns in
+    [Metadata::data_type()](crate::Metadata::data_type()).
+1.  Added [Error::db_error_code()](crate::Error::db_error_code()) as a
+    convenience when processing database errors.
+1.  Added support for seeking within LOBs.
+1.  Added debug formatting to public structures and enumerations in order to
+    ease testing and debugging.
+1.  IO errors that wrap module Error instances are now preserved instead of
+    converted to string
+    ([issue 70](https://github.com/oracle/rust-oracledb/issues/70)).
+1.  The trait `ToDbValue` used for sending parameters to the database is now
+    marked with the `Send` and `Sync` marker traits in order to facilitate use
+    across thread boundaries.
+1.  Fixed bug when the database initiates the reset instead of rust-oracledb
+    ([issue 23](https://github.com/oracle/rust-oracledb/issues/23)).
+1.  Fixed panic when establishing TCPS connections with multiple rustls crypto
+    providers enabled and no process-wide provider installed. The driver now
+    uses AWS-LC as a fallback while respecting an application-installed provider
+    ([issue 34](https://github.com/oracle/rust-oracledb/issues/34)).
+1.  Fixed bug which caused a pool to grow up to the capacity of the pool
+    without any pending requests
+    ([issue 66](https://github.com/oracle/rust-oracledb/issues/66)).
+1.  Fixed bug causing failed acquisition of a connection from a pool to consume
+    the capacity of the pool and prevent pool closure
+    ([issue 67](https://github.com/oracle/rust-oracledb/issues/67)).
+1.  Fixed bug when fetching TIMESTAMP WITH LOCAL TIME ZONE data. The database
+    time zone is now taken into account and timestamps are fetched as UTC
+    timestamps
+    ([issue 69](https://github.com/oracle/rust-oracledb/issues/69)).
+1.  Eliminated rendering of the cause in the `Error::Display` trait since it is
+    already returned by `Error::source()`
+    ([issue 76](https://github.com/oracle/rust-oracledb/issues/76)).
+1.  Fixed bug which caused
+    [Connection::set_call_timeout()](crate::Connection::set_call_timeout)
+    to apply only to socket reads. The timeout now also applies to socket
+    writes, preventing stalled sends from blocking indefinitely
+    ([issue 77](https://github.com/oracle/rust-oracledb/issues/77)).
+1.  Fixed bug in
+    [Metadata::vector_dimensions()](crate::Metadata::vector_dimensions)
+    ([issue 78](https://github.com/oracle/rust-oracledb/issues/78)).
+1.  Fixed bug when binding JSON and VECTOR data before scalar data
+    ([issue 79](https://github.com/oracle/rust-oracledb/issues/79)).
+1.  Fixed bug when a query fetching more than 8 columns and containing repeated
+    data is re-executed
+    ([issue 80](https://github.com/oracle/rust-oracledb/issues/80)).
+1.  Fixed bug when a comment precedes an alias in a tnsnames.ora file
+    ([issue 83](https://github.com/oracle/rust-oracledb/issues/83)).
+1.  Fixed bug which caused all queries to be closed when completely fetched.
+1.  Fixed bug when binding UTC timestamps.
+1.  Upgraded `arrow-array` and `arrow-schema` dependencies to version 60.1.0.
+1.  Arrow fetch schemas now include UTC timezone metadata for `TIMESTAMP WITH
+    TIME ZONE` and `TIMESTAMP WITH LOCAL TIME ZONE` columns.
+
+
+## rust-oracledb 26.0.0-beta.5 (October 28, 2026)
+
+1.  Added support for fetching BFILE LOBs.
+1.  Added support for fetching database objects and collections.
+1.  Added support for specifying the transport connect timeout and ensure it is
+    actually used when establishing a connection to the database
+    ([issue 35](https://github.com/oracle/rust-oracledb/issues/35)).
+1.  Added support for getting the domain and any annotations from columns that
+    support them
+    ([issue 48](https://github.com/oracle/rust-oracledb/issues/48)).
+1.  Added support for fetching CLOB, NCLOB, and LONG columns as Arrow
+    `LargeUtf8` instead of `Utf8`, and BLOB and LONG RAW as `LargeBinary`
+    instead of `Binary`.
+1.  Added `oracle.type-name` metadata to generated Arrow fields.
+1.  Added support for fetching Arrow timestamps in seconds, milliseconds,
+    microseconds, and nanoseconds as determined by Oracle column precision.
+1.  Added Arrow batch binding support for `Float16`, `FixedSizeBinary`, and
+    `Null` arrays.
+1.  Added support for [requesting the Arrow schema](#arrowrequestedschema) used
+    for query results with
+    [StatementBuilder::with_requested_schema()](crate::StatementBuilder::with_requested_schema)
+    ([issue 53](https://github.com/oracle/rust-oracledb/issues/53)).
+1.  Timestamp with time zone columns are now fetched and bound as UTC
+    timestamps
+    ([issue 8](https://github.com/oracle/rust-oracledb/issues/8)).
+1.  Fixed bug with request boundary handling
+    ([issue 32](https://github.com/oracle/rust-oracledb/issues/32)).
+1.  Fixed bug causing bind variables to be detected within DDL statements
+    ([issue 33](https://github.com/oracle/rust-oracledb/issues/33)).
+1.  Fixed issue with encoding integers with trailing zeros
+    ([issue 37](https://github.com/oracle/rust-oracledb/issues/37)).
+1.  Fixed bug preventing statement from being re-parsed on a second attempt
+    when errors take place on the first attempt
+    ([issue 51](https://github.com/oracle/rust-oracledb/issues/51)).
+1.  Fixed bug connecting to Oracle Database 12c
+    ([issue 55](https://github.com/oracle/rust-oracledb/issues/55)).
+1.  Fixed bug causing the type of SQL statements to be unrecognized if the SQL
+    statement starts with a single-line comment
+    ([issue 57](https://github.com/oracle/rust-oracledb/issues/57)).
+1.  Fixed bug causing piggybacks to be sent on non-data packets
+    ([issue 59](https://github.com/oracle/rust-oracledb/issues/59)).
+1.  Fixed bug that would cause the maximum SDU specified in all descriptions to
+    be used instead of the one specified for each individual description.
+1.  Fixed the error `NUMBER has scale 0 but requested scale is -38`
+    when fetching zero into an Arrow Decimal128 array with a negative scale.
+1.  Fixed panics when binding out-of-range Arrow timestamps. Invalid values
+    now return the error `timestamp is outside Oracle range`.
+1.  Fixed connection failures with `unknown TTC message type` errors when the
+    database returns Application Continuity replay context or logical
+    transaction ID (LTXID) data.
+
+
+## rust-oracledb 26.0.0-beta.4 (September 23, 2026)
+
+1.  All of the database type constants have been made references in order to
+    avoid the necessity of taking a reference (or a double reference when
+    binding the type directly).
+1.  Added methods [Metadata::data_type()](crate::Metadata::data_type()),
+    [Metadata::is_sparse_vector()](crate::Metadata::is_sparse_vector()),
+    [Metadata::vector_dimensions()](crate::Metadata::vector_dimensions()) and
+    [Metadata::vector_dimensions()](crate::Metadata::vector_storage_format())
+    and the enumeration [VectorStorageFormat](crate::VectorStorageFormat).
+1.  Added new struct [StatementBuilder](crate::StatementBuilder) to capture the
+    options used to build a statement and added a number of functions on the
+    struct [Statement](crate::Statement) to aid in introspection.
+1.  Added method [Row::columns()](crate::Row::columns()) to provide information
+    about the columns found in that particular row.
+1.  Added struct [DbError](crate::DbError) containing information about the
+    database error which is now returned instead of `String` for
+    the [ErrorKind::DbError](crate::ErrorKind::DbError) enum variant.
+1.  Added support for fetching UROWID.
+1.  Added support for setting the session time zone from the environment
+    variable `ORA_SDTZ` or the client's local time zone
+    ([issue 9](https://github.com/oracle/rust-oracledb/issues/9)).
+1.  Avoid panicing when a lock is poisoned
+    ([issue 22](https://github.com/oracle/rust-oracledb/issues/22)).
+1.  Avoid building errors unless they are needed
+    ([issue 28](https://github.com/oracle/rust-oracledb/issues/28)).
+1.  Added support for using the configured
+    [PoolConfig::ping_timeout()](crate::PoolConfig::ping_timeout()) value
+    ([issue 29](https://github.com/oracle/rust-oracledb/issues/29)).
+1.  Eliminated hang when an error occurs during a DML returning statemnt
+    ([issue 16](https://github.com/oracle/rust-oracledb/issues/16)).
+1.  Fixed encoding of Oracle NUMBER data for values with an odd number of
+    leading zeroes after the decimal point
+    ([issue 21](https://github.com/oracle/rust-oracledb/issues/21)).
+1.  Fixed bug processing duplicate column values when the number of prefetch
+    rows is greater than two
+    ([issue 27](https://github.com/oracle/rust-oracledb/issues/27)).
+1.  Ensure that PL/SQL out binds can be acquired from
+    [Row::get()](crate::Row::get()) and [Row::take()](crate::Row::take()) using
+    the bind variable name and not just the position in the list of out binds.
+1.  Ensure that connections returned from a pool always start with a call
+    timeout of None.
+1.  Corrected calculation of national character set ID used when creating
+    temporary LOBs.
+
+
+## rust-oracledb 26.0.0-beta.3 (September 8, 2026)
+
+1.  Added methods [Row::take()](crate::Row::take()) and
+    [Row::take_array()](crate::Row::take_array()) which transfer ownership of
+    the data in the row to the caller. The existing methods
+    [Row::get()](crate::Row::get()) and
+    [Row::get_array()](crate::Row::get_array()) return references to the row
+    data where possible and clone the data where an owned type is desired. The
+    method ``Row::get_cursor()`` has been removed in favor of the new method
+    [Row::take()](crate::Row::take()).
+1.  The method [Row::get()](crate::Row::get()) can now return `&str` and
+    `&[u8]` references for string and raw data respectively. This allows
+    returning a reference to the fetched data without copying it.
+1.  Added support for using a name instead of a numeric position to identify
+    columns in [Row::get()](crate::Row::get()) and
+    [Row::take()](crate::Row::take())
+    ([issue 12](https://github.com/oracle/rust-oracledb/issues/12)).
+1.  Added new struct [ExecBatchResult](crate::ExecBatchResult) for getting the
+    results from calling
+    [Statement::execute_batch()](crate::Statement::execute_batch()) instead of
+    using [ExecResult](crate::ExecResult). Methods
+    [ExecResult::out_bind_data()](crate::ExecResult::out_bind_data()) and
+    [ExecBatchResult::out_bind_data()](crate::ExecBatchResult::out_bind_data())
+    were added for getting [PL/SQL out bind](#batchplsql) data. The methods
+    [ExecResult::returned_data()](crate::ExecResult::returned_data()) and
+    [ExecBatchResult::returned_data()](crate::ExecBatchResult::returned_data())
+    are only used for getting [DML returning data](#dmlreturning) and they are
+    returned in a manner more conducive to further manipulation
+    ([discussion 14](https://github.com/oracle/rust-oracledb/discussions/14)).
+1.  Added method [Connection::create_lob()](crate::Connection::create_lob) for
+    creating temporary BLOB, CLOB and NCLOB values.
+1.  Added support for binding long values in any order
+    ([issue 10](https://github.com/oracle/rust-oracledb/issues/10)).
+1.  Added support for binding pure OUT binds using the Oracle data type instead
+    of a dummy value. This also allows for binding of REF CURSOR out binds.
+1.  Added support for the HA readiness requirements of Oracle Database 23.26.3.
+1.  Errors that are returned now capture the backtrace and display it if
+    configured with `RUST_BACKTRACE=1`, which aids in debugging.
+1.  Improved errors that are a result of a failure to parse the server's
+    response to a request.
+1.  Fixed bug where returning a connection to the pool did not end the request
+    correctly
+    ([issue 15](https://github.com/oracle/rust-oracledb/issues/15)).
+1.  Removed the ability to clone [Cursor](crate::Cursor) and [Lob](crate::Lob).
+1.  Fixed bug which caused a named binding containing a single quote to panic.
+1.  Fixed bug which caused a hang when executing a statement with PL/SQL out
+    binds multiple times
+    ([issue 17](https://github.com/oracle/rust-oracledb/issues/17)).
+1.  Fixed bug which caused a protocol error when parsing the response to a
+    `SELECT FOR UPDATE` statement.
+1.  Fixed bug which permitted a pool to be created with the maximum number of
+    connections set to zero.  The error
+    [ErrorKind::PoolMaxInvalid](crate::ErrorKind::PoolMaxInvalid) was renamed
+    from `ErrorKind::PoolMaxLessThanMin` which now covers both scenarios.
+1.  Fixed bug binding Arrow arrays of type `StringView` and `BinaryView`.
+
+
+## rust-oracledb 26.0.0-beta.2 (August 20, 2026)
+
+1.  Added method [Statement::bind_names()](crate::Statement::bind_names()) in
+    order to determine the list of bind variable names used by a statement.
+1.  The struct [Row](crate::Row) has been exported publicly so that
+    documentation on it is visible.
+1.  Added method [Row::get_array()](crate::Row::get_array()) in order to get
+    values returned in a DML RETURNING statement using the same types as are
+    possible with scalar values.
+1.  Fixed bugs and enhanced parsing of SQL statements
+    ([issue 1](https://github.com/oracle/rust-oracledb/issues/1)).
+1.  Fixed bugs and enhanced parsing of connect strings, including the handling
+    of listener redirects
+    ([issue 2](https://github.com/oracle/rust-oracledb/issues/2)).
+1.  Fixed bug handling multiple packet responses with databases older than
+    Oracle AI Database 26ai
+    ([issue 5](https://github.com/oracle/rust-oracledb/issues/5)).
+1.  Fixed bugs with reading and writing CLOB/NCLOB when the database character
+    set is a fixed width character set.
+1.  Fixed bug when a statement is executed twice and the second time a value
+    that is bound to a placeholder is larger than the value bound to that
+    placeholder the first time.
+1.  Fixed bug when a statement querying LOBs is executed twice and the second
+    time the `fetch_lobs` option is different from the first time.
+1.  String decoding now returns an error instead of panicing when invalid
+    encoded string data is detected.
+1.  Added runnable examples.
+
+
+## rust-oracledb 26.0.0-beta.1 (August 6, 2026)
+
+Initial release of the rust-oracledb driver for Oracle Database.

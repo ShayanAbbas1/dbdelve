@@ -82,6 +82,15 @@ source: src/sql_snapshots.rs
 [mssql] explain_suffix Plan => ||
 [mssql] explain_prefix Analyze => (none)
 [mssql] explain_suffix Analyze => ||
+[oracle] boolean_literal true => |true|
+[oracle] boolean_literal false => |false|
+[oracle] count_all => |COUNT(*)|
+[oracle] transaction_start => (none)
+[oracle] all_or_nothing => |BEGIN|
+[oracle] explain_prefix Plan => (none)
+[oracle] explain_suffix Plan => ||
+[oracle] explain_prefix Analyze => (none)
+[oracle] explain_suffix Analyze => ||
 [mongodb] boolean_literal true => |true|
 [mongodb] boolean_literal false => |false|
 [mongodb] count_all => |COUNT(*)|

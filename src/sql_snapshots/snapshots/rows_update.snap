@@ -1145,6 +1145,133 @@ source: src/sql_snapshots.rs
 [mssql] empty keys
   (none)
 
+[oracle] plain · plain
+  |UPDATE "public"."accounts" SET "Name" = 'ok' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · single quote
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · backslash
+  |UPDATE "public"."accounts" SET "Name" = 'back\\slash' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] plain · backslash before quote
+  |UPDATE "public"."accounts" SET "Name" = '\\''' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] plain · odd backslashes then quote
+  |UPDATE "public"."accounts" SET "Name" = 'a\\\\\\''b' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] plain · unicode
+  |UPDATE "public"."accounts" SET "Name" = '李小龍 ünï 😀' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · empty
+  |UPDATE "public"."accounts" SET "Name" = '' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · newline and tab
+  |UPDATE "public"."accounts" SET "Name" = 'a|
+  |b\u{9}c' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · control characters
+  |UPDATE "public"."accounts" SET "Name" = 'a\u{0}b\u{7}' WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · like metacharacters
+  |UPDATE "public"."accounts" SET "Name" = '100%_[x]' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · glob metacharacters
+  |UPDATE "public"."accounts" SET "Name" = '*?[a]\\' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] plain · number
+  |UPDATE "public"."accounts" SET "Name" = '42' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · negative float
+  |UPDATE "public"."accounts" SET "Name" = '-3.5e10' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · boolean
+  |UPDATE "public"."accounts" SET "Name" = 'true' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · date
+  |UPDATE "public"."accounts" SET "Name" = '2024-01-02' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · timestamp
+  |UPDATE "public"."accounts" SET "Name" = '2024-01-02 03:04:05.123' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · hex
+  |UPDATE "public"."accounts" SET "Name" = '0xDEADbeef' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] plain · long
+  |UPDATE "public"."accounts" SET "Name" = '01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] null
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] every name
+  |UPDATE "public"."accounts" SET "id" = 'v', "Name" = 'v', "select" = 'v', "we""ird" = 'v', "back`tick" = 'v', "with space" = 'v', "ümlaut" = 'v', "it's" = 'v', "[x]" = 'v', "a.b" = 'v', "" = 'v', "_id" = 'v' WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] composite key
+  |UPDATE "public"."accounts" SET "Name" = 'v' WHERE "id" = '7' AND "Region" = 'eu-west ''x'''|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] binary key
+  |UPDATE "public"."accounts" SET "Name" = 'v' WHERE "payload" = '0xDEADbeef'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation plain
+  |UPDATE "public"."accounts" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation quotes
+  |UPDATE "my ""odd"" schema"."it's `tick` ""dq""" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation unicode
+  |UPDATE "données"."Ünïcødé 表" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation reserved
+  |UPDATE "select"."order" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation mixed case
+  |UPDATE "Sales"."OrderLines" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation brackets and dots
+  |UPDATE "[dbo]"."a.b" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] relation backslash
+  |UPDATE "back\\slash"."trail\\" SET "Name" = 'v' WHERE "id" = '7'|
+  = write_on=true select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] empty sets
+  (none)
+
+[oracle] empty keys
+  (none)
+
 [mongodb] plain · plain
   |UPDATE "public"."accounts" SET "Name" = "ok" WHERE "id" = "7"|
   = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)

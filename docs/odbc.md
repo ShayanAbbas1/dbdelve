@@ -1,8 +1,8 @@
 # Connecting through ODBC
 
 DBDelve has built-in engines for Postgres, MySQL, MariaDB, SQLite, Turso,
-DuckDB, Snowflake, SQL Server, MongoDB, Redis and ClickHouse. Any other
-database with an ODBC driver (IBM Db2, Oracle, Informix, Teradata, Firebird and
+DuckDB, Snowflake, SQL Server, Oracle, MongoDB, Redis and ClickHouse. Any other
+database with an ODBC driver (IBM Db2, Informix, Teradata, Firebird and
 so on) can be reached through the ODBC bridge that ships inside DBDelve.
 
 DBDelve brings the bridge. **You bring the database's ODBC driver**, the same

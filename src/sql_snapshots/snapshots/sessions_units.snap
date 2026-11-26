@@ -102,6 +102,17 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 10 at SELECT 2 => |ok|
+[oracle] statement 0..8 => |SELECT 1|
+[oracle] statement 10..18 => |SELECT 2|
+[oracle] queued 0..8 => |SELECT 1|
+[oracle] queued 10..18 => |SELECT 2|
+[oracle] queued in 0..9 0..8 => |SELECT 1|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |SELECT 1; SELECT 2|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 10 at SELECT 2 => |ok|
 [mongodb] statement 0..8 => |SELECT 1|
 [mongodb] statement 10..16 => |SELECT|
 [mongodb] statement 17..18 => |2|
@@ -237,6 +248,17 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => error: |GO 2 repeats its batch, and dbdelve runs a batch once.|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 13 at SELECT 2 => error: |GO 2 repeats its batch, and dbdelve runs a batch once.|
+[oracle] statement 0..8 => |SELECT 1|
+[oracle] statement 10..26 => |GO\u{a}SELECT 2\u{a}GO 2|
+[oracle] queued 0..8 => |SELECT 1|
+[oracle] queued 10..26 => |GO\u{a}SELECT 2\u{a}GO 2|
+[oracle] queued in 0..9 0..8 => |SELECT 1|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |SELECT 1;\u{a}GO\u{a}SELECT 2\u{a}GO 2\u{a}|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 13 at SELECT 2 => |ok|
 [mongodb] statement 0..8 => |SELECT 1|
 [mongodb] statement 10..12 => |GO|
 [mongodb] statement 13..19 => |SELECT|
@@ -365,6 +387,15 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 18 at SELECT 2 => |ok|
+[oracle] statement 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[oracle] queued 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[oracle] queued in 0..9 0..26 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |SELECT 'GO'\u{a}-- GO\u{a}SELECT 2|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 18 at SELECT 2 => |ok|
 [mongodb] statement 0..24 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT|
 [mongodb] statement 25..26 => |2|
 [mongodb] queued 0..24 => |SELECT 'GO'\u{a}-- GO\u{a}SELECT|
@@ -481,6 +512,15 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 11 at the end => |ok|
+[oracle] statement 0..11 => |SELECT 1\u{a}GO|
+[oracle] queued 0..11 => |SELECT 1\u{a}GO|
+[oracle] queued in 0..9 0..11 => |SELECT 1\u{a}GO|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |SELECT 1\u{a}GO|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 11 at the end => |ok|
 [mongodb] statement 0..6 => |SELECT|
 [mongodb] statement 7..8 => |1|
 [mongodb] statement 9..11 => |GO|
@@ -630,6 +670,19 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 46 at the end => |ok|
+[oracle] statement 0..26 => |IF 1=1 BEGIN DELETE FROM t|
+[oracle] statement 28..41 => |DELETE FROM u|
+[oracle] statement 43..46 => |END|
+[oracle] queued 0..26 => |IF 1=1 BEGIN DELETE FROM t|
+[oracle] queued 28..41 => |DELETE FROM u|
+[oracle] queued 43..46 => |END|
+[oracle] queued in 0..9 0..26 => |IF 1=1 BEGIN DELETE FROM t|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |IF 1=1 BEGIN DELETE FROM t; DELETE FROM u; END|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 46 at the end => |ok|
 [mongodb] statement 0..26 => |IF 1=1 BEGIN DELETE FROM t|
 [mongodb] statement 28..41 => |DELETE FROM u|
 [mongodb] statement 43..46 => |END|
@@ -767,6 +820,17 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 51 at the end => |ok|
+[oracle] statement 0..18 => |DECLARE @x int = 1|
+[oracle] statement 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[oracle] queued 0..18 => |DECLARE @x int = 1|
+[oracle] queued 20..51 => |SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[oracle] queued in 0..9 0..18 => |DECLARE @x int = 1|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |DECLARE @x int = 1;\u{a}SELECT @x\u{a}GO\u{a}SELECT * FROM #tmp|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 51 at the end => |ok|
 [mongodb] statement 0..10 => |DECLARE @x|
 [mongodb] statement 11..18 => |int = 1|
 [mongodb] statement 20..28 => |SELECT @|
@@ -895,6 +959,15 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 20 at the end => |ok|
+[oracle] statement => (none)
+[oracle] queued => (none)
+[oracle] queued in 0..9 => (none)
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |/* only a comment */|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 20 at the end => |ok|
 [mongodb] statement => (none)
 [mongodb] queued => (none)
 [mongodb] queued in 0..9 => (none)
@@ -1024,6 +1097,17 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 19 at SELECT 2 => |ok|
+[oracle] statement 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
+[oracle] statement 19..27 => |SELECT 2|
+[oracle] queued 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
+[oracle] queued 19..27 => |SELECT 2|
+[oracle] queued in 0..9 0..18 => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |SELECT 'a\u{a}GO\u{a}b'\u{a}GO\u{a}SELECT 2|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 19 at SELECT 2 => |ok|
 [mongodb] statement 0..8 => |SELECT '|
 [mongodb] statement 8..9 => |a|
 [mongodb] statement 10..12 => |GO|
@@ -1176,6 +1260,17 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 21 at SELECT 2 => |ok|
+[oracle] statement 9..20 => |SELECT 1\u{a}GO|
+[oracle] statement 21..29 => |SELECT 2|
+[oracle] queued 9..20 => |SELECT 1\u{a}GO|
+[oracle] queued 21..29 => |SELECT 2|
+[oracle] queued in 0..9 => (none)
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |/*\u{a}GO\u{a}*/\u{a}SELECT 1\u{a}GO\u{a}SELECT 2|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 21 at SELECT 2 => |ok|
 [mongodb] statement 9..27 => |SELECT 1\u{a}GO\u{a}SELECT|
 [mongodb] statement 28..29 => |2|
 [mongodb] queued 9..27 => |SELECT 1\u{a}GO\u{a}SELECT|
@@ -1320,6 +1415,17 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 36 at the end => |ok|
+[oracle] statement 0..8 => |SELECT 1|
+[oracle] statement 24..36 => |SELECT 'a;b'|
+[oracle] queued 0..8 => |SELECT 1|
+[oracle] queued 24..36 => |SELECT 'a;b'|
+[oracle] queued in 0..9 0..8 => |SELECT 1|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |SELECT 1 -- trailing\u{a};\u{a}\u{a}SELECT 'a;b'|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 36 at the end => |ok|
 [mongodb] statement 0..20 => |SELECT 1 -- trailing|
 [mongodb] statement 24..30 => |SELECT|
 [mongodb] statement 31..36 => |'a;b'|
@@ -1440,6 +1546,15 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 27 at the end => |ok|
+[oracle] statement 0..27 => |db.a.find({})\u{a}db.b.find({})|
+[oracle] queued 0..27 => |db.a.find({})\u{a}db.b.find({})|
+[oracle] queued in 0..9 0..27 => |db.a.find({})\u{a}db.b.find({})|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |db.a.find({})\u{a}db.b.find({})|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 27 at the end => |ok|
 [mongodb] statement 0..13 => |db.a.find({})|
 [mongodb] statement 14..27 => |db.b.find({})|
 [mongodb] queued 0..13 => |db.a.find({})|
@@ -1554,6 +1669,15 @@ source: src/sql_snapshots.rs
 [mssql] batch_counts => |ok|
 [mssql] batch_repeats 0 => |ok|
 [mssql] batch_repeats 13 at the end => |ok|
+[oracle] statement 0..5 => |GET a|
+[oracle] queued 0..5 => |GET a|
+[oracle] queued in 0..9 0..5 => |GET a|
+[oracle] expected_sets => |1|
+[oracle] split_reads => (none)
+[oracle] one_batch => |GET a\u{a}SET b 1|
+[oracle] batch_counts => |ok|
+[oracle] batch_repeats 0 => |ok|
+[oracle] batch_repeats 13 at the end => |ok|
 [mongodb] statement 0..3 => |GET|
 [mongodb] statement 4..5 => |a|
 [mongodb] statement 6..11 => |SET b|

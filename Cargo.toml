@@ -328,6 +328,12 @@ time = { version = "=0.3.55", default-features = false, features = [
 # in the graph; pinned to the locked version so naming it links no second copy.
 encoding_rs = "=0.8.35"
 
+# Oracle's own driver, pure Rust over TNS with no Instant Client, blocking like
+# mysql and rusqlite. Vendored through `[patch.crates-io]` below. 26.0.0-beta.6
+# is the newest release and a beta: the pin is exact, and it is not bumped
+# unasked.
+oracledb = "=26.0.0-beta.6"
+
 # Classification only, for `sql::classify`: the mode check reads a typed
 # `Statement` so it cannot mistake one statement for another. tree-sitter-sequel
 # recovers `GRANT SELECT ON t TO u` as a `select` node, and a gate that reads a
@@ -513,6 +519,12 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # at rest rather than only under the pointer. Every change is marked
 # `dbdelve patch`; re-apply them on a gpui-component bump.
 gpui-component = { path = "vendor/gpui-component" }
+# oracledb is vendored for two changes, each marked `dbdelve patch`: its rustls
+# dependency takes `ring` with default features off, so the aws-lc-rs C build
+# its manifest would bring in stays out of the graph, and it exposes an
+# interrupt a Cancel can send from another thread. Re-apply both on a bump; the
+# pin is exact because it is a beta and its errors change between betas.
+oracledb = { path = "vendor/oracledb" }
 
 # GPUI does layout, text shaping and scene building on the CPU every frame, so
 # an unoptimized gpui drops frames the moment a grid scrolls. Dependencies are

@@ -20034,6 +20034,2182 @@ source: src/sql_snapshots.rs
   |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = N'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
 
+[oracle] plain · none · [] · offset 0
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 200
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 0
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 200
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 0
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 200
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 0
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 200
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 0
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 200
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 0
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 200
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] plain · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · none · [] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · none · [] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · none · [] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · none · [] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · filtered · [] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · filtered · [] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [id asc] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [id asc] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [id asc] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [id asc] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [Name desc] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [Name desc] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [Name desc] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [Name desc] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [Name desc] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [Name desc] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [id asc, Name desc] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · none · [id asc, Name desc] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 0 · paged id
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "my ""odd"" schema"."it's `tick` ""dq""" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 200 · paged id
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  (none)
+
+[oracle] quotes · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  (none)
+
+[oracle] unicode · none · [] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] unicode · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "données"."Ünïcødé 表" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 0
+  |SELECT * FROM "select"."order" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 0 · paged id
+  |SELECT * FROM "select"."order" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 200
+  |SELECT * FROM "select"."order" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 200 · paged id
+  |SELECT * FROM "select"."order" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 0
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 0 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 200
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 200 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 0
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 0 · paged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 200
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 200 · paged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 0
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 0 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 200
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 200 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 0
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 200
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 0
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 200
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] reserved · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "select"."order" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] mixed case · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "Sales"."OrderLines" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] brackets and dots · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "[dbo]"."a.b" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] backslash · none · [] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY (SELECT NULL FROM DUAL), "id", "Region" OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · none · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 0
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 0 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 0 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 0 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 0 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 0|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 200
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 200 · paged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 200 · unpaged id
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 200 · paged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC OFFSET 200 ROWS FETCH NEXT 1000 ROWS ONLY|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
+[oracle] backslash · filtered · [id asc, Name desc] · offset 200 · unpaged id+Region
+  |SELECT * FROM "back\\slash"."trail\\" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce)
+
 [mongodb] plain · none · [] · offset 0
   |db.getCollection("accounts").find({}).limit(1000)|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None

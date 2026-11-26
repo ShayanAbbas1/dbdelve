@@ -342,6 +342,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::MariaDb
             | Engine::DuckDb
             | Engine::SqlServer
+            | Engine::Oracle
             | Engine::Snowflake
             | Engine::ClickHouse
             | Engine::MongoDb
@@ -359,6 +360,7 @@ impl<F: Fn(&str) -> Result<QueryResult, DbError>> Schema<F> {
             | Engine::MariaDb
             | Engine::DuckDb
             | Engine::SqlServer
+            | Engine::Oracle
             | Engine::Snowflake
             | Engine::ClickHouse
             | Engine::MongoDb

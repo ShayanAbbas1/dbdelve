@@ -161,3 +161,17 @@ sign-extends them. That is also why
 `isql` shows stale values in NULL cells. Linux uses `libdb2.so`; the
 bridge handles either `SQLLEN` width. CI runs the `db2` job with `continue-on-error` until it has
 proven stable.
+
+## Oracle
+
+`oracle` in `compose.yaml` is `gvenzl/oracle-free` (the `-slim-faststart`
+image, with the database already created), on port 51521 (`DBDELVE_ORACLE_PORT`)
+and service `FREEPDB1`. `dev/oracle/init/001-dbdelve-demo.sql` seeds the
+`dbdelve` user's schema; `type_gallery` comes last and the healthcheck counts
+its rows, because the listener answers before the seed has run. The URL is in
+`AGENTS.md`; `sslmode=disable` because the container speaks no TLS, and
+`prefer` would try TLS first and fall back.
+
+The `live_` tests in `src/db/oracle.rs` read `dbdelve_ORACLE_URL`. Most assert
+the seed; `live_every_listed_relation_can_be_described_and_read` only reads, so
+it can be pointed at any Oracle (12.1 or later, for `ORACLE_MAINTAINED`).

@@ -33,6 +33,7 @@ mod mongo;
 mod mssql;
 mod mysql;
 pub(crate) mod odbc_string;
+mod oracle;
 mod password_command;
 pub(crate) mod plugin;
 mod postgres;
@@ -252,6 +253,7 @@ pub enum Engine {
     Snowflake,
     ClickHouse,
     SqlServer,
+    Oracle,
     MongoDb,
     Redis,
     /// SQL with no dialect of its own, reached through a plugin. No built-in
@@ -370,6 +372,7 @@ impl Engine {
             Self::Snowflake => &spec::SNOWFLAKE,
             Self::ClickHouse => &spec::CLICKHOUSE,
             Self::SqlServer => &spec::SQL_SERVER,
+            Self::Oracle => &spec::ORACLE,
             Self::MongoDb => &spec::MONGODB,
             Self::Redis => &spec::REDIS,
             Self::Generic => &spec::GENERIC,
@@ -402,7 +405,7 @@ impl Engine {
     }
 
     /// Presentation order, which is the order the form's chips appear in.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Postgres,
         Self::MySql,
         Self::MariaDb,
@@ -412,6 +415,7 @@ impl Engine {
         Self::Snowflake,
         Self::ClickHouse,
         Self::SqlServer,
+        Self::Oracle,
         Self::MongoDb,
         Self::Redis,
         Self::Generic,
@@ -578,7 +582,12 @@ impl Engine {
             | Self::MariaDb
             | Self::SqlServer
             | Self::MongoDb => true,
-            Self::Turso | Self::Snowflake | Self::ClickHouse | Self::Redis | Self::Generic => false,
+            Self::Turso
+            | Self::Snowflake
+            | Self::ClickHouse
+            | Self::Oracle
+            | Self::Redis
+            | Self::Generic => false,
         }
     }
 
@@ -1215,6 +1224,7 @@ pub enum ConnectionConfig {
     MySql(ServerConfig),
     MariaDb(ServerConfig),
     SqlServer(ServerConfig),
+    Oracle(ServerConfig),
     Sqlite {
         path: String,
         statement_timeout: u32,
@@ -1267,6 +1277,7 @@ impl ConnectionConfig {
             Self::MySql(_) => Engine::MySql,
             Self::MariaDb(_) => Engine::MariaDb,
             Self::SqlServer(_) => Engine::SqlServer,
+            Self::Oracle(_) => Engine::Oracle,
             Self::Sqlite { .. } => Engine::Sqlite,
             Self::Turso { .. } => Engine::Turso,
             Self::DuckDb { .. } => Engine::DuckDb,
@@ -1296,6 +1307,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::Oracle(server)
             | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mongo.server),
@@ -1315,6 +1327,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::Oracle(server)
             | Self::ClickHouse(server)
             | Self::Redis(server) => Some(server),
             Self::MongoDb(mongo) => Some(&mut mongo.server),
@@ -1393,6 +1406,7 @@ impl ConnectionConfig {
             Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::Oracle(server)
             | Self::ClickHouse(server) => server.database = name,
             Self::MongoDb(mongo) => mongo.set_database(name),
             Self::Snowflake(account) => account.set_database(name),
@@ -1485,6 +1499,7 @@ impl ConnectionConfig {
             Engine::MySql => mysql::config_from_url(url).map(Self::MySql),
             Engine::MariaDb => server_from_url(url, "MariaDB").map(Self::MariaDb),
             Engine::SqlServer => mssql::config_from_url(url).map(Self::SqlServer),
+            Engine::Oracle => server_from_url(url, "Oracle").map(Self::Oracle),
             Engine::MongoDb => mongo::config_from_url(url).map(Self::MongoDb),
             Engine::Redis => redis::config_from_url(url).map(Self::Redis),
             Engine::ClickHouse => server_from_url(url, "ClickHouse").map(Self::ClickHouse),
@@ -1515,6 +1530,7 @@ impl ConnectionConfig {
             | Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::Oracle(server)
             | Self::ClickHouse(server)
             | Self::Redis(server) => server.statement_timeout,
             Self::MongoDb(mongo) => mongo.server.statement_timeout,
@@ -1587,6 +1603,7 @@ impl ConnectionConfig {
             Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::Oracle(server)
             | Self::ClickHouse(server)
             | Self::Redis(server) => vec![
                 server.endpoint(),
@@ -1625,6 +1642,7 @@ impl ConnectionConfig {
             Self::MySql(server)
             | Self::MariaDb(server)
             | Self::SqlServer(server)
+            | Self::Oracle(server)
             | Self::ClickHouse(server)
             | Self::Redis(server) => server.endpoint(),
             Self::MongoDb(mongo) => mongo.endpoint(),
@@ -1663,6 +1681,7 @@ pub enum Connection {
     /// MariaDB's too: one driver, which holds the engine it was opened for.
     MySql(mysql::Connection),
     SqlServer(mssql::Connection),
+    Oracle(oracle::Connection),
     Sqlite(sqlite::Connection),
     Turso(turso::Connection),
     DuckDb(duckdb::Connection),
@@ -1690,6 +1709,7 @@ impl Connection {
             ConnectionConfig::SqlServer(server) => {
                 mssql::Connection::open(&server).map(Self::SqlServer)
             }
+            ConnectionConfig::Oracle(server) => oracle::Connection::open(&server).map(Self::Oracle),
             ConnectionConfig::Sqlite {
                 path,
                 statement_timeout,
@@ -1746,6 +1766,7 @@ impl Connection {
             Self::Postgres(connection) => connection.query(sql, fetch),
             Self::MySql(connection) => connection.query(sql, fetch),
             Self::SqlServer(connection) => connection.query(sql, fetch),
+            Self::Oracle(connection) => connection.query(sql, fetch),
             Self::Sqlite(connection) => connection.query(sql, fetch),
             Self::Turso(connection) => connection.query(sql, fetch),
             Self::DuckDb(connection) => connection.query(sql, fetch),
@@ -1976,6 +1997,7 @@ impl Connection {
                 Self::Turso(_)
                 | Self::Snowflake(_)
                 | Self::ClickHouse(_)
+                | Self::Oracle(_)
                 | Self::Redis(_)
                 | Self::External(_) => unverifiable(),
             }
@@ -2011,6 +2033,7 @@ impl Connection {
             Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
+            Self::Oracle(connection) => connection.alongside().map(Self::Oracle),
             Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
             Self::Turso(connection) => connection.alongside().map(Self::Turso),
             Self::DuckDb(connection) => connection.alongside().map(Self::DuckDb),
@@ -2055,6 +2078,7 @@ impl Connection {
             Self::Postgres(connection) => connection.alongside().map(Self::Postgres),
             Self::MySql(connection) => connection.alongside().map(Self::MySql),
             Self::SqlServer(connection) => Ok(Self::SqlServer(connection.alongside())),
+            Self::Oracle(connection) => connection.alongside().map(Self::Oracle),
             Self::Sqlite(connection) => connection.alongside().map(Self::Sqlite),
             Self::Turso(connection) => connection.alongside().map(Self::Turso),
             Self::DuckDb(connection) => connection.alongside().map(Self::DuckDb),
@@ -2092,9 +2116,9 @@ impl Connection {
             Self::Postgres(connection) => connection.on_database(database).map(Self::Postgres),
             Self::SqlServer(connection) => connection.on_database(database).map(Self::SqlServer),
             Self::ClickHouse(connection) => connection.on_database(database).map(Self::ClickHouse),
-            Self::Sqlite(_) | Self::Turso(_) | Self::External(_) => Err(plain_error(
-                "This connection has no other database to open a session on.".into(),
-            )),
+            Self::Sqlite(_) | Self::Turso(_) | Self::Oracle(_) | Self::External(_) => Err(
+                plain_error("This connection has no other database to open a session on.".into()),
+            ),
         }
     }
 
@@ -2173,6 +2197,7 @@ impl Connection {
             ),
             Self::Postgres(_)
             | Self::MySql(_)
+            | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
             | Self::DuckDb(_)
@@ -2201,6 +2226,7 @@ impl Connection {
             Self::Postgres(connection) => connection.catalog(),
             Self::MySql(connection) => connection.catalog(),
             Self::SqlServer(connection) => connection.catalog(),
+            Self::Oracle(connection) => connection.catalog(),
             Self::Sqlite(connection) => connection.catalog(),
             Self::Turso(connection) => connection.catalog(),
             Self::DuckDb(connection) => connection.catalog(),
@@ -2232,6 +2258,7 @@ impl Connection {
                     connection.sequences()
                 })
             }
+            Self::Oracle(connection) => connection.routines(),
             Self::Sqlite(connection) => connection.routines(),
             Self::Turso(connection) => connection.routines(),
             Self::DuckDb(connection) => {
@@ -2265,6 +2292,7 @@ impl Connection {
             Self::MySql(connection) => connection.sizes(),
             Self::MongoDb(connection) => connection.sizes(),
             Self::SqlServer(_)
+            | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::Turso(_)
             | Self::DuckDb(_)
@@ -2289,9 +2317,11 @@ impl Connection {
             Self::DuckDb(connection) => connection.references(schema, relation),
             Self::External(connection) => connection.references(schema, relation),
             // Nothing declares one document's field a reference to another's.
-            Self::Snowflake(_) | Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => {
-                Ok(Vec::new())
-            }
+            Self::Snowflake(_)
+            | Self::ClickHouse(_)
+            | Self::Oracle(_)
+            | Self::MongoDb(_)
+            | Self::Redis(_) => Ok(Vec::new()),
         }
     }
 
@@ -2302,6 +2332,7 @@ impl Connection {
             Self::Postgres(connection) => connection.databases(),
             Self::MySql(connection) => connection.databases(),
             Self::SqlServer(connection) => connection.databases(),
+            Self::Oracle(connection) => connection.databases(),
             Self::MongoDb(connection) => connection.databases(),
             Self::Redis(connection) => connection.databases(),
             Self::Snowflake(connection) => connection.databases(),
@@ -2396,6 +2427,7 @@ impl Connection {
             Self::Postgres(connection) => connection.structure(schema, relation),
             Self::MySql(connection) => connection.structure(schema, relation),
             Self::SqlServer(connection) => connection.structure(schema, relation),
+            Self::Oracle(connection) => connection.structure(schema, relation),
             Self::Sqlite(connection) => connection.structure(schema, relation),
             Self::Turso(connection) => connection.structure(schema, relation),
             Self::DuckDb(connection) => connection.structure(schema, relation),
@@ -2424,9 +2456,9 @@ impl Connection {
             Self::Turso(connection) => connection.schema_graph(schema),
             Self::DuckDb(connection) => connection.schema_graph(schema),
             Self::Snowflake(connection) => connection.schema_graph(schema),
-            Self::ClickHouse(_) | Self::MongoDb(_) | Self::Redis(_) => Err(plain_error(
-                "This engine declares no foreign keys to draw.".into(),
-            )),
+            Self::ClickHouse(_) | Self::Oracle(_) | Self::MongoDb(_) | Self::Redis(_) => Err(
+                plain_error("This engine declares no foreign keys to draw.".into()),
+            ),
             Self::External(connection) => connection.schema_graph(schema),
         }
     }
@@ -2450,6 +2482,7 @@ impl Connection {
             Self::Postgres(connection) => connection.ddl(schema, relation, kind),
             Self::MySql(connection) => connection.ddl(schema, relation),
             Self::SqlServer(connection) => connection.ddl(schema, relation, kind),
+            Self::Oracle(connection) => connection.ddl(schema, relation),
             Self::Sqlite(connection) => connection.ddl(schema, relation),
             Self::Turso(connection) => connection.ddl(schema, relation),
             Self::DuckDb(connection) => connection.ddl(schema, relation),
@@ -2477,6 +2510,7 @@ impl Connection {
             Self::Sqlite(_)
             | Self::Turso(_)
             | Self::ClickHouse(_)
+            | Self::Oracle(_)
             | Self::MongoDb(_)
             | Self::Redis(_)
             | Self::External(_) => Err(plain_error(
@@ -2558,6 +2592,7 @@ impl Connection {
             Self::Postgres(connection) => connection.cancel(),
             Self::MySql(connection) => connection.cancel(),
             Self::SqlServer(connection) => connection.cancel(),
+            Self::Oracle(connection) => connection.cancel(),
             Self::Sqlite(connection) => connection.cancel(),
             Self::Turso(connection) => connection.cancel(),
             Self::DuckDb(connection) => connection.cancel(),
@@ -2580,6 +2615,7 @@ impl Connection {
         match self {
             Self::Postgres(connection) => connection.is_lost(),
             Self::MySql(connection) => connection.is_lost(),
+            Self::Oracle(connection) => connection.is_lost(),
             Self::External(connection) => connection.is_lost(),
             Self::SqlServer(_)
             | Self::Sqlite(_)
@@ -2610,6 +2646,7 @@ impl Connection {
             Self::Postgres(_) => Engine::Postgres,
             Self::MySql(connection) => connection.engine(),
             Self::SqlServer(_) => Engine::SqlServer,
+            Self::Oracle(_) => Engine::Oracle,
             Self::Sqlite(_) => Engine::Sqlite,
             Self::Turso(_) => Engine::Turso,
             Self::DuckDb(_) => Engine::DuckDb,
@@ -5674,8 +5711,12 @@ mod tests {
     #[test]
     fn new_row_is_withheld_only_from_a_mongo_view() {
         // Generic SQL is left out: it has no abilities of its own, since a
-        // plugin target forces every write off.
-        for engine in Target::tiles(&[]).map(|target| target.engine) {
+        // plugin target forces every write off. So is Oracle, until its writes
+        // are admitted.
+        for engine in Target::tiles(&[])
+            .map(|target| target.engine)
+            .filter(|engine| *engine != Engine::Oracle)
+        {
             assert!(
                 Target::built_in(engine).takes_inserts(RelationKind::Table),
                 "{engine:?}"

@@ -276,6 +276,30 @@ source: src/sql_snapshots.rs
 [mssql] keyless
   error: |dbdelve cannot name an edited row by its primary key.|
 
+[oracle] one row
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] two rows
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = NULL WHERE "id" = '8';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] composite keys
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '7' AND "Region" = 'eu-west ''x''';|
+  |UPDATE "public"."accounts" SET "Name" = 'it''s' WHERE "id" = '8' AND "Region" = 'us';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] default
+  |UPDATE "public"."accounts" SET "Name" = DEFAULT WHERE "id" = '7';|
+  = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None
+
+[oracle] empty
+  error: |There are no edits to apply.|
+
+[oracle] keyless
+  error: |dbdelve cannot name an edited row by its primary key.|
+
 [mongodb] one row
   |db.getCollection("accounts").updateOne({_id: ObjectId("65f0c0ffee0000000000abcd")}, {$set: {"Name": "it's"}});|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None

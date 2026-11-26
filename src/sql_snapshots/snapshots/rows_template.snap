@@ -100,6 +100,17 @@ source: src/sql_snapshots.rs
 [mssql] only a sql server computed column => (none)
 [mssql] empty => (none)
 [mssql] awkward names => |INSERT INTO "public"."accounts" ("we""ird", "back`tick", "with space", "ümlaut", "[x]", "") VALUES (@p1, @p2, @p3, @p4, @p5, @p6);|
+[oracle] ordinary => |INSERT INTO "public"."accounts" ("id", "Name", "total", "seq", "rid", "it's") VALUES (?, ?, ?, ?, ?, ?);|
+[oracle] postgres generated => |INSERT INTO "public"."accounts" ("a", "b", "c") VALUES (?, ?, ?);|
+[oracle] mysql generated => |INSERT INTO "public"."accounts" ("a", "b", "c", "d") VALUES (?, ?, ?, ?);|
+[oracle] sql server computed => |INSERT INTO "public"."accounts" ("a", "total", "flat", "ident", "dflt") VALUES (?, ?, ?, ?, ?);|
+[oracle] look-alikes => |INSERT INTO "public"."accounts" ("a", "b", "c", "d") VALUES (?, ?, ?, ?);|
+[oracle] all generated, sql server => |INSERT INTO "public"."accounts" ("total", "ident", "g", "s") VALUES (?, ?, ?, ?);|
+[oracle] all dropped, postgres => |INSERT INTO "public"."accounts" ("b", "c") VALUES (?, ?);|
+[oracle] all dropped, mysql => |INSERT INTO "public"."accounts" ("b", "c") VALUES (?, ?);|
+[oracle] only a sql server computed column => |INSERT INTO "public"."accounts" ("total") VALUES (?);|
+[oracle] empty => (none)
+[oracle] awkward names => |INSERT INTO "public"."accounts" ("we""ird", "back`tick", "with space", "ümlaut", "[x]", "") VALUES (?, ?, ?, ?, ?, ?);|
 [mongodb] ordinary => (none)
 [mongodb] postgres generated => (none)
 [mongodb] mysql generated => (none)

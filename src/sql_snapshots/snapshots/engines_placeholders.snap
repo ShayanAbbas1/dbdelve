@@ -55,6 +55,12 @@ source: src/sql_snapshots.rs
 [mssql] database => |Optional|
 [mssql] user => |Required|
 [mssql] path => |/path/to/app.sqlite|
+[oracle] name => |Named after the database|
+[oracle] host => |localhost|
+[oracle] port => |1521|
+[oracle] database => |Service name|
+[oracle] user => |Required|
+[oracle] path => |/path/to/app.sqlite|
 [mongodb] name => |Named after the database|
 [mongodb] host => |localhost|
 [mongodb] port => |27017|

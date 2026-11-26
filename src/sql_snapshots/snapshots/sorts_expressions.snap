@@ -91,6 +91,16 @@ source: src/sql_snapshots.rs
 [mssql] duplicates #0 id => |1|
 [mssql] duplicates #1 id => |2|
 [mssql] empty name #0  => |1|
+[oracle] columns #0 id => |"id"|
+[oracle] columns #1 Name => |"Name"|
+[oracle] columns #2 we"ird => |"we""ird"|
+[oracle] columns #3 back`tick => |"back`tick"|
+[oracle] columns #4 ümlaut => |"ümlaut"|
+[oracle] columns #5 select => |"select"|
+[oracle] columns #6 out of range => (none)
+[oracle] duplicates #0 id => |1|
+[oracle] duplicates #1 id => |2|
+[oracle] empty name #0  => |1|
 [mongodb] columns #0 id => |"id"|
 [mongodb] columns #1 Name => |"Name"|
 [mongodb] columns #2 we"ird => |"we\\"ird"|

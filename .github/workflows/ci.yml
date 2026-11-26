@@ -88,6 +88,7 @@ jobs:
       dbdelve_MYSQL_URL: mysql://dbdelve:dbdelve@127.0.0.1:53306/dbdelve_dev
       dbdelve_MARIADB_URL: mariadb://dbdelve:dbdelve@127.0.0.1:53307/dbdelve_dev
       dbdelve_MSSQL_URL: mssql://dbdelve:DBDelve_dev1@127.0.0.1:51433/dbdelve_dev
+      dbdelve_ORACLE_URL: oracle://dbdelve:dbdelve@127.0.0.1:51521/FREEPDB1?sslmode=disable
       dbdelve_MONGO_URL: mongodb://dbdelve:dbdelve@127.0.0.1:57017/dbdelve_dev
       dbdelve_REDIS_URL: redis://dbdelve:dbdelve@127.0.0.1:56379/0
       dbdelve_CLICKHOUSE_URL: clickhouse://dbdelve:dbdelve@127.0.0.1:58123/dbdelve_dev?sslmode=disable

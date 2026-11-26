@@ -8,7 +8,7 @@
 
 use super::{
     Builtin, ColumnDefinition, Fields, RelationKind, Syntax, builtins, clickhouse, duckdb, mongo,
-    mssql, mysql, postgres, redis,
+    mssql, mysql, oracle, postgres, redis,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -594,12 +594,18 @@ pub enum Paging {
     /// not stable without an `ORDER BY` (parallel reads, background merges), so
     /// the relation's key orders it and the first page waits for the structure.
     LimitOffsetByKey,
+    /// `OFFSET … ROWS FETCH NEXT … ROWS ONLY`, as [`Paging::OffsetFetch`], but
+    /// Oracle has no `(SELECT NULL)` to order by: its stand-in orders by a
+    /// scalar subquery on `DUAL`, which orders nothing in the same way.
+    OffsetFetchDual,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectTop {
     Limit,
     Top,
+    /// `FETCH FIRST n ROWS ONLY`, which Oracle has in place of `LIMIT`.
+    FetchFirst,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1693,6 +1699,64 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         match_value: Some(clickhouse::match_value),
         ..Hooks::NONE
     },
+};
+
+pub(crate) const ORACLE: EngineSpec = EngineSpec {
+    id: "oracle",
+    built_in_driver: true,
+    dbms_names: &["Oracle"],
+    label: "Oracle",
+    schemes: &["oracle"],
+    file_extensions: &[],
+    // A generic database glyph: Simple Icons carries no Oracle logo.
+    logo: "icons/engine-oracle.svg",
+    brand: 0xC74634,
+    syntax: Syntax::Sql,
+    layout: Fields::Server,
+    default_port: Some(oracle::DEFAULT_PORT),
+    takes_options: false,
+    takes_service: false,
+    resolves_srv: false,
+    // The "database" a profile names is a service, and a service holds users:
+    // there is no list of databases to put the system ones last in.
+    system_databases: &[],
+    binary_types: &["raw", "long raw", "blob", "bfile"],
+    binary_text: Some(BinaryText::ZeroX),
+    numeric_types: &["binary_float", "binary_double"],
+    type_wrappers: &[],
+    hints: Hints {
+        database: "Service name",
+        user: "Required",
+        ..Hints::DEFAULT
+    },
+    sql: SqlSpec {
+        // Oracle reads a bare name as upper case, so `emp` is `EMP` and a
+        // quoted `"emp"` is another table.
+        identifier_folds_upper: true,
+        paging: Paging::OffsetFetchDual,
+        select_top: SelectTop::FetchFirst,
+        // The grammar the filter gate reads has no `ESCAPE`, and Oracle has no
+        // default escape character: see `SubstringMatch::LikePlain`.
+        substring: SubstringMatch::LikePlain,
+        regex: RegexMatch::RegexpLike,
+        // `BEGIN` opens a PL/SQL block, and a transaction opens itself with the
+        // first statement. Nothing here sends a bracketed batch yet: the grid
+        // does not write on this engine, so `transactions` stays off.
+        transactions: false,
+        // The parser stays Generic on purpose. It is the strictest: a call it
+        // does not know needs Read-write, and `s.NEXTVAL` is read as the
+        // sequence advance it is. sqlparser's Oracle dialect would loosen both.
+        parser_dialect: ParserDialect::Generic,
+        // No session-level read-only: `SET TRANSACTION READ ONLY` ends with the
+        // transaction. A Read-only profile is held by `sql::gate` alone.
+        read_only_session: ReadOnlySession::None,
+        builtins: builtins::ansi::BUILTINS,
+        ..SqlSpec::ANSI
+    },
+    // The read-only tier: browsing and queries first. Editing waits for a
+    // transaction the apply can bracket and a literal the write gate reads.
+    abilities: Abilities::NONE,
+    hooks: Hooks::NONE,
 };
 
 pub(crate) const GENERIC: EngineSpec = EngineSpec {

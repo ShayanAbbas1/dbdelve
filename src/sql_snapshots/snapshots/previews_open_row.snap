@@ -974,6 +974,114 @@ source: src/sql_snapshots.rs
 [mssql] rows=0 key=a key "q" type=unknown
   (none)
 
+[oracle] rows=100 key=k type=string
+  (none)
+
+[oracle] rows=100 key=k type=hash
+  (none)
+
+[oracle] rows=100 key=k type=list
+  (none)
+
+[oracle] rows=100 key=k type=set
+  (none)
+
+[oracle] rows=100 key=k type=zset
+  (none)
+
+[oracle] rows=100 key=k type=stream
+  (none)
+
+[oracle] rows=100 key=k type=ReJSON-RL
+  (none)
+
+[oracle] rows=100 key=k type=TSDB-TYPE
+  (none)
+
+[oracle] rows=100 key=k type=unknown
+  (none)
+
+[oracle] rows=100 key=a key "q" type=string
+  (none)
+
+[oracle] rows=100 key=a key "q" type=hash
+  (none)
+
+[oracle] rows=100 key=a key "q" type=list
+  (none)
+
+[oracle] rows=100 key=a key "q" type=set
+  (none)
+
+[oracle] rows=100 key=a key "q" type=zset
+  (none)
+
+[oracle] rows=100 key=a key "q" type=stream
+  (none)
+
+[oracle] rows=100 key=a key "q" type=ReJSON-RL
+  (none)
+
+[oracle] rows=100 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[oracle] rows=100 key=a key "q" type=unknown
+  (none)
+
+[oracle] rows=0 key=k type=string
+  (none)
+
+[oracle] rows=0 key=k type=hash
+  (none)
+
+[oracle] rows=0 key=k type=list
+  (none)
+
+[oracle] rows=0 key=k type=set
+  (none)
+
+[oracle] rows=0 key=k type=zset
+  (none)
+
+[oracle] rows=0 key=k type=stream
+  (none)
+
+[oracle] rows=0 key=k type=ReJSON-RL
+  (none)
+
+[oracle] rows=0 key=k type=TSDB-TYPE
+  (none)
+
+[oracle] rows=0 key=k type=unknown
+  (none)
+
+[oracle] rows=0 key=a key "q" type=string
+  (none)
+
+[oracle] rows=0 key=a key "q" type=hash
+  (none)
+
+[oracle] rows=0 key=a key "q" type=list
+  (none)
+
+[oracle] rows=0 key=a key "q" type=set
+  (none)
+
+[oracle] rows=0 key=a key "q" type=zset
+  (none)
+
+[oracle] rows=0 key=a key "q" type=stream
+  (none)
+
+[oracle] rows=0 key=a key "q" type=ReJSON-RL
+  (none)
+
+[oracle] rows=0 key=a key "q" type=TSDB-TYPE
+  (none)
+
+[oracle] rows=0 key=a key "q" type=unknown
+  (none)
+
 [mongodb] rows=100 key=k type=string
   (none)
 

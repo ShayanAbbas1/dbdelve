@@ -2558,6 +2558,282 @@ source: src/sql_snapshots.rs
   |COMMIT;|
   = write_on=true select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=Some(2)
 
+[oracle] delete update insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete update insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete delete
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(2) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete delete, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(2) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] insert insert
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(0) draft_deletes_match[id+Region]=Some(0) statements=None
+
+[oracle] insert insert, bracketed
+  |BEGIN;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(0) draft_deletes_match[id+Region]=Some(0) statements=None
+
+[oracle] update insert
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(0) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update insert, bracketed
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(0) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update beside a cte delete
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |WITH d AS (DELETE FROM "public"."accounts" WHERE "id" = '8' RETURNING *) SELECT 1;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update beside a cte delete, bracketed
+  |BEGIN;|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |WITH d AS (DELETE FROM "public"."accounts" WHERE "id" = '8' RETURNING *) SELECT 1;|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] cte delete update beside insert
+  |WITH d AS (DELETE FROM "public"."accounts" WHERE "id" = '8' RETURNING *) UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] cte delete update beside insert, bracketed
+  |BEGIN;|
+  |WITH d AS (DELETE FROM "public"."accounts" WHERE "id" = '8' RETURNING *) UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] cte delete update beside update
+  |WITH d AS (DELETE FROM "public"."accounts" WHERE "id" = '8' RETURNING *) UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] cte delete update beside update, bracketed
+  |BEGIN;|
+  |WITH d AS (DELETE FROM "public"."accounts" WHERE "id" = '8' RETURNING *) UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete beside two-row insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id") VALUES ('9'), ('10');|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete beside two-row insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id") VALUES ('9'), ('10');|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete beside insert select
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" SELECT * FROM "public"."accounts";|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete beside insert select, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" SELECT * FROM "public"."accounts";|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete beside insert returning
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL) RETURNING *;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete beside insert returning, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL) RETURNING *;|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=Some(1) draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete, comment, insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |-- note|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete, comment, insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |-- note|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete, executable comment, insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |/*! SELECT 1 */;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete, executable comment, insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |/*! SELECT 1 */;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [Unreadable] gate ro=Some(Upgrade(ReadWrite)) rw=Some(RunOnce) full=Some(RunOnce) confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:Some(RunOnce),full:Some(RunOnce) matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete or, beside insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' OR 1 = 1;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete or, beside insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' OR 1 = 1;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete no where, beside insert
+  |DELETE FROM "public"."accounts";|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete no where, beside insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts";|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=Full [UnfilteredDelete] gate ro=Some(Upgrade(Full)) rw=Some(Upgrade(Full)) full=Some(Confirm(UnfilteredDelete)) confirm[none]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[drop]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[truncate]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:Some(Confirm(UnfilteredDelete)) confirm[unfiltered]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None confirm[all3]=ro:Some(Upgrade(Full)),rw:Some(Upgrade(Full)),full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete returning, beside insert
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' RETURNING *;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete returning, beside insert, bracketed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7' RETURNING *;|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] bracket never closed
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete of another table
+  |DELETE FROM "public"."other" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete of another table
+  |BEGIN;|
+  |DELETE FROM "public"."other" WHERE "id" = '7';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete by half a key
+  |DELETE FROM "public"."accounts" WHERE "Region" = 'eu';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] delete by half a key
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "Region" = 'eu';|
+  |INSERT INTO "public"."accounts" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update of another table
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."other" SET "Name" = 'x' WHERE "id" = '8';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update of another table
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."other" SET "Name" = 'x' WHERE "id" = '8';|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update without a where
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = 'x';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update without a where
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = 'x';|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update by another column
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "Name" = 'y';|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] update by another column
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "Name" = 'y';|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] insert into another table
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."other" ("id", "Name") VALUES ('9', NULL);|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
+[oracle] insert into another table
+  |BEGIN;|
+  |DELETE FROM "public"."accounts" WHERE "id" = '7';|
+  |INSERT INTO "public"."other" ("id", "Name") VALUES ('9', NULL);|
+  |COMMIT;|
+  = write_on=false select=false classify=ReadWrite [] gate ro=Some(Upgrade(ReadWrite)) rw=None full=None confirm[none]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[drop]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[truncate]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[unfiltered]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None confirm[all3]=ro:Some(Upgrade(ReadWrite)),rw:None,full:None matches_key[id]=false matches_key[id+Region]=false matches_key[Region]=false matches_key[none]=false draft_deletes_match[id]=None draft_deletes_match[id+Region]=None statements=None
+
 [generic] delete update insert
   |DELETE FROM "public"."accounts" WHERE "id" = '7';|
   |UPDATE "public"."accounts" SET "Name" = 'x' WHERE "id" = '8';|

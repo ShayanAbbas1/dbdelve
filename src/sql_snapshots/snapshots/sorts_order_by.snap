@@ -1190,6 +1190,138 @@ source: src/sql_snapshots.rs
 [mssql] update · [id asc, Name desc]
   (none)
 
+[oracle] preview · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] preview page 3 · []
+  |SELECT * FROM "public"."accounts" LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] filtered · []
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] existing order · []
+  |SELECT * FROM "public"."accounts"|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] cte · []
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] trailing comment · []
+  |SELECT * FROM "public"."accounts" -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] union · []
+  (none)
+
+[oracle] unparseable · []
+  (none)
+
+[oracle] update · []
+  (none)
+
+[oracle] preview · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] preview page 3 · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] filtered · [id asc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] existing order · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] cte · [id asc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] trailing comment · [id asc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] union · [id asc]
+  (none)
+
+[oracle] unparseable · [id asc]
+  (none)
+
+[oracle] update · [id asc]
+  (none)
+
+[oracle] preview · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] preview page 3 · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] filtered · [Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] existing order · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] cte · [Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] trailing comment · [Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] union · [Name desc]
+  (none)
+
+[oracle] unparseable · [Name desc]
+  (none)
+
+[oracle] update · [Name desc]
+  (none)
+
+[oracle] preview · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] preview page 3 · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC LIMIT 1000 OFFSET 200|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] filtered · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" WHERE "Name" = 'it''s' ORDER BY "id" ASC, "Name" DESC LIMIT 1000|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] existing order · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] cte · [id asc, Name desc]
+  |WITH x AS (SELECT 1 AS a) SELECT * FROM x ORDER BY "id" ASC, "Name" DESC|
+  = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] trailing comment · [id asc, Name desc]
+  |SELECT * FROM "public"."accounts" ORDER BY "id" ASC, "Name" DESC -- note|
+  = write_on=false select=false classify=ReadOnly [] gate ro=None rw=None full=None
+
+[oracle] union · [id asc, Name desc]
+  (none)
+
+[oracle] unparseable · [id asc, Name desc]
+  (none)
+
+[oracle] update · [id asc, Name desc]
+  (none)
+
 [mongodb] find · []
   |db.getCollection("accounts").find({}).limit(1000)|
   = write_on=false select=true classify=ReadOnly [] gate ro=None rw=None full=None
