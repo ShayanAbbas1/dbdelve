@@ -196,6 +196,13 @@ pub(super) enum Line {
         roles: Vec<Account>,
         grantee: Account,
     },
+    /// A partial revoke, which MySQL lists with `partial_revokes` on: a
+    /// global privilege taken off one database, `REVOKE SELECT ON mysql.*`.
+    Revoke {
+        privileges: Vec<Privilege>,
+        database: String,
+        grantee: Account,
+    },
     /// What says nothing of what is held: MariaDB's `SET DEFAULT ROLE`.
     Skipped,
     /// A line this parser cannot read, cut short and with anything after
@@ -208,7 +215,8 @@ impl Line {
         match self {
             Self::Privileges { grantee, .. }
             | Self::Proxy { grantee, .. }
-            | Self::Roles { grantee, .. } => Some(grantee),
+            | Self::Roles { grantee, .. }
+            | Self::Revoke { grantee, .. } => Some(grantee),
             Self::Skipped | Self::Unread(_) => None,
         }
     }
@@ -421,6 +429,9 @@ fn read_grant(line: &str) -> Option<Line> {
     {
         return Some(Line::Skipped);
     }
+    if is_word(tokens.first(), "REVOKE") {
+        return read_revoke(&tokens);
+    }
     if !is_word(tokens.first(), "GRANT") {
         return None;
     }
@@ -460,6 +471,29 @@ fn read_grant(line: &str) -> Option<Line> {
     }
 }
 
+/// `REVOKE privileges ON db.* FROM account`, the one form `SHOW GRANTS`
+/// lists a revoke in.
+fn read_revoke(tokens: &[Token]) -> Option<Line> {
+    let from = tokens
+        .iter()
+        .position(|token| is_word(Some(token), "FROM"))?;
+    let on = tokens[..from]
+        .iter()
+        .position(|token| is_word(Some(token), "ON"))?;
+    let (grantee, taken) = account(&tokens[from + 1..])?;
+    if from + 1 + taken != tokens.len() {
+        return None;
+    }
+    let Level::Database(database) = level(&tokens[on + 1..from])? else {
+        return None;
+    };
+    Some(Line::Revoke {
+        privileges: privileges(&tokens[1..on])?,
+        database,
+        grantee,
+    })
+}
+
 const UNREAD_CHARS: usize = 60;
 
 fn unread(line: &str) -> Line {
@@ -497,6 +531,52 @@ fn unescaped(name: &str) -> String {
         }
     }
     out
+}
+
+/// `name` as a pattern matching only itself: every `_` and `%` no
+/// backslash escapes, escaped. How a schema-level grant reads where the
+/// server takes the name literally, as MySQL does with `partial_revokes` on.
+fn literal(name: &str) -> String {
+    let mut out = String::new();
+    let mut chars = name.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                out.extend(chars.next());
+            }
+            '_' | '%' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `held` as a server that takes schema names in grants literally reads
+/// it: a database-level grant on `sales_1` reaches `sales_1` alone.
+fn literal_levels(held: Held) -> Held {
+    (held.into_iter())
+        .map(|(through, line)| match line {
+            Line::Privileges {
+                privileges,
+                level: Level::Database(name),
+                grantee,
+                grantable,
+            } => (
+                through,
+                Line::Privileges {
+                    privileges,
+                    level: Level::Database(literal(&name)),
+                    grantee,
+                    grantable,
+                },
+            ),
+            line => (through, line),
+        })
+        .collect()
 }
 
 /// Whether `name` matches the `LIKE` pattern `pattern`, `\` escaping.
@@ -686,11 +766,39 @@ fn privilege_columns() -> String {
 }
 
 /// Who holds a privilege on every table: `mysql.user`'s global columns.
-fn global_grants_sql() -> String {
+/// Every global grant, with MySQL's partial revokes where the server keeps
+/// them (`restrictions`): `User_attributes`' `Restrictions`, a JSON list of
+/// `{"Database": …, "Privileges": […]}`.
+fn global_grants_sql(restrictions: bool) -> String {
+    let restricted = match restrictions {
+        true => ", JSON_EXTRACT(User_attributes, '$.Restrictions') AS restrictions",
+        false => "",
+    };
     format!(
-        "SELECT User AS user, Host AS host, {} FROM mysql.user ORDER BY User, Host",
+        "SELECT User AS user, Host AS host, {}{restricted} FROM mysql.user ORDER BY User, Host",
         privilege_columns()
     )
+}
+
+/// The server version partial revokes came in, and with them schema names
+/// in grants read literally while `partial_revokes` is on.
+const PARTIAL_REVOKES: (u16, u16, u16) = (8, 0, 16);
+
+/// The privileges a `mysql.user` row's `restrictions` take off `database`.
+fn revoked_on(restrictions: &str, database: &str) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Restriction {
+        #[serde(rename = "Database")]
+        database: String,
+        #[serde(rename = "Privileges")]
+        privileges: Vec<String>,
+    }
+    let read: Vec<Restriction> = serde_json::from_str(restrictions).unwrap_or_default();
+    (read.into_iter())
+        .filter(|restriction| restriction.database == database)
+        .flat_map(|restriction| restriction.privileges)
+        .map(|privilege| privilege.to_uppercase())
+        .collect()
 }
 
 /// Every database-level grant: which databases each reaches is decided
@@ -969,6 +1077,7 @@ fn held_inside(held: &Held, database: &str) -> Vec<HeldGrant> {
 pub(super) fn assemble_access(held: &Held, databases: &[String], superuser: bool) -> RoleAccess {
     let mut server = Vec::new();
     let mut global: Vec<Right> = Vec::new();
+    let mut revokes: Vec<Revoked> = Vec::new();
     for (through, line) in held {
         let suffix = match through {
             Some(role) => format!(" through {role}"),
@@ -1003,6 +1112,15 @@ pub(super) fn assemble_access(held: &Held, databases: &[String], superuser: bool
                     target.shown_quoted()
                 ));
             }
+            Line::Revoke {
+                privileges,
+                database,
+                ..
+            } => revokes.push(Revoked {
+                source: source_of(through, Source::Global),
+                database: database.clone(),
+                privileges: named(privileges, false),
+            }),
             Line::Unread(text) => server.push(format!("unread: {text}")),
             Line::Privileges { .. } | Line::Roles { .. } | Line::Skipped => {}
         }
@@ -1037,7 +1155,7 @@ pub(super) fn assemble_access(held: &Held, databases: &[String], superuser: bool
     let mut access = Vec::new();
     for (name, listed) in names {
         let mut rights = match listed {
-            true => global.clone(),
+            true => restricted(&global, &revokes, &name),
             false => Vec::new(),
         };
         for (through, line) in held {
@@ -1093,6 +1211,48 @@ pub(super) fn assemble_access(held: &Held, databases: &[String], superuser: bool
         databases: access,
         server,
     }
+}
+
+/// A partial revoke: `privileges` of a global grant, held as `source`,
+/// taken off `database`.
+struct Revoked {
+    source: Source,
+    database: String,
+    privileges: Vec<String>,
+}
+
+/// The global rights `global` as they reach `database`, less what a partial
+/// revoke takes off it there. `ALL PRIVILEGES` with any of it revoked is
+/// what is left of it, privilege by privilege.
+fn restricted(global: &[Right], revokes: &[Revoked], database: &str) -> Vec<Right> {
+    let here: Vec<&Revoked> = (revokes.iter())
+        .filter(|revoke| revoke.database == database)
+        .collect();
+    if here.is_empty() {
+        return global.to_vec();
+    }
+    let mut rights = Vec::new();
+    for right in global {
+        for source in &right.sources {
+            let revoked: Vec<&str> = (here.iter())
+                .filter(|revoke| revoke.source == *source)
+                .flat_map(|revoke| revoke.privileges.iter().map(String::as_str))
+                .collect();
+            let gone = |privilege: &str| {
+                revoked.contains(&privilege) || revoked.contains(&"ALL PRIVILEGES")
+            };
+            if right.privilege == "ALL PRIVILEGES" && !revoked.is_empty() {
+                let left = (DATA_PRIVILEGES.iter())
+                    .filter(|privilege| !matches!(**privilege, "ALL PRIVILEGES" | "GRANT OPTION"));
+                for privilege in left.filter(|privilege| !gone(privilege)) {
+                    add_right(&mut rights, privilege, source.clone());
+                }
+            } else if !gone(&right.privilege) {
+                add_right(&mut rights, &right.privilege, source.clone());
+            }
+        }
+    }
+    rights
 }
 
 /// Whether `privilege` acts on a table, and so is counted in tables.
@@ -1209,6 +1369,20 @@ pub(super) fn assemble_reach(
                     target.shown_quoted()
                 ));
             }
+            Line::Revoke {
+                privileges,
+                database,
+                ..
+            } => {
+                let route = match through {
+                    Some(role) => format!(" through {role}"),
+                    None => String::new(),
+                };
+                other.push(format!(
+                    "{} revoked on {database}.*{route}",
+                    named(privileges, false).join(", ")
+                ));
+            }
             Line::Unread(text) => other.push(format!("unread: {text}")),
             Line::Roles { .. } | Line::Skipped => {}
         }
@@ -1268,6 +1442,7 @@ fn table_rank(privilege: &str) -> usize {
 pub(super) fn assemble_object_grants(
     engine: Engine,
     schema: &str,
+    literal_names: bool,
     global: &QueryResult,
     databases: &QueryResult,
     table: &QueryResult,
@@ -1322,7 +1497,11 @@ pub(super) fn assemble_object_grants(
             let on = match per_database {
                 true => {
                     let granted = required_cell(result, row, "db")?;
-                    if database_source(granted, schema).is_none() {
+                    let read = match literal_names {
+                        true => literal(granted),
+                        false => granted.to_string(),
+                    };
+                    if database_source(&read, schema).is_none() {
                         continue;
                     }
                     format!("{granted}.*")
@@ -1331,7 +1510,15 @@ pub(super) fn assemble_object_grants(
             };
             let grantee = account(result, row)?;
             let grantable = yes(result, row, "Grant_priv")?;
+            // A partial revoke takes a global privilege off this database.
+            let revoked = match per_database {
+                true => Vec::new(),
+                false => revoked_on(cell(result, row, "restrictions"), schema),
+            };
             for (privilege, column) in TABLE_PRIVILEGES {
+                if revoked.iter().any(|gone| gone == privilege) {
+                    continue;
+                }
                 if yes(result, row, column)? {
                     grants.push(Grant {
                         grantee: Some(grantee.clone()),
@@ -1359,10 +1546,15 @@ pub(super) fn assemble_object_grants(
     })
 }
 
-/// The audit lists: no login is recorded and there is no PUBLIC, so idle
-/// logins are unknown and PUBLIC's grants none. A role is unused when no
-/// account holds it.
-pub(super) fn assemble_reports(roles: &Roles, sessions: &QueryResult) -> Result<Reports, DbError> {
+/// The audit lists: no login is recorded, so idle logins are unknown. MySQL
+/// has no PUBLIC, so PUBLIC's grants are none; MariaDB has one from 10.11
+/// (`has_public`), whose grants are not read, so they are unknown rather
+/// than none. A role is unused when no account holds it.
+pub(super) fn assemble_reports(
+    roles: &Roles,
+    sessions: &QueryResult,
+    has_public: bool,
+) -> Result<Reports, DbError> {
     let mut by_login = Vec::new();
     for row in &sessions.rows {
         let count = required_cell(sessions, row, "sessions")?;
@@ -1384,7 +1576,7 @@ pub(super) fn assemble_reports(roles: &Roles, sessions: &QueryResult) -> Result<
             .filter(|role| login(role) && role.expired)
             .map(|role| role.name.clone())
             .collect(),
-        public_grants: Vec::new(),
+        public_grants: (!has_public).then(Vec::new),
         unused_roles: (roles.roles.iter())
             .filter(|role| !login(role) && roles.members(&role.name).is_empty())
             .map(|role| role.name.clone())
@@ -1455,15 +1647,26 @@ impl super::mysql::Connection {
     }
 
     /// Everything `name` holds, its own grants and, transitively, those of
-    /// every role it was granted, active by default or not; a role granted
-    /// twice is read once. MariaDB's `SHOW GRANTS` of an account repeats
+    /// every role it holds active as it logs in; a role granted twice is
+    /// read once. MariaDB's `SHOW GRANTS` of an account repeats
     /// its roles' lines under their own names, which are left for each
     /// role's own read.
     fn held(&self, name: &str) -> Result<Held, DbError> {
         let roles = has_roles(self.engine(), self.server_version()?);
         let start = Account::parse(name);
+        // A login's roles count only where they are active as it logs in:
+        // one it must `SET ROLE` to is a membership marked not inherited,
+        // and its grants are none of the login's own reach. A role active
+        // has every role granted to it active too.
+        let memberships = match roles {
+            true => Some(self.roles()?),
+            false => None,
+        };
+        let login = (memberships.as_ref())
+            .and_then(|read| read.role(&start.display()))
+            .is_some_and(|role| role.login);
         let mut queue = vec![(start.clone(), None)];
-        let mut seen = vec![start];
+        let mut seen = vec![start.clone()];
         let mut held = Vec::new();
         let mut index = 0;
         while let Some((account, through)) = queue.get(index).cloned() {
@@ -1475,7 +1678,12 @@ impl super::mysql::Connection {
                     continue;
                 }
                 if let (true, Line::Roles { roles: granted, .. }) = (roles, &line) {
-                    for role in granted {
+                    let active = |role: &Account| {
+                        !(login && account == start)
+                            || (memberships.as_ref())
+                                .is_none_or(|read| read.inherits(&start.display(), &role.display()))
+                    };
+                    for role in granted.iter().filter(|role| active(role)) {
                         if !seen.contains(role) {
                             seen.push(role.clone());
                             queue.push((role.clone(), Some(role.display())));
@@ -1485,7 +1693,21 @@ impl super::mysql::Connection {
                 held.push((through.clone(), line));
             }
         }
-        Ok(held)
+        Ok(match self.literal_schema_names()? {
+            true => literal_levels(held),
+            false => held,
+        })
+    }
+
+    /// Whether the server reads a `_` or `%` in a schema-level grant as
+    /// itself: MySQL from 8.0.16 with `partial_revokes` on, which also lists
+    /// the partial revokes in `SHOW GRANTS` and `mysql.user`.
+    fn literal_schema_names(&self) -> Result<bool, DbError> {
+        if self.engine() != Engine::MySql || self.server_version()? < PARTIAL_REVOKES {
+            return Ok(false);
+        }
+        let read = self.internal_query("SELECT @@GLOBAL.partial_revokes AS literal")?;
+        Ok((read.rows.first()).is_some_and(|row| cell(&read, row, "literal") == "1"))
     }
 
     pub fn role_access(&self, name: &str) -> Result<RoleAccess, DbError> {
@@ -1526,8 +1748,10 @@ impl super::mysql::Connection {
     pub fn object_grants(&self, schema: &str, name: &str) -> Result<ObjectGrants, DbError> {
         let engine = self.engine();
         let denied = || plain_error(GRANTS_DENIED.into());
+        let literal_names = self.literal_schema_names()?;
+        let restrictions = engine == Engine::MySql && self.server_version()? >= PARTIAL_REVOKES;
         let global = self
-            .read_unless_denied(&global_grants_sql())?
+            .read_unless_denied(&global_grants_sql(restrictions))?
             .ok_or_else(denied)?;
         let databases = (self.read_unless_denied(&database_grants_sql())?).ok_or_else(denied)?;
         let table = (self.read_unless_denied(&table_grants_sql(engine, schema, name))?)
@@ -1535,11 +1759,21 @@ impl super::mysql::Connection {
         let columns = (self.read_unless_denied(&column_grants_sql(engine, schema, name))?)
             .ok_or_else(denied)?;
         let roles = self.roles()?;
-        assemble_object_grants(engine, schema, &global, &databases, &table, &columns, roles)
+        assemble_object_grants(
+            engine,
+            schema,
+            literal_names,
+            &global,
+            &databases,
+            &table,
+            &columns,
+            roles,
+        )
     }
 
     pub fn role_reports(&self, roles: &Roles) -> Result<Reports, DbError> {
-        assemble_reports(roles, &self.internal_query(SESSIONS_SQL)?)
+        let has_public = self.engine() == Engine::MariaDb && self.server_version()? >= (10, 11, 0);
+        assemble_reports(roles, &self.internal_query(SESSIONS_SQL)?, has_public)
     }
 }
 
@@ -1833,10 +2067,10 @@ mod tests {
 
     #[test]
     fn a_line_the_parser_cannot_read_is_kept_short_and_without_a_hash() {
-        let partial = parse_grant("REVOKE SELECT ON `mysql`.* FROM `app`@`%`");
+        let odd_revoke = parse_grant("REVOKE SELECT ON `shop`.`orders` FROM `app`@`%`");
         assert_eq!(
-            partial,
-            Line::Unread("REVOKE SELECT ON `mysql`.* FROM `app`@`%`".into())
+            odd_revoke,
+            Line::Unread("REVOKE SELECT ON `shop`.`orders` FROM `app`@`%`".into())
         );
         let hashed = parse_grant(&format!(
             "GRANT SELECT ON TO 'u'@'h' IDENTIFIED BY PASSWORD '{HASH}'"
@@ -1853,6 +2087,123 @@ mod tests {
         ] {
             assert!(matches!(parse_grant(odd), Line::Unread(_)), "{odd}");
         }
+    }
+
+    /// MySQL with `partial_revokes` on lists a global privilege taken off one
+    /// database as a `REVOKE` line of its own.
+    #[test]
+    fn a_partial_revoke_reads_as_what_it_takes_off_which_database() {
+        assert_eq!(
+            parse_grant("REVOKE SELECT, INSERT ON `mysql`.* FROM `app`@`%`"),
+            Line::Revoke {
+                privileges: vec![privilege("SELECT"), privilege("INSERT")],
+                database: "mysql".into(),
+                grantee: user("app", "%"),
+            }
+        );
+        assert!(matches!(
+            parse_grant("REVOKE SELECT ON *.* FROM `app`@`%`"),
+            Line::Unread(_)
+        ));
+    }
+
+    /// A global grant reaches every database but the ones a partial revoke
+    /// takes it off; `ALL PRIVILEGES` there is what is left of it.
+    #[test]
+    fn access_takes_a_partial_revoke_off_its_database_alone() {
+        let app = || user("app", "%");
+        let held: Held = vec![
+            (
+                None,
+                privileges(&["SELECT", "INSERT"], Level::Global, app(), false),
+            ),
+            (
+                None,
+                Line::Revoke {
+                    privileges: vec![privilege("SELECT")],
+                    database: "mysql".into(),
+                    grantee: app(),
+                },
+            ),
+        ];
+        let listed = ["mysql".to_string(), "shop".into()];
+        let access = assemble_access(&held, &listed, false);
+        let rights = |name: &str| {
+            let database = access.databases.iter().find(|d| d.name == name).unwrap();
+            (database.rights.iter())
+                .map(|right| right.privilege.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rights("mysql"), ["INSERT"]);
+        assert_eq!(rights("shop"), ["SELECT", "INSERT"]);
+        assert!(access.server.iter().all(|line| !line.starts_with("unread")));
+
+        let held: Held = vec![
+            (
+                None,
+                privileges(&["ALL PRIVILEGES"], Level::Global, app(), false),
+            ),
+            (
+                None,
+                Line::Revoke {
+                    privileges: vec![privilege("SELECT")],
+                    database: "mysql".into(),
+                    grantee: app(),
+                },
+            ),
+        ];
+        let access = assemble_access(&held, &listed, false);
+        let mysql = rights_of(&access, "mysql");
+        assert!(
+            !mysql.contains(&"SELECT".to_string()) && !mysql.contains(&"ALL PRIVILEGES".into())
+        );
+        assert!(mysql.contains(&"INSERT".to_string()) && mysql.contains(&"DELETE".into()));
+        assert_eq!(rights_of(&access, "shop"), ["ALL PRIVILEGES"]);
+
+        let reach = assemble_reach(&held, &listed, &HashMap::new());
+        assert!(
+            reach
+                .predefined
+                .contains(&"SELECT revoked on mysql.*".to_string()),
+            "{:?}",
+            reach.predefined
+        );
+    }
+
+    fn rights_of(access: &RoleAccess, name: &str) -> Vec<String> {
+        let database = access.databases.iter().find(|d| d.name == name).unwrap();
+        (database.rights.iter())
+            .map(|right| right.privilege.clone())
+            .collect()
+    }
+
+    /// With `partial_revokes` on, MySQL reads `_` and `%` in a schema-level
+    /// grant as themselves: `sales_1.*` is not a pattern for `salesA1`.
+    #[test]
+    fn a_literal_schema_name_reaches_only_itself() {
+        assert_eq!(literal("sales_1"), r"sales\_1");
+        assert_eq!(literal(r"a\_b%"), r"a\_b\%");
+        assert_eq!(database_source(&literal("sales_1"), "salesA1"), None);
+        assert_eq!(
+            database_source(&literal("sales_1"), "sales_1"),
+            Some(Source::Direct)
+        );
+        let held = literal_levels(vec![(
+            None,
+            privileges(&["SELECT"], database("sales_1"), user("app", "%"), false),
+        )]);
+        let listed = ["sales_1".to_string(), "salesA1".into()];
+        assert_eq!(reached_databases(&held, &listed), ["sales_1"]);
+    }
+
+    #[test]
+    fn a_users_restrictions_say_what_is_revoked_where() {
+        let restrictions = r#"[{"Database": "mysql", "Privileges": ["SELECT", "insert"]},
+            {"Database": "shop", "Privileges": ["DELETE"]}]"#;
+        assert_eq!(revoked_on(restrictions, "mysql"), ["SELECT", "INSERT"]);
+        assert_eq!(revoked_on(restrictions, "shop"), ["DELETE"]);
+        assert!(revoked_on(restrictions, "other").is_empty());
+        assert!(revoked_on("", "mysql").is_empty(), "no restrictions column");
     }
 
     #[test]
@@ -2309,11 +2660,19 @@ mod tests {
             ..Roles::default()
         };
         let sessions = result(&["name", "sessions"], &[&[Some("app"), Some("3")]]);
-        let reports = assemble_reports(&all, &sessions).unwrap();
+        let reports = assemble_reports(&all, &sessions, false).unwrap();
         assert_eq!(reports.expired, ["locked@%"]);
         assert_eq!(reports.unused_roles, ["shop_read"]);
         assert_eq!(reports.sessions, [("app".to_string(), 3)]);
         assert_eq!(reports.idle, None);
+        assert_eq!(
+            reports.public_grants,
+            Some(Vec::new()),
+            "MySQL has no PUBLIC"
+        );
+        // MariaDB 10.11's PUBLIC is not read: unknown, never zero.
+        let reports = assemble_reports(&all, &sessions, true).unwrap();
+        assert_eq!(reports.public_grants, None);
     }
 
     #[test]
@@ -2377,6 +2736,7 @@ mod tests {
         let grants = assemble_object_grants(
             Engine::MySql,
             "shop",
+            false,
             &global,
             &databases,
             &table,

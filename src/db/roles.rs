@@ -392,8 +392,10 @@ pub struct Reports {
     /// records logins; `None` where it does not.
     pub idle: Option<Vec<String>>,
     pub expired: Vec<String>,
-    /// `schema.name` of every relation PUBLIC holds a privilege on.
-    pub public_grants: Vec<String>,
+    /// `schema.name` of every relation PUBLIC holds a privilege on; `None`
+    /// where the server has a PUBLIC whose grants are not read, so the
+    /// audit says nothing rather than none.
+    pub public_grants: Option<Vec<String>>,
     pub unused_roles: Vec<String>,
     /// Sessions open now, by login, most first.
     pub sessions: Vec<(String, u64)>,
@@ -1457,7 +1459,7 @@ pub(super) fn assemble_reports(
             .filter(|role| role.expired)
             .map(|role| role.name.clone())
             .collect(),
-        public_grants,
+        public_grants: Some(public_grants),
         // A login turned off is a login, not a role nobody uses.
         unused_roles: names(unused, "name")?
             .into_iter()

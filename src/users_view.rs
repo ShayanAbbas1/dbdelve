@@ -1076,29 +1076,31 @@ pub fn report_cards(reports: &Reports) -> Vec<ReportCard> {
             hue: Some(ConnectionColor::Orange),
         });
     }
-    cards.extend([
-        ReportCard {
-            title: "Passwords past expiry",
-            count: reports.expired.len().to_string(),
-            detail: "Their password is refused; any other way in still works.".into(),
-            names: names(&reports.expired),
-            hue: Some(ConnectionColor::Orange),
-        },
-        ReportCard {
+    cards.extend([ReportCard {
+        title: "Passwords past expiry",
+        count: reports.expired.len().to_string(),
+        detail: "Their password is refused; any other way in still works.".into(),
+        names: names(&reports.expired),
+        hue: Some(ConnectionColor::Orange),
+    }]);
+    // Left out where the server's PUBLIC is not read: zero would say no
+    // relation is open to every role.
+    if let Some(public) = &reports.public_grants {
+        cards.push(ReportCard {
             title: "Grants to PUBLIC",
-            count: reports.public_grants.len().to_string(),
+            count: public.len().to_string(),
             detail: "Relations every role holds a privilege on.".into(),
-            names: names(&reports.public_grants),
+            names: names(public),
             hue: Some(ConnectionColor::Blue),
-        },
-        ReportCard {
-            title: "Unused roles",
-            count: reports.unused_roles.len().to_string(),
-            detail: "Roles with no members that own and hold nothing here.".into(),
-            names: names(&reports.unused_roles),
-            hue: Some(ConnectionColor::Blue),
-        },
-    ]);
+        });
+    }
+    cards.extend([ReportCard {
+        title: "Unused roles",
+        count: reports.unused_roles.len().to_string(),
+        detail: "Roles with no members that own and hold nothing here.".into(),
+        names: names(&reports.unused_roles),
+        hue: Some(ConnectionColor::Blue),
+    }]);
     let sessions: u64 = reports.sessions.iter().map(|(_, count)| count).sum();
     let by_login: Vec<String> = (reports.sessions.iter())
         .map(|(name, count)| format!("{name} {count}"))
@@ -1136,7 +1138,9 @@ pub fn reports_csv(reports: &Reports) -> String {
         push("Idle for 90 days", idle);
     }
     push("Passwords past expiry", &reports.expired);
-    push("Grants to PUBLIC", &reports.public_grants);
+    if let Some(public) = &reports.public_grants {
+        push("Grants to PUBLIC", public);
+    }
     push("Unused roles", &reports.unused_roles);
     for (name, count) in &reports.sessions {
         rows.push(vec![

@@ -4104,9 +4104,8 @@ mod tests {
 
         assert!(reports.expired.contains(&"dbdelve_probe_ana".to_string()));
         assert!(
-            reports
-                .public_grants
-                .contains(&"dbdelve_roles_probe.orders".to_string())
+            (reports.public_grants.as_ref())
+                .is_some_and(|grants| grants.contains(&"dbdelve_roles_probe.orders".to_string()))
         );
         assert_eq!(reports.idle, None, "Postgres records no logins");
     }
