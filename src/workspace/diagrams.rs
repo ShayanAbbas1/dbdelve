@@ -35,15 +35,22 @@ impl Workspace {
         }
     }
 
-    /// The schemas the palette offers a diagram of: the one a diagram opens
-    /// on when nothing names one, then every other schema of the catalog
-    /// with a table to draw.
-    pub(crate) fn diagram_schemas(profile: &Profile) -> Vec<String> {
+    /// The schemas the palette offers a diagram of, each with its database
+    /// (`None` for the connection's own): the one a diagram opens on when
+    /// nothing names one, then every other schema of the catalog with a
+    /// table to draw. The first is the object tab in front's when there is
+    /// one, so it keeps that tab's database: `public` of another database is
+    /// not the connection's `public`.
+    pub(crate) fn diagram_schemas(profile: &Profile) -> Vec<(Option<String>, String)> {
         let catalog = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(catalog),
             _ => None,
         };
-        offered_schemas(Self::diagram_schema(profile), catalog)
+        let own = profile.active_database();
+        let database = (profile.session.active_object())
+            .and_then(|tab| tab.database.clone())
+            .filter(|database| own.as_ref() != Some(database));
+        offered_schemas(database, Self::diagram_schema(profile), catalog)
     }
 
     /// Bring a schema's diagram to the front, opening and reading it if it
@@ -617,13 +624,23 @@ fn without_hidden(
     }
 }
 
-/// `first`, then the catalog's other schemas that have a table to draw.
-fn offered_schemas(first: Option<String>, catalog: Option<&Catalog>) -> Vec<String> {
+/// `first`, in `database` (`None` for the connection's own), then the
+/// catalog's other schemas that have a table to draw, all in the
+/// connection's own database. A schema of the catalog is left out only where
+/// `first` is the same schema of the same database.
+fn offered_schemas(
+    database: Option<String>,
+    first: Option<String>,
+    catalog: Option<&Catalog>,
+) -> Vec<(Option<String>, String)> {
+    let skipped = first.clone().filter(|_| database.is_none());
     let rest = (catalog.into_iter())
         .flat_map(|catalog| &catalog.schemas)
-        .filter(|schema| first.as_ref() != Some(&schema.name) && drawn_tables(schema) > 0)
-        .map(|schema| schema.name.clone());
-    first.clone().into_iter().chain(rest).collect()
+        .filter(|schema| skipped.as_ref() != Some(&schema.name) && drawn_tables(schema) > 0)
+        .map(|schema| (None, schema.name.clone()));
+    (first.map(|first| (database, first)).into_iter())
+        .chain(rest)
+        .collect()
 }
 
 /// Whether a relation of this kind is drawn as a card of its schema's
@@ -979,15 +996,31 @@ mod tests {
             database: None,
             ..Default::default()
         };
+        let own = |name: &str| (None, name.to_string());
         assert_eq!(
-            offered_schemas(Some("public".into()), Some(&catalog)),
-            ["public", "archive", "billing"]
+            offered_schemas(None, Some("public".into()), Some(&catalog)),
+            [own("public"), own("archive"), own("billing")]
         );
         assert_eq!(
-            offered_schemas(Some("public".into()), None),
-            ["public"],
+            offered_schemas(None, Some("public".into()), None),
+            [own("public")],
             "before the catalog is read"
         );
-        assert!(offered_schemas(None, None).is_empty());
+        assert!(offered_schemas(None, None, None).is_empty());
+        assert_eq!(
+            offered_schemas(
+                Some("warehouse".into()),
+                Some("public".into()),
+                Some(&catalog)
+            ),
+            [
+                (Some("warehouse".to_string()), "public".to_string()),
+                own("archive"),
+                own("public"),
+                own("billing"),
+            ],
+            "another database's public keeps its database, and the connection's own public \
+             is still offered"
+        );
     }
 }

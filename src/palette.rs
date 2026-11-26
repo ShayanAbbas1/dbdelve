@@ -4641,12 +4641,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.extend(
             Workspace::diagram_schemas(profile)
                 .into_iter()
-                .map(|schema| {
+                .map(|(database, schema)| {
+                    let label = match &database {
+                        Some(database) => format!("Show diagram of {schema} in {database}"),
+                        None => format!("Show diagram of {schema}"),
+                    };
                     command(
-                        &format!("Show diagram of {schema}"),
+                        &label,
                         icon::DIAGRAM,
                         Command::ShowDiagram {
-                            database: None,
+                            database,
                             schema,
                             centre: None,
                         },
