@@ -140,6 +140,16 @@ pub struct StoredProfile {
     /// the file.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Whether an agent may reach this connection over MCP. Absent is a
+    /// profile written before agents could see any, and reads back as hidden:
+    /// every profile that exists before this field does is invisible to agents
+    /// after the upgrade. Left out when false, so a hidden profile is written
+    /// exactly as it always was. A build without the field ignores the key and
+    /// drops it on its next save, which hides the profile -- the safe
+    /// direction. Written only by `Workspace::set_agent_visible`, and read from
+    /// disk only at load.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_visible: bool,
     /// `sql::Destructive::slug()`, for the kinds whose confirmation this
     /// connection has silenced. Per connection and per kind: silencing DROP on
     /// a scratch database says nothing about whether you want to be asked on
@@ -834,6 +844,17 @@ pub struct StoredSettings {
     /// while it is name. A scalar, above the tables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_order: Option<String>,
+    /// Master switch for AI Features (MCP server, titlebar mark, policy).
+    /// Off by default; a saved `agent_access = true` alone never turns it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_features: Option<bool>,
+    /// Whether agents may reach this variant's windows over the socket.
+    /// Absent reads as off, including in a file written before the field
+    /// existed. Only a window's own access actions write it, through
+    /// `Workspace::agent_access_to_save`: every other save carries the file's
+    /// value forward, so one window's save never undoes another's choice.
+    #[serde(default)]
+    pub agent_access: Option<bool>,
     /// Keybinding overrides, keyed by the action id in
     /// `keybindings::REGISTRY`. Only the ones a user actually changed --
     /// everything else stays on whatever the running build defaults to.
@@ -843,6 +864,11 @@ pub struct StoredSettings {
     /// below the scalars.
     #[serde(default)]
     pub theme_opacity: Option<HashMap<String, f32>>,
+    /// Per-tool and per-class AI Features policy overrides, keyed by
+    /// `PolicyRow::slug()` and valued by `PolicyLevel::slug()`. A table, so it
+    /// stays below the scalars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_policy: Option<BTreeMap<String, String>>,
 }
 
 impl StoredSettings {
@@ -1062,6 +1088,13 @@ pub fn load_profiles(plugins: &[&'static Plugin]) -> Result<ProfileList, LoadFai
 
 /// The profile file without `load_profiles`' moving it aside on a failure,
 /// for a read that only peeks, ahead of the one that reports.
+/// When `profiles.toml` last changed and its length, or `None` when it cannot
+/// be read: [`peek_profiles`] can answer differently only once this does.
+pub fn profiles_stamp() -> Option<(std::time::SystemTime, u64)> {
+    let meta = fs::metadata(dbdelve_directory().ok()?.join(PROFILES_FILE)).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 pub fn peek_profiles(plugins: &[&'static Plugin]) -> Option<ProfileList> {
     read_profiles(&dbdelve_directory().ok()?.join(PROFILES_FILE), plugins).ok()
 }
@@ -2633,6 +2666,163 @@ fn secure(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Where what an agent's approved statements did is recorded, beside
+/// `profiles.toml`.
+#[cfg(unix)]
+pub(crate) const AGENT_AUDIT_FILE: &str = "agent-audit.jsonl";
+
+// ponytail: the audit is rewritten to its newest `AUDIT_KEEP` lines once it
+// passes `AUDIT_SLACK`, so a rewrite comes once per two thousand appends, and
+// the line count is read from the file once and then kept, so an append never
+// reads it. The upgrade is a size bound or rotation, if a user's audit ever
+// needs to reach further back. Two windows can append to one file (a write
+// outlives the bridge that started it), so every append and rewrite holds
+// [`AGENT_AUDIT_LOCK`], and a kept count is trusted only while the file is the
+// one it was counted on.
+#[cfg(unix)]
+pub(crate) const AUDIT_KEEP: usize = 2_000;
+/// Locked for the whole of an append and the rewrite it may make, beside the
+/// audit and not the audit itself: a rewrite replaces the audit's file, and a
+/// lock on the old one would no longer keep anyone out.
+#[cfg(unix)]
+const AGENT_AUDIT_LOCK: &str = ".agent-audit.lock";
+#[cfg(unix)]
+pub(crate) const AUDIT_SLACK: usize = 4_000;
+
+/// The record of agent calls: append-only, one JSON object per line, never a
+/// row value.
+///
+/// Unix only, as the bridge that feeds it is: on Windows nothing reads it, and
+/// CI's Windows clippy denies dead code.
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct AuditLog {
+    /// How many lines the file holds, read from it by the first append and
+    /// kept from then on, with the length and inode the file had when it was
+    /// last written here: a file another window has written since is counted
+    /// again. `None` until then, and again after a write that failed, which
+    /// may have left the end of the file cut.
+    lines: Option<(usize, u64, u64)>,
+}
+
+#[cfg(unix)]
+impl AuditLog {
+    /// Append `line`, which must hold no newline, as one line of the file.
+    ///
+    /// Created `0600` and kept there. The line and its newline go out in a
+    /// single `write_all`: two writes could leave a line without its end. A
+    /// file whose last line a crash left without one is ended first, so the
+    /// two never run together, and the cut line stays where it is: lines are
+    /// never parsed or rewritten here, only counted.
+    ///
+    /// Once the file passes [`AUDIT_SLACK`] lines it is rewritten to its
+    /// newest [`AUDIT_KEEP`]. They are kept verbatim and never merged the way
+    /// the history's are: a call's `started` line must stay a line of its own
+    /// beside its `outcome`, since the pair is the proof that a statement was
+    /// sent before it was answered.
+    ///
+    /// ponytail: the cut is by count, so a call still running when the file is
+    /// rewritten (an approved write may run ten minutes) can lose its `started`
+    /// line and keep its `outcome`, which still names the call, its statement
+    /// and its decision. The upgrade is moving the cut back to the first line
+    /// no earlier unmatched `started` line precedes.
+    pub(crate) fn append(&mut self, line: &str) -> Result<(), String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let directory = dbdelve_directory()?;
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+        // Held to the end of this call, the rewrite included.
+        let _locked = lock_audit(&directory.join(AGENT_AUDIT_LOCK))?;
+        let path = directory.join(AGENT_AUDIT_FILE);
+        let stamp = |path: &Path| fs::metadata(path).ok().map(|meta| (meta.len(), meta.ino()));
+        let known = self
+            .lines
+            .filter(|&(_, len, ino)| stamp(&path) == Some((len, ino)));
+        let (mut lines, cut) = match known {
+            Some((lines, _, _)) => (lines, false),
+            None => match fs::read(&path) {
+                Ok(bytes) => {
+                    let cut = bytes.last().is_some_and(|last| *last != b'\n');
+                    let ended = bytes.iter().filter(|byte| **byte == b'\n').count();
+                    (ended + usize::from(cut), cut)
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (0, false),
+                Err(error) => {
+                    return Err(format!("Could not read {}: {error}", path.display()));
+                }
+            },
+        };
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+        // A file that existed before with looser bits keeps none of them.
+        secure(&path)?;
+        let mut text = String::with_capacity(line.len() + 2);
+        if cut {
+            text.push('\n');
+        }
+        text.push_str(line);
+        text.push('\n');
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            self.lines = None;
+            return Err(format!("Could not write {}: {error}", path.display()));
+        }
+        lines += 1;
+        if lines > AUDIT_SLACK
+            && let Some(kept) = keep_newest_audit_lines(&path)
+        {
+            lines = kept;
+        }
+        self.lines = stamp(&path).map(|(len, ino)| (lines, len, ino));
+        Ok(())
+    }
+}
+
+/// Open `path` and hold an exclusive `flock` on it until the file is dropped.
+#[cfg(unix)]
+fn lock_audit(path: &Path) -> Result<fs::File, String> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    loop {
+        // SAFETY: `file` is an open descriptor for the length of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(format!("Could not lock {}: {error}", path.display()));
+        }
+    }
+}
+
+/// Rewrite the audit to its newest [`AUDIT_KEEP`] lines, through
+/// [`write_file`] so a rewrite that fails halfway leaves the file as it was.
+/// Answers how many lines it holds now, or `None` when the rewrite did not
+/// happen: the file is still correct to read, it just keeps its length, and
+/// the next append tries again.
+///
+/// The text is read lossily: only a line cut by a crash can end in half a
+/// character, and it is not a line anything reads.
+#[cfg(unix)]
+fn keep_newest_audit_lines(path: &Path) -> Option<usize> {
+    let bytes = fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let kept = &lines[lines.len().saturating_sub(AUDIT_KEEP)..];
+    write_file(path, &kept.concat()).ok()?;
+    Some(kept.len())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -3473,6 +3663,167 @@ user = ""
         assert_eq!(expanded_against("~/app.db", None), Path::new("~/app.db"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_is_created_private_and_one_line_per_append() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_home(|| {
+            let path = dbdelve_directory()
+                .expect("the test home has a data directory")
+                .join(AGENT_AUDIT_FILE);
+            let mode = |path: &Path| {
+                fs::metadata(path)
+                    .expect("the file exists")
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+
+            let mut log = AuditLog::default();
+            log.append(r#"{"a":1}"#).expect("the first line is written");
+            log.append(r#"{"b":"x\ny"}"#)
+                .expect("the second line is written");
+            let text = fs::read_to_string(&path).expect("the file is readable");
+            assert_eq!(text.lines().count(), 2, "{text:?}");
+            for line in text.lines() {
+                serde_json::from_str::<serde_json::Value>(line).expect("a line is JSON");
+            }
+            assert_eq!(mode(&path), 0o600);
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                .expect("the mode is settable");
+            log.append(r#"{"c":3}"#).expect("the third line is written");
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(
+                fs::read_to_string(&path)
+                    .expect("the file is readable")
+                    .lines()
+                    .count(),
+                3
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_counts_again_a_file_another_window_wrote() {
+        with_home(|| {
+            let (mut mine, mut other) = (AuditLog::default(), AuditLog::default());
+            mine.append(r#"{"a":1}"#).expect("a line is written");
+            for n in 0..3 {
+                other
+                    .append(&format!(r#"{{"b":{n}}}"#))
+                    .expect("a line is written");
+            }
+            mine.append(r#"{"a":2}"#).expect("a line is written");
+            assert_eq!(mine.lines.map(|(lines, _, _)| lines), Some(5));
+            assert_eq!(audit_text().lines().count(), 5);
+        });
+    }
+
+    #[cfg(unix)]
+    fn audit_path() -> PathBuf {
+        dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join(AGENT_AUDIT_FILE)
+    }
+
+    #[cfg(unix)]
+    fn audit_text() -> String {
+        fs::read_to_string(audit_path()).expect("the audit is readable")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_keeps_its_newest_lines_once_past_its_slack() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_home(|| {
+            let mut log = AuditLog::default();
+            for n in 0..=AUDIT_SLACK {
+                log.append(&format!(r#"{{"n":{n}}}"#))
+                    .expect("a line is written");
+            }
+            let kept: Vec<String> = (AUDIT_SLACK + 1 - AUDIT_KEEP..=AUDIT_SLACK)
+                .map(|n| format!(r#"{{"n":{n}}}"#))
+                .collect();
+            let text = audit_text();
+            let lines: Vec<_> = text.lines().collect();
+            assert_eq!(lines.len(), AUDIT_KEEP);
+            // Not `assert_eq!`: its failure would print two thousand lines.
+            assert!(lines == kept, "the newest lines, in order and verbatim");
+            assert_eq!(
+                fs::metadata(audit_path())
+                    .expect("the file exists")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            let beside = fs::read_dir(audit_path().parent().expect("the file has a directory"))
+                .expect("the directory is readable")
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("agent-audit"))
+                .collect::<Vec<_>>();
+            assert_eq!(beside, [AGENT_AUDIT_FILE]);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_counts_an_existing_file_once() {
+        with_home(|| {
+            let full: String = (0..AUDIT_SLACK)
+                .map(|n| format!("{{\"n\":{n}}}\n"))
+                .collect();
+            fs::create_dir_all(audit_path().parent().expect("the file has a directory"))
+                .expect("the directory is creatable");
+            fs::write(audit_path(), full).expect("the file is writable");
+
+            let mut log = AuditLog::default();
+            log.append(r#"{"last":1}"#).expect("a line is written");
+            let text = audit_text();
+            assert_eq!(text.lines().count(), AUDIT_KEEP, "compacted on that append");
+            assert_eq!(text.lines().last(), Some(r#"{"last":1}"#));
+
+            log.append(r#"{"last":2}"#).expect("a line is written");
+            assert_eq!(
+                audit_text().lines().count(),
+                AUDIT_KEEP + 1,
+                "the count was kept and the file not read again"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_ends_a_cut_line_before_the_next() {
+        with_home(|| {
+            fs::create_dir_all(audit_path().parent().expect("the file has a directory"))
+                .expect("the directory is creatable");
+            fs::write(audit_path(), "{\"v\":1,\"id\":").expect("the file is writable");
+
+            AuditLog::default()
+                .append(r#"{"v":1,"id":2}"#)
+                .expect("a line is written");
+            assert_eq!(audit_text(), "{\"v\":1,\"id\":\n{\"v\":1,\"id\":2}\n");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_audit_starts_a_missing_file() {
+        with_home(|| {
+            assert!(!audit_path().exists());
+            AuditLog::default()
+                .append(r#"{"v":1}"#)
+                .expect("a line is written");
+            assert_eq!(audit_text(), "{\"v\":1}\n");
+        });
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn a_tilde_and_backslash_is_the_home_directory_on_windows() {
@@ -3493,7 +3844,15 @@ user = ""
 
         let mut counter = LOCK.lock().unwrap_or_else(|error| error.into_inner());
         *counter += 1;
-        let home = std::env::temp_dir().join(format!(
+        // On Unix the home is short on purpose: the agent socket lives under
+        // it, and under macOS's `temp_dir()` that path is about 117 bytes
+        // against the 104 `sun_path` holds. Tests of the socket then bind the
+        // path the app derives, not a stand-in for it.
+        #[cfg(unix)]
+        let root = PathBuf::from("/tmp");
+        #[cfg(not(unix))]
+        let root = std::env::temp_dir();
+        let home = root.join(format!(
             "dbdelve-store-test-{}-{}",
             std::process::id(),
             *counter
@@ -3659,6 +4018,7 @@ user = "shayan"
                 next_query_id: Some(1),
                 color: None,
                 mode: Some("full".into()),
+                agent_visible: false,
                 confirmed: vec!["drop".into(), "truncate".into()],
                 open_query: None,
                 ssm: None,
@@ -3731,6 +4091,7 @@ user = "shayan"
             next_query_id: Some(7),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
             ssm: None,
@@ -3891,6 +4252,7 @@ open_objects = []
             next_query_id: Some(0),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
@@ -4662,6 +5024,59 @@ folder = "Hot"
     }
 
     #[test]
+    fn a_profile_written_before_the_flag_loads_hidden_and_saves_without_it() {
+        let file = |extra: &str| {
+            format!(
+                "[[profiles]]\nid = \"a\"\nname = \"A\"\nhost = \"\"\ndatabase = \"\"\nuser = \"\"\n{extra}"
+            )
+        };
+        for text in [file(""), file("agent_visible = false\n")] {
+            let profiles = decode_profiles(&text, &[]).unwrap().profiles;
+            assert!(!profiles[0].agent_visible, "{text}");
+            let written = written_alone(profiles[0].clone());
+            assert!(!written.contains("agent_visible"), "{written}");
+        }
+        assert!(decode_profiles("", &[]).unwrap().profiles.is_empty());
+    }
+
+    #[test]
+    fn a_visible_profile_round_trips_ahead_of_its_tables() {
+        let profile = StoredProfile {
+            agent_visible: true,
+            ssh: Some(SshTunnel {
+                host: "dbdelve-bastion".into(),
+                port: None,
+                user: "tunnel".into(),
+                identity_file: None,
+                run_as: None,
+                passphrase: String::new(),
+            }),
+            open_objects: vec![StoredObject {
+                schema: "public".into(),
+                name: "accounts".into(),
+                routine: false,
+                structure: false,
+                kind: RelationKind::default(),
+                filter: String::new(),
+                filter_engine: None,
+                origin: None,
+                filters: Vec::new(),
+                active: true,
+                bars: Vec::new(),
+                diagram: false,
+                diagram_view: None,
+                database: None,
+            }],
+            ..a_stored_profile()
+        };
+        let text = written_alone(profile.clone());
+        let flag = text.find("agent_visible = true").expect(&text);
+        let first_table = text.find("\n[profiles.").expect(&text);
+        assert!(flag < first_table, "{text}");
+        assert_eq!(decode_profiles(&text, &[]).unwrap().profiles, vec![profile]);
+    }
+
+    #[test]
     fn an_ssh_tunnel_with_every_field_survives_the_round_trip_through_toml() {
         let profile = StoredProfile {
             ssm: None,
@@ -4892,6 +5307,7 @@ folder = "Hot"
             next_query_id: Some(0),
             color: Some(ConnectionColor::Purple.slug().to_string()),
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
@@ -4991,6 +5407,7 @@ folder = "Hot"
             next_query_id: Some(7),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
@@ -5076,6 +5493,7 @@ folder = "Hot"
             next_query_id: Some(1),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
@@ -5207,6 +5625,7 @@ open_objects = []
             next_query_id: Some(7),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
@@ -5318,11 +5737,17 @@ open_objects = []
                 queries_move_dismissed: Some(true),
                 edit_mode: Some("row".into()),
                 files_order: Some("added".into()),
+                ai_features: Some(true),
+                agent_access: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
                 )])),
                 theme_opacity: Some(HashMap::from([("Dark".to_string(), 0.6)])),
+                agent_policy: Some(BTreeMap::from([(
+                    "list_tables".to_string(),
+                    "deny".to_string(),
+                )])),
             }),
             projects: vec![
                 StoredProject {
@@ -5368,6 +5793,7 @@ open_objects = []
                     next_query_id: Some(2),
                     color: None,
                     mode: None,
+                    agent_visible: false,
                     confirmed: Vec::new(),
                     open_query: None,
                     ssm: None,
@@ -5420,6 +5846,7 @@ open_objects = []
                     next_query_id: None,
                     color: None,
                     mode: None,
+                    agent_visible: false,
                     confirmed: Vec::new(),
                     open_query: None,
                     ssm: None,
@@ -5564,6 +5991,79 @@ open_objects = []
                 .expect("it encodes")
                 .contains("sidebar_")
         );
+    }
+
+    #[test]
+    fn agent_access_is_off_unless_saved_on() {
+        let read = |text: &str| {
+            decode_profiles(text, &[])
+                .expect("the file decodes")
+                .settings
+                .and_then(|settings| settings.agent_access)
+        };
+        assert_eq!(read(""), None);
+        assert_eq!(read("[settings]\ncheck_for_updates = false\n"), None);
+        assert_eq!(read("[settings]\nagent_access = true\n"), Some(true));
+        assert_eq!(read("[settings]\nagent_access = false\n"), Some(false));
+
+        // Written ahead of the tables whichever way it is set, or TOML would
+        // refuse the file.
+        for choice in [Some(true), Some(false)] {
+            let file = ProfileFile {
+                settings: Some(StoredSettings {
+                    agent_access: choice,
+                    custom_keybindings: Some(HashMap::from([(
+                        "apply_edits".to_string(),
+                        "cmd-shift-s".to_string(),
+                    )])),
+                    ..StoredSettings::default()
+                }),
+                ..ProfileFile::default()
+            };
+            let text = toml::to_string_pretty(&file).expect("the file encodes");
+            let decoded: ProfileFile = toml::from_str(&text).expect("the file decodes");
+            assert_eq!(decoded, file, "{text}");
+        }
+    }
+
+    #[test]
+    fn ai_features_and_agent_policy_round_trip_and_default_off() {
+        let decode = |text: &str| {
+            decode_profiles(text, &[])
+                .expect("the file decodes")
+                .settings
+                .unwrap_or_default()
+        };
+        // Absent and `agent_access = true` alone both leave `ai_features` off.
+        assert_eq!(decode("").ai_features, None);
+        assert_eq!(
+            decode("[settings]\nagent_access = true\n").ai_features,
+            None
+        );
+        assert_eq!(
+            decode("[settings]\nai_features = true\n").ai_features,
+            Some(true)
+        );
+
+        let file = ProfileFile {
+            settings: Some(StoredSettings {
+                ai_features: Some(true),
+                agent_access: Some(true),
+                custom_keybindings: Some(HashMap::from([(
+                    "apply_edits".to_string(),
+                    "cmd-shift-s".to_string(),
+                )])),
+                agent_policy: Some(BTreeMap::from([
+                    ("list_tables".to_string(), "deny".to_string()),
+                    ("execute_sql_writes".to_string(), "auto".to_string()),
+                ])),
+                ..StoredSettings::default()
+            }),
+            ..ProfileFile::default()
+        };
+        let text = toml::to_string_pretty(&file).expect("the file encodes");
+        let decoded: ProfileFile = toml::from_str(&text).expect("the file decodes");
+        assert_eq!(decoded, file, "{text}");
     }
 
     #[test]
@@ -6289,6 +6789,7 @@ active = true
             next_query_id: Some(7),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: Some("daily".into()),
             ssm: None,
@@ -6929,6 +7430,7 @@ name = \"accounts\"
             next_query_id: Some(0),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,
@@ -7070,6 +7572,7 @@ name = \"accounts\"
             next_query_id: Some(0),
             color: None,
             mode: None,
+            agent_visible: false,
             confirmed: Vec::new(),
             open_query: None,
             ssm: None,

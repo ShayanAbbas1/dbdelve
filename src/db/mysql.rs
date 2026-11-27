@@ -786,6 +786,40 @@ fn over(options: OptsBuilder, tls: Option<SslOpts>) -> OptsBuilder {
     }
 }
 
+/// What a profile's connection runs once at connect, as session defaults.
+///
+/// The read-only hold comes first, for an agent's config
+/// ([`ServerConfig::read_only`]); a session that holds it starts read-only,
+/// before any statement of its own. The timeout is never spliced into the
+/// user's own submission -- see `ServerConfig::statement_timeout` for what
+/// it does and does not bound. MySQL's `max_execution_time` counts
+/// milliseconds and MariaDB's `max_statement_time` seconds, and a server too
+/// old to know the variable fails the connect here rather than the statement
+/// later.
+fn init_statements(server: &ServerConfig, engine: Engine) -> Vec<String> {
+    let mut init = Vec::new();
+    if server.read_only {
+        init.extend(read_only_hold(engine));
+    }
+    match server.statement_timeout {
+        0 => {}
+        seconds if engine == Engine::MariaDb => {
+            init.push(format!("SET SESSION max_statement_time = {seconds}"));
+        }
+        seconds => init.push(format!(
+            "SET SESSION max_execution_time = {}",
+            u64::from(seconds) * 1_000
+        )),
+    }
+    init
+}
+
+/// The statement that holds a session to reads, in the spelling
+/// [`Connection::set_read_only`](super::Connection::set_read_only) sends.
+fn read_only_hold(engine: Engine) -> Option<String> {
+    super::read_only_statement(engine, true).map(str::to_string)
+}
+
 /// Another session at the server `dial` names, as the one a profile keeps.
 fn connect(
     server: &ServerConfig,
@@ -820,22 +854,10 @@ fn set_time_zone(
 }
 
 fn session_options(server: &ServerConfig, engine: Engine, dial: Option<SocketAddr>) -> OptsBuilder {
-    match server.statement_timeout {
-        0 => base_options(server, dial),
-        // Run once at connect as a session default, never spliced into the
-        // user's own submission — see `ServerConfig::statement_timeout` for
-        // what this does and does not bound. MySQL's `max_execution_time`
-        // counts milliseconds and MariaDB's `max_statement_time` seconds, and a
-        // server too old to know the variable fails the connect here rather
-        // than the statement later.
-        seconds => base_options(server, dial).init(vec![if engine == Engine::MariaDb {
-            format!("SET SESSION max_statement_time = {seconds}")
-        } else {
-            format!(
-                "SET SESSION max_execution_time = {}",
-                u64::from(seconds) * 1_000
-            )
-        }]),
+    let init = init_statements(server, engine);
+    match init.is_empty() {
+        true => base_options(server, dial),
+        false => base_options(server, dial).init(init),
     }
 }
 
@@ -849,12 +871,18 @@ fn dialled(
 }
 
 /// The throwaway connection a cancel opens: the same fields, but bounded end
-/// to end and with no init statement it has no use for.
-fn cancel_options(server: &ServerConfig, dial: Option<SocketAddr>) -> OptsBuilder {
+/// to end. It runs no timeout statement it has no use for, only the read-only
+/// hold when the config carries one -- `KILL QUERY` and the `PROCESSLIST` read
+/// both run in a read-only session.
+fn cancel_options(server: &ServerConfig, engine: Engine, dial: Option<SocketAddr>) -> OptsBuilder {
     let timeout = Some(Duration::from_secs(CANCEL_TIMEOUT_SECONDS));
-    base_options(server, dial)
+    let options = base_options(server, dial)
         .read_timeout(timeout)
-        .write_timeout(timeout)
+        .write_timeout(timeout);
+    match server.read_only.then(|| read_only_hold(engine)).flatten() {
+        Some(hold) => options.init(vec![hold]),
+        None => options,
+    }
 }
 
 /// A live connection. Cloneable so a background task can take one without
@@ -1109,7 +1137,7 @@ impl Connection {
         let server = &self.server;
         let dial = self.dial()?;
         let (mut connection, _) = open(server, self.engine, dial, false, |dial| {
-            cancel_options(server, dial)
+            cancel_options(server, self.engine, dial)
         })?;
         connection
             .query_drop(format!("KILL QUERY {}", self.connection_id))
@@ -1276,7 +1304,7 @@ impl Connection {
             if side.is_none() {
                 let dial = self.dial().ok()?;
                 *side = open(&self.server, self.engine, dial, false, |dial| {
-                    cancel_options(&self.server, dial)
+                    cancel_options(&self.server, self.engine, dial)
                 })
                 .map(|(connection, _)| connection)
                 .ok();
@@ -2474,6 +2502,14 @@ fn metadata_lock_sql(engine: Engine, schema: &str, relation: &str) -> String {
     )
 }
 
+/// Whether `error` is the connection breaking rather than the server's
+/// answer: a socket error mid-statement (a reset, a broken pipe, an end of
+/// stream). The statement may have run. A refused connect never reaches here:
+/// [`connect_error`] reads it.
+fn lost_connection(error: &::mysql::Error) -> bool {
+    matches!(error, ::mysql::Error::IoError(_))
+}
+
 /// `KILL QUERY`'s doing: "Query execution was interrupted", on both servers.
 fn interrupted(error: &::mysql::Error) -> bool {
     matches!(error, ::mysql::Error::MySqlError(error) if error.code == 1317)
@@ -2513,6 +2549,9 @@ fn bounded<S: std::os::fd::AsRawFd, T>(
 }
 
 fn query_error(error: &::mysql::Error) -> DbError {
+    if lost_connection(error) {
+        return super::lost_reply(&describe(error));
+    }
     DbError {
         message: describe(error),
         // MySQL reports no offset into the statement, so there is nothing to
@@ -2738,6 +2777,19 @@ mod tests {
 
         let sizes = connection.sizes_of(std::slice::from_ref(&own)).unwrap();
         assert_eq!(sizes.keys().collect::<Vec<_>>(), [&own]);
+    }
+
+    #[test]
+    fn a_broken_socket_is_a_lost_reply_and_a_server_error_is_not() {
+        let reset =
+            ::mysql::Error::IoError(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(query_error(&reset).lost_reply());
+        let refused = ::mysql::Error::MySqlError(::mysql::MySqlError {
+            state: "23000".into(),
+            code: 1062,
+            message: "Duplicate entry '1' for key 'PRIMARY'".into(),
+        });
+        assert!(!query_error(&refused).lost_reply());
     }
 
     #[test]
@@ -3923,8 +3975,12 @@ ORDER BY 1, 2
             ..ServerConfig::default()
         };
         let reached = "192.0.2.7:3307".parse().unwrap();
-        let opts: ::mysql::Opts =
-            cancel_options(&server, dialled(None, Some(reached)).unwrap()).into();
+        let opts: ::mysql::Opts = cancel_options(
+            &server,
+            Engine::MySql,
+            dialled(None, Some(reached)).unwrap(),
+        )
+        .into();
         assert_eq!(opts.get_ip_or_hostname(), "192.0.2.7");
         assert_eq!(opts.get_tcp_port(), 3307);
         assert!(!opts.get_prefer_socket());
@@ -4039,7 +4095,7 @@ ORDER BY 1, 2
             statement_timeout: 5,
             ..ServerConfig::default()
         };
-        let opts: ::mysql::Opts = cancel_options(&server, None).into();
+        let opts: ::mysql::Opts = cancel_options(&server, Engine::MySql, None).into();
 
         let timeout = Some(Duration::from_secs(CANCEL_TIMEOUT_SECONDS));
         assert_eq!(opts.get_read_timeout(), timeout.as_ref());
@@ -4205,6 +4261,54 @@ ORDER BY 1, 2
     }
 
     #[test]
+    fn a_read_only_hold_runs_at_connect() {
+        let server = |read_only, statement_timeout| ServerConfig {
+            read_only,
+            statement_timeout,
+            ..ServerConfig::default()
+        };
+        assert_eq!(
+            init_statements(&server(true, 30), Engine::MySql),
+            [
+                "SET SESSION TRANSACTION READ ONLY",
+                "SET SESSION max_execution_time = 30000"
+            ]
+        );
+        assert_eq!(
+            init_statements(&server(true, 30), Engine::MariaDb),
+            [
+                "SET SESSION TRANSACTION READ ONLY",
+                "SET SESSION max_statement_time = 30"
+            ]
+        );
+        assert_eq!(
+            init_statements(&server(true, 0), Engine::MySql),
+            ["SET SESSION TRANSACTION READ ONLY"]
+        );
+        assert!(init_statements(&server(false, 0), Engine::MySql).is_empty());
+        assert_eq!(
+            init_statements(&server(false, 30), Engine::MariaDb),
+            ["SET SESSION max_statement_time = 30"]
+        );
+    }
+
+    #[test]
+    fn a_held_cancel_session_runs_the_hold() {
+        let init = |read_only, statement_timeout| {
+            let server = ServerConfig {
+                read_only,
+                statement_timeout,
+                ..ServerConfig::default()
+            };
+            let opts: ::mysql::Opts = cancel_options(&server, Engine::MySql, None).into();
+            opts.get_init().to_vec()
+        };
+        assert_eq!(init(true, 5), ["SET SESSION TRANSACTION READ ONLY"]);
+        assert_eq!(init(true, 0), ["SET SESSION TRANSACTION READ ONLY"]);
+        assert!(init(false, 5).is_empty());
+    }
+
+    #[test]
     fn structure_sql_quotes_a_name_containing_a_quote() {
         assert_eq!(
             structure_sql(
@@ -4213,6 +4317,18 @@ ORDER BY 1, 2
                 "odd'name",
             ),
             "WHERE TABLE_SCHEMA = 'dbdelve_dev' AND TABLE_NAME = 'odd''name'"
+        );
+    }
+
+    #[test]
+    fn a_schema_named_like_a_placeholder_is_not_substituted_into() {
+        assert_eq!(
+            structure_sql(
+                "WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}",
+                "{relation}",
+                "a'b",
+            ),
+            "WHERE TABLE_SCHEMA = '{relation}' AND TABLE_NAME = 'a''b'"
         );
     }
 
@@ -4425,6 +4541,88 @@ ORDER BY 1, 2
                 .ddl("information_schema", "SCHEMATA")
                 .unwrap_or_else(|error| panic!("{engine:?}: {error}"));
             assert!(ddl.contains("SCHEMA_NAME"), "{engine:?}: {ddl}");
+        }
+    }
+
+    /// One test over both servers: an agent's config holds every session
+    /// opened from it, the one `sizes()` reads through and the one that
+    /// cancels a statement included.
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_side_session_sizes_opens_is_read_only() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            let plain = live(engine);
+            for statement in [
+                "DROP TABLE IF EXISTS dbdelve_side_probe",
+                "CREATE TABLE dbdelve_side_probe (x int)",
+                "INSERT INTO dbdelve_side_probe VALUES (1), (2), (3)",
+                "ANALYZE TABLE dbdelve_side_probe",
+            ] {
+                plain
+                    .query(statement, Fetch::default())
+                    .unwrap_or_else(|error| panic!("{engine:?}: {statement}: {error}"));
+            }
+
+            let held = Connection::open(
+                &ServerConfig {
+                    sslmode: SslMode::Disable,
+                    read_only: true,
+                    ..live_config(engine)
+                },
+                engine,
+            )
+            .expect("a held connection should open");
+            let side = held.sizes_session().expect("the side session should open");
+            // MySQL 8.4 dropped `tx_read_only`, which MariaDB still spells so.
+            let variable = match engine {
+                Engine::MariaDb => "@@SESSION.tx_read_only",
+                _ => "@@SESSION.transaction_read_only",
+            };
+            let setting = side
+                .query(&format!("SELECT {variable}"), Fetch::default())
+                .expect("the setting should read");
+            assert_eq!(setting.rows, vec![vec![Some("1".into())]], "{engine:?}");
+            let refusal = side
+                .query(
+                    "INSERT INTO dbdelve_side_probe VALUES (4)",
+                    Fetch::default(),
+                )
+                .expect_err("a held side session must refuse a write");
+            assert!(
+                refusal.message.contains("READ ONLY"),
+                "{engine:?}, the server's own words: {}",
+                refusal.message
+            );
+            let sizes = held
+                .sizes(&Shown::everything())
+                .expect("sizes should load on a held connection");
+            assert!(
+                sizes["dbdelve_dev"].contains_key("dbdelve_side_probe"),
+                "{engine:?}: the hold must not empty the estimates"
+            );
+
+            // A held cancel session still stops a running statement.
+            let sleeper = held.clone();
+            let started = Instant::now();
+            let running = std::thread::spawn(move || {
+                let _ = sleeper.query("SELECT SLEEP(10)", Fetch::default());
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            held.cancel().expect("the KILL QUERY should send");
+            running.join().expect("the sleeping statement should end");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{engine:?}: a held cancel session did not stop the statement"
+            );
+
+            // The seeded rows are all there is: the refused write did not land.
+            let count = plain
+                .query("SELECT count(*) FROM dbdelve_side_probe", Fetch::default())
+                .expect("the plain connection should read");
+            assert_eq!(count.rows, vec![vec![Some("3".into())]], "{engine:?}");
+            plain
+                .query("DROP TABLE dbdelve_side_probe", Fetch::default())
+                .expect("the probe table should drop");
         }
     }
 
@@ -5346,6 +5544,69 @@ ORDER BY 1, 2
         assert_eq!(updated.rows_affected, Some(2));
     }
 
+    /// The write lane's session waits at most the lock wait it was opened
+    /// with, for a metadata lock and for a row lock, and the read lane's does
+    /// not. The row lock is held by a transaction left open on another
+    /// session, as a user's would be.
+    fn live_an_approved_write_session_carries_the_lock_wait(engine: Engine) {
+        use crate::db::{Connection as Open, ConnectionConfig};
+        let server = ServerConfig {
+            sslmode: SslMode::Disable,
+            ..live_config(engine)
+        };
+        let config = match engine {
+            Engine::MariaDb => ConnectionConfig::MariaDb(server),
+            _ => ConnectionConfig::MySql(server),
+        };
+        let run = |connection: &Open, sql: &str| {
+            connection.query(sql, &crate::db::CancelToken::default(), Fetch::default())
+        };
+        let waits = |connection: &Open| {
+            let result = run(
+                connection,
+                "SELECT @@SESSION.lock_wait_timeout, @@SESSION.innodb_lock_wait_timeout",
+            )
+            .expect("the server answers the read");
+            let row = &result.rows[0];
+            [0, 1].map(|at| row.get(at).unwrap_or_default().to_string())
+        };
+
+        let writer =
+            Open::open_for_approved_write(config.clone(), 30).expect("the write connection opens");
+        assert_eq!(waits(&writer), ["30", "30"]);
+        let reader = Open::open_for_agent(config.clone()).expect("the read connection opens");
+        assert_ne!(waits(&reader)[0], "30");
+
+        let table = format!("dbdelve_lock_{}", std::process::id());
+        let holder = Open::open(config.clone()).expect("the holding connection opens");
+        let drop = format!("DROP TABLE IF EXISTS {table}");
+        run(&holder, &drop).expect("a stale table is dropped");
+        run(
+            &holder,
+            &format!("CREATE TABLE {table} (id INT PRIMARY KEY, n INT) ENGINE = InnoDB"),
+        )
+        .expect("the table is made");
+        run(&holder, &format!("INSERT INTO {table} VALUES (1, 0)")).expect("the row is made");
+        let outcome = (|| {
+            run(&holder, "BEGIN")?;
+            run(&holder, &format!("UPDATE {table} SET n = 1 WHERE id = 1"))?;
+            let writer = Open::open_for_approved_write(config.clone(), 2)?;
+            let began = Instant::now();
+            let blocked = run(&writer, &format!("UPDATE {table} SET n = 2 WHERE id = 1"));
+            Ok::<_, crate::db::DbError>((blocked, began.elapsed()))
+        })();
+        let _ = run(&holder, "ROLLBACK");
+        run(&holder, &drop).expect("the table is dropped");
+        let (blocked, waited) = outcome.expect("the lock is held and the writer opens");
+        let error = blocked.expect_err("the approved update waits for the row lock and gives up");
+        assert!(
+            error.message.contains("Lock wait timeout"),
+            "{}",
+            error.message
+        );
+        assert!(waited < Duration::from_secs(20), "it waited {waited:?}");
+    }
+
     fn live_a_statements_warnings_arrive_as_messages(engine: Engine) {
         let connection = live(engine);
         let dropped = connection
@@ -5457,7 +5718,7 @@ ORDER BY 1, 2
             .expect("the probe sequence should be created");
 
         let second = super::super::Connection::MySql(live(Engine::MariaDb))
-            .routines(&crate::db::Shown::everything())
+            .routines(&Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas
@@ -5521,7 +5782,7 @@ ORDER BY 1, 2
     fn live_mysql_lists_no_sequence_and_sends_no_sequence_statement() {
         let connection = live(Engine::MySql);
         let second = super::super::Connection::MySql(live(Engine::MySql))
-            .routines(&crate::db::Shown::everything())
+            .routines(&Shown::everything())
             .expect("the second half should read");
         assert!(
             second
@@ -6118,6 +6379,10 @@ ORDER BY 1, 2
         row_limit_drains_an_ineligible_read,
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
+        denied_functions_agree_with_the_server,
+        session_settings_agree_with_the_server,
+        executable_comments_agree_with_the_server,
+        comment_forms_agree_with_the_server,
         generated_writes_round_trip,
         generated_draft_round_trip,
         verified_draft_round_trip,
@@ -6138,6 +6403,10 @@ ORDER BY 1, 2
         row_limit_drains_an_ineligible_read,
         capped_read_keeps_the_users_transaction,
         read_only_session_refuses_a_write,
+        denied_functions_agree_with_the_server,
+        session_settings_agree_with_the_server,
+        executable_comments_agree_with_the_server,
+        comment_forms_agree_with_the_server,
         generated_writes_round_trip,
         generated_draft_round_trip,
         verified_draft_round_trip,
@@ -6184,6 +6453,7 @@ ORDER BY 1, 2
         live_a_blank_database_connects_to_none,
         live_query_round_trip,
         live_a_write_reports_the_rows_it_affected,
+        live_an_approved_write_session_carries_the_lock_wait,
         live_a_statements_warnings_arrive_as_messages,
         live_a_multi_statement_submission_counts_the_warnings_it_cannot_list,
         live_a_multi_statement_selection_keeps_one_result_shape,

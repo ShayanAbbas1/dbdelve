@@ -899,7 +899,11 @@ impl Connection {
             Cancellable::Yes(_) => self.url("?async=true"),
             Cancellable::No => self.url(""),
         };
-        let (status, accepted) = self.exchange(&url, Some(&body))?;
+        // A submit with no answer may still have reached the server, which
+        // cannot be told from one that did not: the outcome is not known.
+        let (status, accepted) = self
+            .exchange(&url, Some(&body))
+            .map_err(|error| super::lost_reply(&error.message))?;
         let mut answer = reply(&host, status, &accepted)?;
         let handle = accepted["statementHandle"].as_str().unwrap_or_default();
         // Nothing to cancel once the statement is over, and a synchronous
@@ -941,10 +945,13 @@ impl Connection {
         let mut pause = Duration::from_millis(100);
         while answer == Reply::Running {
             let (status, body) = match self.fetch(&self.url(&format!("/{handle}"))) {
+                // The statement is the server's by now and the poll lost track
+                // of it, so whether it ran is not known.
                 Ok((status, body)) if transient(status) => {
-                    return Err(self.abandon(&handle, refusal(&host, status, &body)));
+                    let lost = super::lost_reply(&refusal(&host, status, &body).message);
+                    return Err(self.abandon(&handle, lost));
                 }
-                Err(error) => return Err(self.abandon(&handle, error)),
+                Err(error) => return Err(self.abandon(&handle, super::lost_reply(&error.message))),
                 Ok(polled) => polled,
             };
             answer = reply(&host, status, &body)?;
@@ -1118,12 +1125,7 @@ impl Connection {
         let database = self.config.stored_database();
         let within = Engine::Snowflake.qualified(&database, schema);
         let [columns, primary, unique, imported] = self.at_once([
-            super::structure_sql(
-                Engine::Snowflake,
-                &COLUMNS_SQL.replace("{type}", TYPE_SQL),
-                schema,
-                relation,
-            ),
+            structure_sql(&COLUMNS_SQL.replace("{type}", TYPE_SQL), schema, relation),
             format!("SHOW PRIMARY KEYS IN SCHEMA {within}"),
             format!("SHOW UNIQUE KEYS IN SCHEMA {within}"),
             format!("SHOW IMPORTED KEYS IN SCHEMA {within}"),
@@ -1382,6 +1384,15 @@ fn appended(mut first: QueryResult, second: QueryResult) -> Result<QueryResult, 
     Ok(first)
 }
 
+/// A relation name is user data and can contain a quote.
+fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
+    super::fill_placeholders(
+        template,
+        &Engine::Snowflake.quote_literal(schema),
+        &Engine::Snowflake.quote_literal(relation),
+    )
+}
+
 /// The type is spelled the way a result column's is, lower case with its
 /// precision, so a relation reads the same in its Structure tab and its grid.
 const TYPE_SQL: &str = r#"
@@ -1579,6 +1590,18 @@ pub(crate) mod mock;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_schema_named_like_a_placeholder_is_not_substituted_into() {
+        assert_eq!(
+            structure_sql(
+                "WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {relation}",
+                "{relation}",
+                "a'b",
+            ),
+            "WHERE TABLE_SCHEMA = '{relation}' AND TABLE_NAME = 'a''b'"
+        );
+    }
 
     /// Throwaway keys that protect nothing, generated for these tests with
     /// `openssl genpkey -algorithm RSA`.

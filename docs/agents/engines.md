@@ -1004,7 +1004,7 @@ Decided, and not to be re-litigated:
   saves it as it was.
 
 - **Redis is a command language of its own, classified by table.** As with
-  MongoDB, `holds_read_only` is false and `redis_cmd::classify` is the only
+  MongoDB, `holds_read_only` is false and `redis_cmd::classify_lines` is the only
   Read-only boundary; it fails closed on any name it does not list. There is
   no `EXPLAIN`, no transaction to bracket a batch with (`transaction_start` is
   `None`: a batch applies in order and a failure says which command failed and
@@ -1246,3 +1246,71 @@ Decided, and not to be re-litigated:
   (`EngineSpec::dbms_names`), suggests that dialect, one click to take it; a
   dialect that also has a built-in driver says what the built-in does that
   the plugin cannot.
+
+## Agent connections
+
+An agent reads through a connection of its own, never the user's. What it
+carries, engine by engine:
+
+- **A statement timeout, always.** `AGENT_TIMEOUT` (30 seconds), or the
+  profile's own when that is lower; a profile with none gets the 30. What it
+  bounds is what `ServerConfig::statement_timeout` says for the engine: on
+  MySQL it bounds only read-only `SELECT`s, which is all an agent sends; SQLite
+  and DuckDB stop a statement with a wall-clock interrupt, which counts time
+  spent blocked on a lock as readily as time spent scanning; a Redis timeout
+  closes the session, with anything it held, and the next call reopens one.
+  On ClickHouse the timeout is `max_execution_time` on every request, sent
+  unless the server already has that value, so a `readonly=1` account, which
+  may change no setting, fails the connection's validation request, before the
+  agent's first read, whenever the server's `max_execution_time` differs from
+  the agent's timeout. Such an account needs either a server-side
+  `max_execution_time` equal to the agent's timeout (30 seconds, or the
+  profile's when lower) or permission to change it.
+- **File engines are opened read-only by the engine.** SQLite and DuckDB open
+  with the engine's read-only flag, and Turso takes `PRAGMA query_only`, so a
+  write the gate misjudged still cannot change the file.
+- **On Postgres, MySQL and MariaDB every session opened for an agent's read
+  starts read-only; elsewhere what holds it varies by engine.** On those three
+  the hold rides in the connection's config
+  (`with_read_only_hold`), so the side session `sizes()` reads through and the
+  sessions that cancel a statement carry it from their first statement. SQL
+  Server, Snowflake and Redis take no session setting, and ClickHouse carries
+  the hold on each request; `sql::agent_gate` holds what the agent sends there.
+  MongoDB has no such setting either and is held by the gate alone; its
+  `sizes()` runs DBDelve's fixed `$collStats` aggregation on the agent's own
+  client and opens no other session.
+- **An approved write opens its own writable connection for that call and
+  drops it.** It takes no read-only hold, so a server session starts as the
+  profile's own, and a session change the statement makes ends with the
+  connection. Its statement timeout is `WRITE_TIMEOUT` (600 seconds), or the
+  profile's when that is shorter. It waits at most `LOCK_WAIT` (30 seconds) for
+  a lock on Postgres (`lock_timeout`), and on MySQL and MariaDB for a row lock
+  (`innodb_lock_wait_timeout`) and a metadata lock (`lock_wait_timeout`); the
+  read lane's sessions do not carry that wait. On MySQL nothing bounds a
+  running DDL: `max_execution_time` bounds only a `SELECT`. Nothing cancels a
+  running approved write. A write stopped by a client-side timer, on MongoDB or
+  Redis, answers that the outcome is not known: it is told by its error
+  (`DbError::stopped_waiting`), not by how long it ran, so a server's own
+  refusal that came late stays a plain failure, and a write that never opened
+  was never sent. So does a write, on any engine, whose connection broke
+  before the server answered (`DbError::lost_reply`): a socket reset, broken
+  pipe or end of stream on Postgres, MySQL, MariaDB and SQL Server, an I/O
+  failure or cleared pool on MongoDB, a dropped Redis session, a ClickHouse
+  request lost after it went out, a Snowflake submit or poll with no answer
+  (Snowflake cannot tell that from a submit that never arrived), and a plugin
+  that stopped mid-statement or reported its connection lost (SQLSTATE class
+  `08`). Only those points set it; an error the server sent is its answer. A
+  failed
+  Postgres `CREATE INDEX CONCURRENTLY` answers that an invalid index may remain.
+  A DuckDB write is refused.
+- **DuckDB is opened per call and dropped when the call ends.** A second DuckDB
+  instance's view of a file is frozen at open, so a kept one would read a copy
+  that goes stale as the user commits. Databases attached to the user's
+  instance are not attached on the agent's, so agents cannot see them, and an
+  in-memory profile is refused: it exists only inside the user's own instance.
+- **A SQLite file not in WAL mode makes a commit wait for an agent's read.** A
+  reader holds off the writer's commit lock until it ends, so the user's commit
+  can wait and then fail with `database is locked`. A file in WAL mode does
+  not. The visibility dialog states this for any SQLite file whose header does
+  not say WAL (`sqlite::journal_is_wal`), read once when the dialog opens.
+  Turso does not block commits.

@@ -1019,6 +1019,9 @@ impl Workspace {
         if self.close_palette(window, cx) {
             return;
         }
+        if self.close_agent_popover(cx) {
+            return;
+        }
         if self.reference_popup.take().is_some() {
             cx.notify();
             return;
@@ -1042,6 +1045,11 @@ impl Workspace {
         // Drawn over the form too, and backed out of before the form is.
         if self.form.is_some() && self.render_quit(cx).is_some() {
             self.cancel_quit(cx);
+            return;
+        }
+        // Drawn over the connection form, so it closes before the form does,
+        // and before the project naming drawn in it.
+        if self.form.is_some() && self.close_agent_audit(cx) {
             return;
         }
         // Backs out of naming a new project to the list, as its × does,
@@ -1070,7 +1078,9 @@ impl Workspace {
         // settings panel beside it -- so `escape` backs out of them in that
         // order, one at a time. The palette stays first so that picking a
         // font from inside settings closes the font list and leaves the panel
-        // it was opened from standing.
+        // it was opened from standing. An agent's approval is drawn behind every
+        // dialog, so it backs out last, and only denies; the activity dialog is
+        // drawn over it, so it goes first of the two.
         if self.cancel_stale_edit(cx) {
             return;
         }
@@ -1111,6 +1121,12 @@ impl Workspace {
         if self.cancel_discard_close(cx) {
             return;
         }
+        if self.cancel_agent_visibility(cx) {
+            return;
+        }
+        if self.cancel_agent_writes_auto(cx) {
+            return;
+        }
         if self.cancel_delete_query(cx) {
             return;
         }
@@ -1134,6 +1150,12 @@ impl Workspace {
             return;
         }
         if self.close_filter_picker(cx) {
+            return;
+        }
+        if self.close_agent_audit(cx) {
+            return;
+        }
+        if self.deny_front_approval(cx) {
             return;
         }
         // Only from inside the panel: it sits beside the workspace rather than

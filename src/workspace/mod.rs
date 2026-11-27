@@ -4,6 +4,9 @@
 //! grouped by concern in the sibling modules, which are parts of this same
 //! inherent impl rather than types of their own.
 
+mod agent;
+mod agent_read;
+mod agent_write;
 mod commands;
 mod diagrams;
 #[cfg(test)]
@@ -49,12 +52,15 @@ use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 pub(crate) use diagrams::{SideRead, drawn_in_diagrams};
 pub(crate) use exports::SchemaExportDialog;
 pub(crate) use import_dialog::PreviewGrid;
+#[cfg(test)]
+pub(crate) use profiles::restored;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 pub(crate) use users::RolesSide;
 pub(crate) use users::{GrantsOf, GrantsView, RoleForm, RoleFormKind};
 
+use crate::actions::{DisconnectAgents, ShowAgentActivity};
 use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
 use crate::session::{catalog_relation, write_buffer, write_grids};
@@ -133,6 +139,11 @@ pub(crate) struct Settings {
     /// Whether either tree shows sizes, and whether any is read.
     pub(crate) show_sizes: bool,
     pub(crate) files_order: crate::explorer::FilesOrder,
+    /// Master switch for AI Features (MCP server, titlebar mark, policy).
+    /// Off by default; `agent_access` alone never turns it on.
+    pub(crate) ai_features: bool,
+    /// Per-tool and per-class policy for agent calls.
+    pub(crate) agent_policy: crate::agent::policy::AgentPolicy,
 }
 
 impl Settings {
@@ -178,6 +189,8 @@ impl Default for Settings {
             show_host: true,
             show_sizes: true,
             files_order: crate::explorer::FilesOrder::default(),
+            ai_features: false,
+            agent_policy: crate::agent::policy::AgentPolicy::default(),
         }
     }
 }
@@ -480,6 +493,33 @@ pub(crate) struct Workspace {
     /// The Show Grants dialog.
     pub(crate) grants_view: Option<GrantsView>,
     pub(crate) last_grants_request: u64,
+    /// The id of the profile whose agent-visibility dialog is open. Only that
+    /// dialog sets it, and `set_agent_visible` grants visibility only to the
+    /// profile it names.
+    pub(crate) agent_visibility_prompt: Option<String>,
+    /// Whether an agent's read of the profile in [`Self::agent_visibility_prompt`]
+    /// can make the owner's commit wait, for a SQLite file
+    /// ([`db::ConnectionConfig::commit_wait_on_file`]). Read from the file once,
+    /// when the dialog opens, so drawing it never touches the disk; a file in
+    /// WAL is still told what a rollback journal would bring.
+    pub(crate) agent_visibility_blocks_commits: Option<bool>,
+    /// The agent bridge: the socket, and the calls waiting on this window.
+    pub(crate) agent: agent::AgentState,
+    /// Whether the `Agent activity` dialog is up. Only the popover's item
+    /// opens it and only its own close and `escape` end it.
+    pub(crate) agent_audit_open: bool,
+    /// Whether the titlebar MCP popover is open.
+    pub(crate) agent_popover_open: bool,
+    /// Whether the confirmation dialog for setting `execute_sql` writes to Auto
+    /// is open.
+    pub(crate) agent_writes_auto_prompt: bool,
+    /// Profiles kept listed in Settings -> AI Features after being switched
+    /// off during this session, so the user can toggle them back on or remove
+    /// them with `×`.
+    pub(crate) ai_listed_profiles: HashSet<String>,
+    /// Which agent client's registration snippet is shown in Settings and the
+    /// MCP popover.
+    pub(crate) agent_client: crate::agent::shim::AgentClient,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -506,6 +546,14 @@ pub(crate) struct Workspace {
     /// last looked at: a tab reaching the front by any path is looked at
     /// once, not every frame.
     pub(crate) file_looked_at: Option<(String, u64)>,
+    /// The source statement the approval dialog was last drawn from, by call,
+    /// so Approve can refuse a call that was never drawn or whose statement is
+    /// not the one drawn (GATE-10). Written by the render through `&self`.
+    pub(crate) approval_shown: std::cell::RefCell<Option<(crate::agent::CallId, String)>>,
+    /// Where the approval's statement block is scrolled, by call, so the next
+    /// call opens at its first line and the scrollbar reads the same offset.
+    pub(crate) approval_scroll:
+        std::cell::RefCell<Option<(crate::agent::CallId, gpui::ScrollHandle)>>,
     /// See [`Workspace::welcome_project_focus`].
     pub(crate) welcome_project_focus: std::cell::RefCell<Vec<FocusHandle>>,
     pub(crate) update: Option<update::Update>,
@@ -679,6 +727,14 @@ impl Workspace {
             role_form: None,
             grants_view: None,
             last_grants_request: 0,
+            agent_visibility_prompt: None,
+            agent_visibility_blocks_commits: None,
+            agent_audit_open: false,
+            agent_popover_open: false,
+            agent_writes_auto_prompt: false,
+            ai_listed_profiles: HashSet::new(),
+            agent_client: crate::agent::shim::AgentClient::default(),
+            agent: agent::AgentState::default(),
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -702,6 +758,8 @@ impl Workspace {
             dialog_choice: std::cell::Cell::default(),
             focus_before_dialog: std::cell::RefCell::default(),
             file_looked_at: None,
+            approval_shown: std::cell::RefCell::default(),
+            approval_scroll: std::cell::RefCell::default(),
             welcome_project_focus: std::cell::RefCell::default(),
             update: None,
             update_checks: None,
@@ -714,6 +772,10 @@ impl Workspace {
         };
 
         let mut load_failure = None;
+        // Read once, here, to decide whether to listen. The window keeps no
+        // copy: a saved one is what would write `true` back over another
+        // window's kill switch (see `agent_access_to_save`).
+        let mut listen_at_launch = false;
         match store::load_profiles(&workspace.plugins) {
             Ok(store::ProfileList {
                 profiles,
@@ -726,6 +788,12 @@ impl Workspace {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let stored_settings = stored_settings.unwrap_or_default();
+                workspace.settings.ai_features = stored_settings.ai_features.unwrap_or(false);
+                workspace.settings.agent_policy = crate::agent::policy::AgentPolicy::from_stored(
+                    stored_settings.agent_policy.as_ref(),
+                );
+                listen_at_launch =
+                    workspace.settings.ai_features && stored_settings.agent_access.unwrap_or(false);
                 // Ahead of the fonts and the theme, which size gpui-component's
                 // widgets off the chrome size as they install.
                 let chrome_font_size =
@@ -841,6 +909,14 @@ impl Workspace {
                     .chain(workspace.unavailable.iter().map(|gone| gone.id.as_str()))
                     .collect::<Vec<_>>();
                 workspace.projects = projects::normalized_projects(projects, &live);
+                // Only a restore that hid a profile read as Postgres leaves a
+                // choice at launch. Saving after the loop and the projects
+                // writes the whole file, and clears the choice so another
+                // window's later grant is adopted, not overwritten. A launch
+                // that narrowed nothing writes nothing.
+                if !workspace.agent.visibility_choices.is_empty() {
+                    workspace.remember_profiles(cx);
+                }
             }
             Err(failure) => {
                 workspace.store_unreadable = !failure.moved_aside;
@@ -898,6 +974,12 @@ impl Workspace {
         }
         if let Some(message) = load_failure {
             workspace.note(message, cx);
+        }
+        // A refusal is shown and nothing saved changes: the choice is the
+        // user's, and a window that found another one serving can be asked
+        // again from the palette.
+        if listen_at_launch && let Err(text) = workspace.listen_for_agents_at_launch(cx) {
+            workspace.note(text, cx);
         }
 
         if workspace.settings.check_for_updates {
@@ -969,10 +1051,6 @@ impl Workspace {
         })
         .detach();
 
-        // Finish writes synchronously: the process is going, and nothing
-        // would wait for background work to finish. The profiles only when a
-        // write is pending: written unasked, they would put this session's
-        // copy over one another instance saved since.
         // Closing the one window quits, so it asks as Quit does.
         let closing = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
@@ -980,11 +1058,19 @@ impl Workspace {
                 .update(cx, |workspace, cx| workspace.may_quit(cx))
                 .unwrap_or(true)
         });
+        // Finish writes synchronously: the process is going, and nothing
+        // would wait for background work to finish. The profiles only when a
+        // write is pending: written unasked, they would put this session's
+        // copy over one another instance saved since.
+        //
+        // The agent socket file goes with the window; the user's choice stays
+        // saved, so the next launch listens again only if access was on.
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             if workspace.profiles_unsaved {
                 let _ = workspace.save_profiles(cx);
             }
+            workspace.drop_bridge();
             async {}
         })
         .detach();
@@ -1003,6 +1089,7 @@ impl Workspace {
             if workspace.profiles_unsaved {
                 let _ = workspace.save_profiles(cx);
             }
+            workspace.drop_bridge();
         })
         .detach();
 
@@ -1085,6 +1172,24 @@ impl Workspace {
             Some(profile) => profile.session.editor_needs_focus = true,
             None => self.welcome_needs_focus = true,
         }
+    }
+
+    fn disconnect_agents_action(
+        &mut self,
+        _: &DisconnectAgents,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.disconnect_agents(cx);
+    }
+
+    fn show_agent_activity_action(
+        &mut self,
+        _: &ShowAgentActivity,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_agent_activity(cx);
     }
 
     pub(crate) fn note(&mut self, message: String, cx: &mut Context<Self>) {
@@ -1696,6 +1801,67 @@ impl Workspace {
             .children(self.settings_open.then(|| render_settings_panel(self, cx)))
             .into_any_element()
     }
+
+    /// The agent mark for a titlebar, or nothing while AI Features is off or no
+    /// bridge runs. Hover shows a compact status preview; click toggles the
+    /// full MCP popover.
+    fn render_agent_mark(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = *theme(cx);
+        let mark = self.agent_mark_state()?;
+        let shared = self.agent_reachable_profiles().count();
+        let tools = self.settings.agent_policy.listed_tool_count();
+        let summary = self.settings.agent_policy.summary();
+        let status = match mark {
+            ui::AgentMark::Listening => "MCP server listening".to_string(),
+            ui::AgentMark::Connected { waiting: 0 } => "Claude Code attached".to_string(),
+            ui::AgentMark::Connected { waiting: 1 } => {
+                "Claude Code attached \u{b7} 1 call waiting".to_string()
+            }
+            ui::AgentMark::Connected { waiting } => {
+                format!("Claude Code attached \u{b7} {waiting} calls waiting")
+            }
+        };
+        let shared_label = if shared == 1 {
+            "1 connection shared".to_string()
+        } else {
+            format!("{shared} connections shared")
+        };
+        let preview =
+            format!("{status}\n{shared_label} \u{b7} {tools} tools\n{summary} Click to change.");
+        Some(
+            div()
+                .child(
+                    ui::agent_mark(t, mark)
+                        .tooltip(preview)
+                        .on_click(cx.listener(|workspace, _, _, cx| {
+                            workspace.toggle_agent_popover(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// One line of the agent call log, newest at the top of the menu: how long ago,
+/// the tool, the connection, and how the call ended. A name the agent gave that
+/// resolved nothing is quoted as asked for, so its words never read as a
+/// connection of DBDelve's.
+fn agent_log_label(entry: &agent::LogEntry, now: u64) -> String {
+    let age = ui::relative_age(now.saturating_sub(entry.at) / 1000);
+    let mut line = format!("{age} ago \u{b7} {}", entry.tool.name());
+    match (&entry.resolved, &entry.asked) {
+        (Some(name), _) => line.push_str(&format!(" \u{b7} {name}")),
+        (None, Some(asked)) => line.push_str(&format!(" \u{b7} asked for \"{asked}\"")),
+        (None, None) => {}
+    }
+    line.push_str(&format!(" \u{b7} {}", entry.status.as_str()));
+    if entry.requester_gone {
+        line.push_str(" \u{b7} no requester");
+    }
+    if entry.decision == Some(agent::Decision::Approved) {
+        line.push_str(" \u{b7} approved");
+    }
+    line
 }
 
 impl Workspace {
@@ -2042,6 +2208,8 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
                 .on_action(cx.listener(Self::submit_connection))
+                .on_action(cx.listener(Self::disconnect_agents_action))
+                .on_action(cx.listener(Self::show_agent_activity_action))
                 .on_action(cx.listener(Self::next_profile))
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
@@ -2054,7 +2222,13 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::quit))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
-                .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
+                .child(titlebar(
+                    t,
+                    None,
+                    self.render_agent_mark(cx).into_iter().collect(),
+                    Vec::new(),
+                    Vec::new(),
+                ))
                 .children(self.render_cleanup_notice(t, cx))
                 .child(
                     div()
@@ -2064,6 +2238,12 @@ impl Render for Workspace {
                 )
                 .children(self.dialog_layer(
                     [
+                        // First, so it is drawn behind every other dialog: an
+                        // agent's unsolicited approval never covers one the user
+                        // is already answering.
+                        ("agent-approval", self.render_agent_approval(cx)),
+                        ("agent-audit", self.render_agent_audit(cx)),
+                        ("agent-writes-auto", self.render_agent_writes_auto(cx)),
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
                         // Closing the window asks from every surface.
@@ -2072,6 +2252,7 @@ impl Render for Workspace {
                     window,
                     cx,
                 ))
+                .children(self.render_agent_popover(cx))
                 .children(self.palette.clone());
         }
         let Some(profile) = self.profile() else {
@@ -2088,6 +2269,8 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::select_theme))
                 .on_action(cx.listener(Self::show_editor))
                 .on_action(cx.listener(Self::open_connection_form))
+                .on_action(cx.listener(Self::disconnect_agents_action))
+                .on_action(cx.listener(Self::show_agent_activity_action))
                 .on_action(cx.listener(Self::new_project))
                 .on_action(cx.listener(Self::import_from))
                 .on_action(cx.listener(Self::open_settings))
@@ -2106,7 +2289,10 @@ impl Render for Workspace {
                 .child(titlebar(
                     t,
                     None,
-                    self.render_update_pill(cx).into_iter().collect(),
+                    self.render_agent_mark(cx)
+                        .into_iter()
+                        .chain(self.render_update_pill(cx))
+                        .collect(),
                     Vec::new(),
                     Vec::new(),
                 ))
@@ -2115,6 +2301,13 @@ impl Render for Workspace {
                 .child(self.beside_settings(self.render_welcome(window, cx).into_any_element(), cx))
                 .children(self.dialog_layer(
                     [
+                        // Home lists the connections, so an agent's call on a
+                        // visible one and the visibility dialog its row opens
+                        // both arrive here as well as in front of a profile.
+                        ("agent-approval", self.render_agent_approval(cx)),
+                        ("agent-audit", self.render_agent_audit(cx)),
+                        ("agent-visibility", self.render_agent_visibility(cx)),
+                        ("agent-writes-auto", self.render_agent_writes_auto(cx)),
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
                         // Closing the window asks from every surface.
@@ -2123,6 +2316,7 @@ impl Render for Workspace {
                     window,
                     cx,
                 ))
+                .children(self.render_agent_popover(cx))
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
@@ -2885,6 +3079,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::disconnect_agents_action))
+            .on_action(cx.listener(Self::show_agent_activity_action))
             .on_action(cx.listener(Self::focus_sidebar))
             .on_action(cx.listener(Self::collapse_all_schemas))
             .on_action(cx.listener(Self::expand_all_schemas))
@@ -2986,6 +3182,7 @@ impl Render for Workspace {
                         })
                         .into_any_element()
                 })
+                .chain(self.render_agent_mark(cx))
                 .chain(update_pill)
                 .collect(),
                 [
@@ -3025,6 +3222,11 @@ impl Render for Workspace {
             .child(self.beside_settings(main_pane, cx))
             .children(self.dialog_layer(
                 [
+                    // First, so it is drawn behind every other dialog: an
+                    // agent's unsolicited approval never covers one the user is
+                    // already answering, and `escape` reaches it last.
+                    ("agent-approval", self.render_agent_approval(cx)),
+                    ("agent-audit", self.render_agent_audit(cx)),
                     ("show-ddl", self.render_show_ddl(cx)),
                     ("filter-picker", self.render_filter_picker(window, cx)),
                     ("show-grants", self.render_show_grants(cx)),
@@ -3041,6 +3243,8 @@ impl Render for Workspace {
                     // the question has to be the dialog in front then.
                     ("stable-import", self.render_stable_import(cx)),
                     ("quit", self.render_quit(cx)),
+                    ("agent-visibility", self.render_agent_visibility(cx)),
+                    ("agent-writes-auto", self.render_agent_writes_auto(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),
@@ -3049,6 +3253,7 @@ impl Render for Workspace {
                 window,
                 cx,
             ))
+            .children(self.render_agent_popover(cx))
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }

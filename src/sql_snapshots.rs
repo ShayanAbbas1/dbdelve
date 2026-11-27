@@ -4,12 +4,14 @@
 //! `explorer.rs` and `db/mod.rs` so that refactor never edits the tests that
 //! judge it.
 
+pub(crate) mod agent;
 mod batches;
 mod engines;
 mod explain;
 mod fake_spec;
 mod filters;
 mod gates;
+pub(crate) mod hardening;
 mod previews;
 mod redis_writes;
 mod rows;

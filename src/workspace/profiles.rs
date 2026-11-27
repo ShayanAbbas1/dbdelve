@@ -208,10 +208,24 @@ const TRANSACTION_BLOCKS_SWITCH: &str = "The database was not switched: a transa
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
-        match self.save_profiles(cx) {
-            Ok(()) => self.profiles_unsaved = false,
-            Err(message) => self.note(message, cx),
+        if let Err(message) = self.remember_profiles_or_fail(cx) {
+            self.note(message, cx);
         }
+    }
+
+    /// [`Self::remember_profiles`] for a caller that must know the file holds
+    /// what it saved before it goes on, and says the failure itself.
+    pub(crate) fn remember_profiles_or_fail(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        // One read of the file: the flags it holds are the ones written, and
+        // the calls of every profile it hid are rejected, so no hide is
+        // written without its sweep.
+        self.adopt_saved_visibility(cx);
+        self.write_profiles(cx)?;
+        self.profiles_unsaved = false;
+        Ok(())
     }
 
     /// [`Self::remember_profiles`] once things have been still for a moment,
@@ -234,7 +248,19 @@ impl Workspace {
     /// Writes `profiles.toml` from what this session holds, as
     /// [`Self::remember_profiles`] does, for a caller with nowhere to say
     /// that it failed.
-    pub(crate) fn save_profiles(&self, cx: &App) -> Result<(), String> {
+    pub(crate) fn save_profiles(&mut self, cx: &App) -> Result<(), String> {
+        // A quit has no call left to reject, since the bridge goes with the
+        // window, but it must still not write a stale flag over another
+        // window's choice.
+        self.read_saved_visibility();
+        self.write_profiles(cx)
+    }
+
+    /// The write both saves end in, with the visibility flags as the caller
+    /// last read them. This window's own pending choices, of visibility and of
+    /// access, are let go only once the file holds them: a failed write
+    /// leaves them for the next save to retry, so a hide is never lost to it.
+    fn write_profiles(&mut self, cx: &App) -> Result<(), String> {
         // The file we could not read at startup is still the user's, and what
         // this session holds is not what they have -- so it must not flatten
         // it. The notice said nothing would be saved.
@@ -247,6 +273,7 @@ impl Workspace {
             .map(|profile| profile.stored(cx))
             .collect::<Vec<_>>();
         let active = self.profile().map(|profile| profile.id.clone());
+        let agent_access = self.agent_access_to_save();
         let picked = fonts(cx);
         let fonts = store::StoredFonts {
             chrome: Some(picked.chrome.to_string()),
@@ -288,8 +315,11 @@ impl Workspace {
                 .then(|| self.settings.edit_mode.slug().into()),
             files_order: (self.settings.files_order != explorer::FilesOrder::default())
                 .then(|| self.settings.files_order.slug().into()),
+            ai_features: Some(self.settings.ai_features).filter(|on| *on),
+            agent_access,
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
+            agent_policy: self.settings.agent_policy.to_stored(),
         };
         store::save_profiles(&store::ProfileList {
             profiles,
@@ -298,7 +328,10 @@ impl Workspace {
             settings: Some(settings),
             projects: self.projects.clone(),
             unavailable: self.unavailable.clone(),
-        })
+        })?;
+        self.agent.visibility_choices.clear();
+        self.agent.access_choice = None;
+        Ok(())
     }
 
     pub(crate) fn restore_profile(
@@ -343,6 +376,7 @@ impl Workspace {
             .server()
             .and_then(|_| stored_session_settings(&stored, config.engine()).2)
             .map(|message| format!("{message} It is not applied."));
+        let read_as_postgres = unreadable_engine.is_some();
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -416,6 +450,9 @@ impl Workspace {
         let takes_script = config.target().takes_startup_script();
         let keeps_alive = config.target().keeps_alive();
         let closes_idle = !config.lives_with_its_connection();
+        if read_as_postgres && stored.agent_visible {
+            self.agent.visibility_choices.insert(id.clone());
+        }
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -480,6 +517,14 @@ impl Workspace {
             keep_alive_task: None,
             last_activity: cx.background_executor().now(),
             idle_task: None,
+            // Absent reads as hidden: the flag is a grant, and a file written
+            // before it existed granted nothing. A profile read as Postgres
+            // hides too: the grant was for the engine it named, not this one.
+            // The id is this window's unsaved choice so the save `Workspace::new`
+            // makes once every profile is in writes the hide, where
+            // `adopt_saved_visibility` would read the file's grant back; a save
+            // from here would write a partial list.
+            agent_visible: stored.agent_visible && !read_as_postgres,
             confirmed: stored
                 .confirmed
                 .iter()
@@ -583,6 +628,10 @@ impl Workspace {
             keep_alive_task: None,
             last_activity: cx.background_executor().now(),
             idle_task: None,
+            // Every way a profile is made -- the form, a duplicate, an import --
+            // starts hidden. Only the owner's confirmation in the visibility
+            // dialog grants it.
+            agent_visible: false,
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -1357,11 +1406,24 @@ impl Workspace {
         let password = password_to_persist(&config, Origin::Form).map(str::to_string);
         let passphrase = passphrase_to_persist(&config).map(str::to_string);
         let profile = &mut self.profiles[index];
+        let target_changed = profile.config.needs_reconnect(&config);
         // A profile left idle, disconnected or never opened, opens on the
         // edited config whenever it is next picked.
         let retargeted = profile.config.retargets(&config);
-        let reconnect =
-            profile.config.needs_reconnect(&config) && !matches!(profile.state, ProfileState::Idle);
+        let reconnect = target_changed && !matches!(profile.state, ProfileState::Idle);
+        // The visibility dialog's consent was given for the target it described.
+        // A new engine makes its stated server-side facts stale; any other change
+        // `needs_reconnect` sees points that consent at a server the owner did
+        // not name. The whole of `needs_reconnect` counts, a timeout or TLS edit
+        // included, and whether or not the profile is open: narrowing needs no
+        // consent, and one definition of a changed target is all there is to
+        // keep in step.
+        // The hide is recorded whatever this window's flag says: a grant saved
+        // by another window for the old target must not be taken on for the
+        // new one by the save below.
+        let engine_changed = profile.config.engine() != config.engine();
+        let hide = engine_changed || target_changed;
+        let was_visible = profile.agent_visible;
         // Edits staged against the rows the old config reached say nothing
         // about the new one's, where the same key can name another row; kept,
         // a Row view's next leave would send one there unread. A config that
@@ -1383,7 +1445,7 @@ impl Workspace {
         if profile.config.engine().syntax() != syntax {
             profile.session.set_syntax(syntax, window, cx);
         }
-        profile.name = name;
+        profile.name = name.clone();
         profile.color = color;
         profile.config = config;
         // The tabs stay open on the new target, so a view in a mode it does
@@ -1393,6 +1455,15 @@ impl Workspace {
             if let ObjectBody::Relation { edit_mode, .. } = &mut tab.body {
                 *edit_mode = edit_mode.on(target);
             }
+        }
+        // Saved by `remember_profiles` below.
+        if hide && self.withdraw_agent_visibility(id, cx) && was_visible {
+            let notice = if engine_changed {
+                format!("{name} is hidden from agents because its engine changed.")
+            } else {
+                format!("{name} is hidden from agents because its connection changed.")
+            };
+            self.note(notice, cx);
         }
 
         // Only what was typed. A blank field is not an instruction to forget the
@@ -1814,6 +1885,18 @@ impl Workspace {
                     routines,
                 });
             }
+        }
+        // A grant was given for the database the dialog named, and the lane
+        // follows the profile's config, so it ends here as an edited target's
+        // does in `save_profile`.
+        let id = profile.id.clone();
+        let hidden = profile.agent_visible.then(|| profile.name.clone());
+        self.withdraw_agent_visibility(&id, cx);
+        if let Some(name) = hidden {
+            self.note(
+                format!("{name} is hidden from agents because its database changed."),
+                cx,
+            );
         }
         self.remember_profiles(cx);
         match in_session {
@@ -3978,6 +4061,9 @@ impl Workspace {
         let stopped = self.abandon_import(&id, cx);
 
         let removed = self.profiles.remove(index);
+        // Removal does not pass through `set_agent_visible`, so it sweeps here
+        // too: a call waiting on this profile has nothing left to be about.
+        self.reject_calls_for(&removed.id, cx);
         if let Some(key) = identity_file(&removed.config)
             && let Ok(directory) = store::ssh_key_directory()
             && is_unshared_imported_key(
@@ -4119,6 +4205,25 @@ fn run_startup(
 /// and says so, rather than connecting somewhere the user did not ask for
 /// without mentioning it; a plugin profile is held back here instead, because
 /// read as Postgres it would be saved as one.
+/// What a stored profile connects to, read as a restore reads it, or `None`
+/// when a restore could not read it at all, or read its engine only as the
+/// Postgres stand-in it opens with a notice: that stand-in is not what the
+/// file names, so no grant is matched against it.
+pub(super) fn stored_target(
+    stored: &store::StoredProfile,
+    plugins: &[&'static Plugin],
+) -> Option<ConnectionConfig> {
+    // As `restore_profile` reads it: absent is `prefer`, unreadable fails closed.
+    let sslmode = match stored.sslmode.as_deref() {
+        None => SslMode::default(),
+        Some(slug) => SslMode::parse(slug).unwrap_or(SslMode::VerifyFull),
+    };
+    match restored_config(stored, sslmode, plugins) {
+        Ok((config, None)) => Some(config),
+        Ok((_, Some(_))) | Err(_) => None,
+    }
+}
+
 fn restored_config(
     stored: &store::StoredProfile,
     sslmode: SslMode,
@@ -4205,6 +4310,28 @@ fn stored_session_settings(
     let refused = (!refused.is_empty()).then(|| refused.join(" "));
     (time_zone, properties, refused)
 }
+
+/// Each profile of a `profiles.toml` fixture as the window would restore it, by
+/// id, for the tests that need one of every engine's config.
+#[cfg(test)]
+pub(crate) fn restored(text: &str) -> Vec<(String, ConnectionConfig)> {
+    let store::ProfileList { profiles, .. } =
+        store::decode_profiles(text, &[]).expect("the fixture loads");
+    profiles
+        .iter()
+        .map(|stored| {
+            let engine = Engine::parse(stored.engine.as_deref().unwrap_or("postgres"))
+                .expect("a known engine");
+            let sslmode = stored
+                .sslmode
+                .as_deref()
+                .map_or(Ok(SslMode::default()), SslMode::parse)
+                .expect("a known sslmode");
+            (stored.id.clone(), stored_config(stored, engine, sslmode))
+        })
+        .collect()
+}
+
 /// The connection a stored profile on a built-in `engine` describes, with
 /// `sslmode` as [`Workspace::restore_profile`] read it.
 fn stored_config(
@@ -4251,6 +4378,7 @@ fn stored_config(
                 schema: stored.schema.clone(),
                 time_zone,
                 properties,
+                read_only: false,
             };
             match engine {
                 Engine::MySql => ConnectionConfig::MySql(server),
@@ -4461,21 +4589,7 @@ mod tests {
     use super::*;
 
     fn restored(text: &str) -> Vec<(String, ConnectionConfig)> {
-        let store::ProfileList { profiles, .. } =
-            store::decode_profiles(text, &[]).expect("the fixture loads");
-        profiles
-            .iter()
-            .map(|stored| {
-                let engine = Engine::parse(stored.engine.as_deref().unwrap_or("postgres"))
-                    .expect("a known engine");
-                let sslmode = stored
-                    .sslmode
-                    .as_deref()
-                    .map_or(Ok(SslMode::default()), SslMode::parse)
-                    .expect("a known sslmode");
-                (stored.id.clone(), stored_config(stored, engine, sslmode))
-            })
-            .collect()
+        super::restored(text)
     }
 
     fn restored_configs(text: &str) -> String {
@@ -4833,6 +4947,20 @@ target = 'i-0123456789abcdef0'
             stored_config(&file("database = ''"), Engine::DuckDb, SslMode::default()),
             ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0)
         );
+    }
+
+    #[test]
+    fn a_stored_engine_read_only_as_a_stand_in_has_no_target() {
+        let file = |engine: &str| -> store::StoredProfile {
+            toml::from_str(&format!(
+                "id = 'dev'\nname = 'Dev'\nhost = 'db.internal'\nuser = 'ada'\n\
+                 database = 'orders'\nengine = '{engine}'\n"
+            ))
+            .expect("a profile")
+        };
+        assert!(stored_target(&file("postgres"), &[]).is_some());
+        // Read as Postgres with a notice: not the target the file names.
+        assert_eq!(stored_target(&file("no-such-engine"), &[]), None);
     }
 
     #[test]

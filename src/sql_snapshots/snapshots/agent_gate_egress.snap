@@ -1,0 +1,217 @@
+---
+source: src/sql_snapshots.rs
+---
+[postgres] call pg_read_file: SELECT * FROM pg_read_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_read_binary_file: SELECT * FROM pg_read_binary_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_read_file_old: SELECT * FROM pg_read_file_old('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_stat_file: SELECT * FROM pg_stat_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_dir: SELECT * FROM pg_ls_dir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_logdir: SELECT * FROM pg_ls_logdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_waldir: SELECT * FROM pg_ls_waldir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_logicalmapdir: SELECT * FROM pg_ls_logicalmapdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_logicalsnapdir: SELECT * FROM pg_ls_logicalsnapdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_replslotdir: SELECT * FROM pg_ls_replslotdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_archive_statusdir: SELECT * FROM pg_ls_archive_statusdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_tmpdir: SELECT * FROM pg_ls_tmpdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_ls_summariesdir: SELECT * FROM pg_ls_summariesdir('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] call pg_logdir_ls: SELECT * FROM pg_logdir_ls('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[postgres] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[postgres] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[postgres] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[postgres] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[postgres] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[postgres] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[postgres] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[postgres] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[mysql] call load_file: SELECT * FROM load_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mysql] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[mysql] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[mysql] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[mysql] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[mysql] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[mysql] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[mysql] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[mysql] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[mariadb] call load_file: SELECT * FROM load_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mariadb] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[mariadb] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[mariadb] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[mariadb] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[mariadb] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[mariadb] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[mariadb] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[mariadb] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[sqlite] (no egress list) => (none)
+[sqlite] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[sqlite] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[sqlite] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[sqlite] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[sqlite] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[sqlite] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[sqlite] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[sqlite] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[turso] (no egress list) => (none)
+[turso] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[turso] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[turso] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[turso] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[turso] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[turso] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[turso] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[turso] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[duckdb] call arrow_scan: SELECT * FROM arrow_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call glob: SELECT * FROM glob('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_bloom_probe: SELECT * FROM parquet_bloom_probe('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_file_metadata: SELECT * FROM parquet_file_metadata('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_full_metadata: SELECT * FROM parquet_full_metadata('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_kv_metadata: SELECT * FROM parquet_kv_metadata('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_metadata: SELECT * FROM parquet_metadata('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_scan: SELECT * FROM parquet_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call parquet_schema: SELECT * FROM parquet_schema('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_blob: SELECT * FROM read_blob('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_csv: SELECT * FROM read_csv('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_csv_auto: SELECT * FROM read_csv_auto('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_duckdb: SELECT * FROM read_duckdb('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_json: SELECT * FROM read_json('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_json_auto: SELECT * FROM read_json_auto('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_json_objects: SELECT * FROM read_json_objects('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_json_objects_auto: SELECT * FROM read_json_objects_auto('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_ndjson: SELECT * FROM read_ndjson('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_ndjson_auto: SELECT * FROM read_ndjson_auto('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_ndjson_objects: SELECT * FROM read_ndjson_objects('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_parquet: SELECT * FROM read_parquet('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_single_csv_file: SELECT * FROM read_single_csv_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_single_json_file: SELECT * FROM read_single_json_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_single_parquet_file: SELECT * FROM read_single_parquet_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_text: SELECT * FROM read_text('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call read_xlsx: SELECT * FROM read_xlsx('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call seq_scan: SELECT * FROM seq_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call sniff_csv: SELECT * FROM sniff_csv('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call iceberg_scan: SELECT * FROM iceberg_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call delta_scan: SELECT * FROM delta_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call st_read: SELECT * FROM st_read('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call sqlite_scan: SELECT * FROM sqlite_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call postgres_scan: SELECT * FROM postgres_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call postgres_query: SELECT * FROM postgres_query('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call mysql_scan: SELECT * FROM mysql_scan('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] call mysql_query: SELECT * FROM mysql_query('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a quoted path: SELECT * FROM 'data.csv' => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a double-quoted path: SELECT * FROM "data.csv" => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[duckdb] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[snowflake] (no egress list) => (none)
+[snowflake] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[snowflake] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[snowflake] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[snowflake] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[snowflake] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[snowflake] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[snowflake] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[snowflake] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[clickhouse] call url: SELECT * FROM url('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call urlcluster: SELECT * FROM urlcluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call s3: SELECT * FROM s3('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call s3cluster: SELECT * FROM s3cluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call gcs: SELECT * FROM gcs('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call cosn: SELECT * FROM cosn('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call oss: SELECT * FROM oss('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call azureblobstorage: SELECT * FROM azureblobstorage('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call azureblobstoragecluster: SELECT * FROM azureblobstoragecluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call hdfs: SELECT * FROM hdfs('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call hdfscluster: SELECT * FROM hdfscluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call hive: SELECT * FROM hive('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalake: SELECT * FROM deltalake('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalakeazure: SELECT * FROM deltalakeazure('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalakeazurecluster: SELECT * FROM deltalakeazurecluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalakecluster: SELECT * FROM deltalakecluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalakelocal: SELECT * FROM deltalakelocal('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalakes3: SELECT * FROM deltalakes3('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call deltalakes3cluster: SELECT * FROM deltalakes3cluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call iceberg: SELECT * FROM iceberg('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call icebergazure: SELECT * FROM icebergazure('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call icebergazurecluster: SELECT * FROM icebergazurecluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call icebergcluster: SELECT * FROM icebergcluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call iceberghdfs: SELECT * FROM iceberghdfs('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call iceberghdfscluster: SELECT * FROM iceberghdfscluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call iceberglocal: SELECT * FROM iceberglocal('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call iceberglocalcluster: SELECT * FROM iceberglocalcluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call icebergs3: SELECT * FROM icebergs3('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call icebergs3cluster: SELECT * FROM icebergs3cluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call hudi: SELECT * FROM hudi('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call hudicluster: SELECT * FROM hudicluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimon: SELECT * FROM paimon('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimonazure: SELECT * FROM paimonazure('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimonazurecluster: SELECT * FROM paimonazurecluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimoncluster: SELECT * FROM paimoncluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimonhdfs: SELECT * FROM paimonhdfs('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimonhdfscluster: SELECT * FROM paimonhdfscluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimonlocal: SELECT * FROM paimonlocal('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimons3: SELECT * FROM paimons3('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call paimons3cluster: SELECT * FROM paimons3cluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call arrowflight: SELECT * FROM arrowflight('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call bigquery: SELECT * FROM bigquery('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call ytsaurus: SELECT * FROM ytsaurus('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call jdbc: SELECT * FROM jdbc('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call odbc: SELECT * FROM odbc('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call mysql: SELECT * FROM mysql('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call postgresql: SELECT * FROM postgresql('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call mongodb: SELECT * FROM mongodb('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call redis: SELECT * FROM redis('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call sqlite: SELECT * FROM sqlite('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call remote: SELECT * FROM remote('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call remotesecure: SELECT * FROM remotesecure('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call file: SELECT * FROM file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call filecluster: SELECT * FROM filecluster('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call filesystem: SELECT * FROM filesystem('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call executable: SELECT * FROM executable('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] call eval: SELECT * FROM eval('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[clickhouse] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[clickhouse] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[clickhouse] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[clickhouse] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[clickhouse] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[clickhouse] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[clickhouse] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[clickhouse] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[mssql] call fn_xe_file_target_read_file: SELECT * FROM fn_xe_file_target_read_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] call fn_get_audit_file: SELECT * FROM fn_get_audit_file('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] call fn_trace_gettable: SELECT * FROM fn_trace_gettable('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] call dm_os_file_exists: SELECT * FROM dm_os_file_exists('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] call dm_os_enumerate_filesystem: SELECT * FROM dm_os_enumerate_filesystem('x') => |ro=approve(ReadOnly) rw=approve(ReadOnly) full=approve(ReadOnly)|
+[mssql] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[mssql] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[mssql] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[mssql] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[mssql] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[mssql] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[mssql] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[mssql] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|
+[mongodb] a quoted path: SELECT * FROM 'data.csv' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a double-quoted path: SELECT * FROM "data.csv" => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[redis] a quoted path: SELECT * FROM 'data.csv' => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] a double-quoted path: SELECT * FROM "data.csv" => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[redis] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[generic] (no egress list) => (none)
+[generic] a quoted path: SELECT * FROM 'data.csv' => |ro=run rw=run full=run|
+[generic] a double-quoted path: SELECT * FROM "data.csv" => |ro=run rw=run full=run|
+[generic] a url: SELECT * FROM 'https://example.com/x.parquet' => |ro=run rw=run full=run|
+[generic] a comma join: SELECT * FROM 'a.csv' a, 'b.csv' b => |ro=run rw=run full=run|
+[generic] a join: SELECT * FROM t JOIN 'b.csv' b ON t.id = b.id => |ro=run rw=run full=run|
+[generic] a subquery: SELECT * FROM t WHERE id IN (SELECT id FROM 'b.csv') => |ro=run rw=run full=run|
+[generic] a dotted literal that is no path: SELECT * FROM t WHERE v = '1.2' => |ro=run rw=run full=run|
+[generic] a timestamp literal: SELECT * FROM t WHERE ts = '2024-01-02 03:04:05' => |ro=run rw=run full=run|

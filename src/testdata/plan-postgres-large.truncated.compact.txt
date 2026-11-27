@@ -1,0 +1,40 @@
+truncated: kept 8 of 59 nodes (heaviest first, then findings, then by self time; at most 8 with ancestors)
+plan: engine=postgres analyzed=yes basis=measured time_unit="measured (ms)" cost_unit="planner cost, arbitrary units" total=9119.317ms execution="9273.512 ms" planning="21.833 ms" outside_nodes=154.195ms conditions=verbatim
+findings:
+  n18 misestimate over x200 est=200 act=1 HashAggregate
+  n0 misestimate over x16 est=482 act=29 Append
+  ... 6 findings on nodes not shown
+tree:
+  n0 Append self=0.627ms 0.0% est=482 act=29 loops=1
+    | Buffers: shared hit=7520 read=2492612, temp read=14427 written=14696
+    n2 Subquery Scan on "*SELECT* 1" self=0.128ms 0.0% est=36 act=6 loops=1
+      | Buffers: shared hit=422 read=249610
+      n3 Finalize GroupAggregate self=1.397ms 0.0% est=36 act=6 loops=1
+        | Group Key: events.account_id, events.kind
+        | Buffers: shared hit=422 read=249610
+        n4 Gather Merge self=132.841ms 1.4% est=72 act=12 loops=1 parallel=2workers
+          | Workers Planned: 2
+          | Workers Launched: 2
+          | Buffers: shared hit=422 read=249610
+          n5 Sort self=0.987ms 0.0% est=108 act=12 (x 3 loops) loops=3 parallel=2workers
+            | Sort Key: events.account_id, events.kind
+            | Sort Method: quicksort  Memory: 25kB
+            | Buffers: shared hit=422 read=249610
+            | Worker 0:  Sort Method: quicksort  Memory: 25kB
+            | Worker 1:  Sort Method: quicksort  Memory: 25kB
+            n6 Partial HashAggregate self=48.917ms 0.5% est=108 act=12 (x 3 loops) loops=3 parallel=2workers
+              | Group Key: events.account_id, events.kind
+              | Batches: 1  Memory Usage: 24kB
+              | Buffers: shared hit=390 read=249610
+              | Worker 0:  Batches: 1  Memory Usage: 24kB
+              | Worker 1:  Batches: 1  Memory Usage: 24kB
+              n7 Parallel Seq Scan on events self=1066.057ms 11.6% est=1125678 act=899991 (x 3 loops) loops=3 parallel=2workers
+                | Filter: (amount > '100'::numeric)
+                | Rows Removed by Filter: 33337  [total 100011 over 3 loops]
+                | Buffers: shared hit=390 read=249610
+    n18 HashAggregate self=16.212ms 0.1% est=200 act=1 loops=1
+      | Group Key: x.account_id
+      | Batches: 1  Memory Usage: 40kB
+      | Buffers: temp read=4871 written=1
+      ... 1 nodes not shown
+    ... 50 nodes not shown

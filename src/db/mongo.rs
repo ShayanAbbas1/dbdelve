@@ -224,6 +224,7 @@ pub fn config_from_url(url: &str) -> Result<MongoConfig, String> {
             schema: None,
             time_zone: None,
             properties: Properties::default(),
+            read_only: false,
         },
         srv,
         options,
@@ -569,13 +570,9 @@ impl Connection {
                         operation.into_future(),
                     )
                     .await
-                    .map_err(|_| {
-                        plain_error(format!(
-                            "Stopped after the statement timeout of {seconds} seconds."
-                        ))
-                    })?,
+                    .map_err(|_| plain_error(super::stopped_waiting(seconds)))?,
                 };
-                outcome.map_err(|error| plain_error(error.kind.to_string()))
+                outcome.map_err(|error| statement_error(&error.kind))
             })
         })?
     }
@@ -1409,6 +1406,10 @@ impl Connection {
     /// count them, and its document count, from `$collStats`. A view has
     /// neither, and a time-series collection no count.
     ///
+    /// The statement timeout bounds every `$collStats` together, not each
+    /// one: they are one call, so a database of many collections cannot keep
+    /// reading long after whoever asked has stopped waiting.
+    ///
     /// ponytail: one `$collStats` per collection, one after another. Fine for
     /// hundreds; run them concurrently if a database of thousands is slow.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
@@ -1416,38 +1417,41 @@ impl Connection {
             return Ok(Sizes::new());
         }
         let database = self.database();
-        let mut sizes = std::collections::HashMap::new();
-        for listed in self.collections()? {
-            let Some(relation) =
-                relation(&listed).filter(|relation| relation.kind == RelationKind::Table)
-            else {
-                continue;
-            };
-            let collection = database.collection::<Document>(&relation.name);
-            let reports: Vec<Document> = self.call(async {
+        let tables: Vec<String> = self
+            .collections()?
+            .iter()
+            .filter_map(relation)
+            .filter(|relation| relation.kind == RelationKind::Table)
+            .map(|relation| relation.name)
+            .collect();
+        let sizes = self.call(async {
+            let mut sizes = std::collections::HashMap::new();
+            for name in tables {
+                let collection = database.collection::<Document>(&name);
                 let stats = async {
                     collection
                         .aggregate([doc! { "$collStats": { "storageStats": {} } }])
                         .await?
-                        .try_collect()
+                        .try_collect::<Vec<Document>>()
                         .await
                 };
-                match stats.await {
+                let reports = match stats.await {
                     // Dropped since it was listed: it has no size to show, and
                     // the rest still do.
                     Err(error)
                         if matches!(&*error.kind, ErrorKind::Command(failed) if failed.code == NAMESPACE_NOT_FOUND) =>
                     {
-                        Ok(Vec::new())
+                        Vec::new()
                     }
-                    other => other,
+                    other => other?,
+                };
+                let statistics = statistics(&reports);
+                if statistics != Statistics::default() {
+                    sizes.insert(name, statistics);
                 }
-            })?;
-            let statistics = statistics(&reports);
-            if statistics != Statistics::default() {
-                sizes.insert(relation.name, statistics);
             }
-        }
+            Ok(sizes)
+        })?;
         Ok(Sizes::from([(self.database.clone(), sizes)]))
     }
 
@@ -1939,6 +1943,34 @@ fn connect_error(error: &Error, config: &MongoConfig, tls: bool) -> DbError {
     })
 }
 
+/// What a statement's failure says. The driver's text for a failed server
+/// selection lists every member of the topology it looked at, and for a
+/// `mongodb+srv` or replica-set profile those are discovered hosts that no
+/// profile field holds, so those kinds are said without it. The server's own
+/// words for anything it answered stay.
+fn statement_error(kind: &ErrorKind) -> DbError {
+    match kind {
+        // The connection broke with no answer from the server, so the
+        // statement may have run.
+        ErrorKind::Io(io) => super::lost_reply(&format!(
+            "The connection to the server failed: {}.",
+            io.kind()
+        )),
+        // The driver's message names the server whose pool was cleared, which
+        // may be a member the profile never named. Said as the `Io` it follows.
+        ErrorKind::ConnectionPoolCleared { .. } => super::lost_reply(
+            "The connection to the server failed and its connections were closed.",
+        ),
+        kind => plain_error(match kind {
+            ErrorKind::ServerSelection { .. } => {
+                "No server was available to run the statement.".into()
+            }
+            ErrorKind::DnsResolve { .. } => "A server's address could not be resolved.".into(),
+            kind => kind.to_string(),
+        }),
+    }
+}
+
 /// A panic inside the driver would take the background thread with it, and
 /// is a failure to report rather than a crash.
 fn guarded<T>(call: impl FnOnce() -> T) -> Result<T, DbError> {
@@ -2033,7 +2065,7 @@ impl<'a> Run<'a> {
                     outcome = operation(session).into_future() => {
                         Some(outcome.map_err(|error| {
                             ANSWERED.set(refusal(&error));
-                            plain_error(error.kind.to_string())
+                            statement_error(&error.kind)
                         }))
                     }
                     Ok(()) = stopped => Some(Err(plain_error("Cancelled.".into()))),
@@ -2045,9 +2077,7 @@ impl<'a> Run<'a> {
             // What the server's own bound did not stop, or a command that
             // carries none, is stopped the way Cancel stops it.
             let _ = connection.kill(handle);
-            Err(plain_error(format!(
-                "Stopped after the statement timeout of {timeout} seconds."
-            )))
+            Err(plain_error(super::stopped_waiting(timeout)))
         })
     }
 }
@@ -3349,6 +3379,27 @@ mod tests {
         // Refused or unanswered fails the same way in plaintext.
         assert!(!tls_not_offered(&io(std::io::ErrorKind::ConnectionRefused)));
         assert!(!tls_not_offered(&io(std::io::ErrorKind::TimedOut)));
+    }
+
+    #[test]
+    fn a_statement_failing_on_the_socket_does_not_say_where_it_was_going() {
+        let reset = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset by 10.0.0.5:27017 (replica-2.internal)",
+        );
+        let said = statement_error(&Error::from(reset).kind);
+        assert!(
+            said.message
+                .ends_with(": The connection to the server failed: connection reset."),
+            "{}",
+            said.message
+        );
+        // A broken socket leaves the outcome unknown.
+        assert!(said.lost_reply());
+        // What a server answered is its own to say, and is its answer.
+        let custom = Error::custom("a message the server wrote").kind;
+        assert!(!statement_error(&custom).message.is_empty());
+        assert!(!statement_error(&custom).lost_reply());
     }
 
     #[test]

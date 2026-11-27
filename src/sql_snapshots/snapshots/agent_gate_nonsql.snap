@@ -1,0 +1,176 @@
+---
+source: src/sql_snapshots.rs
+---
+[mongodb] find: db.c.find({a: 1}) => |ro=run rw=run full=run|
+[mongodb] count: db.c.countDocuments({}) => |ro=run rw=run full=run|
+[mongodb] aggregate: db.c.aggregate([{$match: {a: 1}}]) => |ro=run rw=run full=run|
+[mongodb] show collections: show collections => |ro=run rw=run full=run|
+[mongodb] show databases: show dbs => |ro=run rw=run full=run|
+[mongodb] list indexes: db.c.getIndexes() => |ro=run rw=run full=run|
+[mongodb] run a read command: db.runCommand({ping: 1}) => |ro=run rw=run full=run|
+[mongodb] insert one: db.c.insertOne({a: 1}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] insert many: db.c.insertMany([{a: 1}]) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] update one: db.c.updateOne({a: 1}, {$set: {a: 2}}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] update many: db.c.updateMany({a: 1}, {$set: {a: 2}}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] update many without a filter: db.c.updateMany({}, {$set: {a: 2}}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] replace one: db.c.replaceOne({a: 1}, {a: 2}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] find one and update: db.c.findOneAndUpdate({a: 1}, {$set: {a: 2}}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] find one and replace: db.c.findOneAndReplace({a: 1}, {a: 2}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] create an index: db.c.createIndex({a: 1}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] aggregate into another collection: db.c.aggregate([{$match: {a: 1}}, {$merge: {into: "x"}}]) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] rename a collection: db.c.renameCollection("x") => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] rename without dropping the target: db.c.renameCollection("x", false) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] find and modify with an update: db.runCommand({findAndModify: "c", query: {a: 1}, update: {$set: {a: 2}}}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] find and modify with remove false: db.runCommand({findAndModify: "c", query: {a: 1}, remove: false, update: {$set: {a: 2}}}) => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] create a collection: db.createCollection("x") => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[mongodb] delete one: db.c.deleteOne({_id: 1}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] delete many: db.c.deleteMany({a: 1}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] delete many without a filter: db.c.deleteMany({}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] find one and delete: db.c.findOneAndDelete({a: 1}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] delete command: db.runCommand({delete: "c", deletes: [{q: {a: 1}, limit: 1}]}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] delete command on admin: db.adminCommand({delete: "c", deletes: [{q: {a: 1}, limit: 0}]}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] find and modify that removes: db.runCommand({findAndModify: "c", query: {a: 1}, remove: true}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove: db.c.remove({}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove with a filter: db.c.remove({a: 1}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove, one document: db.c.remove({a: 1}, true) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove with options: db.c.remove({a: 1}, {justOne: true}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove on a named collection: db.getCollection("c").remove({}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove on a sibling database: db.getSiblingDB("x").c.remove({}) => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] legacy remove, then a read: db.c.remove({}); db.c.find() => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[mongodb] drop a collection: db.c.drop() => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mongodb] drop a database: db.dropDatabase() => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mongodb] drop an index: db.c.dropIndex("i") => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mongodb] aggregate out: db.c.aggregate([{$out: "x"}]) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mongodb] rename and drop the target: db.c.renameCollection("x", true) => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[mongodb] a where clause: db.c.find({$where: "1"}) => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[mongodb] a function in an expression: db.c.find({$expr: {$function: {body: "1", args: [], lang: "js"}}}) => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[mongodb] an accumulator: db.c.aggregate([{$group: {_id: 1, n: {$accumulator: {init: "1", accumulate: "1", accumulateArgs: [], merge: "1", lang: "js"}}}}]) => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[mongodb] a where clause in a chained call: db.c.find({a: 1}).sort({$where: "1"}) => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[mongodb] current op: db.adminCommand({currentOp: 1}) => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[mongodb] current op of every client: db.adminCommand({currentOp: 1, $all: true}) => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[mongodb] current op through runCommand: db.runCommand({currentOp: 1}) => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[mongodb] current op stage: db.adminCommand({aggregate: 1, pipeline: [{$currentOp: {allUsers: true}}], cursor: {}}) => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[mongodb] current op helper: db.currentOp() => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[mongodb] current op stage on the database: db.getSiblingDB("admin").aggregate([{$currentOp: {allUsers: true}}]) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] connection status with privileges: db.runCommand({connectionStatus: 1, showPrivileges: true}) => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[mongodb] connection status: db.runCommand({connectionStatus: 1}) => |ro=run rw=run full=run|
+[mongodb] connection status, privileges off: db.runCommand({connectionStatus: 1, showPrivileges: false}) => |ro=run rw=run full=run|
+[mongodb] a field named currentOp: db.c.find({currentOp: 1}) => |ro=run rw=run full=run|
+[mongodb] two reads: db.c.find(); db.c.find() => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mongodb] two deletes: db.c.deleteMany({}); db.c.deleteMany({}) => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[mongodb] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mongodb] a comment only: // nothing => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[mongodb] a method DBDelve does not know: db.c.bulkWrite([]) => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[mongodb] garbage: db.c.find( => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[redis] read a key: GET k => |ro=run rw=run full=run|
+[redis] read keys: KEYS * => |ro=run rw=run full=run|
+[redis] scan: SCAN 0 => |ro=run rw=run full=run|
+[redis] ttl: TTL k => |ro=run rw=run full=run|
+[redis] hash read: HGETALL h => |ro=run rw=run full=run|
+[redis] config help: CONFIG HELP => |ro=run rw=run full=run|
+[redis] client info: CLIENT INFO => |ro=run rw=run full=run|
+[redis] client getname: CLIENT GETNAME => |ro=run rw=run full=run|
+[redis] acl list: ACL LIST => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] select a database: SELECT 1 => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] subscribe: SUBSCRIBE n => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] pattern subscribe: PSUBSCRIBE n* => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] monitor: MONITOR => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] sync: SYNC => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] hello: HELLO 2 => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] reset: RESET => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] quit: QUIT => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] client reply: CLIENT REPLY OFF => |ro=refuse(NotSent) rw=refuse(NotSent) full=refuse(NotSent)|
+[redis] monitor then a read: MONITOR\u{a}GET a => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[redis] set: SET k v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] hash set: HSET h f v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] expire: EXPIRE k 10 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] persist: PERSIST k => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] expire at a past time: EXPIREAT k 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] expire at in milliseconds: PEXPIREAT k 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] stream add: XADD s * f v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] set with a timeout: SET k v EX 10 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] set with a timeout the server rejects: SET k v EX 0 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] get and expire: GETEX k EX 10 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] hash field expire: HEXPIRE h 10 FIELDS 1 f => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Field) full=approve(ReadWrite, Field)|
+[redis] hash field expire at a fixed time in milliseconds: HPEXPIREAT h 1 FIELDS 1 f => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Field) full=approve(ReadWrite, Field)|
+[redis] hash set with a timeout: HSETEX h EX 10 FIELDS 1 f v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Field) full=approve(ReadWrite, Field)|
+[redis] hash get and expire: HGETEX h EX 10 FIELDS 1 f => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Field) full=approve(ReadWrite, Field)|
+[redis] set with an expiry in seconds: SETEX k 10 v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] set with an expiry in milliseconds: PSETEX k 10 v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] rename: RENAME a b => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] store an intersection: SINTERSTORE d a b => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] copy over: COPY a b REPLACE => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] list move: LMOVE a b LEFT RIGHT => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] set move: SMOVE a b m => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite) full=approve(ReadWrite)|
+[redis] delete: DEL k => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] delete, lower case: del k => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] unlink: UNLINK k => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] get and delete: GETDEL k => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] hash delete: HDEL h f => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] list pop: LPOP l => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] blocking list pop: BLPOP l 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] list remove: LREM l 0 v => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] list trim: LTRIM l 0 0 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] set remove: SREM s m => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] set pop: SPOP s => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] sorted set remove: ZREM z m => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] sorted set pop: ZPOPMIN z => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] sorted set remove range: ZREMRANGEBYRANK z 0 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] stream delete: XDEL s 1-1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] stream trim: XTRIM s MAXLEN 0 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] stream add that trims: XADD s MAXLEN 0 * f v => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] stream add that trims by id: XADD s MINID 9999999999999-0 * f v => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] json delete: JSON.DEL d $ => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] time series delete: TS.DEL t 0 1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] destroy a consumer group: XGROUP DESTROY s g => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] delete a consumer: XGROUP DELCONSUMER s g c => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] migrate: MIGRATE h 6379 k 0 1000 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] expire at zero: EXPIRE k 0 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] expire at minus one: EXPIRE k -1 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] expire with a leading zero: EXPIRE k 010 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] expire in milliseconds at zero: PEXPIRE k 0 => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] hash field expire at zero: HEXPIRE k 0 FIELDS 1 f => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] set at a fixed time: SET k v EXAT 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] set at a fixed time in milliseconds: SET k v PXAT 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] get and expire at a fixed time: GETEX k EXAT 1 => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Key) full=approve(ReadWrite, Key)|
+[redis] hash set at a fixed time: HSETEX h EXAT 1 FIELDS 1 f v => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Field) full=approve(ReadWrite, Field)|
+[redis] hash get and expire at a fixed time: HGETEX h PXAT 1 FIELDS 1 f => |ro=refuse(NeedsMode { needed: ReadWrite, held: ReadOnly }) rw=approve(ReadWrite, Field) full=approve(ReadWrite, Field)|
+[redis] hash set expiring at zero: HSETEX h EX 0 FIELDS 1 f v => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] hash get expiring at zero: HGETEX h PX 0 FIELDS 1 f => |ro=refuse(Delete) rw=refuse(Delete) full=refuse(Delete)|
+[redis] eval: EVAL "return 1" 0 => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] eval sha: EVALSHA abc 0 => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] fcall: FCALL f 0 => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] eval, read-only form: EVAL_RO "return 1" 0 => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] eval sha, read-only form: EVALSHA_RO abc 0 => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] fcall, read-only form: FCALL_RO f 0 => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] load a script: SCRIPT LOAD "return 1" => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] load a function: FUNCTION LOAD "#!lua name=x" => |ro=refuse(Script) rw=refuse(Script) full=refuse(Script)|
+[redis] config get a password: CONFIG GET requirepass => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] config get everything: CONFIG GET * => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] config get, lower case: config get maxmemory => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] client list: CLIENT LIST => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] acl getuser: ACL GETUSER u => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] acl whoami: ACL WHOAMI => |ro=run rw=run full=run|
+[redis] acl users: ACL USERS => |ro=run rw=run full=run|
+[redis] acl log: ACL LOG => |ro=run rw=run full=run|
+[redis] config get, then an unknown command: CONFIG GET x\u{a}FROBNICATE => |ro=refuse(Disclosure) rw=refuse(Disclosure) full=refuse(Disclosure)|
+[redis] flush a database: FLUSHDB => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[redis] flush everything: FLUSHALL => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[redis] config set: CONFIG SET maxmemory 1 => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[redis] shutdown: SHUTDOWN => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[redis] delete a function: FUNCTION DELETE f => |ro=refuse(Drop) rw=refuse(Drop) full=refuse(Drop)|
+[redis] multi: MULTI => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[redis] exec: EXEC => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[redis] discard: DISCARD => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[redis] watch: WATCH k => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[redis] auth: AUTH u p => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[redis] client setname: CLIENT SETNAME me => |ro=refuse(Session) rw=refuse(Session) full=refuse(Session)|
+[redis] a transaction: MULTI\u{a}SET k v\u{a}EXEC => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[redis] two reads: GET a\u{a}GET b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[redis] two deletes: DEL a\u{a}DEL b => |ro=refuse(MoreThanOne) rw=refuse(MoreThanOne) full=refuse(MoreThanOne)|
+[redis] empty:  => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[redis] a comment only: # note => |ro=refuse(NoStatement) rw=refuse(NoStatement) full=refuse(NoStatement)|
+[redis] a comment, then a read: # note\u{a}GET a => |ro=run rw=run full=run|
+[redis] an unknown command: FROBNICATE a => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[redis] an unclosed quote: SET k "open => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|
+[redis] a read, then garbage: GET a\u{a}FROBNICATE => |ro=refuse(Unreadable) rw=refuse(Unreadable) full=refuse(Unreadable)|

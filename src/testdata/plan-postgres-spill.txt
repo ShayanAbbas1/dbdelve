@@ -1,0 +1,28 @@
+Limit  (cost=284886.17..284886.20 rows=10 width=14) (actual time=802.487..802.582 rows=10 loops=1)
+  Buffers: shared hit=364 read=249643, temp read=841 written=1033
+  ->  Sort  (cost=284636.17..285052.88 rows=166685 width=14) (actual time=643.856..653.989 rows=100010 loops=1)
+        Sort Key: e.amount DESC, e.id
+        Sort Method: external merge  Disk: 4088kB
+        Buffers: shared hit=364 read=249643, temp read=841 written=1033
+        ->  Hash Semi Join  (cost=1.57..264480.94 rows=166685 width=14) (actual time=1.942..542.951 rows=166667 loops=1)
+              Hash Cond: (e.kind = events.kind)
+              Buffers: shared hit=358 read=249643
+              ->  Seq Scan on events e  (cost=0.00..260000.00 rows=1000000 width=20) (actual time=0.683..432.147 rows=1000000 loops=1)
+                    Buffers: shared hit=357 read=249643
+              ->  Hash  (cost=1.56..1.56 rows=1 width=6) (actual time=0.510..0.528 rows=1 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                    Buffers: shared hit=1
+                    ->  Limit  (cost=0.00..1.55 rows=1 width=6) (actual time=0.105..0.131 rows=1 loops=1)
+                          Buffers: shared hit=1
+                          ->  Seq Scan on events  (cost=0.00..262500.00 rows=169400 width=6) (actual time=0.082..0.082 rows=1 loops=1)
+                                Filter: (account_id = 3)
+                                Rows Removed by Filter: 1
+                                Buffers: shared hit=1
+Planning:
+  Buffers: shared hit=196
+Planning Time: 16.546 ms
+JIT:
+  Functions: 15
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 7.780 ms, Inlining 0.000 ms, Optimization 13.208 ms, Emission 132.179 ms, Total 153.167 ms
+Execution Time: 939.005 ms

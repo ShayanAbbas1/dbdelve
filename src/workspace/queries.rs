@@ -3864,14 +3864,15 @@ impl Workspace {
                             && let Tab::Query(query) = tab
                             && let Some(tab) = profile.session.query_tab_mut(query)
                         {
-                            tab.plan = Some(Explained {
+                            tab.plan = Some(Explained::new(
+                                engine,
                                 plan,
                                 mode,
-                                sql: explained.unwrap_or_default(),
-                                typed: typed.is_some(),
+                                explained.unwrap_or_default(),
+                                typed.is_some(),
                                 columns,
                                 rows,
-                            });
+                            ));
                             tab.showing_plan = true;
                             // The form and review were for another result.
                             if tab.show_slot() {

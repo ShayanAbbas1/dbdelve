@@ -1,0 +1,9 @@
+explain
+Output: id, name, plan, balance
+
+ReadFromMergeTree (dbdelve_dev.accounts)
+   Read type: Default
+   Parts: 1 | Granules: 1
+   Output: id, name, plan, balance
+   Prewhere filter
+   Prewhere filter column:  active

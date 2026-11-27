@@ -1,0 +1,37 @@
+Limit  (cost=259972.68..259972.77 rows=36 width=54) (actual time=732.643..742.711 rows=6 loops=1)
+  Buffers: shared hit=168 read=249867
+  ->  Sort  (cost=259972.68..259972.77 rows=36 width=54) (actual time=576.049..586.083 rows=6 loops=1)
+        Sort Key: (sum(amount)) DESC
+        Sort Method: quicksort  Memory: 25kB
+        Buffers: shared hit=168 read=249867
+        ->  Finalize GroupAggregate  (cost=259962.00..259971.75 rows=36 width=54) (actual time=575.438..585.501 rows=6 loops=1)
+              Group Key: account_id, kind
+              Buffers: shared hit=165 read=249867
+              ->  Gather Merge  (cost=259962.00..259970.40 rows=72 width=54) (actual time=574.546..584.606 rows=18 loops=1)
+                    Workers Planned: 2
+                    Workers Launched: 2
+                    Buffers: shared hit=165 read=249867
+                    ->  Sort  (cost=258961.97..258962.06 rows=36 width=54) (actual time=466.015..466.020 rows=6 loops=3)
+                          Sort Key: account_id, kind
+                          Sort Method: quicksort  Memory: 25kB
+                          Buffers: shared hit=165 read=249867
+                          Worker 0:  Sort Method: quicksort  Memory: 25kB
+                          Worker 1:  Sort Method: quicksort  Memory: 25kB
+                          ->  Partial HashAggregate  (cost=258960.59..258961.04 rows=36 width=54) (actual time=464.839..465.096 rows=6 loops=3)
+                                Group Key: account_id, kind
+                                Batches: 1  Memory Usage: 24kB
+                                Buffers: shared hit=133 read=249867
+                                Worker 0:  Batches: 1  Memory Usage: 24kB
+                                Worker 1:  Batches: 1  Memory Usage: 24kB
+                                ->  Parallel Seq Scan on events  (cost=0.00..255208.33 rows=375226 width=20) (actual time=112.977..407.300 rows=299997 loops=3)
+                                      Filter: (amount > '100'::numeric)
+                                      Rows Removed by Filter: 33337
+                                      Buffers: shared hit=133 read=249867
+Planning:
+  Buffers: shared hit=133 read=12 dirtied=1
+Planning Time: 14.157 ms
+JIT:
+  Functions: 28
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 26.701 ms, Inlining 0.000 ms, Optimization 41.490 ms, Emission 442.855 ms, Total 511.046 ms
+Execution Time: 888.825 ms

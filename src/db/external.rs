@@ -771,7 +771,14 @@ impl Connection {
                     if fails_ended && kind == ErrorKind::Server && !lost {
                         self.host.in_transaction.store(false, Ordering::Relaxed);
                     }
-                    return Err(self.plugin_error(kind, message, position, lost));
+                    let error = self.plugin_error(kind, message, position, lost);
+                    // The driver's connection failed (SQLSTATE class `08`)
+                    // under a statement, rather than the server answering:
+                    // the statement may have run.
+                    return Err(match lost && kind != ErrorKind::Cancelled {
+                        true => super::lost_reply(&error.message),
+                        false => error,
+                    });
                 }
                 Routed::Control(_) => {
                     return Err(self.host.violated(
@@ -1964,11 +1971,13 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            error.message.starts_with("The Echo plugin stopped ("),
+            error.message.contains("The Echo plugin stopped ("),
             "{}",
             error.message
         );
         assert!(error.message.ends_with("committed is unknown."));
+        // Gone mid-statement: the reply was lost, not refused.
+        assert!(error.lost_reply(), "{}", error.message);
         assert!(connection.is_lost());
         let again = connection.catalog().unwrap_err();
         assert!(again.message.contains("The connection was reset"));
@@ -1982,7 +1991,7 @@ mod tests {
             .err()
             .unwrap();
         assert!(
-            error.message.starts_with("The Echo plugin stopped ("),
+            error.message.contains("The Echo plugin stopped ("),
             "{}",
             error.message
         );
@@ -2203,12 +2212,15 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.message, "echo failed, as asked");
+        assert!(!error.lost_reply());
         assert!(!connection.is_lost());
 
-        connection
+        let lost = connection
             .query("lost", &CancelToken::default(), Fetch::default())
             .err()
             .unwrap();
+        // A class-08 failure is the connection's, so the outcome is unknown.
+        assert!(lost.lost_reply(), "{}", lost.message);
         assert!(connection.is_lost());
         for refused in [
             connection
@@ -2376,7 +2388,7 @@ mod tests {
         let (error, took) = cancelled(&connection, "hang", Duration::from_millis(200));
         assert!(took < CANCEL_DEADLINE + Duration::from_secs(1), "{took:?}");
         assert!(
-            error.message.starts_with(
+            error.message.contains(
                 "The Echo plugin did not answer a cancel within 5 s and was stopped. The \
                  connection was reset"
             ),
@@ -2384,6 +2396,7 @@ mod tests {
             error.message
         );
         assert!(error.message.ends_with("committed is unknown."));
+        assert!(error.lost_reply(), "{}", error.message);
         assert!(connection.is_lost());
         assert!(gone_within(pid, Duration::from_secs(1)));
     }

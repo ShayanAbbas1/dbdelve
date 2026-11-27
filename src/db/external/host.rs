@@ -698,10 +698,15 @@ fn reset_error(cause: &str, running_query: bool) -> DbError {
         true => " Whether the statement that was running committed is unknown.",
         false => "",
     };
-    failure(format!(
+    let message = format!(
         "{cause} The connection was reset: any open transaction, temporary tables and session \
          settings are gone.{unknown}"
-    ))
+    );
+    // A plugin gone mid-statement took the reply with it.
+    match running_query {
+        true => crate::db::lost_reply(&message),
+        false => failure(message),
+    }
 }
 
 pub(super) fn failure(message: String) -> DbError {

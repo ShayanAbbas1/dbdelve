@@ -299,6 +299,20 @@ curves, and hover states are instant. These things move:
   once over 220ms when the tunnel is switched on (`revealed`, keyed by the
   transport and row, so switching transports replays the entrance). Neither repeats.
 
+- **The approval surface moves nothing.** An agent's approval dialog has no
+  animation, no smooth scroll and no countdown: the statement is read where it
+  stands, and a timer that counted down on screen would be a clock to beat.
+  The statement block's scrollbar is always drawn, never faded in, and on a
+  window too short for the whole card the block gives up its height first so
+  Deny and Approve stay on screen.
+  Approve's arm is a one-shot timer (`ARM_DELAY`), not an animation, and ends
+  in one redraw, which takes Approve's label from the faint ink to the quiet
+  one: the library's disabled style dims only a fill, and a ghost has none. The dialog asks the OS for attention once per call, when it is
+  first drawn (`Window::request_attention`): a single dock bounce or taskbar
+  flash that never takes focus from another application and never raises the
+  window, and nothing at all on Wayland, where the mark's waiting count is the
+  signal.
+
 Anything else that moves needs raising first, and a second repeating animation
 means building the shared throttled clock and moving both onto it.
 

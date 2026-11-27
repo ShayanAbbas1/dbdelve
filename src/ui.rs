@@ -155,6 +155,243 @@ fn split_highlights<'a>(
         .collect()
 }
 
+/// A statement's text as it is drawn for a human who must read what the
+/// server will read: every character that is invisible, blank, drawn as
+/// something it is not, or that reorders what is around it is shown as an
+/// ASCII `[U+XXXX]` marker (see [`hides_in_text`]). For display only; what
+/// runs, and what is compared against it, is always the source text (D-29).
+pub(crate) struct Visible {
+    pub(crate) display: String,
+    /// One entry per replaced character: its bytes in the source and its
+    /// marker's bytes in the display, in source order.
+    map: Vec<(Range<usize>, Range<usize>)>,
+    /// For each entry of `map`, how many bytes longer the display is than the
+    /// source once that entry and every one before it are replaced, so a
+    /// lookup is a binary search rather than a walk of the whole map.
+    grown: Vec<usize>,
+}
+
+impl Visible {
+    /// `highlights` over the source text, moved onto the display. An end inside
+    /// a replaced character lands on its marker's end, so a colour never stops
+    /// halfway through a marker.
+    pub(crate) fn remap(&self, highlights: &[(Range<usize>, HighlightStyle)]) -> Highlights {
+        highlights
+            .iter()
+            .map(|(range, style)| (self.at(range.start)..self.at(range.end), *style))
+            .filter(|(range, _)| !range.is_empty())
+            .collect()
+    }
+
+    fn at(&self, offset: usize) -> usize {
+        // The entries that start before `offset`; only the last of them can
+        // hold it, as they are disjoint and in order.
+        let before = self
+            .map
+            .partition_point(|(source, _)| source.start < offset);
+        let Some(last) = before.checked_sub(1) else {
+            return offset;
+        };
+        let (source, shown) = &self.map[last];
+        if offset < source.end {
+            return shown.end;
+        }
+        offset + self.grown[last]
+    }
+}
+
+/// The code points beyond the control characters that draw as nothing, as a
+/// blank or as something they are not: Unicode 16.0's
+/// Default_Ignorable_Code_Point (the tag characters, the variation selectors,
+/// the Hangul fillers among them) and general category Cf (format), merged,
+/// with U+2800 BRAILLE PATTERN BLANK and the private-use areas (Co), which
+/// draw as whatever a font puts there; planes 15 and 16 are taken whole, their
+/// last two code points being noncharacters. Sorted and disjoint, for a binary
+/// search.
+///
+/// Unassigned code points (Cn) outside Default_Ignorable are not here: which
+/// are unassigned changes with each Unicode version, and the standard library
+/// has no table of them. A font draws one it has no glyph for as a box.
+const HIDDEN_RANGES: &[(char, char)] = &[
+    ('\u{ad}', '\u{ad}'),
+    ('\u{34f}', '\u{34f}'),
+    ('\u{600}', '\u{605}'),
+    ('\u{61c}', '\u{61c}'),
+    ('\u{6dd}', '\u{6dd}'),
+    ('\u{70f}', '\u{70f}'),
+    ('\u{890}', '\u{891}'),
+    ('\u{8e2}', '\u{8e2}'),
+    ('\u{115f}', '\u{1160}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180f}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{202a}', '\u{202e}'),
+    ('\u{2060}', '\u{206f}'),
+    ('\u{2800}', '\u{2800}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{e000}', '\u{f8ff}'),
+    ('\u{fe00}', '\u{fe0f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{ffa0}', '\u{ffa0}'),
+    ('\u{fff0}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0000}', '\u{e0fff}'),
+    ('\u{f0000}', '\u{10ffff}'),
+];
+
+/// Characters that read as nothing, read as something they are not, or move
+/// what is around them, in a statement the server reads byte for byte. `\n`
+/// and `\t` are drawn as themselves; every other control character is not,
+/// nor any space but the ASCII one, which the server does not read as a
+/// space, nor anything in [`HIDDEN_RANGES`]. An emoji's variation selector is
+/// marked with the rest: what is drawn is what the server reads, not what the
+/// emoji would look like.
+fn hides_in_text(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_control() && c != '\n' && c != '\t';
+    }
+    c.is_control()
+        || c.is_whitespace()
+        || HIDDEN_RANGES
+            .binary_search_by(|&(low, high)| {
+                if high < c {
+                    std::cmp::Ordering::Less
+                } else if low > c {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+}
+
+pub(crate) fn visible(text: &str) -> Visible {
+    let mut display = String::with_capacity(text.len());
+    let mut map = Vec::new();
+    for (start, c) in text.char_indices() {
+        if hides_in_text(c) {
+            let from = display.len();
+            display.push_str(&format!("[U+{:04X}]", c as u32));
+            map.push((start..start + c.len_utf8(), from..display.len()));
+        } else {
+            display.push(c);
+        }
+    }
+    let grown = map
+        .iter()
+        .scan(
+            0,
+            |grown, (source, shown): &(Range<usize>, Range<usize>)| {
+                *grown += shown.len() - source.len();
+                Some(*grown)
+            },
+        )
+        .collect();
+    Visible {
+        display,
+        map,
+        grown,
+    }
+}
+
+/// A statement as the editor colours it, one run per line, with every
+/// character [`visible`] marks drawn as its marker in `marker`'s style. The
+/// colours come from the source text and are moved onto the display, so a
+/// marker cannot change what the grammar made of the statement. Lines break at
+/// `\n` only: `str::lines` would drop a carriage return and the empty line
+/// after a final newline, which are the things a reader needs to see.
+pub(crate) fn code_lines_visible(
+    text: &str,
+    syntax: Syntax,
+    theme: &HighlightTheme,
+    marker: HighlightStyle,
+) -> Vec<StyledText> {
+    visible_lines(text, syntax, theme, marker)
+        .into_iter()
+        .map(|(line, runs)| StyledText::new(line).with_highlights(runs))
+        .collect()
+}
+
+fn visible_lines(
+    text: &str,
+    syntax: Syntax,
+    theme: &HighlightTheme,
+    marker: HighlightStyle,
+) -> Vec<(String, Highlights)> {
+    let seen = visible(text);
+    let markers: Vec<Range<usize>> = seen.map.iter().map(|(_, shown)| shown.clone()).collect();
+    let runs = with_markers(
+        seen.remap(&code_highlights(text, syntax, Code::Statement, theme)),
+        &markers,
+        marker,
+    );
+    let mut start = 0;
+    seen.display
+        .split('\n')
+        .map(|line| {
+            let end = start + line.len();
+            let own = runs
+                .iter()
+                .filter_map(|(range, style)| {
+                    let clipped = range.start.max(start)..range.end.min(end);
+                    (!clipped.is_empty())
+                        .then(|| (clipped.start - start..clipped.end - start, *style))
+                })
+                .collect();
+            start = end + 1;
+            (line.to_string(), own)
+        })
+        .collect()
+}
+
+/// `runs` with every marker cut out of them and drawn in `marker` instead,
+/// in order and never overlapping, as a text's highlights must be: a run that
+/// spans a marker (a string holding one) is split around it. `markers` are in
+/// order and disjoint, as [`visible`] makes them.
+fn with_markers(runs: Highlights, markers: &[Range<usize>], marker: HighlightStyle) -> Highlights {
+    let mut out = Vec::with_capacity(runs.len() + markers.len() * 2);
+    for (range, style) in runs {
+        let mut at = range.start;
+        let first = markers.partition_point(|shown| shown.end <= range.start);
+        for shown in markers[first..]
+            .iter()
+            .take_while(|shown| shown.start < range.end)
+        {
+            if at < shown.start {
+                out.push((at..shown.start, style));
+            }
+            at = at.max(shown.end);
+        }
+        if at < range.end {
+            out.push((at..range.end, style));
+        }
+    }
+    out.extend(markers.iter().map(|shown| (shown.clone(), marker)));
+    out.sort_by_key(|(range, _)| range.start);
+    out
+}
+
+/// How big a statement is as the reader sees it: the lines drawn, and its bytes
+/// as UTF-8, which is what the server is sent.
+pub(crate) fn size_fact(text: &str) -> String {
+    let count = |n: usize, noun: &str| {
+        format!(
+            "{} {noun}{}",
+            group_digits(&n.to_string()),
+            if n == 1 { "" } else { "s" }
+        )
+    };
+    format!(
+        "{}, {}",
+        count(text.split('\n').count(), "line"),
+        count(text.len(), "byte")
+    )
+}
+
 /// One column of icons down the sidebar, so every label starts at the same x
 /// whether its row is a folder or an object.
 pub(crate) fn row_icon(t: Theme, path: &'static str) -> impl IntoElement {
@@ -316,6 +553,47 @@ pub(crate) fn update_pill(t: Theme, label: String) -> Button {
                 .text_color(t.text_muted)
                 .child(label)
                 .child(row_icon(t, icon::CHEVRON_DOWN)),
+        )
+}
+
+/// What the titlebar's agent mark says. There is no third state here: with
+/// agent access off nothing is drawn at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentMark {
+    /// DBDelve is listening and no agent is attached.
+    Listening,
+    /// An agent is attached or a call is waiting; `waiting` is how many calls
+    /// wait on the person at the window.
+    Connected { waiting: usize },
+}
+
+/// The agent mark: the MCP logo, dim while DBDelve only listens and lit once an agent
+/// is there, with the number of calls waiting beside it when there are any.
+///
+/// A `Button` like [`mode_pill`], so the titlebar can hang its popover off it.
+/// Drawn still: nothing here moves.
+pub(crate) fn agent_mark(t: Theme, mark: AgentMark) -> Button {
+    let (color, selector, waiting) = match mark {
+        AgentMark::Listening => (t.text_muted, "agent-mark-listening", 0),
+        AgentMark::Connected { waiting } => (t.accent, "agent-mark-connected", waiting),
+    };
+    control("agent-mark", Tone::Quiet, Control::Compact)
+        .px(px(layout::SPACE_SM))
+        .rounded(px(layout::RADIUS_CONTROL))
+        .child(
+            div()
+                .debug_selector(|| selector.into())
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                .text_color(color)
+                .child(
+                    icon(icon::AGENT_MARK)
+                        .size(px(layout::chrome(layout::ICON_SIZE)))
+                        .text_color(color),
+                )
+                .when(waiting > 0, |mark| mark.child(waiting.to_string())),
         )
 }
 
@@ -1047,6 +1325,56 @@ pub(crate) fn segmented_choice(
         )
 }
 
+/// Like [`segmented_choice`], with a leading icon inside the segment.
+pub(crate) fn segmented_icon_choice(
+    id: impl Into<gpui::ElementId>,
+    icon_path: &'static str,
+    label: &'static str,
+    selected: bool,
+    enabled: bool,
+    t: Theme,
+) -> Button {
+    let ink = if !enabled {
+        t.text_faint
+    } else if selected {
+        t.text
+    } else {
+        t.text_muted
+    };
+    control(id, Tone::Quiet, Control::Compact)
+        .p_0()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .disabled(!enabled)
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .px(px(layout::SPACE_SM))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                .whitespace_nowrap()
+                .map(|segment| {
+                    if selected {
+                        segment
+                            .bg(t.element_active)
+                            .text_color(ink)
+                            .font_weight(FontWeight::MEDIUM)
+                    } else {
+                        segment.text_color(ink)
+                    }
+                })
+                .when(!enabled, |segment| segment.opacity(DISABLED_OPACITY))
+                .child(
+                    icon(icon_path)
+                        .size(px(layout::chrome(layout::TEXT_SM)))
+                        .text_color(ink),
+                )
+                .child(label),
+        )
+}
+
 /// A connection colour as a dot to pick, or None as a struck-out ring; the
 /// one picked is ringed in the text colour. A button underneath, so Tab
 /// reaches it and Space or Enter picks it; the caller adds the click.
@@ -1457,6 +1785,282 @@ mod tests {
             ),
             color("boolean")
         );
+    }
+
+    #[test]
+    fn visible_characters_mark_every_control_bidi_and_zero_width_character() {
+        for c in [
+            '\u{0}', '\u{1b}', '\r', '\u{7f}', '\u{85}', '\u{9f}', '\u{61c}', '\u{200b}',
+            '\u{200e}', '\u{202e}', '\u{2066}', '\u{2069}', '\u{2028}', '\u{2029}', '\u{ad}',
+            '\u{feff}',
+        ] {
+            assert_eq!(
+                visible(&format!("a{c}b")).display,
+                format!("a[U+{:04X}]b", c as u32),
+                "{c:?}"
+            );
+        }
+        assert_eq!(visible("a\tb\nc").display, "a\tb\nc");
+    }
+
+    /// Unicode 16.0's Default_Ignorable_Code_Point and general category Cf, as
+    /// `DerivedCoreProperties.txt` and `DerivedGeneralCategory.txt` list them,
+    /// kept apart from the merged table they are checked against.
+    const DEFAULT_IGNORABLE: &[(char, char)] = &[
+        ('\u{ad}', '\u{ad}'),
+        ('\u{34f}', '\u{34f}'),
+        ('\u{61c}', '\u{61c}'),
+        ('\u{115f}', '\u{1160}'),
+        ('\u{17b4}', '\u{17b5}'),
+        ('\u{180b}', '\u{180f}'),
+        ('\u{200b}', '\u{200f}'),
+        ('\u{202a}', '\u{202e}'),
+        ('\u{2060}', '\u{206f}'),
+        ('\u{3164}', '\u{3164}'),
+        ('\u{fe00}', '\u{fe0f}'),
+        ('\u{feff}', '\u{feff}'),
+        ('\u{ffa0}', '\u{ffa0}'),
+        ('\u{fff0}', '\u{fff8}'),
+        ('\u{1bca0}', '\u{1bca3}'),
+        ('\u{1d173}', '\u{1d17a}'),
+        ('\u{e0000}', '\u{e0fff}'),
+    ];
+    const FORMAT: &[(char, char)] = &[
+        ('\u{ad}', '\u{ad}'),
+        ('\u{600}', '\u{605}'),
+        ('\u{61c}', '\u{61c}'),
+        ('\u{6dd}', '\u{6dd}'),
+        ('\u{70f}', '\u{70f}'),
+        ('\u{890}', '\u{891}'),
+        ('\u{8e2}', '\u{8e2}'),
+        ('\u{180e}', '\u{180e}'),
+        ('\u{200b}', '\u{200f}'),
+        ('\u{202a}', '\u{202e}'),
+        ('\u{2060}', '\u{2064}'),
+        ('\u{2066}', '\u{206f}'),
+        ('\u{feff}', '\u{feff}'),
+        ('\u{fff9}', '\u{fffb}'),
+        ('\u{110bd}', '\u{110bd}'),
+        ('\u{110cd}', '\u{110cd}'),
+        ('\u{13430}', '\u{1343f}'),
+        ('\u{1bca0}', '\u{1bca3}'),
+        ('\u{1d173}', '\u{1d17a}'),
+        ('\u{e0001}', '\u{e0001}'),
+        ('\u{e0020}', '\u{e007f}'),
+    ];
+
+    #[test]
+    fn visible_characters_mark_every_default_ignorable_and_format_character() {
+        for (low, high) in DEFAULT_IGNORABLE.iter().chain(FORMAT) {
+            for c in *low..=*high {
+                assert_eq!(
+                    visible(&format!("a{c}b")).display,
+                    format!("a[U+{:04X}]b", c as u32),
+                    "U+{:04X}",
+                    c as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visible_characters_mark_blank_letters_odd_spaces_and_private_use() {
+        for c in [
+            // Tag characters, the "ASCII smuggling" channel.
+            '\u{e0041}',
+            '\u{e007f}',
+            // Variation selectors, an emoji's VS16 among them.
+            '\u{fe0f}',
+            '\u{e0100}',
+            '\u{e01ef}',
+            '\u{180e}',
+            '\u{34f}',
+            '\u{206a}',
+            '\u{206f}',
+            // Hangul fillers: letters a server reads inside an identifier.
+            '\u{115f}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{ffa0}',
+            '\u{2800}',
+            // Spaces a server does not read as one.
+            '\u{a0}',
+            '\u{1680}',
+            '\u{2000}',
+            '\u{200a}',
+            '\u{202f}',
+            '\u{205f}',
+            '\u{3000}',
+            // Private use, which draws as whatever a font puts there.
+            '\u{e000}',
+            '\u{f8ff}',
+            '\u{f0000}',
+            '\u{10fffd}',
+        ] {
+            assert_eq!(
+                visible(&format!("a{c}b")).display,
+                format!("a[U+{:04X}]b", c as u32),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn the_hidden_ranges_are_sorted_and_disjoint() {
+        for pair in HIDDEN_RANGES.windows(2) {
+            assert!(pair[0].0 <= pair[0].1, "{pair:?}");
+            assert!(pair[0].1 < pair[1].0, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn visible_characters_keep_crlf_and_a_trailing_carriage_return() {
+        let theme = HighlightTheme::default_dark();
+        let lines = |text| {
+            visible_lines(text, Syntax::Sql, &theme, HighlightStyle::default())
+                .into_iter()
+                .map(|(line, _)| line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines("a\r\nb"), ["a[U+000D]", "b"]);
+        assert_eq!(lines("a\r"), ["a[U+000D]"]);
+        assert_eq!(lines("a\n"), ["a", ""]);
+        assert_eq!(lines(""), [""]);
+        assert_eq!(
+            code_lines_visible("a\r\nb", Syntax::Sql, &theme, HighlightStyle::default()).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn visible_characters_keep_highlights_on_the_text_they_coloured() {
+        let theme = HighlightTheme::default_dark();
+        let marker = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        // A marker is drawn inside a literal; the keywords either side of it keep
+        // their colours on exactly their own characters.
+        let text = "SELECT 'a\u{202e}b' FROM t";
+        let seen = visible(text);
+        assert_eq!(seen.display, "SELECT 'a[U+202E]b' FROM t");
+        let original = code_highlights(text, Syntax::Sql, Code::Statement, &theme);
+        let spans = |highlights: &Highlights, shown: &str| {
+            highlights
+                .iter()
+                .map(|(range, _)| shown[range.clone()].to_string())
+                .collect::<Vec<_>>()
+        };
+        let before = spans(&original, text);
+        assert!(before.contains(&"FROM".to_string()), "{before:?}");
+        let after = spans(&seen.remap(&original), &seen.display);
+        assert!(after.contains(&"SELECT".to_string()), "{after:?}");
+        assert!(after.contains(&"FROM".to_string()), "{after:?}");
+        assert!(after.contains(&"'a[U+202E]b'".to_string()), "{after:?}");
+
+        let lines = visible_lines(text, Syntax::Sql, &theme, marker);
+        assert_eq!(lines.len(), 1);
+        let (line, runs) = &lines[0];
+        assert_eq!(line, "SELECT 'a[U+202E]b' FROM t");
+        assert!(
+            runs.iter()
+                .any(|(range, style)| &line[range.clone()] == "[U+202E]" && *style == marker)
+        );
+        assert!(runs.iter().any(|(range, _)| &line[range.clone()] == "FROM"));
+
+        // A range ending inside the replaced character ends at the marker's end,
+        // and one starting inside it starts after the marker.
+        let style = HighlightStyle::default();
+        let seen = visible("SELECT\u{202e} 1");
+        assert_eq!(seen.remap(&[(0..7, style)])[0].0, 0..14);
+        assert_eq!(seen.remap(&[(7..11, style)])[0].0, 14..16);
+        assert_eq!(seen.remap(&[(9..11, style)])[0].0, 14..16);
+    }
+
+    #[test]
+    fn a_marker_inside_a_coloured_run_splits_it_and_nothing_overlaps() {
+        let theme = HighlightTheme::default_dark();
+        let marker = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let text = "SELECT 'a\u{200b}b', 'c\u{202e}' FROM t";
+        for (line, runs) in visible_lines(text, Syntax::Sql, &theme, marker) {
+            for pair in runs.windows(2) {
+                assert!(
+                    pair[0].0.end <= pair[1].0.start,
+                    "{line}: {:?} overlaps or precedes {:?}",
+                    pair[0].0,
+                    pair[1].0
+                );
+            }
+            for (range, style) in &runs {
+                let drawn = &line[range.clone()];
+                if drawn.starts_with("[U+") {
+                    assert_eq!(*style, marker, "{drawn}");
+                } else {
+                    assert!(
+                        !drawn.contains("[U+"),
+                        "a marker kept the run's colour: {drawn}"
+                    );
+                }
+            }
+            assert!(
+                runs.iter()
+                    .any(|(range, _)| &line[range.clone()] == "[U+200B]")
+            );
+            assert!(runs.iter().any(|(range, _)| &line[range.clone()] == "'a"));
+        }
+    }
+
+    #[test]
+    fn every_source_offset_lands_where_a_walk_of_the_markers_puts_it() {
+        let text = "a\u{200b}b\u{202e}\u{202e}c\u{feff}\u{e0041}d\u{2800}";
+        let seen = visible(text);
+        // The walk the lookup replaced, kept here as the reference.
+        let walked = |offset: usize| {
+            let mut growth = 0;
+            for (source, shown) in &seen.map {
+                if offset <= source.start {
+                    break;
+                }
+                if offset < source.end {
+                    return shown.end;
+                }
+                growth += shown.len() - source.len();
+            }
+            offset + growth
+        };
+        for offset in 0..=text.len() {
+            assert_eq!(seen.at(offset), walked(offset), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn visible_characters_leave_plain_text_as_it_is() {
+        let theme = HighlightTheme::default_dark();
+        for text in [
+            "UPDATE t SET a = 'é' WHERE id = 1",
+            "SELECT '\u{1F600}' FROM t",
+            // A combining accent is drawn on the letter before it.
+            "UPDATE t SET a = 'e\u{301}' WHERE id = 1",
+            "SELECT '日本語', 'Ελληνικά', 'עברית', 'العربية', '한국어' FROM t",
+        ] {
+            let seen = visible(text);
+            assert_eq!(seen.display, text);
+            let original = code_highlights(text, Syntax::Sql, Code::Statement, &theme);
+            assert!(!original.is_empty());
+            assert_eq!(seen.remap(&original), original);
+        }
+    }
+
+    #[test]
+    fn the_size_fact_counts_drawn_lines_and_bytes() {
+        assert_eq!(size_fact("a"), "1 line, 1 byte");
+        assert_eq!(size_fact("é"), "1 line, 2 bytes");
+        assert_eq!(size_fact("a\nb\n"), "3 lines, 4 bytes");
+        assert_eq!(size_fact(&"a".repeat(1204)), "1 line, 1,204 bytes");
     }
 
     #[test]

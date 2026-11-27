@@ -132,6 +132,7 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         schema: None,
         time_zone: None,
         properties: Properties::default(),
+        read_only: false,
     })
 }
 
@@ -656,17 +657,21 @@ impl Connection {
             *session = None;
         }
         let timeout = self.server.statement_timeout;
+        // The connection broke with no answer: the command may have run.
+        if !asked && lost && !error.is_timeout() {
+            return Err(super::lost_reply(&format!(
+                "{} The session closed with it, and anything it held, a MULTI or a WATCH, is gone.",
+                message(&error)
+            )));
+        }
         Err(plain_error(match (asked, lost) {
             (true, _) => CANCELLED.into(),
             (false, true) if error.is_timeout() => format!(
-                "Stopped after the statement timeout of {timeout} seconds. The session closed \
-                 with it, and anything it held, a MULTI or a WATCH, is gone."
+                "{} The session closed with it, and anything it held, a MULTI or a WATCH, is \
+                 gone.",
+                super::stopped_waiting(timeout)
             ),
-            (false, true) => format!(
-                "{} The session closed with it, and anything it held, a MULTI or a WATCH, is gone.",
-                message(&error)
-            ),
-            (false, false) => message(&error),
+            (false, _) => message(&error),
         }))
     }
 
@@ -2816,6 +2821,128 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cells(&ran(&other, "GET other:key")), [some(&["in db 1"])]);
+    }
+
+    /// `HARD-08` exempts Redis from the live differential, because `CONFIG GET`
+    /// and `CLIENT LIST` are deliberately over-classified: they write nothing
+    /// and are rated above a read for what they return. In its place the
+    /// requirement asks for live evidence that the server still returns it, and
+    /// this is that evidence; a Redis that stopped would leave DBDelve prompting
+    /// for nothing.
+    ///
+    /// The two password settings get deliberately unequal evidence, and the
+    /// reason is the dev server rather than an oversight. It authenticates
+    /// through an ACL user with `default off`, so both settings are configured
+    /// empty on it, and an empty value read back is indistinguishable from a
+    /// redacted one. `masterauth` is therefore round-tripped: a marker written
+    /// to it must read back byte for byte, which a server that blanked the value
+    /// would fail. It is consulted only when this server replicates from
+    /// another, so writing it changes nothing any other test can see. The
+    /// client authentication setting is checked by name alone and never
+    /// written: it is live, the compose healthcheck authenticates against it and
+    /// concurrent live sessions hold connections through it, so setting it
+    /// mid-run would lock them out. The stronger check is refused on it.
+    ///
+    /// Listing clients is a read, so that half needs no restore: the session is
+    /// only named, and the name dies with the connection. Without it every
+    /// client on this server reports an empty name, and a column header over
+    /// empty cells would prove nothing.
+    ///
+    /// The verdicts are asserted last, in the same test, so reverting either one
+    /// fails it along with the premise it rests on.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_config_get_and_client_list_still_disclose_what_the_gate_now_stops() {
+        /// Puts `masterauth` back as it was found. The test does it itself and
+        /// fails if it cannot; dropped before that, on an earlier failure, it
+        /// tries once more and can only warn. A failure reports neither the
+        /// value nor the server's message, which may carry it.
+        struct Restore<'a> {
+            connection: &'a Connection,
+            was: String,
+            restored: bool,
+        }
+        impl Restore<'_> {
+            fn put_back(&mut self) -> bool {
+                let put_back = format!("CONFIG SET masterauth {}", redis_cmd::quoted(&self.was));
+                self.restored = self.connection.query(&put_back, Fetch::default()).is_ok();
+                self.restored
+            }
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if !self.restored && !self.put_back() {
+                    eprintln!("masterauth was not put back to the value it held");
+                }
+            }
+        }
+
+        let connection = live();
+        let config = |name: &str| cells(&ran(&connection, &format!("CONFIG GET {name}")));
+        let value_of = |rows: &[Vec<Cell>], name: &str| {
+            rows.iter()
+                .find(|row| row[0].as_deref() == Some(name))
+                .map(|row| row[1].clone().unwrap_or_default())
+        };
+
+        for name in ["requirepass", "masterauth"] {
+            assert!(
+                value_of(&config(name), name).is_some(),
+                "CONFIG GET {name} no longer lists {name}"
+            );
+        }
+
+        let was = value_of(&config("masterauth"), "masterauth").expect("masterauth is listed");
+        let mut restore = Restore {
+            connection: &connection,
+            was,
+            restored: false,
+        };
+        let marker = "dbdelve-premise-not-a-credential";
+        ran(&connection, &format!("CONFIG SET masterauth {marker}"));
+        // Compared, never printed: on a mismatch the value read back is
+        // whatever the server holds, which may be a credential.
+        let read_back = value_of(&config("masterauth"), "masterauth");
+        assert!(
+            read_back.as_deref() == Some(marker),
+            "CONFIG GET masterauth no longer returns the value it holds"
+        );
+        assert!(
+            restore.put_back(),
+            "masterauth was not put back to the value it held"
+        );
+
+        let name = "dbdelve-premise-client";
+        ran(&connection, &format!("CLIENT SETNAME {name}"));
+        let list = ran(&connection, "CLIENT LIST");
+        let column = |wanted: &str| {
+            list.columns
+                .iter()
+                .position(|column| column.name == wanted)
+                .unwrap_or_else(|| panic!("CLIENT LIST has no {wanted} column"))
+        };
+        let (address, named) = (column("addr"), column("name"));
+        let rows = cells(&list);
+        let ours = rows
+            .iter()
+            .find(|row| row[named].as_deref() == Some(name))
+            .expect("CLIENT LIST no longer returns the name a client gave itself");
+        let (host, port) = ours[address]
+            .as_deref()
+            .and_then(|address| address.rsplit_once(':'))
+            .expect("CLIENT LIST no longer returns a host and port for a client");
+        assert!(!host.is_empty() && port.parse::<u16>().is_ok());
+
+        for text in [
+            "CONFIG GET requirepass",
+            "CONFIG GET masterauth",
+            "CLIENT LIST",
+        ] {
+            assert!(
+                redis_cmd::classify(text).mode > crate::sql::Mode::ReadOnly,
+                "{text} is no longer rated above a read"
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,12 @@ use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px, relative,
 };
-use gpui_component::{Disableable, Sizable, input::Input, tooltip::Tooltip};
+use gpui_component::{
+    Disableable, Sizable,
+    input::Input,
+    menu::{DropdownMenu, PopupMenuItem},
+    tooltip::Tooltip,
+};
 
 use crate::{
     Workspace,
@@ -32,8 +37,8 @@ use crate::{
     },
     ui::{
         Control, Tone, button, button_label, chord_hint, highlighted, icon_button, keycap_text,
-        keycaps, option_row, picker, raised_card, segmented, segmented_choice, stacked_option_row,
-        switch, well,
+        keycaps, option_row, picker, raised_card, segmented, segmented_choice,
+        segmented_icon_choice, stacked_option_row, switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
@@ -49,10 +54,17 @@ pub(crate) enum SettingsTab {
     Appearance,
     Fonts,
     Keyboard,
+    AiFeatures,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::General, Self::Appearance, Self::Fonts, Self::Keyboard];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Appearance,
+        Self::Fonts,
+        Self::Keyboard,
+        Self::AiFeatures,
+    ];
 
     fn name(self) -> &'static str {
         match self {
@@ -60,6 +72,7 @@ impl SettingsTab {
             Self::Appearance => "Appearance",
             Self::Fonts => "Fonts",
             Self::Keyboard => "Keyboard",
+            Self::AiFeatures => "AI Features",
         }
     }
 
@@ -69,6 +82,7 @@ impl SettingsTab {
             Self::Appearance => icon::THEME,
             Self::Fonts => icon::FONT,
             Self::Keyboard => icon::KEYBOARD,
+            Self::AiFeatures => icon::AGENT_VISIBLE,
         }
     }
 
@@ -78,6 +92,7 @@ impl SettingsTab {
             Self::Appearance => "Theme, glass and titlebar",
             Self::Fonts => "Faces and sizes",
             Self::Keyboard => "Shortcuts",
+            Self::AiFeatures => "AI Features",
         }
     }
 
@@ -95,6 +110,10 @@ impl SettingsTab {
             Self::Keyboard => {
                 "Every action you can bind. A change takes effect the next \
                  time DBDelve starts."
+            }
+            Self::AiFeatures => {
+                "Let an agent such as Claude Code read your databases over MCP. Off by \
+                 default; every connection stays hidden until you share it."
             }
         }
     }
@@ -131,6 +150,10 @@ enum SettingId {
     Font(FontSlot),
     /// A [`KeybindingSpec::id`].
     Keybinding(&'static str),
+    AiFeatures,
+    McpServer,
+    AiConnections,
+    ConnectClaudeCode,
 }
 
 /// A row the search found, and the characters of its title it matched.
@@ -440,6 +463,52 @@ fn setting_rows() -> Vec<SettingRow> {
                 }),
         );
     }
+    rows.extend([
+        row(
+            SettingId::AiFeatures,
+            SettingsTab::AiFeatures,
+            "",
+            "AI Features",
+            "Off. No server runs and no agent can reach a connection.",
+            &["ai", "agent", "mcp", "claude", "features"],
+        ),
+        row(
+            SettingId::McpServer,
+            SettingsTab::AiFeatures,
+            "",
+            "MCP server",
+            "Listening. Claude Code can attach.",
+            &["ai", "agent", "mcp", "server", "bridge", "claude"],
+        ),
+        row(
+            SettingId::AiConnections,
+            SettingsTab::AiFeatures,
+            "Connections agents can reach",
+            "Connections agents can reach",
+            "Hidden until switched on. The connection's mode still limits what runs.",
+            &["ai", "agent", "mcp", "connections", "share", "visible"],
+        ),
+        row(
+            SettingId::ConnectClaudeCode,
+            SettingsTab::AiFeatures,
+            "Connect an agent",
+            "Connect an agent",
+            "DBDelve cannot register an agent for you. Run this once in your terminal.",
+            &[
+                "ai",
+                "agent",
+                "mcp",
+                "claude",
+                "codex",
+                "openai",
+                "antigravity",
+                "agy",
+                "command",
+                "copy",
+                "register",
+            ],
+        ),
+    ]);
     rows
 }
 
@@ -550,6 +619,9 @@ fn applies(id: SettingId, settings: &Settings) -> bool {
         SettingId::Theme => !settings.match_system_appearance,
         SettingId::SystemTheme(_) => settings.match_system_appearance,
         SettingId::ImportFromStable => Channel::current() == Channel::Nightly,
+        SettingId::McpServer | SettingId::AiConnections | SettingId::ConnectClaudeCode => {
+            settings.ai_features
+        }
         _ => true,
     }
 }
@@ -836,22 +908,31 @@ fn render_section(
 fn render_group(workspace: &Workspace, rows: &[Shown], cx: &mut Context<Workspace>) -> AnyElement {
     let t = popup_theme(cx);
     let label = rows[0].row.group;
-    let rows: Vec<AnyElement> = rows
-        .iter()
-        .map(|row| render_row(workspace, row.row, row.matched, cx))
-        .collect();
+    let content = if rows.len() == 1 && rows[0].row.id == SettingId::AiConnections {
+        render_ai_connections(workspace, t, cx)
+    } else if rows.len() == 1 && rows[0].row.id == SettingId::ConnectClaudeCode {
+        render_connect_claude_code(workspace, t, cx)
+    } else {
+        let rows: Vec<AnyElement> = rows
+            .iter()
+            .map(|row| render_row(workspace, row.row, row.matched, cx))
+            .collect();
+        well(t, rows).into_any_element()
+    };
     div()
         .flex()
         .flex_col()
         .gap(px(layout::SPACE_SM))
-        .child(
-            div()
-                .text_size(px(layout::chrome(layout::TEXT_XS)))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(t.text_muted)
-                .child(label),
-        )
-        .child(well(t, rows))
+        .when(!label.is_empty(), |group| {
+            group.child(
+                div()
+                    .text_size(px(layout::chrome(layout::TEXT_XS)))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.text_muted)
+                    .child(label),
+            )
+        })
+        .child(content)
         .into_any_element()
 }
 
@@ -865,17 +946,29 @@ fn render_row(
     let glass_only = row.id == SettingId::Opacity && !t.is_glass;
     let nothing_to_import =
         row.id == SettingId::ImportFromStable && workspace.stable_connections == 0;
-    let description = row.description.map(|description| {
-        if glass_only {
-            SharedString::from(format!("{description} Glass themes only."))
-        } else if nothing_to_import {
-            SharedString::from(format!(
-                "{description} DBDelve has no connections on this computer."
-            ))
+    let description = match row.id {
+        SettingId::AiFeatures => Some(SharedString::from(if workspace.settings.ai_features {
+            "On. Agents can reach the connections you share below."
         } else {
-            SharedString::from(description)
-        }
-    });
+            "Off. No server runs and no agent can reach a connection."
+        })),
+        SettingId::McpServer => Some(SharedString::from(if workspace.agent.bridge.is_some() {
+            "Listening. Claude Code can attach."
+        } else {
+            "Off. No server is listening."
+        })),
+        _ => row.description.map(|description| {
+            if glass_only {
+                SharedString::from(format!("{description} Glass themes only."))
+            } else if nothing_to_import {
+                SharedString::from(format!(
+                    "{description} DBDelve has no connections on this computer."
+                ))
+            } else {
+                SharedString::from(description)
+            }
+        }),
+    };
     let title = highlighted(row.title, matched, t);
     let control = render_control(workspace, row.id, t, cx);
     if matches!(row.id, SettingId::Font(_)) {
@@ -1093,7 +1186,297 @@ fn render_control(
             Some(spec) => render_keybinding(workspace, spec, t, cx),
             None => div().into_any_element(),
         },
+        SettingId::AiFeatures => div()
+            .debug_selector(|| "settings-ai-features".into())
+            .flex_shrink_0()
+            .child(
+                switch("ai-features", settings.ai_features, t).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, _, cx| {
+                        let on = !workspace.settings.ai_features;
+                        workspace.set_ai_features(on, cx);
+                    },
+                )),
+            )
+            .into_any_element(),
+        SettingId::McpServer => {
+            let listening = workspace.agent.bridge.is_some();
+            segmented(t)
+                .children(
+                    [
+                        (true, "On", "settings-mcp-on"),
+                        (false, "Off", "settings-mcp-off"),
+                    ]
+                    .map(|(on, label, selector)| {
+                        div().debug_selector(move || selector.into()).child(
+                            segmented_choice(
+                                ("mcp-server", on as usize),
+                                label,
+                                on == listening,
+                                true,
+                                t,
+                            )
+                            .on_click(cx.listener(
+                                move |workspace, _: &ClickEvent, _, cx| {
+                                    if on {
+                                        workspace.turn_on_agent_access(cx);
+                                    } else {
+                                        workspace.disconnect_agents(cx);
+                                    }
+                                },
+                            )),
+                        )
+                    }),
+                )
+                .into_any_element()
+        }
+        SettingId::AiConnections | SettingId::ConnectClaudeCode => div().into_any_element(),
     }
+}
+
+fn render_ai_connections(
+    workspace: &Workspace,
+    t: Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for (index, profile) in workspace.profiles.iter().enumerate() {
+        if !profile.agent_visible && !workspace.ai_listed_profiles.contains(&profile.id) {
+            continue;
+        }
+        let id = profile.id.clone();
+        let remove_id = id.clone();
+        let visible = profile.agent_visible;
+        let subtitle = format!(
+            "{} \u{b7} {}",
+            profile.config.engine().label(),
+            profile.mode.label()
+        );
+        rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_MD))
+                .px(px(layout::SPACE_MD))
+                .py(px(layout::SPACE_SM))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(layout::chrome(layout::CONTROL_HEIGHT)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .bg(t.surface)
+                        .child(
+                            icon(icon::DATABASE)
+                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                .text_color(t.text_muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text)
+                                .truncate()
+                                .child(profile.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                .text_color(t.text_muted)
+                                .truncate()
+                                .child(subtitle),
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("settings-ai-conn-switch-{index}"))
+                        .flex_shrink_0()
+                        .child(switch(("ai-conn-switch", index), visible, t).on_click(
+                            cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                                if visible {
+                                    workspace.ai_listed_profiles.insert(id.clone());
+                                    workspace.set_agent_visible(&id, false, cx);
+                                } else {
+                                    workspace.open_agent_visibility(index, cx);
+                                }
+                            }),
+                        )),
+                )
+                .child(
+                    icon_button(
+                        ("ai-conn-remove", index),
+                        icon::CLOSE,
+                        Tone::Quiet,
+                        Control::Compact,
+                        t,
+                    )
+                    .tooltip("Remove from list")
+                    .on_click(cx.listener(
+                        move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.ai_listed_profiles.remove(&remove_id);
+                            workspace.set_agent_visible(&remove_id, false, cx);
+                            cx.notify();
+                        },
+                    )),
+                )
+                .into_any_element(),
+        );
+    }
+
+    let addable: Vec<(usize, String)> = workspace
+        .profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, profile)| !profile.agent_visible)
+        .map(|(index, profile)| (index, profile.name.clone()))
+        .collect();
+    let entity = cx.entity().downgrade();
+    let add_button = button(
+        "settings-ai-add-connection",
+        "Add connection",
+        Tone::Quiet,
+        Control::Compact,
+        t,
+    )
+    .disabled(addable.is_empty())
+    .dropdown_menu(move |mut menu, _, _| {
+        for (index, name) in &addable {
+            let entity = entity.clone();
+            let index = *index;
+            menu = menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                _ = entity.update(cx, |workspace, cx| {
+                    workspace.open_agent_visibility(index, cx);
+                });
+            }));
+        }
+        menu
+    });
+
+    rows.push(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(layout::SPACE_MD))
+            .px(px(layout::SPACE_MD))
+            .py(px(layout::SPACE_SM))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(layout::chrome(layout::TEXT_XS)))
+                    .text_color(t.text_muted)
+                    .child(
+                        "Hidden until switched on. The connection's mode still limits what runs.",
+                    ),
+            )
+            .child(add_button)
+            .into_any_element(),
+    );
+
+    well(t, rows).into_any_element()
+}
+
+fn render_connect_claude_code(
+    workspace: &Workspace,
+    t: Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    use crate::agent::shim::AgentClient;
+
+    let mono = fonts(cx).family(FontSlot::Editor).clone();
+    let client = workspace.agent_client;
+    let command = workspace
+        .agent_registration_command()
+        .unwrap_or_else(|| "claude mcp add dbdelve -- dbdelve mcp".to_string());
+    let row = div()
+        .flex()
+        .flex_col()
+        .gap(px(layout::SPACE_SM))
+        .p(px(layout::SPACE_MD))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .p(px(layout::SEGMENT_INSET))
+                .rounded(px(layout::RADIUS_CONTROL + layout::SEGMENT_INSET))
+                .bg(t.element_hover)
+                .children(AgentClient::ALL.map(|choice| {
+                    let selector = format!("settings-connect-{}", choice.slug());
+                    div().debug_selector(move || selector.clone()).child(
+                        segmented_icon_choice(
+                            ("settings-agent-client", choice as usize),
+                            choice.icon(),
+                            choice.label(),
+                            choice == client,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace, _: &ClickEvent, _, cx| {
+                                workspace.set_agent_client(choice, cx);
+                            },
+                        )),
+                    )
+                })),
+        )
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(layout::SPACE_SM))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(layout::SPACE_SM))
+                        .py(px(layout::SPACE_SM))
+                        .rounded(px(layout::RADIUS_CONTROL))
+                        .bg(t.surface)
+                        .border_1()
+                        .border_color(t.border)
+                        .font_family(mono)
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                        .text_color(t.text)
+                        .child(command),
+                )
+                .child(
+                    button(
+                        "settings-copy-mcp",
+                        "Copy",
+                        Tone::Quiet,
+                        Control::Compact,
+                        t,
+                    )
+                    .on_click(cx.listener(
+                        |workspace, _: &ClickEvent, _, cx| {
+                            workspace.copy_agent_registration(cx);
+                        },
+                    )),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                .text_color(t.text_muted)
+                .child(format!(
+                    "{} Which tools an agent may call, and which wait for your click, is set from \
+                     the MCP mark in the titlebar.",
+                    client.note()
+                )),
+        )
+        .into_any_element();
+    well(t, vec![row]).into_any_element()
 }
 
 fn render_opacity(workspace: &Workspace, t: Theme, cx: &mut Context<Workspace>) -> AnyElement {
@@ -1406,7 +1789,7 @@ mod tests {
                 SettingId::Keybinding("sort_active_column"),
             ]
         );
-        assert_eq!(found("!keyboard").len(), 23);
+        assert_eq!(found("!keyboard").len(), 27);
     }
 
     #[test]

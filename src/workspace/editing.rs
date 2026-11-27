@@ -52,6 +52,8 @@ impl Workspace {
             return;
         }
         self.clear_notice();
+        // The form is drawn in the results pane, so a form opened or focused
+        // below brings a hidden pane back; a refusal leaves it as it was.
         let engine = self.engine();
         let Some(profile) = self.profile() else {
             return;

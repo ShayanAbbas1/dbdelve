@@ -7,13 +7,15 @@
 //! addition; redis-cli would send it.
 //!
 //! Classifying a command is a lookup by its name (and subcommand, where the
-//! word after the name decides: `CONFIG GET` reads, `CONFIG SET` is
-//! destructive). The server has no Read-only hold to fall back on, so this is
-//! the whole boundary, and a name the table does not know is unreadable.
+//! word after the name decides: `CONFIG GET` writes nothing and is
+//! rated a write for what it returns, `requirepass` and `masterauth`, while
+//! `CONFIG SET` is destructive). The server has no Read-only hold to fall back
+//! on, so this is the whole boundary, and a name the table does not know is
+//! unreadable.
 
 use std::ops::Range;
 
-use crate::sql::{Destructive, Leaves, Mode, Verdict};
+use crate::sql::{Destructive, Expiry, Leaves, Mode, Verdict};
 
 pub(crate) mod browse;
 pub(crate) mod edit;
@@ -288,25 +290,30 @@ enum Kind {
     Drop,
 }
 
-/// The lowest mode that may run `text`, and what makes it dangerous if
+/// [`classify_lines`] of `text`, for the tests.
+#[cfg(test)]
+pub(crate) fn classify(text: &str) -> Verdict {
+    classify_lines(&Lines::of(text))
+}
+
+/// The lowest mode that may run `lines`, and what makes it dangerous if
 /// anything does. A command the table does not know, or a line that cannot be
 /// split, is unreadable, and with no server-side hold behind Read-only it may
 /// not run there even once. A refused command is sent nowhere, so it reads.
-pub(crate) fn classify(text: &str) -> Verdict {
+pub(crate) fn classify_lines(lines: &Lines) -> Verdict {
     let unreadable = Verdict {
         mode: Mode::ReadWrite,
         destructive: vec![Destructive::Unreadable],
     };
+    if !lines.all_split() {
+        return unreadable;
+    }
     let mut verdict = Verdict::READ;
-    for span in statements(text) {
-        let Ok(words) = split(&text[span.clone()]) else {
-            return unreadable;
-        };
-        let command = Command { span, words };
-        if refusal(&command).is_some() {
+    for command in &lines.commands {
+        if refusal(command).is_some() {
             continue;
         }
-        verdict = verdict.max(match kind(&command) {
+        verdict = verdict.max(match kind(command) {
             Some(Kind::Read) => Verdict::READ,
             Some(Kind::Write) => Verdict::WRITE,
             Some(Kind::Script) => Verdict::FULL,
@@ -320,17 +327,281 @@ pub(crate) fn classify(text: &str) -> Verdict {
 /// What `text` leaves on its session that a fresh connection would not have:
 /// a `MULTI` still open, or a session setting.
 pub(crate) fn leaves(text: &str) -> Leaves {
+    leaves_of(&Lines::of(text))
+}
+
+/// [`leaves`] of lines already split: nothing, as for a text [`parse`]
+/// refuses, unless every line splits and none is refused.
+pub(crate) fn leaves_of(lines: &Lines) -> Leaves {
     let mut leaves = Leaves::default();
-    for command in parse(text).unwrap_or_default() {
+    if !lines.sendable() {
+        return leaves;
+    }
+    for command in &lines.commands {
         match command.name().as_str() {
             "MULTI" => leaves.transaction = Some(true),
             "EXEC" | "DISCARD" => leaves.transaction = Some(false),
             "WATCH" | "AUTH" | "READONLY" | "READWRITE" => leaves.settings = true,
-            "CLIENT" if kind(&command) == Some(Kind::Write) => leaves.settings = true,
+            // By name, not by verdict: `CLIENT LIST` is a write for what it
+            // discloses, and says nothing about the session it is run on.
+            "CLIENT"
+                if matches!(
+                    command.subcommand().as_str(),
+                    "KILL"
+                        | "UNPAUSE"
+                        | "SETNAME"
+                        | "SETINFO"
+                        | "NO-EVICT"
+                        | "NO-TOUCH"
+                        | "TRACKING"
+                        | "CACHING"
+                        | "UNBLOCK"
+                ) =>
+            {
+                leaves.settings = true
+            }
             _ => {}
         }
     }
     leaves
+}
+
+/// Every line of `text` split once, so a caller that asks [`classify_lines`],
+/// [`leaves_of`] and the `_in` readers below about one text splits it once.
+pub(crate) struct Lines {
+    /// Every command that splits into words, refused or not, in order. A line
+    /// that does not split is left out: the `_in` readers answer for what they
+    /// can read, and [`classify_lines`] already calls the text unreadable.
+    pub(crate) commands: Vec<Command>,
+    /// How many lines hold a command: [`statements`]'s count.
+    pub(crate) lines: usize,
+}
+
+impl Lines {
+    pub(crate) fn of(text: &str) -> Self {
+        let spans = statements(text);
+        let lines = spans.len();
+        let commands = spans
+            .into_iter()
+            .filter_map(|span| {
+                let words = split(&text[span.clone()]).ok()?;
+                Some(Command { span, words })
+            })
+            .collect();
+        Self { commands, lines }
+    }
+
+    /// Whether every line split.
+    fn all_split(&self) -> bool {
+        self.commands.len() == self.lines
+    }
+
+    /// Whether [`parse`] reads the text: every line splits and none is a
+    /// command the editor never sends.
+    pub(crate) fn sendable(&self) -> bool {
+        self.all_split()
+            && self
+                .commands
+                .iter()
+                .all(|command| refusal(command).is_none())
+    }
+}
+
+/// [`removes_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn removes(text: &str) -> bool {
+    removes_in(&Lines::of(text).commands)
+}
+
+/// Whether any of `commands` takes data out of the database: a name in
+/// [`REMOVES`], `MIGRATE`, `XGROUP DESTROY` or `DELCONSUMER`, an `XADD` that
+/// trims (`MAXLEN` or `MINID`), an expiry whose timeout is not a positive
+/// integer written plainly (`EXPIRE k 0` deletes the key at once, as does
+/// `EX 0` on `HSETEX` or `HGETEX`). The agent path refuses all of them,
+/// whatever the mode (GATE-07); the human path never asks. A command that
+/// schedules a removal (a positive timeout, an absolute time) is not one: it
+/// is an expiry, which [`expiry_in`] names and the agent path approves.
+pub(crate) fn removes_in(commands: &[Command]) -> bool {
+    commands.iter().any(removes_data)
+}
+
+/// [`expiry_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn expiry(text: &str) -> Option<Expiry> {
+    expiry_in(&Lines::of(text).commands)
+}
+
+/// What the first of `commands` that schedules a removal schedules it
+/// for: the key (`EXPIRE`, `SETEX` or `SET` with a positive timeout, an
+/// `*EXPIREAT` or an `EXAT` or `PXAT` at any time), or the named fields of a
+/// hash (the `H` forms of the same). The agent path approves such a command and
+/// names the effect; the human path never asks. A timeout that is not a
+/// positive integer written plainly schedules nothing here: the server rejects
+/// it on `SET`, `GETEX` and `SETEX`, and `EXPIRE` and the hash commands remove
+/// on it, which [`removes_in`] answers.
+///
+/// The option words are read only where each command takes its options
+/// ([`options`]), so a key, field or value spelled like one is not an expiry.
+pub(crate) fn expiry_in(commands: &[Command]) -> Option<Expiry> {
+    commands
+        .iter()
+        .find_map(|command| match command.name().as_str() {
+            "EXPIRE" | "PEXPIRE" | "SETEX" | "PSETEX" => {
+                keeps_the_key(&word(&command.words, 2)).then_some(Expiry::Key)
+            }
+            "EXPIREAT" | "PEXPIREAT" => Some(Expiry::Key),
+            "HEXPIRE" | "HPEXPIRE" => {
+                keeps_the_key(&word(&command.words, 2)).then_some(Expiry::Field)
+            }
+            "HEXPIREAT" | "HPEXPIREAT" => Some(Expiry::Field),
+            "SET" | "GETEX" => times_out(command).then_some(Expiry::Key),
+            "HSETEX" | "HGETEX" => times_out(command).then_some(Expiry::Field),
+            _ => None,
+        })
+}
+
+/// Whether `command` carries an absolute time, or a relative one the server
+/// takes as positive, among its options.
+fn times_out(command: &Command) -> bool {
+    let options = options(command);
+    has_option(options, &["EXAT", "PXAT"]) || relative_timeouts(options).any(|t| keeps_the_key(&t))
+}
+
+/// The timeout after each `EX` or `PX` among `options`, empty when the option
+/// ends them.
+fn relative_timeouts(options: &[Vec<u8>]) -> impl Iterator<Item = String> + '_ {
+    options
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| word.eq_ignore_ascii_case(b"EX") || word.eq_ignore_ascii_case(b"PX"))
+        .map(|(at, _)| self::word(options, at + 1))
+}
+
+/// The words of `command` where it takes its options, so that a key, value,
+/// field or stream entry spelled like an option is not read as one: after the
+/// value on `SET`, after the key on `GETEX`, between the key and `FIELDS` on
+/// `HSETEX` and `HGETEX`, and between the key and the entry ID on `XADD`.
+/// Every word after the name on any other command.
+fn options(command: &Command) -> &[Vec<u8>] {
+    let words = command.words.as_slice();
+    let from = |at: usize| words.get(at..).unwrap_or_default();
+    match command.name().as_str() {
+        "SET" => from(3),
+        "GETEX" => from(2),
+        "HSETEX" | "HGETEX" => {
+            let options = from(2);
+            let fields = options
+                .iter()
+                .position(|word| word.eq_ignore_ascii_case(b"FIELDS"))
+                .unwrap_or(options.len());
+            &options[..fields]
+        }
+        // The ID is `*` or `<ms>`, `<ms>-<seq>` or `<ms>-*`; the options are
+        // what comes before the first word shaped like one. A `MAXLEN` or
+        // `MINID` threshold can be shaped like one too, but it follows the
+        // word that makes the command a trim, which is kept.
+        "XADD" => {
+            let options = from(2);
+            let id = options
+                .iter()
+                .position(|word| entry_id(word))
+                .unwrap_or(options.len());
+            &options[..id]
+        }
+        _ => from(1),
+    }
+}
+
+/// Whether `word` is a stream entry ID as `XADD` takes one.
+fn entry_id(word: &[u8]) -> bool {
+    let digits = |part: &[u8]| !part.is_empty() && part.iter().all(u8::is_ascii_digit);
+    match word {
+        b"*" => true,
+        _ => match word.iter().position(|byte| *byte == b'-') {
+            None => digits(word),
+            Some(dash) => {
+                digits(&word[..dash]) && {
+                    let seq = &word[dash + 1..];
+                    seq == b"*" || digits(seq)
+                }
+            }
+        },
+    }
+}
+
+fn removes_data(command: &Command) -> bool {
+    let name = command.name();
+    match name.as_str() {
+        "MIGRATE" => true,
+        "XGROUP" => matches!(command.subcommand().as_str(), "DESTROY" | "DELCONSUMER"),
+        "EXPIRE" | "PEXPIRE" | "HEXPIRE" | "HPEXPIRE" => !keeps_the_key(&word(&command.words, 2)),
+        // An `XADD` that trims is an `XTRIM`, and `LIMIT` only ever follows
+        // `MAXLEN` or `MINID`. A field named `MAXLEN` after the ID is data.
+        "XADD" => has_option(options(command), &["MAXLEN", "MINID"]),
+        // Unlike `SET`, these take a zero `EX` or `PX` and delete the field
+        // at once (checked on Redis 8.10.3). Read before `FIELDS` only.
+        "HSETEX" | "HGETEX" => relative_timeouts(options(command)).any(|t| !keeps_the_key(&t)),
+        name => REMOVES.contains(&name),
+    }
+}
+
+/// The fail-safe reading of a timeout the server may take as non-positive or
+/// reject: only a run of digits not starting with `0` is known to keep the
+/// key.
+fn keeps_the_key(timeout: &str) -> bool {
+    !timeout.is_empty()
+        && timeout.bytes().all(|byte| byte.is_ascii_digit())
+        && !timeout.starts_with('0')
+}
+
+/// Whether any of `words` is one of `options`, compared without regard to case.
+fn has_option(words: &[Vec<u8>], options: &[&str]) -> bool {
+    words.iter().any(|word| {
+        options
+            .iter()
+            .any(|option| word.eq_ignore_ascii_case(option.as_bytes()))
+    })
+}
+
+/// [`runs_script_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn runs_script(text: &str) -> bool {
+    runs_script_in(&Lines::of(text).commands)
+}
+
+/// Whether any of `commands` runs a script the server holds, or loads one:
+/// `EVAL`, `EVALSHA`, `FCALL`, their `_RO` forms (the server holds those to
+/// reads, but what the script does is still code DBDelve cannot read),
+/// `SCRIPT LOAD` and `FUNCTION LOAD`.
+pub(crate) fn runs_script_in(commands: &[Command]) -> bool {
+    commands.iter().any(|command| {
+        let name = command.name();
+        match name.as_str() {
+            "EVAL_RO" | "EVALSHA_RO" | "FCALL_RO" => true,
+            "SCRIPT" | "FUNCTION" => command.subcommand() == "LOAD",
+            name => SCRIPTS.contains(&name),
+        }
+    })
+}
+
+/// [`discloses_in`] of the commands `text` splits into, for the tests.
+#[cfg(test)]
+pub(crate) fn discloses(text: &str) -> bool {
+    discloses_in(&Lines::of(text).commands)
+}
+
+/// Whether any of `commands` is `CONFIG GET` or `CLIENT LIST`, which can
+/// answer with `requirepass`, `masterauth` or another client's address and name
+/// (D-27), or `ACL LIST` or `ACL GETUSER`, which answer with every user's
+/// password hashes. Matched by name and subcommand and nothing wider; [`kind`]
+/// records why the line is drawn there.
+pub(crate) fn discloses_in(commands: &[Command]) -> bool {
+    commands.iter().any(|command| {
+        matches!(
+            (command.name().as_str(), command.subcommand().as_str()),
+            ("CONFIG", "GET") | ("CLIENT", "LIST") | ("ACL", "LIST" | "GETUSER")
+        )
+    })
 }
 
 /// Every command name the editor offers, with how much it may do. A name that
@@ -357,16 +628,24 @@ fn kind(command: &Command) -> Option<Kind> {
     let sub = command.subcommand();
     use Kind::*;
     Some(match (name.as_str(), sub.as_str()) {
-        ("CONFIG", "GET" | "HELP") => Read,
+        ("CONFIG", "HELP") => Read,
+        // These two answer with what a Read-only profile should not be handed
+        // unasked: `requirepass` and `masterauth`, and every connected
+        // client's address and name. This is where the human path's line is
+        // drawn, so they are rated writes and Read-only asks. Their siblings
+        // stay reads -- `CONFIG HELP`, and on `CLIENT` `INFO`, `ID`, `GETNAME`,
+        // `GETREDIR`, `TRACKINGINFO` and `HELP` -- and so do `ACL LIST` and
+        // `ACL GETUSER`, because the human is reading their own server. The
+        // agent path refuses all four through [`discloses_in`]. The client fields
+        // in `ACL LOG` and `SLOWLOG GET` stay reads on both paths.
+        ("CONFIG", "GET") => Write,
         ("CONFIG", "SET" | "REWRITE" | "RESETSTAT") => Drop,
         ("CLIENT", "PAUSE") => Drop,
-        ("CLIENT", "LIST" | "INFO" | "ID" | "GETNAME" | "GETREDIR" | "TRACKINGINFO" | "HELP") => {
-            Read
-        }
+        ("CLIENT", "INFO" | "ID" | "GETNAME" | "GETREDIR" | "TRACKINGINFO" | "HELP") => Read,
         (
             "CLIENT",
-            "KILL" | "UNPAUSE" | "SETNAME" | "SETINFO" | "NO-EVICT" | "NO-TOUCH" | "TRACKING"
-            | "CACHING" | "UNBLOCK",
+            "LIST" | "KILL" | "UNPAUSE" | "SETNAME" | "SETINFO" | "NO-EVICT" | "NO-TOUCH"
+            | "TRACKING" | "CACHING" | "UNBLOCK",
         ) => Write,
         ("SCRIPT", "EXISTS" | "HELP") => Read,
         ("SCRIPT", "LOAD" | "KILL") => Write,
@@ -821,6 +1100,70 @@ const WRITES: &[&str] = &[
     "VSETATTR",
 ];
 
+/// Commands that take data out of the database, one word each: what the agent
+/// path's GATE-07 refuses on Redis whatever the mode. The human path never
+/// reads this list. Names that decide by an argument or a subcommand
+/// (`MIGRATE`, `XGROUP DESTROY`, an `XADD` that trims, the `EXPIRE` family,
+/// and a non-positive `EX` or `PX` on `HSETEX` and `HGETEX`) are in
+/// [`removes_in`].
+///
+/// ponytail: these overwrite or move data without a removal flag and stay
+/// approvable (D-23): `RENAME`, `COPY ... REPLACE`, `RESTORE ... REPLACE` and
+/// every `*STORE` command overwrite their destination, and `LMOVE`, `BLMOVE`,
+/// `RPOPLPUSH`, `BRPOPLPUSH`, `SMOVE` and `MOVE` hand what leaves one key to
+/// another. The ceiling is that a pure function has no clock and does not know
+/// whether a destination exists, so the human reads the exact command before
+/// approving it. An expiry is told from a removal by the statement alone: a
+/// pure function has no clock, so an absolute time already past, which removes
+/// at once, is approved as an expiry, and the approval's text tells the human
+/// so ([`expiry_in`]). The upgrade path is a removal flag on those words, once the
+/// approval surface can show the destination's state.
+const REMOVES: &[&str] = &[
+    "DEL",
+    "UNLINK",
+    "GETDEL",
+    "DELEX",
+    "HDEL",
+    "HGETDEL",
+    "LPOP",
+    "RPOP",
+    "BLPOP",
+    "BRPOP",
+    "LMPOP",
+    "BLMPOP",
+    "LREM",
+    "LTRIM",
+    "SREM",
+    "SPOP",
+    "ZREM",
+    "ZPOPMIN",
+    "ZPOPMAX",
+    "BZPOPMIN",
+    "BZPOPMAX",
+    "ZMPOP",
+    "BZMPOP",
+    "ZREMRANGEBYRANK",
+    "ZREMRANGEBYSCORE",
+    "ZREMRANGEBYLEX",
+    "XDEL",
+    "XTRIM",
+    "XACKDEL",
+    "XDELEX",
+    "JSON.DEL",
+    "JSON.FORGET",
+    "JSON.CLEAR",
+    "JSON.ARRPOP",
+    "JSON.ARRTRIM",
+    "TS.DEL",
+    "TS.DELETERULE",
+    "CF.DEL",
+    "FT.ALIASDEL",
+    "FT.DICTDEL",
+    "FT.SUGDEL",
+    "VREM",
+    "TDIGEST.RESET",
+];
+
 /// Commands that run a script, whose `redis.call`s are DBDelve's to guess at:
 /// `EVAL "return redis.call('flushall')" 0` is a `FLUSHALL`. Their `_RO`
 /// forms, which the server holds to reads, are in `READS`.
@@ -960,10 +1303,12 @@ mod tests {
             ("GET a", &read),
             ("hgetall h", &read),
             ("SCAN 0 MATCH user:* COUNT 100", &read),
-            ("CONFIG GET maxmemory", &read),
+            ("CONFIG GET maxmemory", &write),
+            ("CONFIG HELP", &read),
             ("config set maxmemory 1", &drop),
             ("CONFIG REWRITE", &drop),
-            ("CLIENT LIST", &read),
+            ("CLIENT LIST", &write),
+            ("CLIENT ID", &read),
             ("CLIENT KILL ID 4", &write),
             ("SCRIPT EXISTS abc", &read),
             ("SCRIPT FLUSH", &drop),
@@ -1042,11 +1387,309 @@ mod tests {
     }
 
     #[test]
+    fn a_disclosing_command_has_the_same_verdict_first_or_last_in_a_buffer() {
+        for (first, second) in [
+            ("CONFIG GET requirepass", "GET a"),
+            ("CLIENT LIST", "GET a"),
+        ] {
+            let forward = classify(&format!("{first}\n{second}"));
+            assert_eq!(forward, Verdict::WRITE, "{first} then {second}");
+            assert_eq!(
+                classify(&format!("{second}\n{first}")),
+                forward,
+                "{second} then {first}"
+            );
+        }
+    }
+
+    #[test]
     fn a_multi_holds_its_session_until_exec_or_discard() {
         assert_eq!(leaves("MULTI").transaction, Some(true));
         assert_eq!(leaves("EXEC").transaction, Some(false));
         assert_eq!(leaves("DISCARD").transaction, Some(false));
         assert!(leaves("CLIENT SETNAME me").settings);
         assert_eq!(leaves("GET a"), Leaves::default());
+    }
+
+    #[test]
+    fn the_two_commands_that_return_secrets_are_split_from_their_siblings_by_name() {
+        let write = Verdict::WRITE;
+        for text in ["config get requirepass", "CLIENT LIST TYPE normal"] {
+            assert_eq!(classify(text), write, "{text}");
+        }
+        for text in [
+            "CONFIG HELP",
+            "CLIENT ID",
+            "CLIENT INFO",
+            "CLIENT GETNAME",
+            "CLIENT GETREDIR",
+            "CLIENT TRACKINGINFO",
+            "CLIENT HELP",
+        ] {
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+    }
+
+    #[test]
+    fn listing_clients_leaves_no_session_setting_but_naming_one_does() {
+        assert_eq!(leaves("CLIENT LIST"), Leaves::default());
+        assert!(leaves("CLIENT SETNAME me").settings);
+        assert!(leaves("CLIENT NO-TOUCH ON").settings);
+    }
+
+    #[test]
+    fn every_removal_and_script_name_is_one_the_tables_know() {
+        for name in REMOVES {
+            assert!(WRITES.contains(name), "{name} is not a write");
+        }
+        for name in ["EVAL", "EVALSHA", "FCALL"] {
+            assert!(SCRIPTS.contains(&name), "{name}");
+            assert!(runs_script(&format!("{name} x 0")), "{name}");
+        }
+        for name in ["EVAL_RO", "EVALSHA_RO", "FCALL_RO"] {
+            assert!(READS.contains(&name), "{name}");
+            assert!(runs_script(&format!("{name} x 0")), "{name}");
+        }
+        assert!(runs_script("SCRIPT LOAD \"return 1\""));
+        assert!(runs_script("function load code"));
+        assert!(!runs_script("SCRIPT EXISTS abc"));
+        assert!(!runs_script("GET a"));
+        for text in [
+            "CONFIG GET x",
+            "config get *",
+            "CLIENT LIST",
+            "GET a\nCLIENT LIST",
+            "ACL LIST",
+            "acl getuser u",
+            "ACL GETUSER u",
+        ] {
+            assert!(discloses(text), "{text}");
+        }
+        for text in [
+            "CONFIG HELP",
+            "CLIENT INFO",
+            "ACL WHOAMI",
+            "ACL USERS",
+            "ACL LOG",
+            "SLOWLOG GET",
+        ] {
+            assert!(!discloses(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expiry_removes_only_with_a_timeout_that_is_not_positive() {
+        assert!(!removes("EXPIRE k 10"));
+        assert!(!removes("hexpire k 10 FIELDS 1 f"));
+        for text in [
+            "EXPIRE k 0",
+            "EXPIRE k -5",
+            "EXPIRE k 010",
+            "EXPIRE k +5",
+            "EXPIRE k abc",
+            "EXPIRE k",
+            "PEXPIRE k 0",
+            "HEXPIRE k 0 FIELDS 1 f",
+            "HPEXPIRE k -1 FIELDS 1 f",
+        ] {
+            assert!(removes(text), "{text}");
+        }
+        // The `*EXPIREAT` commands cannot be told a time in the past from one
+        // in the future without a clock, so they are expiries the approval
+        // names, not removals.
+        assert!(!removes("EXPIREAT k 1"));
+        assert!(!removes("PEXPIREAT k 1"));
+    }
+
+    #[test]
+    fn a_stream_add_removes_only_when_it_trims() {
+        for text in [
+            "XADD s * f v",
+            "XADD s NOMKSTREAM * f v",
+            // The grid's guard read: `MAXLEN` decides only on `XADD`.
+            "LPOS l v COUNT 0 MAXLEN 1",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+        for text in [
+            "XADD s MAXLEN 0 * f v",
+            "XADD s MAXLEN ~ 1000 * f v",
+            "XADD s MINID = 9999999999999-0 * f v",
+            "xadd s minid 1 * f v",
+            "XADD s NOMKSTREAM MAXLEN ~ 10 LIMIT 5 * f v",
+        ] {
+            assert!(removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_set_or_getex_with_a_timeout_or_a_fixed_time_is_an_expiry_of_the_key() {
+        for text in [
+            "SET k v EXAT 1",
+            "SET k v PXAT 1",
+            "set k v exat 4102444800",
+            "SET k v NX PXAT 1 GET",
+            "SET k v EX 10",
+            "SET k v PX 10",
+            "GETEX k EX 10",
+            "GETEX k EXAT 1",
+            "GETEX k PXAT 1",
+        ] {
+            assert_eq!(expiry(text), Some(Expiry::Key), "{text}");
+            assert!(!removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_option_word_outside_the_options_is_data() {
+        // A key, a value or a field spelled like an option schedules nothing.
+        for text in [
+            "SET k EXAT",
+            "SET EXAT v",
+            "SET k PXAT KEEPTTL",
+            "GETEX EXAT",
+            "GETEX PXAT PERSIST",
+            "HSETEX h FIELDS 1 EXAT 1",
+            "HSETEX h FIELDS 2 f PXAT EX 10",
+            "HGETEX h PERSIST FIELDS 1 EXAT",
+        ] {
+            assert_eq!(expiry(text), None, "{text}");
+        }
+        // A field or value spelled `EX` with a zero after it removes nothing.
+        for text in [
+            "HSETEX h EX 10 FIELDS 2 EX 0 f v",
+            "HGETEX h FIELDS 3 EX 0 f",
+            "HSETEX h FIELDS 1 PX 0",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+        assert!(removes("HSETEX h FNX EX 0 FIELDS 1 EX 10"));
+    }
+
+    #[test]
+    fn a_stream_add_reads_its_trim_before_the_entry_id_only() {
+        for text in [
+            "XADD s * MAXLEN 10",
+            "XADD s 1-1 MINID 1",
+            "XADD s 5-* f MAXLEN",
+            "XADD s NOMKSTREAM 7 MAXLEN ~ 10",
+            "XADD MAXLEN * f v",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+        for text in [
+            "XADD s MAXLEN 10 * MAXLEN 1",
+            "XADD s KEEPREF MINID 1-0 1-1 f v",
+            // No ID found: the whole line is options, which fails safe.
+            "XADD s MAXLEN",
+        ] {
+            assert!(removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_command_that_schedules_no_removal_is_no_expiry() {
+        for text in [
+            "SET k v",
+            "SET k v KEEPTTL",
+            "GETEX k PERSIST",
+            "SET k v EX 0",
+            "GETEX k PX 0",
+            "SET k v EX abc",
+            "GET k",
+            "PERSIST k",
+            "EXPIRE k 0",
+            "EXPIRE k -1",
+            "HEXPIRE k 0 FIELDS 1 f",
+            "HSETEX h EX 0 FIELDS 1 f v",
+            "HGETEX h PERSIST FIELDS 1 f",
+            "HSET h f v",
+            "HGETEX h FIELDS 1 f",
+            // The server rejects these, so they schedule nothing and remove
+            // nothing.
+            "SETEX k 0 v",
+            "PSETEX k -1 v",
+            "SETEX k 010 v",
+        ] {
+            assert_eq!(expiry(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_hash_command_with_a_timeout_or_a_fixed_time_is_an_expiry_of_its_fields() {
+        for text in [
+            "HEXPIRE h 10 FIELDS 1 f",
+            "HPEXPIRE h 10 FIELDS 1 f",
+            "hexpire h 10 fields 1 f",
+            "HEXPIREAT h 1 FIELDS 1 f",
+            "HPEXPIREAT h 1 FIELDS 1 f",
+            "HSETEX h EX 10 FIELDS 1 f v",
+            "HSETEX h FXX EXAT 1 FIELDS 1 f v",
+            "HSETEX h PXAT 1 FIELDS 1 f v",
+            "HGETEX h PX 1 FIELDS 1 f",
+            "HGETEX h EXAT 1 FIELDS 1 f",
+            "hgetex h pxat 1 fields 1 f",
+        ] {
+            assert_eq!(expiry(text), Some(Expiry::Field), "{text}");
+            assert!(!removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expire_or_setex_with_a_positive_timeout_or_any_fixed_time_is_an_expiry_of_the_key() {
+        for text in [
+            "EXPIRE k 10",
+            "PEXPIRE k 10",
+            "EXPIRE k 10 NX",
+            "EXPIREAT k 1",
+            "PEXPIREAT k 1",
+            "expireat k 4102444800",
+            // No time at all is over-named, which fails safe.
+            "EXPIREAT k",
+            "SETEX k 10 v",
+            "PSETEX k 10 v",
+            "setex k 10 v",
+        ] {
+            assert_eq!(expiry(text), Some(Expiry::Key), "{text}");
+            assert!(!removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_hash_field_expiry_that_is_not_positive_removes_the_field() {
+        // Redis 8.10.3 deletes the field at once for a zero `EX` or `PX` on
+        // `HSETEX` and `HGETEX`, where `SET` refuses the same timeout.
+        for text in [
+            "HSETEX h EX 0 FIELDS 1 f v",
+            "HSETEX h PX 0 FIELDS 1 f v",
+            "HGETEX h EX 0 FIELDS 1 f",
+            "hgetex h px 00 fields 1 f",
+            "HSETEX h FNX EX -1 FIELDS 1 f v",
+            "HGETEX h EX abc FIELDS 1 f",
+            "HGETEX h EX",
+        ] {
+            assert!(removes(text), "{text}");
+        }
+        for text in [
+            "HSETEX h EX 10 FIELDS 1 f v",
+            "HSETEX h PXAT 1 FIELDS 1 f v",
+            "HGETEX h PX 1 FIELDS 1 f",
+            "HGETEX h EXAT 1 FIELDS 1 f",
+            "HGETEX h PERSIST FIELDS 1 f",
+            "SET k v EX 0",
+            "GETEX k PX 0",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_removal_is_found_wherever_the_line_sits_and_however_it_is_cased() {
+        assert!(removes("GET a\ndel a"));
+        assert!(removes("# note\nXGROUP destroy s g"));
+        assert!(removes("MIGRATE h 6379 k 0 1000"));
+        assert!(!removes("SET k v"));
+        assert!(!removes("RENAME a b"));
+        assert!(!removes("SET k \"open"));
     }
 }

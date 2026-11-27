@@ -371,7 +371,21 @@ pub(crate) fn statements(text: &str) -> Vec<Range<usize>> {
 /// Every statement in `text`, or the first error in any of them. Spans are
 /// offsets into `text`.
 pub(crate) fn parse(text: &str) -> Result<Vec<Statement>, ParseError> {
-    read(text)
+    parsed_readings(read(text))
+}
+
+/// [`statements`] and [`parse`] from one read of `text`, for a caller that
+/// asks [`classify_parsed`] and the `_parsed` readers below about one text.
+pub(crate) fn statements_and_parse(
+    text: &str,
+) -> (Vec<Range<usize>>, Result<Vec<Statement>, ParseError>) {
+    let readings = read(text);
+    let spans = readings.iter().map(|(span, _)| span.clone()).collect();
+    (spans, parsed_readings(readings))
+}
+
+fn parsed_readings(readings: Vec<Reading>) -> Result<Vec<Statement>, ParseError> {
+    readings
         .into_iter()
         .map(|(span, target)| {
             Ok(Statement {
@@ -1652,13 +1666,18 @@ fn binary_wrapper(data: &str, subtype: &str) -> Option<Value> {
 /// All or nothing, as there: one statement it cannot read makes the whole
 /// submission one it cannot vouch for, and that verdict is returned alone.
 pub(crate) fn classify(text: &str) -> Verdict {
+    classify_parsed(&parse(text))
+}
+
+/// [`classify`] of a text already [`parse`]d.
+pub(crate) fn classify_parsed(parsed: &Result<Vec<Statement>, ParseError>) -> Verdict {
     // Mongo has no session-level Read-only hold, so as on SQLite an unreadable
     // statement may not run even once in Read-only.
     let unreadable = Verdict {
         mode: Mode::ReadWrite,
         destructive: vec![Destructive::Unreadable],
     };
-    let Ok(statements) = parse(text) else {
+    let Ok(statements) = parsed else {
         return unreadable;
     };
     statements
@@ -1667,6 +1686,191 @@ pub(crate) fn classify(text: &str) -> Verdict {
             Some(verdict.max(statement_verdict(&statement.target)?))
         })
         .unwrap_or(unreadable)
+}
+
+/// Whether `text` removes documents: a parsed `deleteOne`, `deleteMany` or
+/// `findOneAndDelete`, a `delete` command, a `findAndModify` whose `remove` is
+/// present and not literally `false` (the rule [`collection_verdict`] applies
+/// to `dropTarget`), or any call of a method named `remove`, whether or not
+/// the text parses. The agent path refuses all of them, whatever the mode
+/// (GATE-07); [`classify`] and the human path are not changed by it.
+pub(crate) fn removes(text: &str) -> bool {
+    removes_parsed(text, &parse(text))
+}
+
+/// [`removes`] of `text` already [`parse`]d as `parsed`.
+pub(crate) fn removes_parsed(text: &str, parsed: &Result<Vec<Statement>, ParseError>) -> bool {
+    parsed.as_ref().is_ok_and(|statements| {
+        statements
+            .iter()
+            .any(|statement| removes_documents(&statement.target))
+    }) || calls_method(text, "remove")
+}
+
+fn removes_documents(target: &Target) -> bool {
+    match target {
+        Target::Show(_) => false,
+        Target::Database { call, .. } => {
+            matches!(call.method, DbMethod::RunCommand | DbMethod::AdminCommand)
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|command| command_removes(&command.value))
+        }
+        Target::Collection { call, .. } => matches!(
+            call.method,
+            Method::DeleteOne | Method::DeleteMany | Method::FindOneAndDelete
+        ),
+    }
+}
+
+/// Whether a `runCommand` or `adminCommand` argument is a `delete`, or a
+/// `findAndModify` asked to remove.
+fn command_removes(command: &Value) -> bool {
+    match command {
+        Value::String(name) => name == "delete",
+        Value::Document(fields) => match fields.first() {
+            Some((name, _)) if name == "delete" => true,
+            Some((name, _)) if name == "findAndModify" => fields
+                .iter()
+                .any(|(key, value)| key == "remove" && *value != Value::Bool(false)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `text` holds a call whose method is named `name`, found in the
+/// tree the grammar gives it rather than through [`read`], which refuses a
+/// method it does not know: so every receiver spelling (`db.c`,
+/// `db.getCollection(..)`, `db.getSiblingDB(..).c`) and every argument shape
+/// counts, and a `name` inside a string, a comment or a document key does not.
+/// A call on something that is not a collection counts too: a false positive,
+/// on the refusing side.
+fn calls_method(text: &str, name: &str) -> bool {
+    let mut parser = Parser::new();
+    let Some(tree) = parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()
+        .and_then(|()| parser.parse(text, None))
+    else {
+        return false;
+    };
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        let calls = node.kind() == "call_expression"
+            && node
+                .child_by_field_name("function")
+                .filter(|function| function.kind() == "member_expression")
+                .and_then(|function| function.child_by_field_name("property"))
+                .is_some_and(|property| text.get(property.byte_range()) == Some(name));
+        if calls {
+            return true;
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+    }
+    false
+}
+
+/// Whether any argument of any call in `text`, a chained cursor call included,
+/// holds one of [`JS_OPERATORS`] as a key, at any depth: JavaScript the server
+/// would run. Refused for an agent whatever the mode (D-12); [`classify`] rates
+/// the same operators Full, which is the human's answer.
+pub(crate) fn runs_script(text: &str) -> bool {
+    runs_script_parsed(&parse(text))
+}
+
+/// [`runs_script`] of a text already [`parse`]d.
+pub(crate) fn runs_script_parsed(parsed: &Result<Vec<Statement>, ParseError>) -> bool {
+    parsed.as_ref().is_ok_and(|statements| {
+        statements
+            .iter()
+            .any(|statement| scanned(&statement.target).iter().any(holds_javascript))
+    })
+}
+
+fn holds_javascript(value: &Value) -> bool {
+    match value {
+        // What `$literal` holds is returned as it is, never evaluated.
+        Value::Document(fields) => fields.iter().any(|(key, value)| {
+            key != LITERAL && (JS_OPERATORS.contains(&key.as_str()) || holds_javascript(value))
+        }),
+        Value::Array(values) => values.iter().any(holds_javascript),
+        _ => false,
+    }
+}
+
+/// Whether `text` asks for what no agent is handed unasked: `currentOp`, as a
+/// `runCommand` or `adminCommand` or as the `$currentOp` stage of an
+/// aggregation, which lists every client's address, application name, user and
+/// in-flight command text, and `connectionStatus` asked for `showPrivileges`,
+/// which returns the user's whole privilege set. Refused for an agent whatever
+/// the mode, extending the rule that refuses Redis's `CONFIG GET` and `CLIENT
+/// LIST` (D-27); [`classify`] rates all of them reads, which is the human's
+/// answer about their own server, and is not changed. The `db.currentOp()`
+/// helper is no method DBDelve reads, so it is found in the tree like a legacy
+/// `remove`.
+pub(crate) fn discloses(text: &str) -> bool {
+    discloses_parsed(text, &parse(text))
+}
+
+/// [`discloses`] of `text` already [`parse`]d as `parsed`.
+pub(crate) fn discloses_parsed(text: &str, parsed: &Result<Vec<Statement>, ParseError>) -> bool {
+    let holds = |args: &[Arg]| args.iter().any(|arg| holds_current_op(&arg.value));
+    calls_method(text, "currentOp")
+        || parsed.as_ref().is_ok_and(|statements| {
+            statements.iter().any(|statement| match &statement.target {
+                Target::Show(_) => false,
+                Target::Database { call, .. } => {
+                    (matches!(call.method, DbMethod::RunCommand | DbMethod::AdminCommand)
+                        && call
+                            .args
+                            .first()
+                            .is_some_and(|command| command_discloses(&command.value)))
+                        || holds(&call.args)
+                }
+                Target::Collection { call, cursor, .. } => {
+                    holds(&call.args) || cursor.iter().any(|chained| holds(&chained.args))
+                }
+            })
+        })
+}
+
+/// Whether a `runCommand` or `adminCommand` argument is `currentOp`, or a
+/// `connectionStatus` whose `showPrivileges` is present and not literally
+/// `false` (the fail-safe rule [`command_removes`] applies to `remove`). The
+/// server dispatches on the first key, compared exactly, so a field named
+/// `currentOp` further in is a field. An `explain` is as disclosing as the
+/// command it explains.
+fn command_discloses(command: &Value) -> bool {
+    match command {
+        Value::String(name) => name == "currentOp",
+        Value::Document(fields) => match fields.first() {
+            Some((name, _)) if name == "currentOp" => true,
+            Some((name, _)) if name == "connectionStatus" => fields
+                .iter()
+                .any(|(key, value)| key == "showPrivileges" && *value != Value::Bool(false)),
+            Some((name, inner @ Value::Document(_))) if name == "explain" => {
+                command_discloses(inner)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `value` holds a `$currentOp` key at any depth of a document or an
+/// array. A `$`-prefixed key is an operator and never a field, so none is
+/// matched by mistake.
+fn holds_current_op(value: &Value) -> bool {
+    match value {
+        Value::Document(fields) => fields
+            .iter()
+            .any(|(key, value)| key == "$currentOp" || holds_current_op(value)),
+        Value::Array(values) => values.iter().any(holds_current_op),
+        _ => false,
+    }
 }
 
 /// Whether `text` is a statement `.explain(verbosity)` can be put on the end
@@ -1758,31 +1962,75 @@ pub(crate) fn typed_explain(text: &str) -> Option<ExplainMode> {
 /// included, not only where a method takes a pipeline: one where the executor
 /// is expected to ignore it would be trusting the executor.
 fn statement_verdict(target: &Target) -> Option<Verdict> {
-    let (verdict, args): (Verdict, Vec<&Arg>) = match target {
-        Target::Show(Show::Databases | Show::Collections) => (Verdict::READ, Vec::new()),
+    let values = scanned(target);
+    let verdict = match target {
+        Target::Show(Show::Databases | Show::Collections) => Verdict::READ,
+        Target::Database { call, .. } => match call.method {
+            DbMethod::RunCommand | DbMethod::AdminCommand => command_verdict(values.first()?)?,
+            DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
+            DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
+            DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
+        },
+        Target::Collection { call, .. } => collection_verdict(call),
+    };
+    // A `$out` or `$merge` counts wherever it is, a comment included; a
+    // JavaScript operator counts everywhere but in a comment, which the server
+    // never evaluates.
+    let args: Vec<&Value> = match target {
+        Target::Show(_) => Vec::new(),
+        Target::Database { call, .. } => call.args.iter().map(|arg| &arg.value).collect(),
+        Target::Collection { call, cursor, .. } => call
+            .args
+            .iter()
+            .chain(cursor.iter().flat_map(|chained| &chained.args))
+            .map(|arg| &arg.value)
+            .collect(),
+    };
+    let stages = args.into_iter().fold(verdict, |verdict, value| {
+        verdict.max(out_verdict(value, false))
+    });
+    Some(values.iter().fold(stages, |verdict, value| {
+        verdict.max(out_verdict(value, true))
+    }))
+}
+
+/// Every argument of `target`'s call and of its chained calls, as the
+/// JavaScript checks read them, less what MongoDB defines as a comment: the
+/// top-level `comment` of a command document and the argument of a chained
+/// `.comment(…)`. A comment is metadata the server logs and never evaluates,
+/// so a `$where` in one is no script; the command's filter is still read.
+fn scanned(target: &Target) -> Vec<Value> {
+    match target {
+        Target::Show(_) => Vec::new(),
         Target::Database { call, .. } => {
-            let verdict = match call.method {
-                DbMethod::RunCommand | DbMethod::AdminCommand => {
-                    command_verdict(&call.args.first()?.value)?
-                }
-                DbMethod::GetCollectionNames | DbMethod::Stats => Verdict::READ,
-                DbMethod::CreateCollection | DbMethod::CreateView => Verdict::WRITE,
-                DbMethod::DropDatabase => Verdict::destroys(Destructive::Drop),
-            };
-            (verdict, call.args.iter().collect())
-        }
-        Target::Collection { call, cursor, .. } => (
-            collection_verdict(call),
+            let command = matches!(call.method, DbMethod::RunCommand | DbMethod::AdminCommand);
             call.args
                 .iter()
-                .chain(cursor.iter().flat_map(|chained| &chained.args))
-                .collect(),
-        ),
-    };
-    Some(
-        args.into_iter()
-            .fold(verdict, |verdict, arg| verdict.max(out_verdict(&arg.value))),
-    )
+                .enumerate()
+                .map(|(at, arg)| match (&arg.value, command && at == 0) {
+                    (Value::Document(fields), true) => Value::Document(
+                        fields
+                            .iter()
+                            .filter(|(key, _)| key != "comment")
+                            .cloned()
+                            .collect(),
+                    ),
+                    (value, _) => value.clone(),
+                })
+                .collect()
+        }
+        Target::Collection { call, cursor, .. } => call
+            .args
+            .iter()
+            .chain(
+                cursor
+                    .iter()
+                    .filter(|chained| chained.method != CursorMethod::Comment)
+                    .flat_map(|chained| &chained.args),
+            )
+            .map(|arg| arg.value.clone())
+            .collect(),
+    }
 }
 
 fn collection_verdict(call: &Call<Method>) -> Verdict {
@@ -1881,7 +2129,7 @@ fn command_verdict(command: &Value) -> Option<Verdict> {
             Some(_) => Verdict::destroys(Destructive::Drop),
         },
         "insert" | "update" | "findAndModify" | "createIndexes" | "create" => Verdict::WRITE,
-        "aggregate" => out_verdict(command),
+        "aggregate" => out_verdict(command, true),
         _ => return command_reads(command).then_some(Verdict::READ),
     };
     Some(verdict)
@@ -1933,21 +2181,39 @@ fn command_reads(command: &Value) -> bool {
     }
 }
 
-/// What a `$out` or `$merge` anywhere in `value` does. `$out` replaces its
-/// target collection whole, as `CREATE OR REPLACE TABLE … AS SELECT` does, so
-/// it is a drop; `$merge` writes into what is there.
-fn out_verdict(value: &Value) -> Verdict {
+/// The operators that run JavaScript inside the database process. Rated Full,
+/// not Write: arbitrary code in the server is a different order of thing from
+/// a write, and a Read-write profile would run it with no prompt at all.
+/// Three rules read this list -- [`out_verdict`], the filter bar's
+/// `browse::runs_code` and the agent path's [`runs_script`] -- so an operator
+/// added here reaches all three.
+const JS_OPERATORS: &[&str] = &["$where", "$function", "$accumulator"];
+
+/// The expression whose argument is data: the server returns it as it is and
+/// reads no operator inside it, so the walks above do not look in it. Not a
+/// query operator, so a filter cannot use it to hide a `$where`.
+const LITERAL: &str = "$literal";
+
+/// What a `$out`, `$merge` or, with `javascript`, a JavaScript operator
+/// anywhere in `value` does.
+/// `$out` replaces its target collection whole, as `CREATE OR REPLACE TABLE …
+/// AS SELECT` does, so it is a drop; `$merge` writes into what is there.
+fn out_verdict(value: &Value, javascript: bool) -> Verdict {
     match value {
         Value::Document(fields) => fields.iter().fold(Verdict::READ, |verdict, (key, value)| {
             let stage = match key.as_str() {
+                LITERAL => return verdict,
                 "$out" => Verdict::destroys(Destructive::Drop),
                 "$merge" => Verdict::WRITE,
+                // Not `browse::runs_code`, which also flags a string where
+                // `$or` wants documents -- the filter bar's rule, not this one.
+                operator if javascript && JS_OPERATORS.contains(&operator) => Verdict::FULL,
                 _ => Verdict::READ,
             };
-            verdict.max(stage).max(out_verdict(value))
+            verdict.max(stage).max(out_verdict(value, javascript))
         }),
         Value::Array(values) => values.iter().fold(Verdict::READ, |verdict, value| {
-            verdict.max(out_verdict(value))
+            verdict.max(out_verdict(value, javascript))
         }),
         _ => Verdict::READ,
     }
@@ -4287,6 +4553,30 @@ mod tests {
     }
 
     #[test]
+    fn javascript_operators_need_full_at_any_depth_and_in_every_call_shape() {
+        for text in [
+            "db.c.find({$where: 'sleep(1000)'})",
+            "db.c.aggregate([{$addFields: {x: {$function: {body: 'f', args: [], lang: 'js'}}}}])",
+            "db.c.aggregate([{$group: {_id: 1, x: {$accumulator: {init: 'f', accumulate: 'g', accumulateArgs: [], merge: 'h', lang: 'js'}}}}])",
+            "db.c.find({$and: [{a: {$or: [{$where: '1'}]}}]})",
+            "db.c.aggregate([{$lookup: {from: 'o', pipeline: [{$match: {$where: '1'}}], as: 'z'}}])",
+            "db.c.find({}).hint({$where: '1'})",
+            "db.runCommand({find: 'c', filter: {$where: '1'}})",
+            "db.runCommand({aggregate: 'c', pipeline: [{$match: {$where: '1'}}], cursor: {}})",
+            "db.c.find({\"\\u0024where\": '1'})",
+        ] {
+            assert_eq!(classify(text), Verdict::FULL, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_string_where_or_wants_documents_is_still_a_read_in_a_typed_statement() {
+        for text in ["db.c.find({$or: 'x'})", "db.c.find({a: '$where'})"] {
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+    }
+
+    #[test]
     fn drops_classify_as_destructive() {
         for text in [
             "db.c.aggregate([{$match: {}}, {$out: 'd'}])",
@@ -5305,5 +5595,144 @@ mod tests {
             "db.getCollection(\"c\").insertMany([{\"n\": 2.5, \"d\": ISODate(\"2024-02-29T00:00:00.000Z\"), \"j\": {\"k\": [1]}, \"b\": true},\n{\"b\": null}])"
         );
         assert!(is_generated_write(&s));
+    }
+
+    #[test]
+    fn find_and_modify_removes_unless_remove_is_literally_false() {
+        for text in [
+            r#"db.runCommand({findAndModify: "c", query: {a: 1}, remove: true})"#,
+            r#"db.runCommand({findAndModify: "c", query: {a: 1}, remove: 1})"#,
+            r#"db.adminCommand({findAndModify: "c", remove: "yes"})"#,
+        ] {
+            assert!(removes(text), "{text}");
+        }
+        for text in [
+            r#"db.runCommand({findAndModify: "c", query: {a: 1}, remove: false, update: {$set: {a: 2}}})"#,
+            r#"db.runCommand({findAndModify: "c", query: {a: 1}, update: {$set: {a: 2}}})"#,
+            r#"db.runCommand({find: "c", filter: {remove: true}})"#,
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn every_remove_call_is_a_removal_wherever_its_collection_comes_from() {
+        for text in [
+            "db.c.remove({})",
+            "db.c.remove({a: 1})",
+            "db.c.remove({a: 1}, true)",
+            "db.c.remove({a: 1}, {justOne: true})",
+            r#"db.getCollection("c").remove({})"#,
+            r#"db.getSiblingDB("x").c.remove({})"#,
+            "db.c.remove({}); db.c.find()",
+            "db.c.deleteOne({_id: 1})",
+            "db.c.deleteMany({})",
+            "db.c.findOneAndDelete({a: 1})",
+            r#"db.runCommand({delete: "c", deletes: [{q: {a: 1}, limit: 1}]})"#,
+            r#"db.adminCommand({delete: "c", deletes: [{q: {a: 1}, limit: 0}]})"#,
+        ] {
+            assert!(removes(text), "{text}");
+        }
+        for text in [
+            "db.c.find({remove: 1})",
+            r#"db.c.find({a: "remove()"})"#,
+            "db.c.find() // remove()",
+            "db.c.find({a: 1})",
+            "db.c.insertOne({a: 1})",
+            "show collections",
+            "",
+        ] {
+            assert!(!removes(text), "{text}");
+        }
+        // The human path still cannot read a `remove`.
+        assert_eq!(
+            classify("db.c.remove({})").destructive,
+            [Destructive::Unreadable]
+        );
+    }
+
+    #[test]
+    fn a_javascript_operator_at_any_depth_of_any_argument_runs_a_script() {
+        for text in [
+            r#"db.c.find({$where: "1"})"#,
+            r#"db.c.find({$expr: {$function: {body: "1", args: [], lang: "js"}}})"#,
+            r#"db.c.aggregate([{$group: {_id: 1, n: {$accumulator: {init: "1", accumulate: "1", accumulateArgs: [], merge: "1", lang: "js"}}}}])"#,
+            r#"db.c.find({a: 1}).sort({$where: "1"})"#,
+            r#"db.runCommand({find: "c", filter: {$where: "1"}})"#,
+        ] {
+            assert!(runs_script(text), "{text}");
+        }
+        for text in [
+            "db.c.find({a: 1})",
+            r#"db.c.find({a: "$where"})"#,
+            "db.c.aggregate([{$match: {a: 1}}])",
+            "garbage(",
+        ] {
+            assert!(!runs_script(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_comment_is_metadata_and_holds_no_script() {
+        for text in [
+            r#"db.runCommand({find: "c", filter: {a: 1}, comment: {$where: "1"}})"#,
+            r#"db.c.find({a: 1}).comment({$where: "1"})"#,
+        ] {
+            assert!(!runs_script(text), "{text}");
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+        // The command's own filter is still read.
+        let filtered = r#"db.runCommand({find: "c", filter: {$where: "1"}, comment: "why"})"#;
+        assert!(runs_script(filtered));
+        assert_eq!(classify(filtered), Verdict::FULL);
+    }
+
+    #[test]
+    fn a_literal_document_spelled_like_javascript_is_data() {
+        for text in [
+            r#"db.c.aggregate([{$project: {x: {$literal: {$where: "sleep(1)"}}}}])"#,
+            r#"db.c.aggregate([{$addFields: {x: {$literal: [{$function: "f"}]}}}])"#,
+        ] {
+            assert!(!runs_script(text), "{text}");
+            assert_eq!(classify(text), Verdict::READ, "{text}");
+        }
+        // Beside a `$literal`, or in a filter, the operator is still code.
+        for text in [
+            r#"db.c.aggregate([{$project: {x: {$literal: 1}}}, {$match: {$where: "1"}}])"#,
+            r#"db.c.find({$where: "1", a: {$literal: 1}})"#,
+        ] {
+            assert!(runs_script(text), "{text}");
+            assert_eq!(classify(text), Verdict::FULL, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_current_op_and_connection_status_with_privileges_disclose() {
+        for text in [
+            "db.adminCommand({currentOp: 1})",
+            "db.adminCommand({currentOp: 1, $all: true})",
+            "db.runCommand({currentOp: 1})",
+            "db.adminCommand('currentOp')",
+            "db.getSiblingDB('admin').adminCommand({currentOp: 1})",
+            "db.runCommand({explain: {currentOp: 1}})",
+            "db.adminCommand({aggregate: 1, pipeline: [{$currentOp: {allUsers: true}}], cursor: {}})",
+            "db.c.aggregate([{$currentOp: {}}])",
+            "db.runCommand({connectionStatus: 1, showPrivileges: true})",
+            "db.runCommand({connectionStatus: 1, showPrivileges: 1})",
+            "db.adminCommand({connectionStatus: 1, showPrivileges: true})",
+        ] {
+            assert!(discloses(text), "{text}");
+        }
+        for text in [
+            "db.runCommand({connectionStatus: 1})",
+            "db.runCommand({connectionStatus: 1, showPrivileges: false})",
+            "db.c.find({currentOp: 1})",
+            "db.runCommand({ping: 1, currentOp: 1})",
+            "db.runCommand({ping: 1})",
+            "garbage(",
+            "show dbs",
+        ] {
+            assert!(!discloses(text), "{text}");
+        }
     }
 }
