@@ -152,6 +152,35 @@ pub(crate) struct RoleForm {
 }
 
 impl RoleForm {
+    /// The fields its kind draws, in order: each one's label, input and note.
+    pub(crate) fn fields(&self) -> Vec<(&'static str, &Entity<InputState>, Option<&'static str>)> {
+        let (new, limits, password) = match &self.kind {
+            RoleFormKind::New { login } => (true, *login, *login),
+            RoleFormKind::Edit(_) => (false, true, false),
+            RoleFormKind::Password(_) => (false, false, true),
+        };
+        let mut fields = Vec::new();
+        if new {
+            fields.push(("Name", &self.name, None));
+        }
+        if password {
+            fields.push((
+                "Password",
+                &self.password,
+                Some("Sent as its SCRAM-SHA-256 hash, never as typed."),
+            ));
+            fields.push(("Confirm password", &self.confirm, None));
+        }
+        if limits {
+            fields.push(("Connection limit", &self.limit, None));
+            fields.push(("Password expires", &self.expires, None));
+        }
+        if new {
+            fields.push(("Member of", &self.member_of, None));
+        }
+        fields
+    }
+
     pub(crate) fn title(&self) -> String {
         match &self.kind {
             RoleFormKind::New { login: true } => "New User".into(),
@@ -957,6 +986,47 @@ impl Workspace {
                 }
             });
         });
+        cx.notify();
+    }
+
+    /// Tab in the role form: through its fields as drawn, then Review… and
+    /// Cancel on the dialog's ring, and round to the first field again.
+    pub(crate) fn step_role_form(
+        &mut self,
+        backward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.role_form.as_ref() else {
+            return;
+        };
+        let fields: Vec<Entity<InputState>> = (form.fields().into_iter())
+            .map(|(_, input, _)| input.clone())
+            .collect();
+        const BUTTONS: usize = 2;
+        let stops = fields.len() + BUTTONS;
+        let at = match (fields.iter()).position(|input| input.focus_handle(cx).is_focused(window)) {
+            Some(field) => field,
+            None if self.dialog_focus.is_focused(window) => {
+                fields.len() + self.dialog_choice.get().min(BUTTONS - 1)
+            }
+            None => stops - 1,
+        };
+        let next = match backward {
+            true => (at + stops - 1) % stops,
+            false => (at + 1) % stops,
+        };
+        match fields.get(next) {
+            Some(input) => {
+                // `enter` in a field is Review…, so the ring says so.
+                self.dialog_choice.set(0);
+                input.update(cx, |input, cx| input.focus(window, cx));
+            }
+            None => {
+                self.dialog_choice.set(next - fields.len());
+                self.dialog_focus.focus(window, cx);
+            }
+        }
         cx.notify();
     }
 

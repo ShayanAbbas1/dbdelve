@@ -7570,7 +7570,7 @@ fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_role_form(
                 &profile,
-                super::RoleFormKind::New { login: true },
+                super::users::RoleFormKind::New { login: true },
                 window,
                 cx,
             )
@@ -7664,7 +7664,7 @@ fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_
                 .expect("New User… opened its form");
             assert!(matches!(
                 form.kind,
-                super::RoleFormKind::New { login: true }
+                super::users::RoleFormKind::New { login: true }
             ));
         });
         // Bringing the connection forward forgets what it had read of its
@@ -7678,7 +7678,9 @@ fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_
                 }));
             workspace.run_role_action("far", RoleAction::Edit, Some("ana"), window, cx);
             let form = workspace.role_form.as_ref().expect("Edit… opened its form");
-            assert!(matches!(&form.kind, super::RoleFormKind::Edit(role) if role.name == "ana"));
+            assert!(
+                matches!(&form.kind, super::users::RoleFormKind::Edit(role) if role.name == "ana")
+            );
             // Copy DROP ROLE puts text on the clipboard and sends nothing:
             // the connection's user, `u`, is offered to take over.
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
@@ -7969,7 +7971,12 @@ fn a_refused_role_form_stays_up_with_what_was_typed_and_says_why(cx: &mut TestAp
                 ..Roles::default()
             }));
             let id = profile.id.clone();
-            workspace.open_role_form(&id, super::RoleFormKind::New { login: true }, window, cx);
+            workspace.open_role_form(
+                &id,
+                super::users::RoleFormKind::New { login: true },
+                window,
+                cx,
+            );
             let form = workspace.role_form.as_ref().unwrap();
             let (name, member_of) = (form.name.clone(), form.member_of.clone());
             name.update(cx, |input, cx| input.set_value("ana", window, cx));
@@ -8003,7 +8010,7 @@ fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestA
             let profile = workspace.profile().unwrap().id.clone();
             workspace.open_role_form(
                 &profile,
-                super::RoleFormKind::New { login: true },
+                super::users::RoleFormKind::New { login: true },
                 window,
                 cx,
             );
