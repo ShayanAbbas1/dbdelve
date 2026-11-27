@@ -224,6 +224,9 @@ actions!(
         // input is open; no key binds it. The grid does not know the view's edit
         // mode, so the workspace decides what the edge does.
         StepPastEdge,
+        ToggleAutoCommit,
+        CommitTransaction,
+        RollbackTransaction,
         FollowForeignKey,
         DeleteRow,
         ApplyEdits,
@@ -276,5 +279,9 @@ actions!(
         DiagramFocusRight,
         DiagramFocusUp,
         DiagramFocusDown,
+        UsersListPrevious,
+        UsersListNext,
+        UsersListFirst,
+        UsersListLast,
     ]
 );

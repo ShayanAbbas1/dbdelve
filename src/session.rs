@@ -32,8 +32,8 @@ use crate::{
     Workspace, completion,
     db::{
         CancelToken, Catalog, Connection, ConnectionConfig, Databases, DbError, Engine,
-        ExplainMode, Levels, QueryResult, Relation, RelationKind, Routine, Row, Structure, Syntax,
-        Target,
+        ExplainMode, Include, Levels, QueryResult, Relation, RelationKind, Routine, Row, Shown,
+        Structure, Syntax, Target,
     },
     explain::{self, Plan},
     explorer::{
@@ -54,6 +54,10 @@ use crate::{
     workspace::SchemaExportDialog,
 };
 
+/// Asked by a keep-alive ping once it holds its session: whether the session
+/// is still free of the user's transaction.
+pub(crate) type IdleCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A connection and everything it owns.
 ///
 /// The editor, results, explorer and query state live here rather than on
@@ -66,6 +70,26 @@ pub(crate) struct Profile {
     pub(crate) config: ConnectionConfig,
     pub(crate) color: Option<ConnectionColor>,
     pub(crate) mode: Mode,
+    /// What the connections tree shows of the server. Not
+    /// part of `config`: changing it never reconnects.
+    pub(crate) include: Include,
+    /// What this profile does with its connection rather than what the
+    /// connection is. Not part of `config`: changing it never reconnects.
+    pub(crate) behaviour: Behaviour,
+    /// The pending keep-alive round, one-shot and re-armed after each. Dropping
+    /// it cancels the round, which is how a disconnect, a connect and a changed
+    /// interval end the old timer.
+    pub(crate) keep_alive_task: Option<gpui::Task<()>>,
+    /// When the user last used this profile, on the scheduler's clock
+    /// (`BackgroundExecutor::now`) so a test's `advance_clock` moves it. Moved
+    /// only by the user's own work -- a statement, a catalog read, a connect --
+    /// and never by a keep-alive ping, which would hold an unattended
+    /// connection open for ever.
+    pub(crate) last_activity: std::time::Instant,
+    /// The pending idle close, one-shot: it sleeps until `last_activity` plus
+    /// the timeout. Dropping it cancels the close, which is how a disconnect, a
+    /// connect and a changed timeout end the old one.
+    pub(crate) idle_task: Option<gpui::Task<()>>,
     pub(crate) confirmed: Vec<Destructive>,
     /// Whether this connection has silenced the prompt before editing rows
     /// restored from an earlier session. Stored as [`STALE_ROWS`] among
@@ -85,16 +109,75 @@ pub(crate) struct Profile {
     /// queue's reads would not see. Read off what was sent, not asked of the
     /// server; cleared by a `COMMIT` or `ROLLBACK`, and on connect.
     pub(crate) in_transaction: bool,
+    /// Whether the user's own statements turned MySQL's `autocommit` off on
+    /// this session, read off what was sent like `in_transaction`. Turning
+    /// it on commits the open transaction only from off: from on it is a
+    /// no-op that leaves a `START TRANSACTION`'s writes pending. Cleared on
+    /// connect, which opens autocommitting.
+    pub(crate) autocommit_off: bool,
+    /// Whether a statement failed inside that transaction on an engine that
+    /// then refuses everything but its end (Postgres), whose `COMMIT` rolls
+    /// it back. Read only through [`Self::transaction_failed`], and cleared
+    /// as the next transaction opens.
+    pub(crate) transaction_aborted: bool,
+    /// Every statement the next `COMMIT` or `ROLLBACK` on the connection's
+    /// session ends: the user's statements and dbdelve's edits applied on that
+    /// session, but never dbdelve's reads, for the Auto prompt to list. Held in memory only and never written to the
+    /// history file, `profiles.toml` or any log, since it is SQL text that
+    /// ends with its session. Emptied with [`Profile::in_transaction`].
+    pub(crate) transaction_statements: Vec<String>,
+    /// How many submissions have set [`Self::in_transaction`] as they were
+    /// sent. An end of the transaction is settled only when it lands, so one
+    /// sent before this moved was overtaken on the session by the later
+    /// submission and must not undo what it said ([`Self::superseded`]).
+    /// Shared, so a keep-alive ping can tell under the session's lock that a
+    /// `BEGIN` went out after its round was set ([`Self::sessions_to_ping`]).
+    pub(crate) transaction_sends: Arc<AtomicU64>,
+    /// The tab whose statement opening or ending the transaction on the
+    /// profile's own session is running, until it lands: another tab's waits
+    /// for it, so the server runs them in the order they were sent.
+    pub(crate) transaction_in_flight: Option<Tab>,
+    /// The startup script the live connection ran at its connect, whose
+    /// statements its driver replays on every later session: a script saved
+    /// since applies only from the next connect.
+    pub(crate) connected_script: String,
+    /// Whether each of the user's statements commits on its own. Off means
+    /// dbdelve keeps a transaction open for them, opening it by writing a
+    /// `BEGIN` into the buffer where they can read it -- never onto the wire
+    /// unseen (`AGENTS.md` hard rule 1). Per connection, and off again on
+    /// connect, because the transaction it was holding died with the session.
+    pub(crate) auto_commit: bool,
     /// Whether they have changed the session in a way that lasts as long as
     /// it does -- a `SET`, `USE` or temporary table. Cleared on connect.
     pub(crate) session_changed: bool,
     pub(crate) catalog: CatalogState,
+    /// The include lists `catalog` was read under. Until a read under the
+    /// lists saved now lands, the catalog lacks what a newly shown schema
+    /// holds, so it cannot say a routine there is gone.
+    pub(crate) catalog_include: Include,
     /// The generation a schema refresh was started on. Compared rather than
     /// cleared, so a reconnect that drops the refresh's answer takes the
     /// refresh with it.
     pub(crate) schema_refresh: Option<u64>,
+    /// Whether a filter or depth was saved while a read of the catalog was
+    /// under way, which a refresh would have declined to start: the landing of
+    /// that read clears this and reads again with what was saved.
+    pub(crate) reread_after_load: bool,
     /// What the server listed the last time Select Database asked.
     pub(crate) databases: Databases,
+    /// How many listings of [`Self::databases`] have been started. One lands
+    /// only if none started after it ([`Self::start_listing`]): a later one
+    /// was asked under the filter as it is now, and an earlier one may have
+    /// been asked under one since changed. Select Database's lands under an
+    /// unchanged filter all the same, and asks again under a changed one, so
+    /// its keypress always ends in the palette.
+    pub(crate) listings: u64,
+    /// The server's logins and roles, read for the connections tree's Users
+    /// and roles row and its tab.
+    pub(crate) roles: RolesState,
+    /// The latest read of `roles` started: an earlier one landing after it
+    /// would put back what a role change since has altered.
+    pub(crate) roles_request: u64,
     /// The session opened for each other database of the server, by name,
     /// for the connections tree to read its catalog over. Never the profile's
     /// own connection, and dropped with it.
@@ -102,6 +185,18 @@ pub(crate) struct Profile {
     /// What each other database's catalog has got to, by name. A database
     /// with no entry has not been asked for.
     pub(crate) database_catalogs: HashMap<String, CatalogState>,
+    /// What each other database's catalog was read under, as `catalog_include`
+    /// is the own one's: a filter saved since may show a schema it lacks.
+    pub(crate) database_catalogs_shown: HashMap<String, Shown>,
+    /// The schemas of the profile's own catalog whose relations are being
+    /// read now, each one its row asked for ([`crate::db::Catalog::unread`]),
+    /// with the generation the read was issued to: one a reconnect left
+    /// behind lands nowhere, and must not hold off the next.
+    pub(crate) schema_reads: HashMap<String, u64>,
+    /// The catalog a database switch kept for the connection it opens to
+    /// put back in place of reading it again; see
+    /// `workspace::profiles::keeps_catalog_across_switch`.
+    pub(crate) kept_catalog: Option<KeptCatalog>,
     /// Whether the connection opened on another database than the one the
     /// tabs were opened on, because the picked one was no longer there. What
     /// is left of that database goes on the next frame, which has the window
@@ -175,6 +270,29 @@ pub(crate) fn skips_run_once(opted_in: bool, own_run: bool, mode: Mode, held: bo
     opted_in && own_run && (mode != Mode::ReadOnly || held)
 }
 
+/// Whether an end of the open transaction in `sql` that failed with `error`
+/// left the transaction open; see [`Profile::end_landed`].
+fn failed_end_left_open(engine: Engine, sql: &str, lone: bool, error: &DbError) -> bool {
+    crate::db::sent_nothing(error)
+        || crate::db::transaction_kept_open(error)
+        || (lone && engine.failed_end_keeps_transaction(&error.message))
+        || failed_before_end(engine, sql)
+}
+
+/// Whether a failure of `sql` may have come ahead of its end, which Postgres
+/// then skips with the rest of the submission, leaving the transaction open
+/// and aborted. Only an end that is not the submission's first statement: the
+/// failure may still be the end's own, but read as open the transaction
+/// keeps Roll back offered, while read as ended every later statement fails
+/// with no way out shown.
+fn failed_before_end(engine: Engine, sql: &str) -> bool {
+    engine.failure_aborts_transaction()
+        && crate::sql::Buffer::for_engine(engine, sql)
+            .statements()
+            .first()
+            .is_some_and(|first| !crate::sql::ends_transaction(engine, &sql[first.clone()]))
+}
+
 /// See [`Profile::shortcut_database`]. The shown catalog's own word comes
 /// first: a `USE` of the user's can move the session it was read on without
 /// the profile hearing of it, and a shortcut names what the sidebar shows.
@@ -215,6 +333,192 @@ impl Profile {
         explorer_opens_on(self.config.target(), self.active_schema(), || {
             self.active_database()
         })
+    }
+
+    /// A statement `sql` that ends the open transaction has landed, with
+    /// `error` where it failed. Until now the transaction was still read as
+    /// open. It ended unless the statement never reached the server
+    /// ([`crate::db::sent_nothing`]: a Cancel dropped it unsent), or it is a
+    /// `lone` end the engine says leaves the transaction open when it fails;
+    /// a guess there would keep a flag no COMMIT could clear, or offer a Roll
+    /// Back for work the server had already rolled back. Nor did it on
+    /// Postgres when a statement ahead of the end may have failed
+    /// ([`failed_before_end`]): the end was skipped, and the transaction is
+    /// open and aborted. A `lost` session has no transaction left to keep.
+    ///
+    /// An end that did end the transaction leaves Manual too, since nothing
+    /// is holding one open any more: whether it did, for the caller to say.
+    /// The driver's own word that the transaction outlived the failure
+    /// ([`crate::db::transaction_kept_open`]: SQL Server's compile error
+    /// ahead of the `COMMIT` in its batch) keeps it open whatever else.
+    pub(crate) fn end_landed(
+        &mut self,
+        sql: &str,
+        lone: bool,
+        lost: bool,
+        error: Option<&DbError>,
+    ) -> bool {
+        let engine = self.config.engine();
+        let still_open =
+            !lost && error.is_some_and(|error| failed_end_left_open(engine, sql, lone, error));
+        if still_open {
+            // What failed ahead of the end aborted the transaction, which
+            // can only be rolled back now.
+            self.transaction_aborted |= error.is_some_and(|error| {
+                !crate::db::sent_nothing(error) && failed_before_end(engine, sql)
+            });
+            return false;
+        }
+        self.record_sent(sql, Some(false));
+        self.in_transaction = false;
+        self.leave_manual()
+    }
+
+    /// Auto again, the transaction Manual was holding having ended: whether
+    /// the switch read Manual until now.
+    pub(crate) fn leave_manual(&mut self) -> bool {
+        let manual = !self.auto_commit;
+        self.auto_commit = true;
+        manual
+    }
+
+    /// The server ended the open transaction on its own while running a
+    /// statement sent at `sent_at` ([`crate::db::transaction_ended`]: SQL
+    /// Server's `XACT_ABORT`, or a batch that may have committed first). Nothing is open, and Manual gives way to
+    /// Auto: whether it did. A transaction opened since is not the one that
+    /// ended.
+    pub(crate) fn ended_by_server(&mut self, sent_at: u64) -> bool {
+        if !self.in_transaction || self.superseded(sent_at) {
+            return false;
+        }
+        self.transaction_statements.clear();
+        self.in_transaction = false;
+        self.leave_manual()
+    }
+
+    /// Whether the open transaction failed and can only be rolled back
+    /// ([`Self::transaction_aborted`]).
+    pub(crate) fn transaction_failed(&self) -> bool {
+        self.in_transaction && self.transaction_aborted
+    }
+
+    /// [`Self::transaction_sends`] as it stands.
+    pub(crate) fn transaction_sends(&self) -> u64 {
+        self.transaction_sends.load(Ordering::SeqCst)
+    }
+
+    /// One more submission set the transaction state as it was sent; what
+    /// [`Self::transaction_sends`] now reads.
+    pub(crate) fn transaction_sent(&self) -> u64 {
+        self.transaction_sends.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether a submission sent after `sent_at` set the transaction state,
+    /// which an end sent at `sent_at` landing now must leave alone: the
+    /// session ran that submission after the end.
+    pub(crate) fn superseded(&self, sent_at: u64) -> bool {
+        self.transaction_sends() != sent_at
+    }
+
+    /// A `COMMIT` or `ROLLBACK` sent with the next transaction's `BEGIN`
+    /// behind it, as Manual's Commit and Roll back send them, has landed, with
+    /// `error` where it failed. [`Profile::in_transaction`] stayed set across
+    /// it, and the record is kept until now: only a pair that ran whole ended
+    /// the transaction it lists, and starts the record again with what
+    /// follows the end. One whose end failed where the engine keeps the
+    /// transaction (SQLite on a deferred constraint), or never ran behind a
+    /// Postgres failure ahead of it ([`failed_before_end`]), still holds what
+    /// the record lists, so the pair is added to it. Anywhere else the failed end
+    /// rolled it back and the `BEGIN` behind it never ran, as Postgres skips
+    /// the rest of a submission: nothing is open, and Manual, which promises a
+    /// transaction, gives way to Auto. One sent nothing changed nothing, and a
+    /// `lost` session has no transaction left. What another tab sent while
+    /// the pair was out, recorded from `since` on, may have run after it, in
+    /// the transaction it opened, so a pair that ran whole keeps it.
+    ///
+    /// Whether Manual gave way to Auto, for the caller to say.
+    pub(crate) fn reopen_landed(
+        &mut self,
+        sql: &str,
+        since: usize,
+        lost: bool,
+        error: Option<&DbError>,
+    ) -> bool {
+        match error {
+            None => {
+                let later = self
+                    .transaction_statements
+                    .split_off(since.min(self.transaction_statements.len()));
+                self.record_sent(sql, Some(true));
+                self.transaction_statements.extend(later);
+                self.transaction_aborted = false;
+                // An Auto prompt open over the pair was answered for the
+                // transaction it ended; the one it opened needs asking anew.
+                self.session.auto_commit_prompt = None;
+                false
+            }
+            Some(error) if crate::db::sent_nothing(error) && !lost => false,
+            Some(error)
+                if !lost
+                    && (crate::db::transaction_kept_open(error)
+                        || self
+                            .config
+                            .engine()
+                            .failed_end_keeps_transaction(&error.message)
+                        || failed_before_end(self.config.engine(), sql)) =>
+            {
+                self.transaction_aborted |= failed_before_end(self.config.engine(), sql);
+                self.transaction_statements.push(sql.to_string());
+                false
+            }
+            Some(_) => {
+                self.record_sent(sql, Some(false));
+                self.in_transaction = false;
+                self.leave_manual()
+            }
+        }
+    }
+
+    /// Keeps `sql`, which was just sent on the connection's own session, in
+    /// [`Profile::transaction_statements`] when the next `COMMIT` or
+    /// `ROLLBACK` will end it. `transaction` is what `sql::Leaves` says the
+    /// submission does to the transaction: `Some(false)` ends one and empties
+    /// the record, `Some(true)` leaves one open and starts the record again
+    /// with what this submission runs after its last end when the open
+    /// transaction really ended, and
+    /// `None` appends only while one is open. Called before [`Profile::in_transaction`] is
+    /// updated for the same submission, because it reads whether a
+    /// transaction was open before it.
+    pub(crate) fn record_sent(&mut self, sql: &str, transaction: Option<bool>) {
+        match transaction {
+            Some(false) => self.transaction_statements.clear(),
+            // The record must hold everything the next COMMIT ends, so it
+            // restarts only when the open transaction really ended: none was
+            // open, this submission ends one before opening the next, or the
+            // engine commits at a BEGIN. Where that cannot be told, it
+            // appends: a list showing a statement already committed is wrong
+            // on the safe side, and one dropping a statement still to be
+            // committed is not.
+            Some(true) => {
+                let engine = self.config.engine();
+                if crate::sql::ends_transaction(engine, sql) {
+                    // Only what follows the last end belongs to the new
+                    // transaction: the `COMMIT;` Manual sends ahead of its
+                    // `BEGIN;` closed the one before.
+                    let rest = crate::sql::after_last_end(engine, sql);
+                    self.transaction_statements = match rest.is_empty() {
+                        true => Vec::new(),
+                        false => vec![rest.to_string()],
+                    };
+                } else if !self.in_transaction || engine.begin_ends_open_transaction() {
+                    self.transaction_statements = vec![sql.to_string()];
+                } else {
+                    self.transaction_statements.push(sql.to_string());
+                }
+            }
+            None if self.in_transaction => self.transaction_statements.push(sql.to_string()),
+            None => {}
+        }
     }
 
     /// Why a queue of reads on this connection runs in turn rather than at
@@ -273,6 +577,57 @@ impl Profile {
             .or_else(|| connection?.spelled_database().map(str::to_string))
             .or_else(|| self.config.database_name())
             .or_else(|| connection?.current_database().map(str::to_string))
+    }
+
+    /// Starts a listing of the databases, returning what [`Self::latest_listing`]
+    /// asks of its answer.
+    pub(crate) fn start_listing(&mut self) -> u64 {
+        self.listings += 1;
+        self.listings
+    }
+
+    /// Whether the listing `started` is the latest one started.
+    pub(crate) fn latest_listing(&self, started: u64) -> bool {
+        self.listings == started
+    }
+
+    /// The include lists as they apply to this connection now, owned so a
+    /// read on a background thread can narrow its answer with them.
+    pub(crate) fn shown(&self) -> Shown {
+        self.include.resolve(
+            self.config.target().levels(),
+            self.active_database().as_deref(),
+            self.active_schema(),
+        )
+    }
+
+    /// The database the rows of the profile's own catalog are listed under,
+    /// as the connections tree names it: the session's, wherever the tree
+    /// lists the server's other databases beside it, and none where the
+    /// catalog spans the databases or there is no other. An action handed it
+    /// asks again when it runs, so one a database switch overtook is refused.
+    pub(crate) fn listed_database(&self) -> Option<String> {
+        self.config
+            .target()
+            .levels()
+            .lists_other_databases()
+            .then(|| self.active_database())
+            .flatten()
+    }
+
+    /// Whether the include lists hide an object in `schema` of `database`
+    /// (`None` for the connection's own), or the relation `relation` of it
+    /// when one is named, so the narrowed catalog not listing it says nothing
+    /// about whether it exists.
+    pub(crate) fn filter_hides(
+        &self,
+        database: Option<&str>,
+        schema: &str,
+        relation: Option<&str>,
+    ) -> bool {
+        let own = self.active_database();
+        let elsewhere = database.filter(|database| own.as_deref() != Some(*database));
+        !self.shown().lists_object(elsewhere, schema, relation)
     }
 
     /// The database a folder or a pin names its objects by, where the
@@ -379,6 +734,20 @@ impl Profile {
         }
     }
 
+    /// Whether the catalog read for `database` says what the saved filter
+    /// shows: only once a read under the lists saved now has landed
+    /// ([`Self::catalog_include`], [`Self::database_catalogs_shown`]). A save
+    /// keeps another database's catalog until the read it starts lands.
+    pub(crate) fn catalog_under_saved_filter(&self, database: Option<&str>) -> bool {
+        match database {
+            Some(database) => self
+                .database_catalogs_shown
+                .get(database)
+                .is_some_and(|read| *read == self.shown().in_another_database(database)),
+            None => self.catalog_include == self.include,
+        }
+    }
+
     pub(crate) fn refreshing_schema(&self) -> bool {
         self.schema_refresh == Some(self.generation)
     }
@@ -406,6 +775,37 @@ impl Profile {
                 BoundSession::Opening => None,
             })
             .collect()
+    }
+
+    /// Every session the keep-alive pings: the profile's own connection and
+    /// each one open for another database.
+    /// Each session a keep-alive round pings, with what it asks once it holds
+    /// that session ([`Connection::ping`]): that no transaction was opened on
+    /// it since the round was set, which the round checked only before.
+    pub(crate) fn sessions_to_ping(&self) -> Vec<(Connection, IdleCheck)> {
+        let sends = self.transaction_sends.clone();
+        let set_at = self.transaction_sends();
+        let own = self.connection().map(|connection| {
+            let idle: IdleCheck = Arc::new(move || sends.load(Ordering::SeqCst) == set_at);
+            (connection, idle)
+        });
+        own.into_iter()
+            .chain(self.sessions_to_hold().into_iter().map(|bound| {
+                let connection = bound.connection.clone();
+                let idle: IdleCheck = Arc::new(move || !bound.in_transaction());
+                (connection, idle)
+            }))
+            .collect()
+    }
+
+    /// Whether a statement of the user's has left a transaction open on the
+    /// profile's own session or on any session open for another database.
+    pub(crate) fn any_transaction_open(&self) -> bool {
+        self.in_transaction
+            || self
+                .sessions_to_hold()
+                .iter()
+                .any(|bound| bound.in_transaction())
     }
 
     /// Whether `session` is still the one registered for `database`. One
@@ -442,7 +842,63 @@ impl Profile {
     pub(crate) fn drop_sessions(&mut self) {
         self.bound.clear();
         self.database_catalogs.clear();
+        self.database_catalogs_shown.clear();
         self.session.schema_export = None;
+        // The Users and roles tab's kept session is one more, and stays open
+        // past a disconnect or an idle close unless it is let go of here.
+        for tab in &self.session.objects {
+            if let ObjectBody::Users { side, .. } = &tab.body {
+                side.release();
+            }
+        }
+    }
+
+    /// Let go of each session open for a database `shown` hides that only the
+    /// tree's reads were using: no query or object tab is bound to it, no
+    /// import is writing into it, and no transaction or session setting is
+    /// open on it, which closing would lose. A read still out over one keeps
+    /// it alive until it lands, and lands on nothing ([`Self::is_registered`]).
+    /// Returns the databases let go of.
+    pub(crate) fn release_hidden_sessions(&mut self, shown: &Shown) -> Vec<String> {
+        let held: HashSet<&str> = self
+            .session
+            .queries
+            .iter()
+            .filter_map(|tab| {
+                tab.binding
+                    .as_ref()
+                    .map(|binding| binding.database.as_str())
+            })
+            .chain(
+                self.session
+                    .objects
+                    .iter()
+                    .filter_map(|tab| tab.database.as_deref()),
+            )
+            .chain(
+                self.session
+                    .import_rows
+                    .as_ref()
+                    .and_then(|import| import.database.as_deref()),
+            )
+            .collect();
+        let released: Vec<String> = self
+            .bound
+            .iter()
+            .filter(|(database, session)| {
+                !shown.shows_database(database)
+                    && !held.contains(database.as_str())
+                    && match session {
+                        BoundSession::Open(bound) => !bound.changed(),
+                        BoundSession::Opening => true,
+                    }
+            })
+            .map(|(database, _)| database.clone())
+            .collect();
+        for database in &released {
+            self.bound.remove(database);
+        }
+        released
     }
 
     /// Why an edit under `binding` is not sent, as far as is known before it
@@ -459,6 +915,18 @@ impl Profile {
     /// statements run on, which a verified apply's own `BEGIN` and `COMMIT`
     /// would end: the profile's own for a tab of its database, the bound
     /// session's for a tab bound to another.
+    /// Whether a statement of a tab running on the profile's own session is
+    /// still out. One sent before an end that opens the next transaction
+    /// behind it may run after that pair, inside the transaction it opens,
+    /// where the record, started again from the pair, would not list it.
+    pub(crate) fn own_session_running(&self) -> bool {
+        let session = &self.session;
+        let tabs = (session.queries.iter().map(|tab| Tab::Query(tab.id)))
+            .chain(session.objects.iter().map(|tab| Tab::Object(tab.id)));
+        tabs.into_iter()
+            .any(|tab| session.running(tab) && self.binding_of(tab).is_none())
+    }
+
     pub(crate) fn transaction_open_for(&self, tab: Tab) -> bool {
         match self.binding_of(tab) {
             Some(binding) => self.bound_write_refusal(&binding).is_some(),
@@ -523,6 +991,31 @@ impl Profile {
         }
     }
 
+    /// Whether Filter Databases is offered for this profile, in the node menu
+    /// and the palette alike: its target has databases to choose between, and
+    /// its connection is open to list them. Omitted otherwise, never drawn
+    /// disabled.
+    pub(crate) fn offers_filter(&self) -> bool {
+        matches!(self.state, ProfileState::Connected(_))
+            && self.config.target().levels() != Levels::Flat
+    }
+
+    /// Why an edit of dbdelve's is not sent on the connection's own session:
+    /// a transaction of the user's is open on it and the batch brackets itself
+    /// (`sql::update_batch` on MySQL, MariaDB, SQLite and SQL Server), so its
+    /// `COMMIT` would end the user's -- and on MySQL and MariaDB its opening
+    /// `START TRANSACTION` would commit it first. A single statement carries
+    /// no bracket and joins the transaction, as the user's own would.
+    pub(crate) fn own_write_refusal(&self, sql: &str) -> Option<String> {
+        (self.in_transaction && crate::sql::ends_transaction(self.config.engine(), sql)).then(
+            || {
+                "Not sent: a transaction is open on this connection, and the batch of edits \
+                 would end it with a COMMIT of its own."
+                    .into()
+            },
+        )
+    }
+
     pub(crate) fn connection(&self) -> Option<Connection> {
         match &self.state {
             ProfileState::Connected(connection) => Some((**connection).clone()),
@@ -540,6 +1033,8 @@ impl Profile {
             .session
             .objects
             .iter()
+            // Users and roles is read again from the server, not restored.
+            .filter(|tab| !matches!(tab.body, ObjectBody::Users { .. }))
             .map(|tab| store::StoredObject {
                 active: active == Tab::Object(tab.id),
                 ..tab.stored(engine, cx)
@@ -616,6 +1111,28 @@ impl Profile {
             next_query_id: Some(self.session.next_query_id),
             color: self.color.map(|color| color.slug().to_string()),
             mode: Some(self.mode.slug().to_string()),
+            include_databases: self.include.databases.clone(),
+            include_schemas: self.include.schemas.clone(),
+            include_tables: self
+                .include
+                .tables
+                .iter()
+                .map(|list| store::StoredTableFilter {
+                    database: list.database.clone(),
+                    schema: list.schema.clone(),
+                    tables: list.tables.clone(),
+                })
+                .collect(),
+            introspection_depth: (self.behaviour.depth != Depth::default())
+                .then(|| self.behaviour.depth.slug().to_string()),
+            startup_script: Some(self.behaviour.startup_script.clone())
+                .filter(|script| !script.trim().is_empty()),
+            keep_alive_seconds: self.behaviour.keep_alive,
+            idle_timeout_minutes: self.behaviour.idle_timeout,
+            time_zone: server.and_then(|server| server.time_zone.clone()),
+            driver_properties: server
+                .map(|server| server.properties.stored())
+                .unwrap_or_default(),
             confirmed: self
                 .confirmed
                 .iter()
@@ -821,6 +1338,17 @@ pub(crate) struct Session {
     /// An action a landed row send released, waiting for render, which has the
     /// `Window` its handler needs (`Workspace::resume_released`).
     pub(crate) resume_after: Option<(Tab, AfterEdits)>,
+    /// The question turning auto-commit back on asks while a transaction is
+    /// open: commit it, roll it back, or leave it.
+    pub(crate) auto_commit_prompt: Option<AutoCommitPrompt>,
+    /// The tab the Auto dialog's COMMIT or ROLLBACK is running in. Auto is
+    /// read only once that statement lands, because the switch is not
+    /// allowed to say Auto over a transaction the server still holds.
+    pub(crate) auto_after_end: Option<Tab>,
+    /// The tab Manual's opening `BEGIN` is running in. The switch reads
+    /// Manual from the moment it is sent; should a Cancel drop it unsent, no
+    /// transaction opened and the switch goes back to Auto when it lands.
+    pub(crate) manual_after_begin: Option<Tab>,
     pub(crate) notice: Option<String>,
     /// What a statement's run cost beyond its result (`QueryResult::notice`),
     /// said only while the tab it ran on is in front, under any `notice`.
@@ -885,6 +1413,12 @@ pub(crate) struct Session {
 pub(crate) const APPLY_IN_TRANSACTION: &str =
     "A transaction is open on this connection; the edits were not applied.";
 
+/// Why a review written to join the user's transaction is not run once that
+/// transaction has ended ([`ApplyReview::joining`]).
+pub(crate) const JOINING_ENDED_REFUSAL: &str = "Not sent: these edits were written to join the \
+     transaction that was open, which has since ended. Apply them again to write them as a \
+     batch of their own.";
+
 /// A generated statement waiting to be read and run.
 pub(crate) struct ApplyReview {
     /// The tab the edits came from, so the modal is shown over that surface
@@ -910,6 +1444,33 @@ pub(crate) struct ApplyReview {
     /// The profile generation its last Run went out on. A reconnect since
     /// means that run's landing will be dropped, so the review may close.
     pub(crate) ran_on: Option<u64>,
+    /// `sql` was written without brackets of its own, to join the user's
+    /// transaction open when it was written (`sql::update_batch_joining`).
+    /// Run refuses it once that transaction has ended: each statement would
+    /// then commit on its own, and a failure part way would leave some of
+    /// the edits applied.
+    pub(crate) joining: bool,
+    /// The Show Grants editor's changes: run batch by batch on sessions of
+    /// their own, each database's on that database's, never through the tab
+    /// the review is drawn over.
+    pub(crate) grants: Option<GrantRun>,
+}
+
+/// A grant review's statements and where its run stands.
+pub(crate) struct GrantRun {
+    /// One per database, in the order they run; each passed
+    /// `sql::is_generated_grant_change` as it was written.
+    pub(crate) batches: Vec<crate::db::roles::GrantBatch>,
+    /// The Show Grants dialog it was written from, read again once it ran.
+    pub(crate) request: u64,
+    /// The profile generation and own database the batches were written
+    /// under: a batch for the own database names none, so after a reconnect
+    /// or a switch it would run somewhere the review did not show.
+    pub(crate) written_on: (u64, Option<String>),
+    /// The run out, by its Cancel, while one is: a second Run waits for it.
+    pub(crate) running: Option<crate::db::CancelToken>,
+    /// A Cancel was sent to it.
+    pub(crate) cancelling: bool,
 }
 
 /// The rows a reviewed draft was written from, as they were fetched: one step
@@ -1021,6 +1582,16 @@ pub(crate) struct InsertField {
     /// `Engine::new_row_sends_empty`: whether an emptied field is `''` or left
     /// out.
     pub(crate) sends_empty: bool,
+}
+
+/// A catalog a database switch kept, with the configuration the switch
+/// reconnects with. Only that connection may put it back: an edit made while
+/// it opens can point the profile at another server, whose catalog this is
+/// not.
+pub(crate) struct KeptCatalog {
+    pub(crate) config: ConnectionConfig,
+    pub(crate) catalog: Catalog,
+    pub(crate) routines: Routines,
 }
 
 /// Rows on their way into a table.
@@ -1292,6 +1863,12 @@ impl Session {
             let id = id.clone();
             move |workspace, tree, event: &TreeEvent, cx| {
                 workspace.remember_fold(&id, &tree, event, cx);
+                // A schema listed unread is read when its row opens.
+                if let TreeEvent::Expanded(row) = event
+                    && let Some(schema) = crate::explorer::schema_row_name(row)
+                {
+                    workspace.read_schema(&id, schema, cx);
+                }
             }
         })
         .detach();
@@ -1359,6 +1936,9 @@ impl Session {
             pending_overwrite: None,
             pending_forget: None,
             resume_after: None,
+            auto_commit_prompt: None,
+            auto_after_end: None,
+            manual_after_begin: None,
             notice,
             tab_notice: None,
             apply_review: None,
@@ -1679,7 +2259,7 @@ impl Session {
         match self.active_object() {
             None => self.active_query_tab().map(|tab| tab.shown().0),
             Some(tab) => match &tab.body {
-                ObjectBody::Relation { query, .. } => Some(query),
+                ObjectBody::Relation { query, .. } | ObjectBody::Users { query, .. } => Some(query),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
                 | ObjectBody::Diagram { .. } => None,
@@ -1701,7 +2281,8 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1762,7 +2343,8 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1797,7 +2379,9 @@ impl Session {
                 .iter()
                 .find(|tab| tab.id == id)
                 .and_then(|tab| match &tab.body {
-                    ObjectBody::Relation { query, .. } => Some(query),
+                    ObjectBody::Relation { query, .. } | ObjectBody::Users { query, .. } => {
+                        Some(query)
+                    }
                     ObjectBody::Routine(_)
                     | ObjectBody::Structure { .. }
                     | ObjectBody::Diagram { .. } => None,
@@ -1814,7 +2398,8 @@ impl Session {
                 ObjectBody::Relation { sorting, .. } => Some(sorting),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1826,7 +2411,8 @@ impl Session {
                 ObjectBody::Relation { sorting, .. } => Some(sorting),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1854,7 +2440,8 @@ impl Session {
                 ObjectBody::Relation { edit_mode, .. } => Some(edit_mode),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
         }
     }
@@ -1874,7 +2461,8 @@ impl Session {
                 ObjectBody::Relation { results, .. } => Some(results),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             }))
     }
 
@@ -1891,7 +2479,8 @@ impl Session {
                 Some((&mut tab.query, results))
             }
             Tab::Object(id) => match &mut self.objects.iter_mut().find(|tab| tab.id == id)?.body {
-                ObjectBody::Relation { query, results, .. } => Some((query, results.clone())),
+                ObjectBody::Relation { query, results, .. }
+                | ObjectBody::Users { query, results, .. } => Some((query, results.clone())),
                 ObjectBody::Routine(_)
                 | ObjectBody::Structure { .. }
                 | ObjectBody::Diagram { .. } => None,
@@ -1952,6 +2541,7 @@ impl Session {
         }
         self.pending_overwrite = None;
         self.pending_forget = None;
+        self.auto_commit_prompt = None;
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
@@ -2121,6 +2711,12 @@ pub(crate) struct PendingOverwrite {
     pub(crate) close: bool,
 }
 
+/// The question Auto asks while a transaction is open, and whether its list
+/// of the statements that transaction has run is open.
+pub(crate) struct AutoCommitPrompt {
+    pub(crate) statements_shown: bool,
+}
+
 /// What takes focus when a surface comes to the front. A buffer, a field and a
 /// grid are all focusable and no two of them share a type.
 pub(crate) enum Focus {
@@ -2128,11 +2724,23 @@ pub(crate) enum Focus {
     Grid(Entity<TableState<ResultGrid>>),
     Structure(Entity<TableState<StructureGrid>>),
     Diagram(gpui::FocusHandle),
+    /// The Users and roles list, which takes its own keys.
+    Users(gpui::FocusHandle),
     /// The window itself, for a surface with nothing in it to type into. Not a
     /// no-op: a keystroke only reaches the workspace along the focused
     /// element's dispatch path, so focusing nothing at all is what makes every
     /// binding dead until something is clicked.
     Window,
+}
+
+/// How much of a server's roles is known, read on a side connection.
+#[derive(Clone, Default)]
+pub(crate) enum RolesState {
+    #[default]
+    Unloaded,
+    Loading,
+    Failed(String),
+    Loaded(Arc<crate::db::roles::Roles>),
 }
 
 pub(crate) enum CatalogState {
@@ -2286,11 +2894,16 @@ impl Bound {
     /// transaction open, and nothing in the error tells that from one the
     /// server refused, so a failed one keeps edits refused until a ROLLBACK or
     /// COMMIT goes through.
+    ///
+    /// An end that succeeded is still not the end of the transaction when
+    /// `still_open` says so of what it returned
+    /// ([`crate::db::transaction_still_open`]).
     pub(crate) fn leave<T>(
         &self,
         transaction: Option<bool>,
         settings: bool,
         run: impl FnOnce() -> Result<T, DbError>,
+        still_open: impl FnOnce(&T) -> bool,
     ) -> Result<T, DbError> {
         if settings {
             self.settings.store(true, Ordering::SeqCst);
@@ -2303,7 +2916,7 @@ impl Bound {
             self.transaction.store(true, Ordering::SeqCst);
         }
         let ran = run();
-        if !open && ran.is_ok() {
+        if !open && ran.as_ref().is_ok_and(|ran| !still_open(ran)) {
             self.transaction.store(false, Ordering::SeqCst);
         }
         ran
@@ -2422,6 +3035,78 @@ pub(crate) enum Routines {
     Loading,
     Loaded,
     Failed,
+    /// The profile's [`Depth`] chose not to read them. Not an error and no
+    /// notice is written, but nothing about a routine can be said from it
+    /// either, so a restored routine tab keeps waiting as under `Failed`.
+    Skipped,
+}
+
+/// Which of the connect-time loads run. `Sizes` is every load, as before the
+/// setting existed; columns are no level, since no connect reads them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Depth {
+    /// The relations of the catalog.
+    Relations,
+    /// Then the routines and sequences.
+    Routines,
+    /// Then table sizes, which also need Show sizes.
+    #[default]
+    Sizes,
+}
+
+impl Depth {
+    pub(crate) const ALL: [Depth; 3] = [Depth::Relations, Depth::Routines, Depth::Sizes];
+
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Depth::Relations => "relations",
+            Depth::Routines => "routines",
+            Depth::Sizes => "sizes",
+        }
+    }
+
+    pub(crate) fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|depth| depth.slug() == slug)
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Depth::Relations => "Relations",
+            Depth::Routines => "+ Routines",
+            Depth::Sizes => "+ Sizes",
+        }
+    }
+}
+
+/// The fewest seconds between keep-alive pings. Under it a ping is traffic of
+/// its own rather than a keep-alive, and a hand-edited file could set a storm.
+pub(crate) const MIN_KEEP_ALIVE: u32 = 10;
+
+/// The most seconds between keep-alive pings. Every cut-off a ping answers (a
+/// load balancer, a pooler's idle limit) is under an hour, so past this the
+/// timer would not fire in any session a user keeps; the number was one of two
+/// in the phase with no ceiling at all.
+pub(crate) const MAX_KEEP_ALIVE: u32 = 3600;
+
+/// The most minutes an idle timeout may wait: a day. Past it the deadline is
+/// one a session left open would not reach, so the setting would be a timer
+/// that never fires.
+pub(crate) const MAX_IDLE_TIMEOUT: u32 = 1440;
+
+/// What a profile does with its connection rather than what the connection
+/// is, so changing it never reconnects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Behaviour {
+    pub(crate) depth: Depth,
+    /// The user's text, as typed. Gated on every use and never stored gated: a
+    /// mode lowered since it was written is judged at the next connect.
+    pub(crate) startup_script: String,
+    /// Seconds between pings of the sessions the user holds open; `None` is
+    /// off. Never read by anything but the keep-alive timer.
+    pub(crate) keep_alive: Option<u32>,
+    /// Whole minutes without use after which the profile closes its
+    /// sessions; `None` is off. Read by the idle timer only.
+    pub(crate) idle_timeout: Option<u32>,
 }
 
 /// Which surface the main pane is showing, and what a run targets. Both kinds
@@ -3609,9 +4294,10 @@ impl ObjectTab {
     pub(crate) fn label(&self) -> &str {
         match &self.body {
             ObjectBody::Diagram { .. } => &self.schema,
-            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
-                &self.name
-            }
+            ObjectBody::Relation { .. }
+            | ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Users { .. } => &self.name,
         }
     }
 
@@ -3621,9 +4307,10 @@ impl ObjectTab {
     pub(crate) fn filter(&self) -> &str {
         match &self.body {
             ObjectBody::Relation { filter, .. } => filter,
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
-                ""
-            }
+            ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Diagram { .. }
+            | ObjectBody::Users { .. } => "",
         }
     }
 
@@ -3635,18 +4322,20 @@ impl ObjectTab {
                 .iter()
                 .map(stored_filter)
                 .collect(),
-            ObjectBody::Routine(_) | ObjectBody::Structure { .. } | ObjectBody::Diagram { .. } => {
-                Vec::new()
-            }
+            ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Diagram { .. }
+            | ObjectBody::Users { .. } => Vec::new(),
         }
     }
 
     pub(crate) fn stored(&self, engine: Engine, cx: &gpui::App) -> store::StoredObject {
         let diagram_view = match &self.body {
             ObjectBody::Diagram { view, .. } => Some(view.read(cx).stored()),
-            ObjectBody::Relation { .. } | ObjectBody::Routine(_) | ObjectBody::Structure { .. } => {
-                None
-            }
+            ObjectBody::Relation { .. }
+            | ObjectBody::Routine(_)
+            | ObjectBody::Structure { .. }
+            | ObjectBody::Users { .. } => None,
         };
         store::StoredObject {
             database: self.database.clone(),
@@ -3658,7 +4347,8 @@ impl ObjectTab {
                 ObjectBody::Structure { origin, .. } => origin.clone(),
                 ObjectBody::Relation { .. }
                 | ObjectBody::Routine(_)
-                | ObjectBody::Diagram { .. } => None,
+                | ObjectBody::Diagram { .. }
+                | ObjectBody::Users { .. } => None,
             },
             // Nothing writes the two-field rows an older build did; they are
             // read once on the way in and superseded by `bars` on this save.
@@ -3803,8 +4493,19 @@ pub(crate) fn matching_tab<'a>(
 
 /// What the catalog says a relation is. The only authority on it: a stored
 /// tab's kind is a cache of this, and can be a default rather than a kind.
+///
+/// A relation a table list left out of the catalog is still answered, from the
+/// record the narrowing kept: a tab on one keeps the right icon.
 pub(crate) fn relation_kind(catalog: &Catalog, schema: &str, name: &str) -> Option<RelationKind> {
-    catalog_relation(catalog, schema, name).map(|relation| relation.kind)
+    catalog_relation(catalog, schema, name)
+        .map(|relation| relation.kind)
+        .or_else(|| {
+            let hidden = catalog.hidden_relations.get(schema)?;
+            hidden
+                .iter()
+                .find(|(hidden, _)| hidden == name)
+                .map(|(_, kind)| *kind)
+        })
 }
 
 pub(crate) fn catalog_relation<'a>(
@@ -3935,6 +4636,17 @@ pub(crate) enum ObjectBody {
         /// Read before a Refresh or a reconnect, so read again the next time
         /// the tab is looked at, with the old diagram on screen meanwhile.
         stale: bool,
+    },
+    /// A server's Users and roles: one per connection. The view holds what
+    /// was read; the slot is where a role change it put up for review runs,
+    /// never drawn, since the tab reads its roles again once one lands.
+    Users {
+        view: Entity<crate::users_view::UsersView>,
+        query: QueryState,
+        results: Entity<TableState<ResultGrid>>,
+        /// The side session its reads run on, opened by the first and kept
+        /// while the tab is ([`crate::workspace::RolesSide`]).
+        side: std::sync::Arc<crate::workspace::RolesSide>,
     },
 }
 
@@ -4085,6 +4797,8 @@ pub(crate) enum Refresh {
         /// (`Workspace::execute_unchecked`).
         verify: Option<Verification>,
     },
+    /// The Users and roles tab: its roles read again after a role change.
+    Roles,
 }
 
 impl Refresh {
@@ -4588,6 +5302,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_postgres_failure_ahead_of_the_end_keeps_the_transaction_open() {
+        let failed = DbError {
+            message: "division by zero".into(),
+            position: None,
+        };
+        let left_open = |engine, sql| failed_end_left_open(engine, sql, true, &failed);
+        // Postgres skips the rest of the submission after the failure, so
+        // the COMMIT never ran: the transaction is open, and aborted.
+        assert!(left_open(Engine::Postgres, "UPDATE t SET a = 1/0; COMMIT"));
+        assert!(left_open(
+            Engine::Postgres,
+            "UPDATE t SET a = 1/0; ROLLBACK"
+        ));
+        // The end failed itself, or ran first and committed before it.
+        assert!(!left_open(Engine::Postgres, "COMMIT"));
+        assert!(!left_open(Engine::Postgres, "COMMIT; UPDATE t SET a = 1/0"));
+        // Elsewhere the end is not known to be skipped.
+        assert!(!left_open(Engine::MySql, "UPDATE t SET a = 1/0; COMMIT"));
+    }
+
+    #[test]
     fn a_metadata_read_waits_out_a_begin_being_sent_and_then_stays_off_its_transaction() {
         let connection = Connection::open(crate::db::ConnectionConfig::duckdb(
             crate::db::DUCKDB_IN_MEMORY.to_string(),
@@ -4925,6 +5660,8 @@ mod tests {
             edits: true,
             verify: None,
             ran_on: None,
+            joining: false,
+            grants: None,
         }
     }
 
@@ -6620,5 +7357,16 @@ mod tests {
             refused(AfterEdits::EditMode(EditMode::Draft))
                 .contains("Switching the edit mode discards")
         );
+    }
+
+    #[test]
+    fn depth_levels_are_ordered_and_default_to_today() {
+        assert!(Depth::Relations < Depth::Routines);
+        assert!(Depth::Routines < Depth::Sizes);
+        assert_eq!(Depth::default(), Depth::Sizes);
+        for depth in Depth::ALL {
+            assert_eq!(Depth::from_slug(depth.slug()), Some(depth));
+        }
+        assert_eq!(Depth::from_slug("everything"), None);
     }
 }

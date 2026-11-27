@@ -84,7 +84,8 @@ impl Workspace {
                     } => (structure, results),
                     ObjectBody::Structure { .. }
                     | ObjectBody::Routine(_)
-                    | ObjectBody::Diagram { .. } => return,
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => return,
                 };
                 if !tab.takes_inserts(self.target()) {
                     self.note("This view takes no inserts.".into(), cx);
@@ -368,6 +369,8 @@ impl Workspace {
                 edits: false,
                 verify,
                 ran_on: None,
+                joining: false,
+                grants: None,
             });
         }
         cx.notify();
@@ -1577,6 +1580,8 @@ impl Workspace {
                 edits: false,
                 verify,
                 ran_on: None,
+                joining: false,
+                grants: None,
             });
         }
         cx.notify();
@@ -2511,7 +2516,18 @@ impl Workspace {
         let pending = results.read(cx).delegate().pending_updates();
         // Nothing partial runs: a batch missing one of its rows is not the
         // change the user made.
-        let batch = match update_batch(self.engine(), &pending) {
+        // Inside the user's open transaction the edit joins it, as a single
+        // row's does, rather than bracketing itself and ending it: the one on
+        // the session the edit runs on, which for a bound tab is not the
+        // profile's own.
+        let joining = self
+            .profile()
+            .is_some_and(|profile| profile.transaction_open_for(tab));
+        let written = match joining {
+            true => sql::update_batch_joining(self.engine(), &pending),
+            false => update_batch(self.engine(), &pending),
+        };
+        let batch = match written {
             Ok(batch) => batch,
             Err(message) => {
                 self.note(message, cx);
@@ -2576,6 +2592,8 @@ impl Workspace {
                         edits: true,
                         verify,
                         ran_on: None,
+                        joining,
+                        grants: None,
                     });
                     cx.notify();
                 }
@@ -2672,6 +2690,8 @@ impl Workspace {
                 edits: true,
                 verify,
                 ran_on: None,
+                joining: false,
+                grants: None,
             });
             cx.notify();
         }
@@ -2724,6 +2744,12 @@ impl Workspace {
         let Some(review) = &profile.session.apply_review else {
             return;
         };
+        // Grant changes run batch by batch on sessions of their own, not
+        // through the tab the review is drawn over.
+        if review.grants.is_some() {
+            self.run_grant_review(cx);
+            return;
+        }
         let (tab, sql) = (review.tab, review.sql.clone());
         // Cloned, never taken: a refusal leaves the review open and the next
         // Run reads the rows again.
@@ -2731,6 +2757,12 @@ impl Workspace {
         // Without the refresh the grid would show the UPDATE's empty result set
         // and the user would watch their table vanish.
         let refresh = match tab {
+            Tab::Object(id)
+                if (profile.session.objects.iter())
+                    .any(|tab| tab.id == id && matches!(tab.body, ObjectBody::Users { .. })) =>
+            {
+                Refresh::Roles
+            }
             Tab::Object(id) => Refresh::Relation { id, verify },
             Tab::Query(id) => match profile
                 .session
@@ -2771,6 +2803,9 @@ impl Workspace {
         };
         if !profile.session.apply_review_covers(profile.session.active) {
             return false;
+        }
+        if (profile.session.apply_review.as_ref()).is_some_and(|review| review.grants.is_some()) {
+            return self.close_grant_review(cx);
         }
         // While its batch runs, Cancel and Esc stop it first, and close the
         // review only once a cancel is out or a reconnect has moved the
@@ -2822,7 +2857,7 @@ impl Workspace {
     ///
     /// Asked last, once the creator has nothing left of its own to refuse:
     /// a creator that would have refused anyway must not move the user.
-    fn review_slot_free(
+    pub(super) fn review_slot_free(
         &mut self,
         from: Tab,
         replaces_own: bool,

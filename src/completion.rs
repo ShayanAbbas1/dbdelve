@@ -1744,6 +1744,7 @@ mod tests {
                 },
             ],
             database: None,
+            ..Default::default()
         }
     }
 
@@ -1887,6 +1888,31 @@ mod tests {
     }
 
     #[test]
+    fn a_relation_the_table_list_hides_is_not_offered_though_its_record_is_kept() {
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["orders".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let narrowed = shown.narrow_catalog(schemas());
+        assert_eq!(narrowed.hidden_in("public"), 1, "accounts is on record");
+
+        let sql = "SELECT * FROM acc";
+        let offered = detached(narrowed, COLUMNS)
+            .items(sql, sql.len())
+            .0
+            .into_iter()
+            .map(|(_, candidate)| candidate.label)
+            .collect::<Vec<_>>();
+        assert!(
+            !offered.iter().any(|label| label == "accounts"),
+            "{offered:?}"
+        );
+    }
+
+    #[test]
     fn a_block_comment_suppresses_until_it_closes() {
         assert!(labels("/* acc| */ SELECT 1").is_empty());
         assert!(!labels("/* a note */ SELECT * FROM acc|").is_empty());
@@ -1975,6 +2001,7 @@ mod tests {
                         sequences: Vec::new(),
                     }],
                     database: None,
+                    ..Default::default()
                 },
                 &[],
             )
@@ -2091,6 +2118,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             &[("public", "wide", &names)],
         );
@@ -2129,6 +2157,7 @@ mod tests {
                 })
                 .collect(),
             database: None,
+            ..Default::default()
         };
         let completions = detached(many, &[]);
         let sql = "SELECT * FROM users WHERE u";
@@ -2221,6 +2250,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             &[("shop", "users", &["_id", "name", "email"])],
         );
@@ -2302,6 +2332,7 @@ mod tests {
             Catalog {
                 schemas: Vec::new(),
                 database: None,
+                ..Default::default()
             },
             &[],
         );
@@ -2360,6 +2391,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             &held,
         );
@@ -2412,6 +2444,7 @@ mod tests {
                 },
             ],
             database: None,
+            ..Default::default()
         };
         let text = "parent_id IN (SELECT id FROM accounts) AND ema";
         let scope = ("public".to_string(), "accounts".to_string());
@@ -2545,6 +2578,7 @@ mod tests {
                 sequences: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         };
         let held = described
             .into_iter()

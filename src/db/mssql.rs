@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::net::{Shutdown, SocketAddr};
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
@@ -580,6 +580,15 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
 
 type Tds = Client<Compat<TcpStream>>;
 
+/// The name the server shows for this login: the profile's, else `DBDelve`.
+fn application_name_of(server: &ServerConfig) -> &str {
+    server
+        .properties
+        .application_name
+        .as_deref()
+        .unwrap_or("DBDelve")
+}
+
 /// dbdelve's five rungs as tiberius's two settings.
 ///
 /// tiberius builds its own rustls configuration and offers three trusts:
@@ -601,7 +610,7 @@ fn config(server: &ServerConfig, encryption: EncryptionLevel) -> Config {
     if !server.database.is_empty() {
         config.database(&server.database);
     }
-    config.application_name("DBDelve");
+    config.application_name(application_name_of(server));
     // Sent as typed, blank included: cloud IAM issues a token or nothing.
     config.authentication(AuthMethod::sql_server(&server.user, &server.password));
     config.encryption(encryption);
@@ -861,6 +870,26 @@ struct InFlight {
     /// A Cancel that arrived while one was waiting, carried out when it gets
     /// the session.
     cancel_queued: bool,
+    /// A second handle on the socket of a login still replaying the startup
+    /// script, which a statement waiting on it has no bound on. A Cancel for
+    /// that statement shuts it down, which drops the login unsent to.
+    signing_in: Option<std::net::TcpStream>,
+}
+
+impl InFlight {
+    /// Publishes `socket` as a login's still replaying its startup script,
+    /// for a Cancel to drop. `false`, publishing nothing, when a Cancel for
+    /// the statement waiting on this login came while it signed in, before
+    /// there was a socket to shut: the script would otherwise run unbounded
+    /// for a statement already cancelled. `cancel_queued` stays set, for
+    /// `acquire` to answer that statement with.
+    fn replaying(&mut self, socket: Option<std::net::TcpStream>) -> bool {
+        if self.cancel_queued {
+            return false;
+        }
+        self.signing_in = socket;
+        true
+    }
 }
 
 /// A live connection. Cloneable so a background task can take one without
@@ -891,6 +920,11 @@ pub struct Connection {
     graph: GraphCancel,
     /// The login's default schema in the database it opened on.
     default_schema: Option<String>,
+    /// The statements the profile's gated startup script came to, run by
+    /// [`Self::connect`] on every login: the main session's, one opened for a
+    /// database, one beside it, and any reconnect after a stop. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
 }
 
 impl Connection {
@@ -904,6 +938,7 @@ impl Connection {
                 alongside: false,
                 graph: GraphCancel::default(),
                 default_schema: None,
+                startup: Arc::default(),
             };
             let mut session = connection.connect()?;
             // Asked even when the profile names one, for the server's spelling
@@ -970,8 +1005,7 @@ impl Connection {
         }
         .map_err(|error| connect_error(&error, &self.server))?;
 
-        self.in_flight().socket = Some(socket);
-        Ok(Session {
+        let mut session = Session {
             runtime,
             client,
             timeout: self.server.statement_timeout,
@@ -979,7 +1013,82 @@ impl Connection {
             rowcount: false,
             in_transit: false,
             repeatable_read: false,
-        })
+        };
+        // Session options last on a login are the script's: a login holds them
+        // until the connection drops, so replaying here covers every one.
+        // Published for the while as a login's, so a Cancel can drop it.
+        // A login with no script has nothing left to bound, and `acquire`
+        // still honours the Cancel once it returns.
+        if !self.startup.is_empty() && !self.in_flight().replaying(socket.try_clone().ok()) {
+            return Err(plain_error(super::CANCELLED_QUEUED.into()));
+        }
+        let replayed = run_startup(&mut session, &self.startup, &self.server.database);
+        self.in_flight().signing_in = None;
+        // Only once the script ran: a login it failed is dropped here, and
+        // its socket with it, rather than kept open for a Cancel to find.
+        replayed?;
+        self.in_flight().socket = Some(socket);
+        Ok(session)
+    }
+
+    /// Runs `statements` now on the session `open` logged in, and keeps them
+    /// for every login from here on. The first error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        {
+            let mut session = self.session.lock().map_err(|_| {
+                plain_error(
+                    "The connection is unavailable after an earlier internal failure.".into(),
+                )
+            })?;
+            if let Some(session) = session.as_mut() {
+                run_startup(session, &statements, &self.server.database)?;
+            }
+        }
+        self.startup = statements.into();
+        Ok(self)
+    }
+
+    /// One `SELECT 1` on the session. A statement holding it is the session in
+    /// use, so the ping is skipped, never queued behind it; a session that has
+    /// not logged in yet is left alone, since a ping that logged in would open
+    /// a login nobody asked for. A poisoned lock is a session every later
+    /// statement would fail on. `idle` is asked once the session is held, and
+    /// a `false` skips it too, as on Postgres.
+    pub fn ping(&self, idle: &dyn Fn() -> bool) -> Result<(), DbError> {
+        let mut session = match self.session.try_lock() {
+            Ok(session) => session,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(plain_error("The connection is closed.".into()));
+            }
+        };
+        match session.as_mut() {
+            None => Ok(()),
+            Some(_) if !idle() => Ok(()),
+            Some(session) => {
+                // Bounded by [`super::PING_WITHIN`] even under no statement
+                // timeout: one that expires marks the session lost, so the
+                // next statement finds it so rather than waiting behind a
+                // ping on a socket gone quiet.
+                let within = u32::try_from(super::PING_WITHIN.as_secs()).unwrap_or(u32::MAX);
+                let bound = match session.timeout {
+                    0 => within,
+                    timeout => timeout.min(within),
+                };
+                let kept = std::mem::replace(&mut session.timeout, bound);
+                let pinged = ask(session, "SELECT 1").map(|_| ());
+                session.timeout = kept;
+                match pinged {
+                    Err(_) if matches!(session.lost, Some(Lost::TimedOut)) => {
+                        Err(plain_error(format!(
+                            "The server did not answer a keep-alive within {bound} seconds, \
+                             so the connection was closed."
+                        )))
+                    }
+                    pinged => pinged,
+                }
+            }
+        }
     }
 
     /// The profile's database, or the login's default when it names none,
@@ -1053,8 +1162,14 @@ impl Connection {
         self.graph.ask();
         if !in_flight.running {
             // Waiting behind a catalog load: stopping the load would let the
-            // statement run anyway.
+            // statement run anyway. Waiting on a login's startup script, which
+            // runs unbounded under no statement timeout: that login is dropped.
             in_flight.cancel_queued = in_flight.queued > 0;
+            if in_flight.cancel_queued
+                && let Some(socket) = &in_flight.signing_in
+            {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
             return Ok(());
         }
         in_flight.stopped = true;
@@ -1241,9 +1356,7 @@ impl Connection {
             position: None,
         })?;
         if cancelled {
-            return Err(plain_error(
-                "Cancelled before it started: nothing was sent to the server.".into(),
-            ));
+            return Err(plain_error(super::CANCELLED_QUEUED.into()));
         }
         connected?;
         Ok(guard)
@@ -1484,6 +1597,12 @@ impl Connection {
                 .trip("SELECT @@ROWCOUNT")
                 .and_then(Result::ok)
                 .and_then(|count| count.result.rows.first()?.get(0)?.parse().ok());
+        }
+        if let Ok(collected) = &mut result
+            && origin == Origin::User
+            && let Some(before) = before
+        {
+            still_open(session, sql, before, &mut collected.result);
         }
         // After a failure too: a batch that moved the session and then failed
         // leaves it moved all the same.
@@ -2886,6 +3005,71 @@ fn sets_rowcount(sql: &str) -> Option<bool> {
         .map(|window| window[2].parse::<u64>() != Ok(0))
 }
 
+/// The startup `statements` on `session`, the first error stopping the rest,
+/// kept as a user's own run is: a `SET ROWCOUNT` they leave in force is
+/// theirs, so no read caps over it, and a script that leaves the session on
+/// another database than the one it started on, `database`, is moved back and
+/// refused, since the explorer and every statement dbdelve writes name
+/// `database`'s objects. Told apart by `DB_ID()`, not by name: on a
+/// case-sensitive server `Sales` and `sales` are two databases.
+fn run_startup(
+    session: &mut Session,
+    statements: &[String],
+    database: &str,
+) -> Result<(), DbError> {
+    let home = match statements.iter().any(|statement| mentions_use(statement)) {
+        true => Some(database_id(session)?),
+        false => None,
+    };
+    for statement in statements {
+        ask(session, statement).map_err(|error| startup_error(session, error))?;
+        if let Some(set) = sets_rowcount(statement) {
+            session.rowcount = set;
+        }
+    }
+    let Some(home) = home else {
+        return Ok(());
+    };
+    if database_id(session)? == home {
+        return Ok(());
+    }
+    // Refused either way; moved back so a session kept after the refusal is
+    // not left elsewhere.
+    let _ = ask(session, &format!("USE [{}]", database.replace(']', "]]")));
+    Err(plain_error(format!(
+        "The startup script was refused: it moved the session off database {database}, whose \
+         objects this connection's explorer and every statement dbdelve writes name."
+    )))
+}
+
+/// What a startup statement failed with, said where the session was lost and
+/// [`ask`] has no words for it: no `run_held` reports that here.
+fn startup_error(session: &Session, error: DbError) -> DbError {
+    if !error.message.is_empty() {
+        return error;
+    }
+    plain_error(match &session.lost {
+        Some(Lost::TimedOut) => format!(
+            "A startup statement ran past the {}-second statement timeout and was stopped by \
+             closing its connection.",
+            session.timeout
+        ),
+        Some(Lost::Panicked(message)) => message.clone(),
+        _ => "The connection was lost while the startup script ran.".into(),
+    })
+}
+
+/// The server's id of the database the session is on.
+fn database_id(session: &mut Session) -> Result<String, DbError> {
+    Ok(ask(session, "SELECT DB_ID()")?
+        .result
+        .rows
+        .first()
+        .and_then(|row| row.get(0))
+        .map(str::to_string)
+        .unwrap_or_default())
+}
+
 fn ask(session: &mut Session, statement: &str) -> Result<Collected, DbError> {
     match session.trip(statement) {
         Some(result) => result.map_err(|error| plain_error(describe(&error))),
@@ -3007,6 +3191,101 @@ fn kept_transaction(sql: &str, result: QueryResult) -> Result<QueryResult, DbErr
     }
 }
 
+/// Says so in `result`'s notice when `sql`, which ran whole and ends the
+/// transaction, left the one it ended open ([`outlived_end`]): a `COMMIT`
+/// takes one level off `@@TRANCOUNT`, so inside a nested `BEGIN
+/// TRANSACTION` it commits nothing. Manual's Commit, which opens the next
+/// transaction behind its end, is asked too. `before` is the depth the
+/// batch started at.
+fn still_open(session: &mut Session, sql: &str, before: u64, result: &mut QueryResult) {
+    if !ends(sql) {
+        return;
+    }
+    let read = session
+        .trip("SELECT @@TRANCOUNT, @@OPTIONS & 2")
+        .and_then(Result::ok);
+    let row = read
+        .as_ref()
+        .and_then(|collected| collected.result.rows.first());
+    let depth = row.and_then(|row| row.get(0)?.parse::<u64>().ok());
+    let implicit = row
+        .and_then(|row| row.get(1)?.parse::<u64>().ok())
+        .is_some_and(|bit| bit != 0);
+    if depth.is_some_and(|depth| outlived_end(sql, before, depth, implicit)) {
+        result.notice = Some(match result.notice.take() {
+            Some(notice) => format!("{notice}\n\n{}", super::TRANSACTION_STILL_OPEN),
+            None => super::TRANSACTION_STILL_OPEN.to_string(),
+        });
+    }
+}
+
+/// Whether `sql` ends a transaction, where it lands or before a `BEGIN
+/// TRANSACTION` behind it.
+fn ends(sql: &str) -> bool {
+    crate::sql::leaves(Engine::SqlServer, sql).transaction == Some(false)
+        || crate::sql::ends_transaction(Engine::SqlServer, sql)
+}
+
+/// Whether the transaction `sql` ended is still open, `before` being what
+/// `@@TRANCOUNT` read as the batch started and `depth` what it reads once
+/// it ran, with `implicit` transactions on or not.
+///
+/// A batch that opens with a lone `COMMIT`, as Manual's Commit does, is
+/// told by `before`: the `COMMIT` takes one level off it, so what is left
+/// of the old transaction is that, whatever the statements behind it open.
+/// The final depth cannot say it with `IMPLICIT_TRANSACTIONS` on: the
+/// `BEGIN TRANSACTION` behind a `COMMIT` that ended the old one opens two
+/// levels, the implicit one and its own, which reads as the old one left.
+///
+/// Any other batch is read off `depth`: one that ended the outermost level
+/// is left with only the levels it opened after its last end, so any deeper
+/// is the old transaction still there. With implicit transactions on, the
+/// statements after the end may also have opened one more implicitly, and
+/// only a depth beyond that says the old one is left.
+fn outlived_end(sql: &str, before: u64, depth: u64, implicit: bool) -> bool {
+    if !ends(sql) {
+        return false;
+    }
+    let after = crate::sql::after_last_end(Engine::SqlServer, sql);
+    let (whole, rest) = (
+        crate::sql::Buffer::for_engine(Engine::SqlServer, sql),
+        crate::sql::Buffer::for_engine(Engine::SqlServer, after),
+    );
+    let (statements, behind) = (whole.statements(), rest.statements());
+    let lone_commit = statements.len() == behind.len() + 1
+        && (statements.first()).is_some_and(|first| is_commit(&sql[first.clone()]));
+    if lone_commit {
+        return before > 1;
+    }
+    let opened = behind
+        .iter()
+        .filter(|range| {
+            crate::sql::leaves(Engine::SqlServer, &after[(*range).clone()]).transaction
+                == Some(true)
+        })
+        .count();
+    let opened = u64::try_from(opened).unwrap_or(u64::MAX);
+    let implicitly = u64::from(implicit && !behind.is_empty());
+    depth > opened.saturating_add(implicitly)
+}
+
+/// Whether `statement` is a plain `COMMIT`, which takes one level off
+/// `@@TRANCOUNT` at any depth.
+fn is_commit(statement: &str) -> bool {
+    let words: Vec<String> = (statement.split_whitespace())
+        .map(|word| word.trim_end_matches(';').to_ascii_uppercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    matches!(
+        words
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["COMMIT"] | ["COMMIT", "TRAN" | "TRANSACTION" | "WORK"]
+    )
+}
+
 fn transaction_outcome(
     session: &mut Session,
     sql: &str,
@@ -3041,8 +3320,14 @@ fn transaction_outcome(
             false => "The transaction the batch began is still open.",
         }
     } else if after == 0 && before > 0 {
-        "The transaction that was open before this statement was rolled back, and everything \
-         written in it is gone."
+        ended_outcome(sql, bracketed)
+    } else if after > 0
+        && !bracketed
+        && crate::sql::ends_transaction_at_any_depth(Engine::SqlServer, sql)
+    {
+        // A compile error stops the batch before its `COMMIT` or `ROLLBACK`
+        // runs, and `XACT_ABORT` rolls back only on a runtime one.
+        super::TRANSACTION_KEPT_OPEN
     } else if bracketed {
         match before {
             0 => "The transaction did not commit: nothing the batch wrote remains.",
@@ -3054,6 +3339,21 @@ fn transaction_outcome(
     DbError {
         message: format!("{}\n\n{outcome}", error.message),
         position: error.position,
+    }
+}
+
+/// What a failed batch did to the transaction open before it, now that none
+/// is: `XACT_ABORT` rolled it back, unless the batch may have committed it
+/// first (`COMMIT; SELECT 1/0`), which leaves the depth at zero just the same.
+/// So may a procedure, whose body is not in the text: one that commits and
+/// returns raises error 266 with nothing rolled back (`sql::runs_unseen`).
+/// A batch dbdelve brackets commits only the level it opened.
+fn ended_outcome(sql: &str, bracketed: bool) -> &'static str {
+    let may_commit = crate::sql::may_commit(Engine::SqlServer, sql)
+        || crate::sql::runs_unseen(Engine::SqlServer, sql);
+    match !bracketed && may_commit {
+        true => super::TRANSACTION_ENDED,
+        false => super::TRANSACTION_ROLLED_BACK,
     }
 }
 
@@ -3091,6 +3391,149 @@ mod tests {
         config_from_url(&url).expect("dbdelve_MSSQL_URL should parse")
     }
 
+    #[test]
+    fn a_cancel_that_arrived_during_the_login_stops_the_startup_script() {
+        let mut waiting = InFlight {
+            queued: 1,
+            ..InFlight::default()
+        };
+        assert!(waiting.replaying(None), "no Cancel: the script replays");
+        let mut cancelled = InFlight {
+            queued: 1,
+            cancel_queued: true,
+            ..InFlight::default()
+        };
+        assert!(!cancelled.replaying(None), "the login is dropped instead");
+        // Kept for `acquire`, which answers the waiting statement with it.
+        assert!(cancelled.cancel_queued);
+    }
+
+    #[test]
+    fn an_end_inside_a_nested_transaction_is_told_by_the_depth_left() {
+        let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
+        // Manual's Commit at depth 2 takes one level off and opens one more:
+        // nothing committed, and the outer transaction is still open.
+        assert!(outlived_end(manual_commit, 2, 2, false));
+        assert!(!outlived_end(manual_commit, 1, 1, false));
+        assert!(outlived_end("COMMIT", 2, 1, false));
+        assert!(!outlived_end("COMMIT", 1, 0, false));
+        assert!(outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 2, 3, false));
+        assert!(!outlived_end("COMMIT; BEGIN TRAN; BEGIN TRAN", 1, 2, false));
+        assert!(!outlived_end(
+            "BEGIN TRAN; UPDATE t SET a = 1; COMMIT",
+            0,
+            0,
+            false
+        ));
+        // A batch that ends nothing is not asked about.
+        assert!(!outlived_end("SELECT 1", 3, 3, false));
+        assert!(!outlived_end("BEGIN TRANSACTION", 2, 2, false));
+    }
+
+    /// With `IMPLICIT_TRANSACTIONS` on, the `BEGIN TRANSACTION` behind a
+    /// `COMMIT` that ended the old transaction opens two levels: the depth
+    /// after reads as the old one left, and only the depth before can say.
+    #[test]
+    fn an_implicit_transaction_opened_behind_a_commit_is_not_the_old_one() {
+        let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
+        assert!(!outlived_end(manual_commit, 1, 2, true), "committed");
+        assert!(
+            outlived_end(manual_commit, 2, 2, true),
+            "nested: one level left"
+        );
+        assert!(!outlived_end("ROLLBACK; UPDATE t SET a = 1", 3, 1, true));
+        assert!(outlived_end("ROLLBACK; UPDATE t SET a = 1", 3, 2, true));
+        assert!(is_commit("COMMIT") && is_commit("commit tran;") && is_commit("COMMIT WORK"));
+        assert!(!is_commit("COMMIT TRAN named") && !is_commit("ROLLBACK"));
+    }
+
+    #[test]
+    fn a_procedure_that_ended_the_transaction_is_never_said_to_have_rolled_back() {
+        // A procedure that commits and returns raises error 266; its body is
+        // not in the text, so how the transaction ended is not known.
+        for sql in [
+            "EXEC dbo.p",
+            "EXECUTE dbo.p @a = 1",
+            "UPDATE t SET a = 1; EXEC dbo.p",
+        ] {
+            assert_eq!(
+                ended_outcome(sql, false),
+                crate::db::TRANSACTION_ENDED,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_batch_that_may_have_committed_never_says_it_rolled_back() {
+        for sql in [
+            "COMMIT; SELECT 1/0",
+            "COMMIT TRANSACTION; SELECT 1/0",
+            "UPDATE t SET a = 1; COMMIT; EXEC dbo.p",
+            // Text the grammar cannot read, which may still commit.
+            "COMMIT TRAN; SELECT TOP 1 x FROM t ORDER BY x OFFSET",
+            // A `COMMIT` inside a block or a branch.
+            "BEGIN COMMIT; THROW 50000, 'stop', 1; END;",
+            "IF 1 = 1 BEGIN COMMIT END; SELECT 1/0",
+        ] {
+            assert_eq!(
+                ended_outcome(sql, false),
+                crate::db::TRANSACTION_ENDED,
+                "{sql}"
+            );
+        }
+        for sql in ["SELECT 1/0; ROLLBACK", "UPDATE t SET a = 1/0"] {
+            assert_eq!(
+                ended_outcome(sql, false),
+                crate::db::TRANSACTION_ROLLED_BACK,
+                "{sql}"
+            );
+        }
+        // dbdelve's own batch commits only the level it opened.
+        assert_eq!(
+            ended_outcome("BEGIN TRANSACTION; UPDATE t SET a = 1; COMMIT", true),
+            crate::db::TRANSACTION_ROLLED_BACK
+        );
+    }
+
+    #[test]
+    fn a_blank_application_name_keeps_dbdelve() {
+        let named = |application_name: Option<&str>| {
+            application_name_of(&ServerConfig {
+                properties: crate::db::Properties {
+                    application_name: application_name.map(str::to_string),
+                    connect_timeout: None,
+                },
+                ..ServerConfig::default()
+            })
+            .to_string()
+        };
+        assert_eq!(named(None), "DBDelve");
+        assert_eq!(named(Some("billing")), "billing");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_driver_properties_reach_the_server() {
+        let name = |connection: &Connection| {
+            let result = connection
+                .query("SELECT APP_NAME()", Fetch::default())
+                .expect("the name reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        assert_eq!(name(&live()).as_deref(), Some("DBDelve"));
+        let config = ServerConfig {
+            properties: crate::db::Properties {
+                application_name: Some("billing app".into()),
+                connect_timeout: None,
+            },
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("the connection opens");
+        assert_eq!(name(&main).as_deref(), Some("billing app"));
+        assert_eq!(name(&main.alongside()).as_deref(), Some("billing app"));
+    }
+
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
     }
@@ -3111,6 +3554,132 @@ mod tests {
         assert_eq!(
             first_value(&mut session, "SELECT 1").expect("it reaches the server"),
             Some("1".to_string())
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_never_waits_on_a_busy_session() {
+        let connection = live();
+        assert!(connection.ping(&|| true).is_ok(), "an idle session answers");
+
+        // A statement holds the session for as long as it runs; the round
+        // skips it rather than queue behind it.
+        let busy = connection.session.lock().expect("nothing else holds it");
+        let started = Instant::now();
+        assert!(
+            connection.ping(&|| true).is_ok(),
+            "a busy session is skipped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "and the skip does not wait"
+        );
+        drop(busy);
+
+        let unopened = connection.alongside();
+        assert!(
+            unopened.ping(&|| true).is_ok(),
+            "a session never logged in is left alone"
+        );
+        assert!(
+            unopened
+                .session
+                .lock()
+                .expect("nothing else holds it")
+                .is_none(),
+            "and the ping did not log it in"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_commit_inside_a_nested_transaction_says_one_is_still_open() {
+        let connection = live();
+        let run = |sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message))
+        };
+        run("BEGIN TRANSACTION");
+        run("BEGIN TRANSACTION");
+        assert!(crate::db::transaction_still_open(&run("COMMIT")));
+        assert!(!crate::db::transaction_still_open(&run("COMMIT")));
+        assert!(!crate::db::transaction_still_open(&run("SELECT 1")));
+        // Manual's Commit at depth 2 commits nothing either.
+        run("BEGIN TRANSACTION");
+        run("BEGIN TRANSACTION");
+        let manual_commit = "COMMIT;\n\nBEGIN TRANSACTION;";
+        assert!(crate::db::transaction_still_open(&run(manual_commit)));
+        run("ROLLBACK");
+        run("BEGIN TRANSACTION");
+        assert!(!crate::db::transaction_still_open(&run(manual_commit)));
+        run("ROLLBACK");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_cancel_drops_a_reconnect_stuck_in_its_startup_script() {
+        let mut connection = live();
+        connection.startup = vec!["WAITFOR DELAY '00:01:00'".to_string()].into();
+        *connection.session.lock().unwrap() = None;
+        let user = connection.clone();
+        let started = Instant::now();
+        let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));
+        while connection.in_flight().signing_in.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the login replays"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        connection.cancel().unwrap();
+
+        let error = run
+            .join()
+            .unwrap()
+            .expect_err("the statement was cancelled");
+        assert!(
+            error.message.starts_with("Cancelled before it started"),
+            "{}",
+            error.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "without the script's wait"
+        );
+        assert!(
+            connection.session.lock().unwrap().is_none(),
+            "the login is not kept"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_startup_script_holds_on_every_login() {
+        let first_day = |connection: &Connection| {
+            let result = connection
+                .query("SELECT @@DATEFIRST", Fetch::default())
+                .expect("the option reads");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        let plain = live();
+        let default = first_day(&plain);
+        assert_ne!(default.as_deref(), Some("3"));
+        let scripted = live()
+            .with_startup(vec!["SET DATEFIRST 3".into()])
+            .expect("the script runs");
+        assert_eq!(first_day(&scripted).as_deref(), Some("3"));
+        // The lazy first login of a session beside it.
+        let beside = scripted.alongside();
+        assert_eq!(first_day(&beside).as_deref(), Some("3"));
+        let database = scripted.current_database().to_string();
+        let other = scripted.on_database(&database).expect("a session opens");
+        assert_eq!(first_day(&other).as_deref(), Some("3"));
+        assert_eq!(
+            first_day(&plain),
+            default,
+            "the script is the session's own"
         );
     }
 
@@ -3274,13 +3843,7 @@ mod tests {
                 database: "dbdelve_test".into(),
                 user: "person@example.com".into(),
                 password: "pa ss".into(),
-                password_command: None,
-                sslmode: SslMode::default(),
-                root_certificate: None,
-                statement_timeout: 0,
-                ssm: None,
-                ssh: None,
-                schema: None,
+                ..ServerConfig::default()
             }
         );
         let error = config_from_url("mssql://someone@db.example.test/db?encrypt=true").unwrap_err();
@@ -3951,7 +4514,7 @@ mod tests {
             .expect("the probe sequence should be created");
 
         let second = crate::db::Connection::SqlServer(live())
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas
@@ -5505,6 +6068,90 @@ mod tests {
 
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_rowcount_is_the_users_own_and_kept() {
+        let connection = live()
+            .with_startup(vec!["SET ROWCOUNT 20".into()])
+            .expect("the script runs");
+        let read = "SELECT name FROM sys.all_columns";
+        let drained = connection.query(read, stoppable(10)).unwrap();
+        assert_eq!(drained.stopped, None);
+        assert_eq!(drained.capped_from, Some(20));
+        let kept = connection.query(read, Fetch::default()).unwrap();
+        assert_eq!(kept.rows.len(), 20, "no capped read reset it");
+        let database = connection.current_database().to_string();
+        let other = connection.on_database(&database).expect("a session opens");
+        let kept = other.query(read, stoppable(10)).unwrap();
+        assert_eq!(kept.capped_from, Some(20), "a replay keeps it too");
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_script_that_leaves_the_database_is_refused() {
+        let connection = live();
+        let database = connection.current_database().to_string();
+        let error = live()
+            .with_startup(vec!["USE master".into()])
+            .err()
+            .expect("the script is refused");
+        assert!(
+            error.message.contains("startup script"),
+            "{}",
+            error.message
+        );
+        // Told by id, not by a name in another case.
+        let error = live()
+            .with_startup(vec![format!(
+                "USE [{}]",
+                database.to_uppercase().replace(']', "]]")
+            )])
+            .err()
+            .map(|error| error.message);
+        let case_sensitive = live()
+            .query(
+                "SELECT CASE WHEN 'a' = 'A' THEN 0 ELSE 1 END",
+                Fetch::default(),
+            )
+            .unwrap()
+            .rows[0]
+            .get(0)
+            == Some("1");
+        if !case_sensitive {
+            assert_eq!(error, None, "the same database, spelled in another case");
+        }
+        // One that comes back where it started is its own business.
+        let scripted = connection
+            .with_startup(vec![
+                "USE master".into(),
+                format!("USE [{}]", database.replace(']', "]]")),
+            ])
+            .expect("the script runs");
+        let here = scripted
+            .query("SELECT DB_NAME()", Fetch::default())
+            .unwrap();
+        assert_eq!(here.rows[0].get(0), Some(database.as_str()));
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_startup_statement_past_the_timeout_says_so() {
+        let connection = Connection::open(&ServerConfig {
+            statement_timeout: 1,
+            ..live_config()
+        })
+        .expect("connection should open");
+        let error = connection
+            .with_startup(vec!["WAITFOR DELAY '00:00:03'".into()])
+            .err()
+            .expect("the timeout stops it");
+        assert!(
+            error.message.contains("1-second statement timeout"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_read_that_fails_still_takes_its_cap_back() {
         let connection = live();
         probe_table(&connection, "#dbdelve_rowcount_probe", 50);
@@ -5942,6 +6589,62 @@ mod tests {
         assert_eq!(first(&open), vec![Some("0")]);
     }
 
+    /// What the app reads off an error to keep its transaction state true
+    /// to the session's: a runtime error under `XACT_ABORT` ended the
+    /// transaction, and a compile error stopped the batch before the
+    /// `COMMIT` that would have.
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
+    fn live_a_failure_tells_the_app_whether_the_transaction_outlived_it() {
+        let connection = live();
+        connection
+            .query("CREATE TABLE #work (id int)", Fetch::default())
+            .unwrap();
+        connection
+            .query(
+                "BEGIN TRANSACTION; INSERT INTO #work VALUES (1)",
+                Fetch::default(),
+            )
+            .unwrap();
+        // A parse error, not a name one: an unknown column is caught only
+        // when the statement compiles as it runs, which `XACT_ABORT` reads as
+        // a runtime error and rolls back. `LIMIT` parses for sqlparser, which
+        // must see the `COMMIT`, and stops the whole batch on the server.
+        let error = connection
+            .query(
+                "INSERT INTO #work VALUES (2); SELECT 1 LIMIT 1; COMMIT",
+                Fetch::default(),
+            )
+            .expect_err("SQL Server has no LIMIT");
+        assert!(
+            crate::db::transaction_kept_open(&error),
+            "{}",
+            error.message
+        );
+        assert!(
+            !crate::db::transaction_rolled_back(&error),
+            "{}",
+            error.message
+        );
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("1")]);
+
+        let error = connection
+            .query("SELECT 1/0", Fetch::default())
+            .expect_err("division by zero");
+        assert!(
+            crate::db::transaction_rolled_back(&error),
+            "{}",
+            error.message
+        );
+        let open = connection
+            .query("SELECT @@TRANCOUNT", Fetch::default())
+            .unwrap();
+        assert_eq!(first(&open), vec![Some("0")]);
+    }
+
     #[test]
     #[ignore = "requires the repository development database configured through dbdelve_MSSQL_URL"]
     fn live_a_write_reports_the_rows_it_affected() {
@@ -6140,6 +6843,8 @@ mod tests {
             "{}",
             error.message
         );
+        // So a COMMIT dropped this way leaves the transaction recorded open.
+        assert!(crate::db::sent_nothing(&error));
         assert!(connection.query("SELECT 1", Fetch::default()).is_ok());
     }
 
@@ -6219,6 +6924,7 @@ mod tests {
             alongside: true,
             graph: GraphCancel::default(),
             default_schema: None,
+            startup: Arc::default(),
         };
         let reader = side.clone();
         let read = std::thread::spawn(move || reader.schema_graph("dbo"));
@@ -6250,6 +6956,7 @@ mod tests {
             alongside: false,
             graph: GraphCancel::default(),
             default_schema: None,
+            startup: Arc::default(),
         };
         let user = connection.clone();
         let run = std::thread::spawn(move || user.query("SELECT 1", Fetch::default()));

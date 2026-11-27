@@ -180,14 +180,11 @@ impl Workspace {
         let Some(StableImport::Done(imported)) = &self.stable_import else {
             return;
         };
-        match imported.relaunch {
-            Ok(Some(ref install)) => restart_into(install.clone(), cx),
-            Ok(None) => {
-                update::before_restart();
-                cx.restart();
-            }
-            Err(_) => cx.quit(),
-        }
+        let leaving = match imported.relaunch {
+            Ok(ref install) => Leaving::Restart(install.clone()),
+            Err(_) => Leaving::Quit,
+        };
+        self.leave(leaving, cx);
     }
 
     /// The dialog's button the ring is on, pressed.

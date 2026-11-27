@@ -726,9 +726,11 @@ impl Workspace {
             }
             Command::RecallStatement(sql) => self.recall_statement(sql, window, cx),
             Command::ShowStructure(structure) => self.show_structure(structure, window, cx),
-            Command::ShowDiagram { schema, centre } => {
-                self.open_diagram(schema, centre, window, cx)
-            }
+            Command::ShowDiagram {
+                database,
+                schema,
+                centre,
+            } => self.open_diagram(database, schema, centre, window, cx),
             Command::RefreshRelation(id) => self.refresh_relation(id, cx),
             Command::CountRows(id) => self.count_rows(id, cx),
             Command::NextPage => self.turn_page(true, cx),
@@ -804,6 +806,19 @@ impl Workspace {
             }
             Command::SelectTheme => self.select_theme(&SelectTheme, window, cx),
             Command::SelectDatabase => self.select_database(&SelectDatabase, window, cx),
+            Command::FilterDatabases => {
+                if let Some(profile) = self.profile().map(|profile| profile.id.clone()) {
+                    self.open_filter_picker(&profile, window, cx);
+                }
+            }
+            Command::FilterTables => {
+                if let (Some(profile), Some(scope)) = (
+                    self.profile().map(|profile| profile.id.clone()),
+                    self.front_table_scope(),
+                ) {
+                    self.open_table_picker(scope, &profile, window, cx);
+                }
+            }
             Command::SetDatabase(name) => _ = self.set_database(name, window, cx),
             Command::SetTarget(target) => {
                 if let Some(form) = &mut self.form {
@@ -814,7 +829,7 @@ impl Workspace {
             Command::SelectSchema => self.select_schema(window, cx),
             Command::SetSchema(name) => _ = self.set_schema(name, cx),
             Command::PickSchemaToExport => self.pick_schema_to_export(window, cx),
-            Command::ExportSchema(name) => self.open_schema_export(name, cx),
+            Command::ExportSchema(database, name) => self.open_schema_export(database, name, cx),
             // The row holds the theme as the list opened on it; a file
             // rewritten since must not be put back on screen and kept there.
             Command::SetTheme(side, theme) => {
@@ -944,7 +959,9 @@ impl Workspace {
             Command::ShowStructureSection(section) => self.show_structure_section(section, cx),
             Command::DownloadUpdate(url) => cx.open_url(&url),
             Command::InstallUpdate => self.install_update(cx),
-            Command::RestartIntoUpdate(installed) => restart_into(installed, cx),
+            Command::RestartIntoUpdate(installed) => {
+                self.leave(Leaving::Restart(Some(installed)), cx)
+            }
         }
     }
 }

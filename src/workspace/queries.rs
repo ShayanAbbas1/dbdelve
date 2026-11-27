@@ -14,10 +14,14 @@ use crate::result_grid::{ColumnView, ColumnWidth, StepRow};
 
 use super::*;
 use crate::session::{
-    APPLY_IN_TRANSACTION, AfterEdits, Binding, Bound, Finished, Lane, PendingDelete,
-    PendingDiscard, PendingRun, QueryRename, Queue, Resume, Routed, Step, TabKey, Verification,
-    next_step, query_name_refusal, reveals_results,
+    APPLY_IN_TRANSACTION, AfterEdits, Binding, Bound, Finished, JOINING_ENDED_REFUSAL, Lane,
+    PendingDelete, PendingDiscard, PendingRun, QueryRename, Queue, Resume, Routed, Step, TabKey,
+    Verification, next_step, query_name_refusal, reveals_results,
 };
+
+/// What a `COMMIT` over a failed transaction says it did instead.
+pub(crate) const COMMIT_ROLLED_BACK: &str =
+    "The transaction had failed, so the server rolled it back: nothing in it was committed.";
 
 impl Workspace {
     /// Edits sitting in the visible grid, waiting to be written back. Read off
@@ -390,7 +394,7 @@ impl Workspace {
             // keystroke on is what lets that one have it.
             if matches!(
                 profile.session.active_object().map(|tab| &tab.body),
-                Some(ObjectBody::Diagram { .. })
+                Some(ObjectBody::Diagram { .. } | ObjectBody::Users { .. })
             ) {
                 cx.propagate();
                 return;
@@ -2040,6 +2044,25 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // An idle-closed profile stays in front with its tabs (the idle
+        // timer), so its next run is its reconnect: parked until the connect
+        // lands, where `run_waiting_files` hands it back to `execute_sql` and
+        // the mode gate judges it then. An explain, a refresh or an edit's
+        // read-back is not the user pressing Run and goes on to fail as it
+        // does with no connection.
+        if let (Some(index), Tab::Query(query), None, None, false) =
+            (self.active, tab, &refresh, &explain, keep_rows)
+            && self
+                .profiles
+                .get(index)
+                .is_some_and(|profile| matches!(profile.state, ProfileState::Idle))
+        {
+            let id = self.profiles[index].id.clone();
+            self.runs_on_connect.push((id, query, sql));
+            self.begin_connect(index, cx);
+            return;
+        }
+
         let verdict = sql::classify(self.engine(), &sql);
         let stopped = self
             .profile()
@@ -2167,6 +2190,11 @@ impl Workspace {
             .as_ref()
             .filter(|_| refusal_applies)
             .and_then(|binding| profile.bound_write_refusal(binding));
+        // A role change runs on a session of its own (`generated_apart`):
+        // roles are the server's, and on the shared session a transaction
+        // open there, or one a `BEGIN` of another tab opens before the change
+        // takes the session, would hold it, and its rollback undo it.
+        let role_change = matches!(refresh, Some(Refresh::Roles));
         // A write dbdelve generated for the grid: an Apply edits batch, an
         // Insert, a Delete row or a Row send.
         let edit = matches!(
@@ -2225,6 +2253,25 @@ impl Workspace {
             })
             .or_else(|| {
                 unverified.then(|| "dbdelve refused to send an edit it could not verify.".into())
+            })
+            // An unverified edit on the connection's own session: not sent
+            // when its own brackets would end the user's open transaction.
+            .or_else(|| {
+                (edit && binding.is_none())
+                    .then(|| profile.own_write_refusal(&sql))
+                    .flatten()
+            })
+            // The opposite case: a batch written to join the user's open
+            // transaction, unbracketed, after that transaction has ended.
+            .or_else(|| {
+                (edit
+                    && profile
+                        .session
+                        .apply_review
+                        .as_ref()
+                        .is_some_and(|review| review.covers(tab) && review.joining)
+                    && !profile.transaction_open_for(tab))
+                .then(|| JOINING_ENDED_REFUSAL.to_string())
             });
         // An edit sent to a transactional SQL engine leaves the grid and the
         // draft where they are until the server answers, so a refusal or a
@@ -2271,6 +2318,40 @@ impl Workspace {
             self.drop_parked(tab, refresh);
             return;
         }
+        // Everything an object tab runs is dbdelve's, and a query tab runs
+        // dbdelve's statement only when an edit is applied from its grid, the
+        // one run that carries a refresh -- bar a `Return`, which the user's
+        // own statement carries.
+        let generated = matches!(tab, Tab::Object(_))
+            || refresh
+                .as_ref()
+                .is_some_and(|refresh| !matches!(refresh, Refresh::Return));
+        // One tab's statement that opens or ends the transaction on the
+        // profile's own session waits for another's to land: each runs in a
+        // job of its own, racing for the session, so the server may run them
+        // in either order, and the open flag is read off the order they went.
+        if !generated
+            && binding.is_none()
+            && lane.is_none()
+            && explain.is_none()
+            && profile
+                .transaction_in_flight
+                .is_some_and(|other| other != tab)
+            && sql::leaves(engine, &sql).transaction.is_some()
+        {
+            profile.session.tab_notice = Some((
+                tab,
+                "The statement was not run: a statement opening or ending the transaction is \
+                 still running in another tab."
+                    .into(),
+            ));
+            self.drop_parked(tab, refresh);
+            // A queue's statement: the rest of the selection is not sent past
+            // it, and what already ran stays on the strip.
+            self.stop_queue_on(tab, cx);
+            cx.notify();
+            return;
+        }
 
         if !routed.is_available() {
             if kept {
@@ -2307,7 +2388,7 @@ impl Workspace {
         // Cancel stops what that session is running only while it is running
         // this tab's statement (`Connection::query_bound`).
         let cancel = match (&lane, &binding) {
-            (None, None) => CancelToken::default(),
+            (None, None) if !role_change => CancelToken::default(),
             _ => CancelToken::alongside(),
         };
         let started = std::time::Instant::now();
@@ -2508,14 +2589,6 @@ impl Workspace {
             let ran = statement.as_ref().or(explained.as_ref());
             tab.ran_from = tab.sent_from.take().filter(|(_, sent)| Some(sent) == ran);
         }
-        // Everything an object tab runs is dbdelve's, and a query tab runs
-        // dbdelve's statement only when an edit is applied from its grid, the
-        // one run that carries a refresh -- bar a `Return`, which the user's
-        // own statement carries.
-        let generated = matches!(tab, Tab::Object(_))
-            || refresh
-                .as_ref()
-                .is_some_and(|refresh| !matches!(refresh, Refresh::Return));
         // Recorded on the way out rather than on the way back: the history is
         // what the user ran, and a statement that failed is exactly the one
         // worth getting back. Only the buffer's — a relation's preview is SQL
@@ -2541,20 +2614,89 @@ impl Workspace {
             }
             _ => None,
         };
+        // The user's own work, whichever profile the run belongs to: the one
+        // thing besides a catalog read that keeps an idle timeout away.
+        self.mark_activity(&id, cx);
         // Marked on the way out, like the history: a statement that failed
-        // part way may still have opened a transaction.
+        // part way may still have opened a transaction. One that ends the open
+        // transaction is marked once it lands instead (`Profile::end_landed`),
+        // as `Bound::leave` marks a bound session's: a Cancel can drop it
+        // unsent, and until then a role change or an edit is still refused
+        // inside the transaction it may not have ended.
+        let mut ending = None;
+        // When this submission set the transaction state as it went: what
+        // Manual's `BEGIN` takes back if a Cancel drops it unsent.
+        let mut published = None;
         // Not a bound tab's: what it leaves is left on the session of its
         // database, which is not the profile's own.
         if !generated
             && binding.is_none()
             && let Some(profile) = self.issued_to(&id, generation)
         {
-            let leaves = sql::leaves(engine, explained.as_deref().unwrap_or(&sql));
-            if let Some(open) = leaves.transaction {
-                profile.in_transaction = open;
+            let text = explained.as_deref().unwrap_or(&sql);
+            let mut leaves = sql::leaves(engine, text);
+            // Read as a bound session's statement is: one that may have
+            // opened a transaction `leaves` cannot see counts as opening one,
+            // so an idle close or a role change does not run over it.
+            leaves.transaction = leaves
+                .transaction
+                .or_else(|| sql::transaction_uncertain(engine, text).then_some(true));
+            // MySQL's `autocommit` turned on commits only from off: from on,
+            // a `START TRANSACTION`'s writes are still pending after it.
+            if leaves.transaction == Some(false)
+                && !profile.autocommit_off
+                && sql::ends_by_autocommit_alone(engine, text)
+            {
+                leaves.transaction = None;
+            }
+            if let Some(on) = sql::autocommit_assigned(engine, text) {
+                profile.autocommit_off = !on;
+            }
+            // An end that opens the next transaction behind it, as Manual's
+            // Commit sends it, keeps the record until it lands too: if its
+            // end fails, the transaction the record lists can still be open.
+            let reopens = leaves.transaction == Some(true) && sql::ends_transaction(engine, text);
+            if leaves.transaction.is_some() {
+                profile.transaction_in_flight = Some(tab);
+            }
+            if (leaves.transaction == Some(false) || reopens) && profile.in_transaction {
+                // Whether it is a lone end, whose failure the engine may say
+                // left the transaction open (SQLite's `SQLITE_BUSY`).
+                let lone = sql::after_last_end(engine, text).is_empty();
+                // Where the record stands as it goes: what other tabs send
+                // before it lands may run in the transaction it opens.
+                let since = profile.transaction_statements.len();
+                ending = Some((
+                    sql.clone(),
+                    lone,
+                    reopens,
+                    profile.transaction_sends(),
+                    since,
+                ));
+            } else {
+                profile.record_sent(&sql, leaves.transaction);
+                if let Some(open) = leaves.transaction {
+                    if open && !profile.in_transaction {
+                        profile.transaction_aborted = false;
+                    }
+                    profile.in_transaction = open;
+                    published = Some(profile.transaction_sent());
+                }
             }
             profile.session_changed |= leaves.settings;
         }
+        // A failed Postgres transaction is usable again once this succeeds.
+        let rolls_back_to_savepoint =
+            binding.is_none() && sql::rolls_back_to_savepoint(engine, &sql);
+        // Where the transaction state stood once this went, on the profile's
+        // own session: a server's word that the statement ended the
+        // transaction is about the one open then, not one opened since. A role
+        // change runs on a session of its own, and its failure says nothing
+        // of the transaction on this one.
+        let own_sent_at = (binding.is_none() && !role_change)
+            .then(|| self.issued_to(&id, generation))
+            .flatten()
+            .map(|profile| profile.transaction_sends());
         // The same, for the session of a bound tab's database, which a
         // transaction holds for every tab bound to it: marked on the session
         // as the statement goes (`Bound::leave`).
@@ -2566,6 +2708,16 @@ impl Workspace {
                 .or_else(|| sql::transaction_uncertain(engine, text).then_some(true));
             (open, leaves.settings)
         });
+        // An edit dbdelve applies on the connection's own session runs inside
+        // the user's open transaction and is committed or rolled back with it,
+        // so the prompt that ends it lists it. Its reads stay out.
+        if generated
+            && edit
+            && refusal.is_none()
+            && let Some(profile) = self.issued_to(&id, generation)
+        {
+            profile.record_sent(&sql, None);
+        }
         // A plan is never cut short: its rows are the plan, not data.
         let limit = match tab {
             Tab::Query(query) if explaining.is_none() => self
@@ -2583,7 +2735,8 @@ impl Workspace {
                     ObjectBody::Relation { limit, .. } => *limit,
                     ObjectBody::Routine(_)
                     | ObjectBody::Structure { .. }
-                    | ObjectBody::Diagram { .. } => None,
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => None,
                 }),
             Tab::Object(_) | Tab::Query(_) => None,
         };
@@ -2654,8 +2807,11 @@ impl Workspace {
         // database shares. An edit of dbdelve's is refused while one is open
         // (`Profile::bound_write_refusal`), and the user's statements go on
         // running as typed; the upgrade is a session of the tab's own.
-        let ends_transaction =
-            binding.is_some() && sql::leaves(engine, &sql).transaction == Some(false);
+        // Not a MySQL statement that commits implicitly, which moves the
+        // session as freely as anything else and must run where it is bound.
+        let ends_transaction = binding.is_some()
+            && sql::leaves(engine, &sql).transaction == Some(false)
+            && (!sql::implicitly_commits(engine) || sql::ends_transaction(engine, &sql));
         let bound_db = binding.as_ref().map(|binding| binding.database.clone());
         // A `USE` or `SET` in a bound tab is undone, not rewritten: the
         // binding stays what the tab was opened for, and the next run puts the
@@ -2746,6 +2902,7 @@ impl Workspace {
                     fed.as_ref(),
                     preview_limit,
                 ),
+                (None, true, _, None) if role_change => connection.generated_apart(&sql, &cancel),
                 (None, true, ..) => {
                     connection.generated(&sql, &cancel, fed.as_ref(), preview_limit)
                 }
@@ -2764,16 +2921,21 @@ impl Workspace {
                 (Some(bound), Some(binding), _) if refusal_applies => {
                     bound.edit(&binding.database, run)
                 }
-                (Some(bound), _, Some((open, settings))) => bound.leave(open, settings, run),
+                (Some(bound), _, Some((open, settings))) => {
+                    bound.leave(open, settings, run, crate::db::transaction_still_open)
+                }
                 _ => run(),
             };
             // A Row send's row, read inside the transaction that wrote it: the
             // one row is the whole answer.
             let read_back = verified_read;
             // A connection of the lane's own that failed is gone with it, and
-            // says nothing about the profile's.
+            // says nothing about the profile's; nor does a role change's, run
+            // on a session apart, whose probe would wait on the session's lock
+            // behind another tab's long statement.
             let failed = result.is_err() || matches!(read_back, Some(Err(_)));
-            let lost = !alongside && failed && connection.is_lost();
+            let apart = role_change && generated && verification.is_none() && binding.is_none();
+            let lost = !alongside && !apart && failed && connection.is_lost();
             (
                 result,
                 lost,
@@ -2929,6 +3091,11 @@ impl Workspace {
                 .map(|entry| answered(entry, &result, feed.is_some(), started.elapsed(), target));
             workspace
                 .update(cx, |workspace, cx| {
+                    // A landing for a profile since reconnected is not use of
+                    // the new connection.
+                    if workspace.issued_to(&id, generation).is_some() {
+                        workspace.mark_activity(&id, cx);
+                    }
                     // The plan is carried out of this block rather than stored
                     // inside it: `slot` holds the session borrowed, and the tab
                     // it belongs on has to be reached through the same session.
@@ -3054,12 +3221,124 @@ impl Workspace {
                                 queue.remaining.clear();
                             }
                         }
+                        // Settled here, before a tab closed under the run can
+                        // end the block: whether the end really ended anything
+                        // is only known now.
+                        let ended_ok = result.is_ok();
+                        // Not once a later submission set the transaction
+                        // state as it went: the session ran it after this
+                        // end, so what it said stands.
+                        if profile.transaction_in_flight == Some(tab) {
+                            profile.transaction_in_flight = None;
+                        }
+                        // Whether the transaction Manual was holding ended
+                        // here, which turns the switch back to Auto.
+                        let mut left_manual = false;
+                        // A `COMMIT` that ran over a failed transaction,
+                        // which the server rolled back instead.
+                        let mut commit_rolled_back = false;
+                        let error = result.as_ref().err();
+                        // SQL Server's `COMMIT` at a nesting depth past one,
+                        // which ends a level and commits nothing.
+                        let outlived_end = result
+                            .as_ref()
+                            .is_ok_and(crate::db::transaction_still_open);
+                        if let Some((sent, lone, reopens, sent_at, since)) = &ending
+                            && (lost || !profile.superseded(*sent_at))
+                        {
+                            commit_rolled_back = error.is_none()
+                                && profile.transaction_failed()
+                                && sql::last_end_commits(engine, sent);
+                            left_manual = match reopens {
+                                // An end that left the transaction open ran
+                                // inside it, and the next end still ends it:
+                                // a reopening pair's too, whose `BEGIN` only
+                                // nested one level deeper.
+                                _ if outlived_end => {
+                                    profile.record_sent(sent, None);
+                                    false
+                                }
+                                true => profile.reopen_landed(sent, *since, lost, error),
+                                false => profile.end_landed(sent, *lone, lost, error),
+                            };
+                        } else if bound_db.is_none()
+                            && !lost
+                            && let (Some(error), Some(sent_at)) = (error, own_sent_at)
+                        {
+                            if crate::db::transaction_ended(error) {
+                                left_manual = profile.ended_by_server(sent_at);
+                            } else if engine.failure_aborts_transaction()
+                                && profile.in_transaction
+                                && !crate::db::sent_nothing(error)
+                                && !profile.superseded(sent_at)
+                            {
+                                profile.transaction_aborted = true;
+                            }
+                        } else if bound_db.is_none()
+                            && error.is_none()
+                            && engine.failure_aborts_transaction()
+                            && rolls_back_to_savepoint
+                        {
+                            profile.transaction_aborted = false;
+                        } else if bound_db.is_none()
+                            && !alongside
+                            && let (Ok(ran), Some(sent_at)) = (&result, own_sent_at)
+                            && ran.transaction_open == Some(false)
+                        {
+                            // The engine's own word that nothing is open on
+                            // the profile's session (a lane's is a session of
+                            // its own), which the text cannot give: SQLite's
+                            // `RELEASE` of a savepoint an earlier submission
+                            // opened.
+                            left_manual = profile.ended_by_server(sent_at);
+                        }
+                        let ended_by_server = error.is_some_and(crate::db::transaction_rolled_back);
+                        if left_manual && profile.session.auto_after_end != Some(tab) {
+                            profile.session.notice = Some(
+                                match ended_by_server {
+                                    true => {
+                                        "The server rolled the transaction back, so \
+                                         auto-commit is on again."
+                                    }
+                                    false => "The transaction ended, so auto-commit is on again.",
+                                }
+                                .into(),
+                            );
+                        }
+                        if profile.session.manual_after_begin == Some(tab) {
+                            profile.session.manual_after_begin = None;
+                            // Dropped unsent, it opened nothing: the session
+                            // is still autocommitting, and the switch says so.
+                            if matches!(&result, Err(error) if crate::db::sent_nothing(error)) {
+                                profile.auto_commit = true;
+                                if published.is_some_and(|at| !profile.superseded(at)) {
+                                    profile.in_transaction = false;
+                                    profile.transaction_statements.clear();
+                                }
+                            }
+                        }
+                        if profile.session.auto_after_end == Some(tab) {
+                            profile.session.auto_after_end = None;
+                            if ended_ok && !outlived_end {
+                                profile.auto_commit = true;
+                            }
+                        }
                         let Some((state, results)) = profile.session.slot_at(tab, lane.as_ref())
                         else {
+                            // A role change whose Users tab closed under it
+                            // may still have changed the roles: they are read
+                            // again, or the tree and a reopened tab keep the
+                            // list from before it.
+                            if role_change {
+                                profile.roles = RolesState::Unloaded;
+                            }
                             // A tab closed mid-run has no slot, but the
                             // connection's row still has to say it failed.
                             if lost && bound_db.is_none() {
                                 workspace.rebuild_connections(cx);
+                            }
+                            if role_change {
+                                workspace.load_roles(&id, cx);
                             }
                             return;
                         };
@@ -3103,6 +3382,18 @@ impl Workspace {
                                     error.message = format!("{}\n\n{cost}", error.message);
                                 }
                                 Err(error)
+                            }
+                            result => result,
+                        };
+                        // Postgres answers it with the `ROLLBACK` tag and no
+                        // error, so the run reads as a commit otherwise.
+                        let result = match result {
+                            Ok(mut ran) if commit_rolled_back => {
+                                ran.notice = Some(match ran.notice.take() {
+                                    Some(notice) => format!("{notice}\n\n{COMMIT_ROLLED_BACK}"),
+                                    None => COMMIT_ROLLED_BACK.into(),
+                                });
+                                Ok(ran)
                             }
                             result => result,
                         };
@@ -3429,11 +3720,17 @@ impl Workspace {
                                 error.position = error
                                     .position
                                     .and_then(|position| position.checked_sub(prefix));
+                                // The Users tab draws no result pane, so a
+                                // role change the server refused says why in
+                                // the status bar. A cancel was the user's own.
+                                let refused = (!cancelled
+                                    && matches!(refresh, Some(Refresh::Roles)))
+                                .then(|| error.message.clone());
                                 *state = match restored {
                                     Some(previous) if cancelled => previous,
                                     _ => QueryState::Failed(error),
                                 };
-                                (false, false, None, Vec::new(), None, landed)
+                                (false, false, None, Vec::new(), refused, landed)
                             }
                         }
                     };
@@ -3676,6 +3973,7 @@ impl Workspace {
                             // Landed where it stands, above.
                             Refresh::Row { .. } => {}
                             Refresh::Relation { id, .. } => workspace.refresh_relation(id, cx),
+                            Refresh::Roles => workspace.load_roles(&id, cx),
                         }
                     }
                     // A refresh belongs to a generated edit, so the run that

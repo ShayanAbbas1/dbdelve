@@ -184,7 +184,18 @@ Decided, and not to be re-litigated:
   `BEGIN TRANSACTION` batch opened the transaction from a count of zero, never
   one open before it arrived; when `XACT_ABORT` ends a transaction that
   predates the statement regardless, the error says that transaction -- not
-  dbdelve's -- was rolled back.
+  dbdelve's -- was rolled back, unless the batch may have committed it first
+  (`COMMIT; SELECT 1/0`, `sql::may_commit`), which leaves the count at zero
+  just the same: then it says the transaction ended without saying how
+  (`TRANSACTION_ENDED`). After a successful user batch that
+  `sql::leaves` reads as ending the transaction, `still_open` reads it once
+  more: a `COMMIT` inside a nested `BEGIN TRANSACTION` takes one level off and
+  commits nothing, and the notice says a transaction is still open
+  (`TRANSACTION_STILL_OPEN`), which keeps it open in the workspace. It is read
+  off the depth (`outlived_end`): still open when `@@TRANCOUNT` is past the
+  levels the batch opened after its last end, so Manual's reopening `COMMIT;
+  BEGIN TRANSACTION` pair at depth two keeps the record and the switch as they
+  were, rather than starting a new transaction or turning Auto.
 - **`sql_variant` and every CLR type (`geography`, `geometry`, `hierarchyid`,
   system type id 240) panic tiberius part way through a result it cannot
   decode**, which would otherwise close the session and the transaction in it.
@@ -322,6 +333,40 @@ Decided, and not to be re-litigated:
   good. The run's first rows are held for the describe for up to a second
   (`Feed::await_types`), so they are first shown by type rather than restyled
   once it answers.
+- **A startup script is replayed once on every session DBDelve opens for the
+  user** (`Connection::with_startup`), in each driver's own funnel: after the
+  schema pick on Postgres, as ordinary statements after the connect and never in
+  `init` on MySQL and MariaDB, in every login on SQL Server. The Postgres side
+  session re-asserts its 2-second bound after it. Behind PgBouncer in
+  transaction pooling only tracked parameters survive between statements, so a
+  script's other `SET`s do not, and `search_path` does only from Postgres 18.
+- **A profile's session time zone is applied inside `src/db/` on every session
+  opened from its config** (`db::time_zone_statement`, `SqlSpec::session_time_zone`). Postgres
+  runs `SET TIME ZONE '<zone>'` after the connect, as a `SET` and never a startup
+  option, which poolers refuse, and before the schema pick and the startup
+  script, so a script's own `SET TIME ZONE` wins; behind PgBouncer `TimeZone` is
+  a tracked parameter and survives. MySQL and MariaDB run `SET time_zone = '<zone>'`
+  as a statement right after the connect and never in `init`, whose failure
+  `sslmode=prefer` would retry without TLS. ClickHouse sends the
+  `session_timezone` setting with every request, a zone the server already has
+  is not sent, and a user who may not change it while the server's differs fails
+  the connect in the server's words, as the timeout does. DuckDB has no row: this
+  build has no `icu`, and `SET TimeZone` would try to download it. Snowflake has
+  none: the grid renders `timestamp_ltz` in UTC whatever the session says. The
+  zone is checked by `check_time_zone` in the form and at restore, so it cannot
+  end the literal it is spliced into.
+- **Driver properties are a closed list per engine, mapped inside each driver
+  module**
+  (`Properties`, `EngineSpec::driver_properties`). Postgres takes
+  `application_name` and `connect_timeout` in the libpq string, the name through
+  `quote()`; MySQL and MariaDB take them as the `program_name` connect attribute
+  and the dial timeout; SQL Server takes `application_name` alone. The list is
+  closed on purpose: a free key could carry Postgres `options` or MySQL `init`,
+  or weaken TLS, so a key off the
+  list is refused by name and no property reaches those channels. MongoDB keeps
+  its free-form `options` field, outside this list. On MariaDB's dev image
+  `performance_schema` is off, so the attribute is accepted but not readable
+  back.
 - **SQL Server's Cancel closes the connection** (a read stopped at the row
   limit does not: that is `SET ROWCOUNT`). tiberius cannot send TDS's
   attention signal, and `KILL` needs `ALTER ANY CONNECTION`, which an ordinary
@@ -344,6 +389,30 @@ Decided, and not to be re-litigated:
   driver, so its warnings are not counted. `SHOW WARNINGS` leaves
   `ROW_COUNT()` at -1 for whatever the user runs next; that is accepted, as
   the mysql client's `\W` accepts it, because the warnings' text is the point.
+- **MySQL's and MariaDB's Users and roles are read, never written**
+  (`Target::lists_roles` without `manages_roles`; `db::mysql_roles`). The
+  accounts come from `mysql.user` (MariaDB 10.4 on: with `mysql.global_priv`
+  for lock and password lifetime; no password hash leaves the server, only
+  whether there is one), memberships from MySQL 8's `role_edges` and
+  `default_roles` or MariaDB's `roles_mapping`, and what an account holds from
+  `SHOW GRANTS FOR`, which says every level at once, so one read answers for
+  every database (`DatabaseAccess::inside`, `RoleGrants::flat`: no schema
+  level, no `USAGE`, no owner, no PUBLIC). An account is named `user@host`, a
+  MariaDB role bare; a MySQL 8 role is a locked, passwordless account and is
+  listed as a role. A login that may not read `mysql.user` gets
+  `Roles::denied`, shown in the row's and the tab's place and read again only
+  on Refresh: it is an answer, not a failure to retry. The decisions: a role
+  granted but not a default one is not inherited (not active until `SET
+  ROLE`), unless `activate_all_roles_on_login` is on, and MariaDB's role
+  granted to a role always is; a superuser is an account holding `SELECT`,
+  `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` and `SUPER` (or `ALL
+  PRIVILEGES`) on `*.*` with grant option, an approximation that does not
+  weigh MySQL 8's dynamic `*_ADMIN` privileges; a grant on a database pattern
+  (`db1\_%.*`) reaches every database whose name it matches by `LIKE` and is
+  shown as through that pattern; a `SHOW GRANTS` line the parser cannot read
+  is kept and shown as unread, never dropped. Copy DROP USER is one `DROP
+  USER 'user'@'host';` (`DROP ROLE` for a role) on the clipboard, nothing
+  sent.
 - **Explain** is `EXPLAIN` / `EXPLAIN ANALYZE` on Postgres and MySQL,
   `EXPLAIN` / `ANALYZE` on MariaDB, and `EXPLAIN QUERY PLAN` on SQLite, which
   has no analyze form, so that mode is not offered there
@@ -423,6 +492,16 @@ Decided, and not to be re-litigated:
   `Catalog::by_name` is the display order. Until `Routines::Loaded`, a stored
   routine tab stays pending rather than being resolved against a catalog that
   cannot have it yet.
+- **MySQL before 8.0 reads one database's relations at a time.** It has no
+  data dictionary: `information_schema.TABLES` opens every table's `.frm` for
+  `TABLE_TYPE`, so the whole server's relations took seconds (2.5 s cold for
+  26,000 tables) where one database by `TABLE_SCHEMA =` equality took 0.03 s.
+  `mysql::Connection` reads the server's version at open; on such a server the
+  catalog lists every database and reads the connection's own alone, the rest
+  left in `Catalog::unread` until their rows open (`Connection::schema_relations`,
+  merged by `Catalog::read_relations`), and sizes are read only for the
+  databases read (`Connection::sizes_of`). MariaDB and MySQL 8 read as before.
+  An unread database offers nothing to completion or Go to Object until opened.
 - **Sequences are their own kind, read in the second half.** They are never a
   relation, so no preview, DROP, TRUNCATE, insert or import path can reach one.
   `Connection::routines` reads them only where `Abilities.lists_sequences` is

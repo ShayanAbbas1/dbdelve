@@ -35,32 +35,44 @@ impl Workspace {
         }
     }
 
-    /// The schemas the palette offers a diagram of: the one a diagram opens
-    /// on when nothing names one, then every other schema of the catalog
-    /// with a table to draw.
-    pub(crate) fn diagram_schemas(profile: &Profile) -> Vec<String> {
+    /// The schemas the palette offers a diagram of, each with its database
+    /// (`None` for the connection's own): the one a diagram opens on when
+    /// nothing names one, then every other schema of the catalog with a
+    /// table to draw. The first is the object tab in front's when there is
+    /// one, so it keeps that tab's database: `public` of another database is
+    /// not the connection's `public`.
+    pub(crate) fn diagram_schemas(profile: &Profile) -> Vec<(Option<String>, String)> {
         let catalog = match &profile.catalog {
             CatalogState::Loaded(catalog, _) => Some(catalog),
             _ => None,
         };
-        offered_schemas(Self::diagram_schema(profile), catalog)
+        let own = profile.active_database();
+        let database = (profile.session.active_object())
+            .and_then(|tab| tab.database.clone())
+            .filter(|database| own.as_ref() != Some(database));
+        offered_schemas(database, Self::diagram_schema(profile), catalog)
     }
 
     /// Bring a schema's diagram to the front, opening and reading it if it
     /// has no tab yet, and with a `centre`, showing that table's
-    /// neighbourhood.
+    /// neighbourhood. The schema is `database`'s, the connection's own where
+    /// none is named.
     pub(crate) fn open_diagram(
         &mut self,
+        database: Option<String>,
         schema: String,
         centre: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let database = self.elsewhere(database);
         let Some(profile) = self.profile_mut() else {
             return;
         };
         let existing = (profile.session.objects.iter()).find_map(|tab| match &tab.body {
-            ObjectBody::Diagram { view, .. } if tab.schema == schema => {
+            ObjectBody::Diagram { view, .. }
+                if tab.schema == schema && tab.database == database =>
+            {
                 Some((tab.id, view.clone()))
             }
             _ => None,
@@ -77,7 +89,7 @@ impl Workspace {
                     centre: Some(centre),
                     ..store::StoredDiagram::default()
                 });
-                let Some(id) = self.diagram_tab(schema, restore, window, cx) else {
+                let Some(id) = self.diagram_tab(database, schema, restore, window, cx) else {
                     return;
                 };
                 id
@@ -88,9 +100,11 @@ impl Workspace {
 
     /// Give a schema's diagram a tab, unread and not shown, looked at as
     /// `restore` says once read when it comes back from disk. None where the
-    /// profile draws no diagrams.
+    /// profile draws no diagrams. `database` is as a tab holds it: named only
+    /// when it is not the connection's own.
     pub(crate) fn diagram_tab(
         &mut self,
+        database: Option<String>,
         schema: String,
         restore: Option<store::StoredDiagram>,
         window: &mut Window,
@@ -106,7 +120,7 @@ impl Workspace {
             Some(restore) => DiagramView::restoring(restore, cx),
             None => DiagramView::new(cx),
         });
-        let (profile_id, drawn) = (profile.id.clone(), schema.clone());
+        let (profile_id, drawn, bound) = (profile.id.clone(), schema.clone(), database.clone());
         cx.subscribe_in(
             &view,
             window,
@@ -115,11 +129,18 @@ impl Workspace {
                     schema,
                     table,
                     structure,
-                } => workspace.open_diagram_table(schema, table, *structure, window, cx),
+                } => workspace.open_diagram_table(
+                    bound.clone(),
+                    schema,
+                    table,
+                    *structure,
+                    window,
+                    cx,
+                ),
                 DiagramEvent::Arranged => {
                     let Some(database) = (workspace.profiles.iter())
                         .find(|profile| profile.id == profile_id)
-                        .and_then(arrangement_database)
+                        .and_then(|profile| arrangement_database(profile, bound.as_deref()))
                     else {
                         return;
                     };
@@ -140,7 +161,7 @@ impl Workspace {
         let profile = self.profile_mut()?;
         profile.session.objects.push(ObjectTab {
             id,
-            database: None,
+            database,
             schema,
             name: String::new(),
             kind: None,
@@ -257,18 +278,24 @@ impl Workspace {
     /// or its structure.
     fn open_diagram_table(
         &mut self,
+        database: Option<String>,
         schema: &str,
         table: &str,
         structure: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let kind = match self.catalog() {
-            Some(catalog) => relation_kind(catalog, schema, table).unwrap_or_default(),
-            None => RelationKind::default(),
+        let catalog = self
+            .profile()
+            .map(|profile| profile.catalog_state_of(database.as_deref()));
+        let kind = match catalog {
+            Some(CatalogState::Loaded(catalog, _)) => {
+                relation_kind(catalog, schema, table).unwrap_or_default()
+            }
+            _ => RelationKind::default(),
         };
         self.open_relation_view(
-            None,
+            database,
             schema.to_string(),
             table.to_string(),
             kind,
@@ -279,7 +306,8 @@ impl Workspace {
     }
 
     /// Read a diagram's schema on a connection of its own and lay it out, both
-    /// off the UI thread, unless it is read or being read already. A stale
+    /// off the UI thread, unless it is read or being read already. A diagram
+    /// of another database is read on a session opened there for it. A stale
     /// diagram is read again at the keys-only setting on screen, and stays on
     /// screen until the new one replaces it.
     pub(crate) fn load_diagram(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -290,7 +318,24 @@ impl Workspace {
             return;
         };
         let (profile_id, generation) = (profile.id.clone(), profile.generation);
-        let database = arrangement_database(profile);
+        let Some((bound, schema)) = (profile.session.objects.iter())
+            .find(|tab| tab.id == id)
+            .map(|tab| (tab.database.clone(), tab.schema.clone()))
+        else {
+            return;
+        };
+        let database = arrangement_database(profile, bound.as_deref());
+        // The catalog a bound tab's diagram reads is narrowed by that
+        // database's table lists, the tree's catalog by the own one's.
+        let listed = match bound.as_deref() {
+            Some(database) => profile.shown().in_another_database(database),
+            None => profile.shown(),
+        };
+        // Counted from the narrowed catalog, as the graph is narrowed below.
+        let known_tables = match profile.catalog_state_of(bound.as_deref()) {
+            CatalogState::Loaded(catalog, _) => drawn_table_count(catalog, &schema),
+            _ => None,
+        };
         let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id) else {
             return;
         };
@@ -303,11 +348,6 @@ impl Workspace {
         }
         let wanted = view.read(cx).wanted_keys_only();
         *stale = false;
-        let schema = tab.schema.clone();
-        let known_tables = match &profile.catalog {
-            CatalogState::Loaded(catalog, _) => drawn_table_count(catalog, &schema),
-            _ => None,
-        };
         let reading = Arc::new(SideRead::new());
         *side = Some(reading.clone());
         let issued = reading.clone();
@@ -316,10 +356,16 @@ impl Workspace {
             if reading.cancelled() {
                 return Ok(None);
             }
-            let Some(own) = reading.publish(connection.apart()?) else {
+            let session = match &bound {
+                Some(database) => connection.on_database(database)?,
+                None => connection.apart()?,
+            };
+            let Some(own) = reading.publish(session) else {
                 return Ok(None);
             };
-            let graph = own.schema_graph(&schema)?;
+            let graph = without_hidden(own.schema_graph(&schema)?, |name| {
+                listed.shows_relation(&schema, name)
+            });
             let keys_only =
                 wanted.unwrap_or(known_tables.unwrap_or(graph.tables.len()) > KEYS_ONLY_ABOVE);
             let scene = Scene::new(layout::schema(&graph, keys_only));
@@ -540,13 +586,61 @@ fn drawn_tables(schema: &crate::db::Schema) -> usize {
         .count()
 }
 
-/// `first`, then the catalog's other schemas that have a table to draw.
-fn offered_schemas(first: Option<String>, catalog: Option<&Catalog>) -> Vec<String> {
+/// `graph` without the tables `shows` leaves out, and without the keys to or
+/// from them, so a diagram draws what the tree does. A column keeps its
+/// foreign mark: the key is real, only the table it names is hidden.
+///
+/// ponytail: the hidden tables' columns are still read and dropped here; the
+/// upgrade is a name list in each engine's graph SQL.
+fn without_hidden(
+    graph: crate::db::SchemaGraph,
+    shows: impl Fn(&str) -> bool,
+) -> crate::db::SchemaGraph {
+    use crate::db::KeyTarget;
+    let mut kept_at: Vec<Option<u32>> = Vec::with_capacity(graph.tables.len());
+    let mut tables = Vec::new();
+    for table in graph.tables {
+        if shows(&table.name) {
+            kept_at.push(Some(tables.len() as u32));
+            tables.push(table);
+        } else {
+            kept_at.push(None);
+        }
+    }
+    let at = |table: u32| kept_at.get(table as usize).copied().flatten();
+    let keys = (graph.keys.into_iter())
+        .filter_map(|mut key| {
+            key.table = at(key.table)?;
+            if let KeyTarget::Table { table, .. } = &mut key.referenced {
+                *table = at(*table)?;
+            }
+            Some(key)
+        })
+        .collect();
+    crate::db::SchemaGraph {
+        tables,
+        keys,
+        ..graph
+    }
+}
+
+/// `first`, in `database` (`None` for the connection's own), then the
+/// catalog's other schemas that have a table to draw, all in the
+/// connection's own database. A schema of the catalog is left out only where
+/// `first` is the same schema of the same database.
+fn offered_schemas(
+    database: Option<String>,
+    first: Option<String>,
+    catalog: Option<&Catalog>,
+) -> Vec<(Option<String>, String)> {
+    let skipped = first.clone().filter(|_| database.is_none());
     let rest = (catalog.into_iter())
         .flat_map(|catalog| &catalog.schemas)
-        .filter(|schema| first.as_ref() != Some(&schema.name) && drawn_tables(schema) > 0)
-        .map(|schema| schema.name.clone());
-    first.clone().into_iter().chain(rest).collect()
+        .filter(|schema| skipped.as_ref() != Some(&schema.name) && drawn_tables(schema) > 0)
+        .map(|schema| (None, schema.name.clone()));
+    (first.map(|first| (database, first)).into_iter())
+        .chain(rest)
+        .collect()
 }
 
 /// Whether a relation of this kind is drawn as a card of its schema's
@@ -555,12 +649,16 @@ pub(crate) fn drawn_in_diagrams(kind: RelationKind) -> bool {
     matches!(kind, RelationKind::Table | RelationKind::PartitionedTable)
 }
 
-/// The database a diagram's arrangement is filed under, named as a pin names
-/// its own: none where the catalog lists every database as a schema or the
-/// profile has one. Unknown, nothing is read or written: an arrangement filed
-/// without its database would come back for the same schema in whatever
-/// database came next.
-fn arrangement_database(profile: &Profile) -> Option<Option<String>> {
+/// The database a diagram's arrangement is filed under: `bound`, the one its
+/// tab names, else the connection's own, named as a pin names its own: none
+/// where the catalog lists every database as a schema or the profile has one.
+/// Unknown, nothing is read or written: an arrangement filed without its
+/// database would come back for the same schema in whatever database came
+/// next.
+fn arrangement_database(profile: &Profile, bound: Option<&str>) -> Option<Option<String>> {
+    if let Some(bound) = bound {
+        return Some(Some(bound.to_string()));
+    }
     match profile.shortcut_database() {
         crate::explorer::ShortcutDatabase::Unnamed => Some(None),
         crate::explorer::ShortcutDatabase::On(database) => Some(Some(database)),
@@ -770,9 +868,108 @@ mod tests {
                 sequences: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         };
         assert_eq!(drawn_table_count(&catalog, "public"), Some(2));
         assert_eq!(drawn_table_count(&catalog, "other"), None);
+    }
+
+    #[test]
+    fn a_diagram_draws_only_the_tables_the_table_list_shows() {
+        use crate::db::{
+            GraphColumn, GraphKey, GraphTable, Include, KeyTarget, Levels, SchemaGraph, TableFilter,
+        };
+        let column = |name: &str, primary: bool, foreign: bool| GraphColumn {
+            name: name.to_string().into(),
+            type_label: 0,
+            nullable: false,
+            primary,
+            foreign,
+            unique: primary,
+        };
+        let table = |name: &str, columns: Vec<GraphColumn>| GraphTable {
+            name: name.to_string().into(),
+            columns,
+        };
+        let key = |name: &str, table: u32, referenced: KeyTarget| GraphKey {
+            name: name.to_string().into(),
+            table,
+            columns: vec![1],
+            referenced,
+        };
+        let to = |table: u32| KeyTarget::Table {
+            table,
+            columns: vec![0],
+        };
+        let graph = SchemaGraph {
+            schema: "public".into(),
+            tables: vec![
+                table(
+                    "a",
+                    vec![column("id", true, false), column("b_id", true, true)],
+                ),
+                table(
+                    "b",
+                    vec![column("id", true, false), column("c_id", false, true)],
+                ),
+                table(
+                    "c",
+                    vec![column("id", true, false), column("a_id", false, true)],
+                ),
+            ],
+            types: vec!["int".into()],
+            keys: vec![
+                key("a_b", 0, to(1)),
+                key("b_c", 1, to(2)),
+                key("c_a", 2, to(0)),
+                key(
+                    "a_far",
+                    0,
+                    KeyTarget::Elsewhere {
+                        schema: "audit".into(),
+                        table: "log".into(),
+                    },
+                ),
+            ],
+        };
+        let shown = Include::default()
+            .with_tables(vec![TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["a".into(), "c".into()],
+            }])
+            .resolve(Levels::Flat, None, None);
+
+        let drawn = without_hidden(graph, |name| shown.shows_relation("public", name));
+
+        let names: Vec<&str> = drawn
+            .tables
+            .iter()
+            .map(|table| table.name.as_ref())
+            .collect();
+        assert_eq!(names, ["a", "c"]);
+        let keys: Vec<(&str, u32, &KeyTarget)> = (drawn.keys.iter())
+            .map(|key| (key.name.as_ref(), key.table, &key.referenced))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("c_a", 1, &to(0)),
+                (
+                    "a_far",
+                    0,
+                    &KeyTarget::Elsewhere {
+                        schema: "audit".into(),
+                        table: "log".into(),
+                    }
+                ),
+            ],
+            "a key to or from a hidden table goes, the rest point at the kept tables"
+        );
+        assert!(
+            drawn.tables[0].columns[1].foreign,
+            "b_id is still a foreign key; only the table it names is hidden"
+        );
     }
 
     #[test]
@@ -797,16 +994,33 @@ mod tests {
                 schema("billing", RelationKind::PartitionedTable),
             ],
             database: None,
+            ..Default::default()
         };
+        let own = |name: &str| (None, name.to_string());
         assert_eq!(
-            offered_schemas(Some("public".into()), Some(&catalog)),
-            ["public", "archive", "billing"]
+            offered_schemas(None, Some("public".into()), Some(&catalog)),
+            [own("public"), own("archive"), own("billing")]
         );
         assert_eq!(
-            offered_schemas(Some("public".into()), None),
-            ["public"],
+            offered_schemas(None, Some("public".into()), None),
+            [own("public")],
             "before the catalog is read"
         );
-        assert!(offered_schemas(None, None).is_empty());
+        assert!(offered_schemas(None, None, None).is_empty());
+        assert_eq!(
+            offered_schemas(
+                Some("warehouse".into()),
+                Some("public".into()),
+                Some(&catalog)
+            ),
+            [
+                (Some("warehouse".to_string()), "public".to_string()),
+                own("archive"),
+                own("public"),
+                own("billing"),
+            ],
+            "another database's public keeps its database, and the connection's own public \
+             is still offered"
+        );
     }
 }

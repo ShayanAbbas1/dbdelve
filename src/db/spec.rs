@@ -7,8 +7,8 @@
 //! existing strategies is one more value here and its driver.
 
 use super::{
-    Builtin, ColumnDefinition, Fields, RelationKind, Syntax, builtins, clickhouse, duckdb, mongo,
-    mssql, mysql, postgres, redis,
+    Builtin, ColumnDefinition, Fields, Property, RelationKind, Syntax, builtins, clickhouse,
+    duckdb, mongo, mssql, mysql, postgres, redis,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +37,18 @@ pub struct EngineSpec {
     pub default_port: Option<u16>,
     pub takes_options: bool,
     pub takes_service: bool,
+    /// A profile may carry a startup script, which its driver replays on every
+    /// session it opens for the user.
+    pub takes_startup_script: bool,
+    /// The engine keeps a session open between statements, which a ping can
+    /// keep from an idle cut-off by a proxy or load balancer. Follows the
+    /// `Connection::is_lost` table: an engine that redials on its own, or
+    /// speaks one request at a time, has nothing to keep.
+    pub keeps_alive: bool,
+    /// The driver settings a profile may set on this engine, each mapped in
+    /// the engine's own module. Never anything that carries the read-only
+    /// hold, TLS or credentials: those have fields with their own gates.
+    pub driver_properties: &'static [Property],
     pub resolves_srv: bool,
     pub system_databases: &'static [&'static str],
     /// Exact type names read as bytes beyond the families every engine shares.
@@ -351,6 +363,11 @@ pub struct Hints {
     pub database: &'static str,
     pub user: &'static str,
     pub path: &'static str,
+    /// The Startup script field's placeholder: an example in the engine's own
+    /// dialect that passes the script gate under Read-only, the mode a new
+    /// profile starts in. An engine with no such statement keeps the neutral
+    /// line, so no form shows another dialect's example as its own.
+    pub startup_script: &'static str,
 }
 
 impl Hints {
@@ -360,6 +377,7 @@ impl Hints {
         database: "Optional",
         user: "Required",
         path: "/path/to/app.sqlite",
+        startup_script: "Statements run on every session",
     };
 }
 
@@ -448,6 +466,8 @@ pub struct SqlSpec {
     pub regex: RegexMatch,
     pub substring: SubstringMatch,
     pub read_only_session: ReadOnlySession,
+    /// How a session time zone is spelled to this engine, never the text.
+    pub session_time_zone: SessionTimeZone,
     pub unreadable_floor: UnreadableFloor,
     /// The table engines a `CREATE TABLE … ENGINE =` may name and stay a
     /// write: those that keep their rows in the database. Any other engine
@@ -517,6 +537,7 @@ impl SqlSpec {
         regex: RegexMatch::None,
         substring: SubstringMatch::Like,
         read_only_session: ReadOnlySession::None,
+        session_time_zone: SessionTimeZone::None,
         unreadable_floor: UnreadableFloor::None,
         local_table_engines: None,
         stateless_requests: false,
@@ -786,6 +807,18 @@ pub enum ReadOnlySession {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionTimeZone {
+    /// The engine has no session time zone a profile can set.
+    None,
+    /// `SET TIME ZONE '…'`.
+    SetTimeZone,
+    /// `SET time_zone = '…'`.
+    TimeZoneVariable,
+    /// Sent as a setting on each request rather than on a session.
+    RequestSetting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnreadableFloor {
     /// A statement the parser cannot read is `Unreadable` and nothing more.
     None,
@@ -869,6 +902,14 @@ pub struct Abilities {
     /// The catalog declares foreign keys that
     /// [`Connection::schema_graph`](super::Connection::schema_graph) reads.
     pub draws_diagrams: bool,
+    /// The server's logins, roles and grants can be read and changed through
+    /// [`Connection::roles`](super::Connection::roles) and the statements
+    /// [`super::roles`] writes.
+    pub manages_roles: bool,
+    /// The server's logins, roles and grants can be read through
+    /// [`Connection::roles`](super::Connection::roles), whether or not
+    /// DBDelve writes changes to them ([`Self::manages_roles`]).
+    pub lists_roles: bool,
     /// Why no transaction spans an import's chunks.
     pub chunk_refusal: Option<&'static str>,
 }
@@ -892,6 +933,8 @@ impl Abilities {
         exact_row_estimates: false,
         schema_switch_waits_for_transaction: false,
         draws_diagrams: false,
+        manages_roles: false,
+        lists_roles: false,
         chunk_refusal: None,
     };
 
@@ -943,6 +986,9 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     default_port: Some(postgres::DEFAULT_PORT),
     takes_options: false,
     takes_service: true,
+    takes_startup_script: true,
+    keeps_alive: true,
+    driver_properties: &[Property::ApplicationName, Property::ConnectTimeout],
     resolves_srv: false,
     // `postgres` is an ordinary database people work in.
     system_databases: &[],
@@ -952,6 +998,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints {
         database: "postgres",
+        startup_script: "SET search_path TO app, public;",
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
@@ -972,6 +1019,7 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::PostgreSql,
         regex: RegexMatch::Tilde,
         read_only_session: ReadOnlySession::DefaultTransaction,
+        session_time_zone: SessionTimeZone::SetTimeZone,
         builtins: builtins::postgres::BUILTINS,
         binary_literal: Some(BinaryLiteral::EscapeString),
         ..SqlSpec::ANSI
@@ -992,6 +1040,8 @@ pub(crate) const POSTGRES: EngineSpec = EngineSpec {
         lists_sequences: true,
         schema_switch_waits_for_transaction: true,
         draws_diagrams: true,
+        manages_roles: true,
+        lists_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks::NONE,
@@ -1011,13 +1061,19 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
     default_port: Some(mysql::DEFAULT_PORT),
     takes_options: false,
     takes_service: false,
+    takes_startup_script: true,
+    keeps_alive: true,
+    driver_properties: &[Property::ApplicationName, Property::ConnectTimeout],
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
     binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
-    hints: Hints::DEFAULT,
+    hints: Hints {
+        startup_script: "SET SESSION wait_timeout = 28800;",
+        ..Hints::DEFAULT
+    },
     sql: SqlSpec {
         null_terms: true,
         drafts: true,
@@ -1042,6 +1098,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::MySql,
         regex: RegexMatch::RegexpLike,
         read_only_session: ReadOnlySession::SessionTransaction,
+        session_time_zone: SessionTimeZone::TimeZoneVariable,
         builtins: builtins::mysql::BUILTINS,
         binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
@@ -1061,6 +1118,7 @@ pub(crate) const MYSQL: EngineSpec = EngineSpec {
         // No `picks_schema`: the database is the schema.
         catalog_lists_databases: true,
         draws_diagrams: true,
+        lists_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1084,13 +1142,19 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
     default_port: Some(mysql::DEFAULT_PORT),
     takes_options: false,
     takes_service: false,
+    takes_startup_script: true,
+    keeps_alive: true,
+    driver_properties: &[Property::ApplicationName, Property::ConnectTimeout],
     resolves_srv: false,
     system_databases: &["information_schema", "mysql", "performance_schema", "sys"],
     binary_types: &[],
     binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
-    hints: Hints::DEFAULT,
+    hints: Hints {
+        startup_script: "SET SESSION wait_timeout = 28800;",
+        ..Hints::DEFAULT
+    },
     sql: SqlSpec {
         null_terms: true,
         drafts: true,
@@ -1114,6 +1178,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         parser_dialect: ParserDialect::MySql,
         regex: RegexMatch::RegexpInstr,
         read_only_session: ReadOnlySession::SessionTransaction,
+        session_time_zone: SessionTimeZone::TimeZoneVariable,
         builtins: builtins::mysql::BUILTINS,
         binary_literal: Some(BinaryLiteral::XQuoted),
         ..SqlSpec::ANSI
@@ -1133,6 +1198,7 @@ pub(crate) const MARIADB: EngineSpec = EngineSpec {
         catalog_lists_databases: true,
         draws_diagrams: true,
         lists_sequences: true,
+        lists_roles: true,
         ..Abilities::NONE
     },
     hooks: Hooks {
@@ -1163,6 +1229,9 @@ pub(crate) const SQLITE: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     takes_service: false,
+    takes_startup_script: true,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -1220,6 +1289,9 @@ pub(crate) const TURSO: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     takes_service: false,
+    takes_startup_script: true,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -1267,6 +1339,9 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     takes_service: false,
+    takes_startup_script: true,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -1275,6 +1350,7 @@ pub(crate) const DUCKDB: EngineSpec = EngineSpec {
     type_wrappers: &[],
     hints: Hints {
         path: "Blank for a database in memory",
+        startup_script: "SET threads = 4;",
         ..Hints::DEFAULT
     },
     sql: SqlSpec {
@@ -1338,6 +1414,9 @@ pub(crate) const SNOWFLAKE: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     takes_service: false,
+    takes_startup_script: false,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: false,
     // The account usage share every account has. `SNOWFLAKE_SAMPLE_DATA` is a
     // share too, but one people query.
@@ -1408,6 +1487,9 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     default_port: Some(mssql::DEFAULT_PORT),
     takes_options: false,
     takes_service: false,
+    takes_startup_script: true,
+    keeps_alive: true,
+    driver_properties: &[Property::ApplicationName],
     resolves_srv: false,
     system_databases: &["master", "tempdb", "model", "msdb"],
     // `image` is the legacy binary type here; elsewhere it is a name anyone
@@ -1416,7 +1498,10 @@ pub(crate) const SQL_SERVER: EngineSpec = EngineSpec {
     binary_text: Some(BinaryText::ZeroX),
     numeric_types: &[],
     type_wrappers: &[],
-    hints: Hints::DEFAULT,
+    hints: Hints {
+        startup_script: "SET NOCOUNT ON;",
+        ..Hints::DEFAULT
+    },
     sql: SqlSpec {
         null_terms: true,
         drafts: true,
@@ -1492,6 +1577,9 @@ pub(crate) const MONGODB: EngineSpec = EngineSpec {
     default_port: Some(mongo::DEFAULT_PORT),
     takes_options: true,
     takes_service: false,
+    takes_startup_script: false,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: true,
     system_databases: &["admin", "local", "config"],
     binary_types: &["bindata"],
@@ -1534,6 +1622,9 @@ pub(crate) const REDIS: EngineSpec = EngineSpec {
     default_port: Some(redis::DEFAULT_PORT),
     takes_options: false,
     takes_service: false,
+    takes_startup_script: false,
+    keeps_alive: true,
+    driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],
@@ -1578,6 +1669,9 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
     default_port: Some(clickhouse::DEFAULT_PORT),
     takes_options: false,
     takes_service: false,
+    takes_startup_script: false,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: false,
     system_databases: &["system", "INFORMATION_SCHEMA", "information_schema"],
     binary_types: &[],
@@ -1624,6 +1718,7 @@ pub(crate) const CLICKHOUSE: EngineSpec = EngineSpec {
         materialized_view: MaterializedViewDrop::View,
         parser_dialect: ParserDialect::ClickHouse,
         read_only_session: ReadOnlySession::PerRequest,
+        session_time_zone: SessionTimeZone::RequestSetting,
         unreadable_floor: UnreadableFloor::FirstKeyword,
         local_table_engines: Some(&[
             "MergeTree",
@@ -1709,6 +1804,9 @@ pub(crate) const GENERIC: EngineSpec = EngineSpec {
     default_port: None,
     takes_options: false,
     takes_service: false,
+    takes_startup_script: false,
+    keeps_alive: false,
+    driver_properties: &[],
     resolves_srv: false,
     system_databases: &[],
     binary_types: &[],

@@ -36,10 +36,18 @@ use crate::explorer::{
 use crate::icons::{queries_group_icon, saved_query_icon};
 use crate::session::Binding;
 use crate::sidebar::{
-    self as model, Content, Listed, Node, NodeKind, OPEN_ROWS_CAP, SelectedNode, Selection,
-    SelectionAction, node_actions, schema_row_is_a_database, shown_size,
+    self as model, Content, Listed, Node, NodeAction, NodeKind, OPEN_ROWS_CAP, SelectedNode,
+    Selection, SelectionAction, node_actions, schema_row_is_a_database, shown_size,
 };
 use crate::ui::{Status, row_icon_tinted, status_dot};
+
+/// What a pinned or foldered object the connection's filter hides says when
+/// hovered, so it is not taken for one the server dropped.
+pub(super) const HIDDEN_BY_FILTER: &str = "Hidden by this connection's filter, not missing";
+
+/// How far a coloured connection row's fill stops short of its slot, above and
+/// below: half of it on each of two such rows makes the gap between them.
+const FILLED_ROW_INSET: f32 = layout::SPACE_XS / 2.0;
 
 /// The id of the row of `profile`'s front tab in the connections tree, if
 /// the tab has one.
@@ -111,6 +119,8 @@ pub(crate) struct ConnectionsSidebar {
     pub(crate) counts: Arc<HashMap<String, usize>>,
     /// How many listed connections the filter could not look inside.
     pub(crate) unsearched: usize,
+    /// How many each count is of, where a filter left some out.
+    pub(crate) totals: Arc<HashMap<String, usize>>,
     /// What the tree is narrowed by.
     pub(crate) filter: Entity<InputState>,
     /// The folds the tree had when the first key was typed, which come back
@@ -163,6 +173,7 @@ impl ConnectionsSidebar {
             shortcuts: Arc::default(),
             counts: Arc::default(),
             unsearched: 0,
+            totals: Arc::default(),
             filter,
             folds_before_filter: None,
             selection: Selection::default(),
@@ -294,8 +305,15 @@ impl Workspace {
                         }
                         _ => Vec::new(),
                     },
+                    roles: match (&profile.state, &profile.catalog) {
+                        (ProfileState::Connected(_), CatalogState::Loaded(..)) => {
+                            Self::roles_listing(profile)
+                        }
+                        _ => None,
+                    },
                     levels,
                     database,
+                    databases_left_out: profile.databases.left_out,
                 }
             })
             .collect();
@@ -356,6 +374,7 @@ impl Workspace {
         self.connections.shortcuts = Arc::new(built.shortcuts);
         self.connections.counts = Arc::new(built.counts);
         self.connections.unsearched = built.unsearched;
+        self.connections.totals = Arc::new(built.totals);
         // When the row the tree had is gone, one of the rows still selected
         // is where it goes, so the selection is not left with none of its own.
         let kept = self
@@ -708,7 +727,11 @@ impl Workspace {
                 let scoped = model::unscoped(id)?;
                 self.row_node(scoped.profile, scoped.database, scoped.inner, *leaf)
             }
-            Node::Group | Node::Notice => None,
+            Node::Group
+            | Node::Notice
+            | Node::Users { .. }
+            | Node::RoleGroup { .. }
+            | Node::Role { .. } => None,
         }
     }
 
@@ -798,6 +821,30 @@ impl Workspace {
                     self.open_database(&id, database, cx);
                 }
             }
+            // A schema of the connection's own catalog listed unread is read
+            // when its row opens.
+            Some(Node::Row { leaf: None }) => {
+                let read = model::unscoped(id).and_then(|scoped| {
+                    let schema = schema_row_name(scoped.inner)?;
+                    scoped
+                        .database
+                        .is_none()
+                        .then(|| (scoped.profile.to_string(), schema.to_string()))
+                });
+                if let Some((profile, schema)) = read {
+                    self.read_schema(&profile, &schema, cx);
+                }
+            }
+            // Read when first opened, and again after a failure.
+            Some(Node::Users { profile }) => {
+                let profile = profile.clone();
+                if self.profiles.iter().any(|found| {
+                    found.id == profile
+                        && matches!(found.roles, RolesState::Unloaded | RolesState::Failed(_))
+                }) {
+                    self.load_roles(&profile, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -811,6 +858,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        match self.connections.nodes.get(id) {
+            Some(Node::Users { profile }) => {
+                let profile = profile.clone();
+                self.open_users(&profile, None, window, cx);
+                return true;
+            }
+            Some(Node::Role { profile, name, .. }) => {
+                let (profile, name) = (profile.clone(), name.clone());
+                self.open_users(&profile, Some(name), window, cx);
+                return true;
+            }
+            _ => {}
+        }
         let Some(model::Scoped {
             profile,
             database,
@@ -840,7 +900,14 @@ impl Workspace {
             .listed_files()
             .into_iter()
             .find(|path| explorer::file_row(path) == row);
-        if leaf.is_none() && query.is_none() && file.is_none() {
+        let hidden = self
+            .connections
+            .shortcuts
+            .get(id)
+            .and_then(Shortcut::hidden_relation)
+            .filter(|_| elsewhere.is_none())
+            .map(|(object, kind)| (object.clone(), kind));
+        if leaf.is_none() && query.is_none() && file.is_none() && hidden.is_none() {
             return false;
         }
         if self.active != Some(index) {
@@ -856,7 +923,11 @@ impl Workspace {
                 self.open_object_on(profile, database, leaf.target, window, cx)
             }
             (None, Some(leaf), None) => self.open_explorer_target(leaf.target, window, cx),
-            (None, None, _) => {}
+            (None, None, _) => {
+                if let Some((object, kind)) = hidden {
+                    self.open_hidden_relation(&object, kind, window, cx);
+                }
+            }
         }
         true
     }
@@ -867,6 +938,7 @@ impl Workspace {
         let highlights = self.connections.highlights.clone();
         let shortcuts = self.connections.shortcuts.clone();
         let counts = self.connections.counts.clone();
+        let totals = self.connections.totals.clone();
         // What each connection's rows are drawn in, by profile id: its logo
         // and the dialect its saved queries are written in.
         let targets: HashMap<String, (&'static str, Syntax, Levels)> = self
@@ -939,6 +1011,8 @@ impl Workspace {
             };
             let shortcut = shortcuts.get(id);
             let missing = matches!(shortcut, Some(Shortcut::Member { missing: true, .. }));
+            let hidden = matches!(shortcut, Some(Shortcut::Member { hidden: true, .. }));
+            let hidden_relation = shortcut.and_then(Shortcut::hidden_relation).is_some();
             let query = inner
                 .and_then(saved_query)
                 .or_else(|| shortcut.and_then(Shortcut::query))
@@ -963,11 +1037,27 @@ impl Workspace {
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text_muted),
                 ),
-                _ if leaf.is_some() || query.is_some() || file.is_some() || folder_shortcut => (
+                _ if leaf.is_some()
+                    || query.is_some()
+                    || file.is_some()
+                    || folder_shortcut
+                    || hidden_relation =>
+                {
+                    (
+                        highlighted(label, matched, t),
+                        ListItem::new(index).text_color(t.text),
+                    )
+                }
+                Some(Node::Role { .. } | Node::RoleGroup { .. }) => (
                     highlighted(label, matched, t),
                     ListItem::new(index).text_color(t.text),
                 ),
-                Some(Node::Group | Node::Connection { .. } | Node::Database { .. }) => (
+                Some(
+                    Node::Group
+                    | Node::Connection { .. }
+                    | Node::Database { .. }
+                    | Node::Users { .. },
+                ) => (
                     highlighted(label, matched, t),
                     ListItem::new(index)
                         .text_color(t.text)
@@ -992,6 +1082,8 @@ impl Workspace {
             // of object it is. Both occupy the same slot, so the labels line up.
             let lead = match (node, leaf, shortcut) {
                 (Some(Node::Notice), ..) => None,
+                (Some(Node::Role { login: true, .. }), ..) => Some(icon::USER),
+                (Some(Node::Role { login: false, .. }), ..) => Some(icon::LOCK),
                 (_, Some(leaf), _) => Some(object_icon(leaf.kind)),
                 (
                     _,
@@ -1011,6 +1103,9 @@ impl Workspace {
                 Some(Node::Group) => Some(icon::PROJECT),
                 Some(Node::Connection { .. }) => target.map(|(logo, ..)| *logo),
                 Some(Node::Database { .. }) => Some(icon::DATABASE),
+                Some(Node::Users { .. }) => Some(icon::USERS),
+                Some(Node::RoleGroup { logins: true, .. }) => Some(icon::USER),
+                Some(Node::RoleGroup { logins: false, .. }) => Some(icon::USERS),
                 _ if inner == Some(FILES_GROUP) => {
                     target.map(|(_, syntax, _)| queries_group_icon(*syntax))
                 }
@@ -1055,8 +1150,17 @@ impl Workspace {
                 // library's 16 rather than dbdelve's body size.
                 .text_size(px(layout::chrome(layout::TEXT_MD)))
                 // The tree gives every row the height of its first, so each
-                // is told its density's.
-                .h(px(layout::chrome(density.row_height())))
+                // is told its density's. A coloured connection's fill is
+                // inset by a margin that keeps that height, so two of them
+                // one under the other read as two rows, not one band.
+                .map(|row| match connection.and_then(|(_, look)| look.color) {
+                    Some(_) => row
+                        .h(px(layout::chrome(
+                            density.row_height() - 2.0 * FILLED_ROW_INSET,
+                        )))
+                        .my(px(layout::chrome(FILLED_ROW_INSET))),
+                    None => row.h(px(layout::chrome(density.row_height()))),
+                })
                 .pl(px(
                     layout::SPACE_SM + entry.depth() as f32 * density.indent()
                 ))
@@ -1083,6 +1187,12 @@ impl Workspace {
                                             format!("connections-logo-{profile}")
                                         })
                                         .child(row_icon_tinted(t, path, look.color))
+                                        .into_any_element()
+                                }
+                                // Users and roles wears the accent the
+                                // design draws it in.
+                                None if matches!(node, Some(Node::Users { .. })) => {
+                                    row_icon_tinted(t, path, Some(ConnectionColor::Purple))
                                         .into_any_element()
                                 }
                                 None => row_icon(t, path).into_any_element(),
@@ -1142,7 +1252,7 @@ impl Workspace {
                                             format!("connections-count-{profile}")
                                         })
                                     })
-                                    .child(count.to_string()),
+                                    .child(model::count_label(*count, totals.get(id).copied())),
                             )
                         })
                         .when_some(
@@ -1189,11 +1299,19 @@ impl Workspace {
                     row.tooltip(move |window, cx| {
                         Tooltip::new(path.display().to_string()).build(window, cx)
                     })
+                })
+                .when(hidden, |row| {
+                    row.tooltip(|window, cx| Tooltip::new(HIDDEN_BY_FILTER).build(window, cx))
                 });
             if matches!(node, Some(Node::Notice)) {
                 return row;
             }
-            let opens = !missing && (leaf.is_some() || query.is_some() || file.is_some());
+            let opens = !missing
+                && (leaf.is_some()
+                    || hidden_relation
+                    || query.is_some()
+                    || file.is_some()
+                    || matches!(node, Some(Node::Users { .. } | Node::Role { .. })));
             let workspace = workspace.clone();
             let id = id.to_string();
             row.on_click(move |event, window, cx| {
@@ -1238,6 +1356,16 @@ impl Workspace {
             {
                 return file_row_menu(menu, path, &profile.id, &menu_workspace);
             }
+            // A Users and roles row: the tab's own actions, for the role.
+            if let Some((profile, name, actions)) = state.role_menu(id) {
+                return super::users::role_items(
+                    menu,
+                    &profile,
+                    name.as_deref(),
+                    actions,
+                    &menu_workspace,
+                );
+            }
             let Some(node) = state.connections_node(id) else {
                 // A saved query, a folder, the Pinned group or a pin whose
                 // object is gone: the menu simple mode draws for it, but for
@@ -1268,15 +1396,20 @@ impl Workspace {
             let inner = model::unscoped(id).map(|scoped| scoped.inner.to_string());
             match node.kind {
                 NodeKind::Connection | NodeKind::Database => {
-                    let Some(target) = state
+                    let Some((target, filterable)) = state
                         .profiles
                         .iter()
                         .find(|found| found.id == node.profile)
-                        .map(|found| found.config.target())
+                        .map(|found| (found.config.target(), found.offers_filter()))
                     else {
                         return menu;
                     };
-                    let actions = node_actions(node.kind, &node.name, target);
+                    let mut actions = node_actions(node.kind, &node.name, target);
+                    actions.retain(|action| match action {
+                        NodeAction::FilterDatabases => filterable,
+                        NodeAction::FilterTables => state.table_scope_of(&node).is_some(),
+                        _ => true,
+                    });
                     node_items(menu, &node, actions, &menu_workspace)
                 }
                 // A row of one connection's own rows: the menu simple mode
@@ -1288,6 +1421,7 @@ impl Workspace {
                         label: entry.item().label.clone(),
                         profile: node.profile.clone(),
                         database: node.database.clone(),
+                        listed: node.database.clone(),
                         leaf: node.leaf,
                         shortcut,
                     },

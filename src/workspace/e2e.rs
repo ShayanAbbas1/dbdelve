@@ -117,8 +117,13 @@ fn launch_on_sqlite_holding<'a>(
     .expect("profiles.toml must be writable");
 
     let (workspace, cx) = launch(cx);
-    // CI's live-test job sets `PG*`, which puts an environment profile in
-    // front of the saved one.
+    front_saved_sqlite(&workspace, cx);
+    (workspace, cx)
+}
+
+/// The saved SQLite profile in front. CI's live-test job sets `PG*`, which
+/// puts an environment profile in front of the saved one on every launch.
+fn front_saved_sqlite(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     workspace.update(cx, |workspace, cx| {
         let index = workspace
             .profiles
@@ -128,7 +133,6 @@ fn launch_on_sqlite_holding<'a>(
         workspace.activate(index, cx);
     });
     cx.run_until_parked();
-    (workspace, cx)
 }
 
 /// The app launched on `profiles`, the `[[profiles]]` tables of a hand-written
@@ -1264,7 +1268,9 @@ fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestA
                     ObjectBody::Structure { grid, .. } => {
                         (true, grid.focus_handle(cx).is_focused(window))
                     }
-                    ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {
+                    ObjectBody::Routine(_)
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => {
                         panic!("birds is a table")
                     }
                 }
@@ -1521,6 +1527,15 @@ fn connections_item(
 }
 
 /// A click on the connections tree's row `index`.
+/// Clicks the control drawn under `selector` where it is, as a person does.
+fn click_selector(cx: &mut VisualTestContext, selector: &'static str) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is not drawn"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    settle(cx);
+}
+
 fn click_connections_row(cx: &mut VisualTestContext, index: usize) {
     // `debug_bounds` takes a `'static` selector; a test's few rows can leak.
     let selector: &'static str = format!("connections-row-{index}").leak();
@@ -2182,6 +2197,82 @@ fn attach_other(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     settle(cx);
 }
 
+/// A listing overtaken by one started after it, which may have been asked
+/// under another filter, never lands: only the latest one's answer is shown.
+#[gpui::test]
+fn a_database_listing_overtaken_by_a_later_one_is_dropped(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        let names = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().databases.names.clone()
+            })
+        };
+        assert!(names(&workspace, cx).iter().any(|name| name == "other"));
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.databases = crate::db::Databases::default();
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            workspace.list_databases(&id, generation, cx);
+            // A later listing started before this one lands.
+            workspace.profile_mut().unwrap().start_listing();
+        });
+        settle(cx);
+        assert!(
+            names(&workspace, cx).is_empty(),
+            "the overtaken answer was dropped"
+        );
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            workspace.list_databases(&id, generation, cx);
+        });
+        settle(cx);
+        assert!(
+            names(&workspace, cx).iter().any(|name| name == "other"),
+            "the latest one's answer lands"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// Select Database shares the listing counter with the tree's listing,
+/// which a catalog or refresh landing starts while its fetch is out: the
+/// press still opens the palette, over the filter as it is when it opens.
+#[gpui::test]
+fn select_database_overtaken_by_another_listing_still_opens_the_palette(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_database(&crate::actions::SelectDatabase, window, cx);
+            workspace.profile_mut().unwrap().start_listing();
+        });
+        settle(cx);
+        let databases = palette_labels(&workspace, cx);
+        assert!(
+            databases.iter().any(|label| label == "other"),
+            "the same filter's answer opens the palette: {databases:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_database(&crate::actions::SelectDatabase, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.include.databases = vec!["e2e".to_string()];
+            profile.start_listing();
+        });
+        settle(cx);
+        let databases = palette_labels(&workspace, cx);
+        assert!(
+            databases.iter().any(|label| label == "e2e")
+                && !databases.iter().any(|label| label == "other"),
+            "asked again under the filter saved since: {databases:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn select_database_lists_a_new_database_in_the_connections_tree(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -2315,6 +2406,2718 @@ fn a_session_lost_after_its_replacement_registered_leaves_the_replacement_in_pla
             );
             profile.lose_session("other", &second);
             assert!(!profile.bound.contains_key("other"));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_filtered_duckdb_connection_lists_one_of_its_two_databases_and_never_reads_the_other(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\"e2e\"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+
+        assert_eq!(
+            connections_item(&workspace, cx, &connection_row("e2e"))
+                .map(|(_, rows)| rows.into_iter().map(|(id, ..)| id).collect::<Vec<_>>()),
+            Some(vec![database_row("e2e", "e2e")]),
+            "only the database the filter names"
+        );
+        assert!(
+            connections_row(&workspace, cx, &database_row("e2e", "other")).is_none(),
+            "the database it leaves out is not drawn"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let row = connection_row("e2e");
+            assert_eq!(workspace.connections.counts.get(&row), Some(&1));
+            assert_eq!(workspace.connections.totals.get(&row), Some(&2));
+            assert_eq!(crate::sidebar::count_label(1, Some(2)), "1 of 2");
+
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.databases.names, ["e2e"]);
+            assert_eq!(profile.databases.current.as_deref(), Some("e2e"));
+            assert_eq!(profile.databases.left_out, 1);
+            assert!(
+                profile.bound.is_empty() && profile.database_catalogs.is_empty(),
+                "nothing opened a session to the database the filter hides"
+            );
+            let stored = profile.stored(cx);
+            assert_eq!(stored.include_databases, ["e2e"]);
+            assert!(stored.include_schemas.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// The schema names of the front profile's own catalog, how many the filter
+/// left out of it, and whether its routines have landed.
+fn own_catalog(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (Vec<String>, usize, bool) {
+    workspace.read_with(cx, |workspace, _| {
+        match &workspace.profile().expect("a profile is in front").catalog {
+            CatalogState::Loaded(catalog, routines) => (
+                catalog.schemas.iter().map(|s| s.name.clone()).collect(),
+                catalog.left_out,
+                matches!(routines, crate::session::Routines::Loaded),
+            ),
+            _ => panic!("the catalog has not loaded"),
+        }
+    })
+}
+
+#[gpui::test]
+fn a_schema_filter_hides_a_schema_of_the_own_database_and_its_sequence_does_not_bring_it_back(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "include_schemas = [\"main\"]",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER); CREATE SEQUENCE extra.s;",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let database = database_row("e2e", "e2e");
+        let at = connections_row(&workspace, cx, &database).expect("the database shows");
+        click_connections_row(cx, at);
+
+        let check = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            assert_eq!(
+                own_catalog(workspace, cx),
+                (vec!["main".to_string()], 1, true)
+            );
+            workspace.read_with(cx, |workspace, _| {
+                let nodes = &workspace.connections.nodes;
+                assert!(nodes.contains_key(&scoped_row("e2e", Some("e2e"), "schema-main")));
+                assert!(!nodes.contains_key(&scoped_row("e2e", Some("e2e"), "schema-extra")));
+            });
+        };
+        check(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        check(&workspace, cx);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_database_row_says_how_many_of_its_schemas_the_filter_shows(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "include_schemas = [\"main\"]",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER); CREATE SEQUENCE extra.s;",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let database = database_row("e2e", "e2e");
+        let check = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            assert!(own_catalog(workspace, cx).2, "the routines have landed");
+            workspace.read_with(cx, |workspace, _| {
+                assert_eq!(workspace.connections.counts.get(&database), Some(&1));
+                assert_eq!(workspace.connections.totals.get(&database), Some(&2));
+            });
+        };
+        assert_eq!(crate::sidebar::count_label(1, Some(2)), "1 of 2");
+        check(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        check(&workspace, cx);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_attached_database_row_counts_the_schemas_the_filter_left_out(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"\ninclude_schemas = [\"extra\"]",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER); CREATE SEQUENCE extra.s;",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let at =
+            connections_row(&workspace, cx, &database_row("e2e", "other")).expect("`other` shows");
+        click_connections_row(cx, at);
+
+        workspace.read_with(cx, |workspace, _| {
+            let (counts, totals) = (&workspace.connections.counts, &workspace.connections.totals);
+            let own = database_row("e2e", "e2e");
+            let other = database_row("e2e", "other");
+            // `main` is kept as the active schema and `extra` matches, so the
+            // own database left nothing out.
+            assert_eq!(counts.get(&own), Some(&2));
+            assert_eq!(totals.get(&own), None);
+            assert_eq!(counts.get(&other), Some(&0));
+            assert_eq!(totals.get(&other), Some(&1));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_active_schema_is_kept_only_in_the_connections_own_database(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"\ninclude_schemas = [\"extra\"]",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER); CREATE SEQUENCE extra.s;",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let at =
+            connections_row(&workspace, cx, &database_row("e2e", "other")).expect("`other` shows");
+        click_connections_row(cx, at);
+
+        let (mut names, left_out, _) = own_catalog(&workspace, cx);
+        names.sort();
+        assert_eq!((names, left_out), (vec!["extra".into(), "main".into()], 0));
+        workspace.read_with(cx, |workspace, _| {
+            match workspace.profile().unwrap().database_catalogs.get("other") {
+                Some(CatalogState::Loaded(catalog, _)) => {
+                    assert!(catalog.schemas.is_empty());
+                    assert_eq!(catalog.left_out, 1);
+                }
+                _ => panic!("the catalog of `other` has not loaded"),
+            }
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Another database's catalog read under a filter saved over before it
+/// lands is read again under the new one, so it never puts back a schema
+/// that one hides.
+#[gpui::test]
+fn another_databases_catalog_asked_under_an_old_filter_is_read_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            "CREATE TABLE t (id INTEGER);",
+            "CREATE TABLE u (id INTEGER); CREATE SCHEMA extra; CREATE TABLE extra.x (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let at =
+            connections_row(&workspace, cx, &database_row("e2e", "other")).expect("`other` shows");
+        click_connections_row(cx, at);
+        let other = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                match workspace.profile().unwrap().database_catalogs.get("other") {
+                    Some(CatalogState::Loaded(catalog, _)) => {
+                        let mut names: Vec<_> =
+                            catalog.schemas.iter().map(|s| s.name.clone()).collect();
+                        names.sort();
+                        names
+                    }
+                    _ => panic!("the catalog of `other` has not loaded"),
+                }
+            })
+        };
+        assert_eq!(other(cx), ["extra", "main"]);
+
+        workspace.update(cx, |workspace, cx| {
+            let id = workspace.profile().unwrap().id.clone();
+            workspace.reload_database(&id, "other".to_string(), cx);
+            // Saved while that read is out.
+            workspace.profile_mut().unwrap().include.schemas = vec!["main".to_string()];
+        });
+        settle(cx);
+        assert_eq!(other(cx), ["main"], "read again under the filter saved");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_tab_bound_to_a_hidden_database_runs_and_its_catalog_is_never_read(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\"e2e\"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+
+        new_query_here(&workspace, cx, Some("other"), None);
+        run_in_front(&workspace, cx, "SELECT current_database()");
+        assert_eq!(answer(&workspace, cx).as_deref(), Some("other"));
+
+        let unread = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("a profile is in front");
+                assert!(matches!(
+                    profile.bound.get("other"),
+                    Some(crate::session::BoundSession::Open(_))
+                ));
+                assert!(
+                    !profile.database_catalogs.contains_key("other"),
+                    "the hidden database's catalog was read"
+                );
+            });
+            assert!(
+                connections_row(workspace, cx, &database_row("e2e", "other")).is_none(),
+                "the hidden database is not drawn"
+            );
+        };
+        unread(&workspace, cx);
+
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        unread(&workspace, cx);
+        run_in_front(&workspace, cx, "SELECT current_database()");
+        assert_eq!(answer(&workspace, cx).as_deref(), Some("other"));
+        quit(workspace, cx);
+    });
+}
+
+/// The labels the completion menu of the query tab in front lists after
+/// `text` is typed and the menu asked for.
+fn completion_labels(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    text: &str,
+) -> Vec<String> {
+    cx.simulate_input(text);
+    settle(cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    let labels = query_tab(workspace, cx, |tab, _, cx| {
+        tab.editor
+            .read(cx)
+            .completion_menu_state()
+            .items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect()
+    });
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    labels
+}
+
+#[gpui::test]
+fn everything_that_reads_the_catalog_follows_the_filter(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"\ninclude_databases = [\"e2e\"]\ninclude_schemas = [\"main\"]",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; CREATE TABLE extra.x (id INTEGER);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+
+        cx.dispatch_action(crate::actions::SelectDatabase);
+        settle(cx);
+        let databases = palette_labels(&workspace, cx);
+        assert!(
+            databases.iter().any(|label| label == "e2e"),
+            "{databases:?}"
+        );
+        assert!(
+            !databases.iter().any(|label| label == "other"),
+            "{databases:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.select_schema(window, cx))
+        });
+        settle(cx);
+        let schemas = palette_labels(&workspace, cx);
+        assert!(schemas.iter().any(|label| label == "main"), "{schemas:?}");
+        assert!(!schemas.iter().any(|label| label == "extra"), "{schemas:?}");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        let objects = palette_labels(&workspace, cx);
+        assert!(objects.iter().any(|label| label == "main.t"), "{objects:?}");
+        assert!(
+            !objects.iter().any(|label| label == "extra.x"),
+            "{objects:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        new_query_here(&workspace, cx, None, None);
+        let offered = completion_labels(&workspace, cx, "SELECT * FROM a");
+        // `a` is in `main` and in `extra`: only the one the filter shows is
+        // offered.
+        assert!(
+            offered.iter().any(|label| label.contains("main")),
+            "{offered:?}"
+        );
+        assert!(
+            !offered
+                .iter()
+                .any(|label| label.contains("extra") || label.ends_with('x')),
+            "{offered:?}"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_tab_open_on_a_hidden_object_keeps_working_and_its_pin_draws_hidden_and_opens(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        store::write_query("e2e", "q", "SELECT 1").expect("the test home takes a saved query");
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; \
+             CREATE TABLE extra.x (id INTEGER); INSERT INTO extra.x VALUES (1), (2);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let click = |id: &str, cx: &mut VisualTestContext| {
+            let at = connections_row(&workspace, cx, id)
+                .unwrap_or_else(|| panic!("{id} is not showing"));
+            click_connections_row(cx, at);
+        };
+        click(&connection_row("e2e"), cx);
+        let x = scoped_row("e2e", Some("e2e"), &explorer::relation_row("extra", "x"));
+        for id in [
+            database_row("e2e", "e2e"),
+            scoped_row("e2e", Some("e2e"), "schema-extra"),
+            scoped_row("e2e", Some("e2e"), "category-Tables-extra"),
+            x.clone(),
+        ] {
+            click(&id, cx);
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::Pin, window, cx)
+        });
+        settle(cx);
+
+        // What the tree draws of the pin, by whether its object is listed:
+        // missing, and hidden by the filter.
+        let pin_missing = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("a profile is in front");
+                let content = super::profiles::explorer_content(
+                    profile,
+                    "",
+                    crate::explorer::FilesOrder::Name,
+                );
+                let mut pins = content
+                    .shortcuts
+                    .values()
+                    .filter_map(|shortcut| match shortcut {
+                        crate::explorer::Shortcut::Member {
+                            folder: None,
+                            missing,
+                            hidden,
+                            ..
+                        } => Some((*missing, *hidden)),
+                        _ => None,
+                    });
+                let pin = pins.next().expect("the object is pinned");
+                assert_eq!(pins.next(), None, "one pin");
+                pin
+            })
+        };
+        let survivors = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("a profile is in front");
+                (
+                    profile
+                        .session
+                        .objects
+                        .iter()
+                        .map(|tab| (tab.schema.clone(), tab.name.clone()))
+                        .collect::<Vec<_>>(),
+                    profile.shortcuts.pins.len(),
+                    profile.session.saved_queries.clone(),
+                )
+            })
+        };
+        let object = ("extra".to_string(), "x".to_string());
+        assert_eq!(
+            survivors(cx),
+            (vec![object.clone()], 1, vec!["q".to_string()])
+        );
+        assert_eq!(pin_missing(cx), (false, false));
+
+        // The two steps Save performs on the filter.
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .schemas = vec!["main".to_string()];
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert_eq!(own_catalog(&workspace, cx).0, ["main"]);
+        assert_eq!(
+            survivors(cx),
+            (vec![object.clone()], 1, vec!["q".to_string()])
+        );
+        assert_eq!(
+            pin_missing(cx),
+            (false, true),
+            "hidden by the filter, not drawn as dropped"
+        );
+        assert_eq!(
+            store::read_query("e2e", "q").expect("the file reads"),
+            Some("SELECT 1".to_string())
+        );
+
+        // The tab still reads its rows through the session it was opened on.
+        let id = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.objects[0].id
+        });
+        workspace.update(cx, |workspace, cx| workspace.refresh_relation(id, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let tab = &workspace.profile().unwrap().session.objects[0];
+            let ObjectBody::Relation { query, .. } = &tab.body else {
+                panic!("x is a table");
+            };
+            assert!(matches!(query, QueryState::Complete { .. }));
+        });
+
+        // Closed, the tab opens again from the pin, by the relation's name.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_object(id, window, cx);
+        });
+        settle(cx);
+        assert_eq!(survivors(cx).0, Vec::new());
+        let pin = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .connections
+                .shortcuts
+                .iter()
+                .find(|(_, shortcut)| shortcut.hidden_relation().is_some())
+                .map(|(row, _)| row.clone())
+                .expect("the connections tree lists the hidden pin")
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.open_connection_row(&pin, window, cx));
+        });
+        settle(cx);
+        assert_eq!(survivors(cx).0, vec![object.clone()]);
+
+        // Removing the filter lists the object again, and the pin with it.
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .schemas
+                .clear();
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert_eq!(
+            pin_missing(cx),
+            (false, false),
+            "the pin is drawn present again"
+        );
+        assert_eq!(survivors(cx), (vec![object], 1, vec!["q".to_string()]));
+        quit(workspace, cx);
+    });
+}
+
+/// The `Filter Databases` entry of the connections tree's connection menu:
+/// New Query Here, Copy Name, Refresh, then it.
+const FILTER_DATABASES_DOWNS: usize = 4;
+
+/// The DuckDB connection with `other` and `scratch` attached, the instance
+/// listing three databases, and the picker opened from the connection's menu.
+fn three_databases_with_the_picker_open(
+    cx: &mut TestAppContext,
+) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = duckdb_with_other_attached(cx);
+    let scratch = store::dbdelve_directory()
+        .expect("the test home has a data directory")
+        .join("scratch.duckdb");
+    run_in_front(
+        &workspace,
+        cx,
+        &format!("ATTACH '{}' AS scratch", scratch.display()),
+    );
+    workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+    settle(cx);
+    let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+    pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+    settle(cx);
+    (workspace, cx)
+}
+
+#[gpui::test]
+fn filter_databases_on_the_connection_menu_saves_a_ticked_list_and_rereads_without_reconnecting(
+    cx: &mut TestAppContext,
+) {
+    use super::filter_picker::Listing;
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        let scratch = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("scratch.duckdb");
+        run_in_front(
+            &workspace,
+            cx,
+            &format!("ATTACH '{}' AS scratch", scratch.display()),
+        );
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        let before = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            (profile.generation, profile.config.clone(), profile.mode)
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.connections.totals.get(&connection_row("e2e")),
+                None
+            );
+        });
+
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        assert!(cx.debug_bounds("filter-picker").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.databases.listing,
+                Listing::Loaded(vec!["e2e".into(), "other".into(), "scratch".into()]),
+                "every database the server lists, not only the shown ones"
+            );
+            assert_eq!(picker.row_hint("e2e"), Some("current database"));
+            assert_eq!(picker.row_hint("other"), None);
+        });
+
+        // The connection's own database is checked and cannot be unticked.
+        click_selector(cx, "filter-picker-row-databases-0");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert!(picker.databases.ticked.is_empty());
+        });
+        click_selector(cx, "filter-picker-row-databases-1");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["other"]);
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None, "Save closes the dialog");
+        assert!(editor_has_keyboard(&workspace, cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.filter_picker.is_none());
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.databases, ["other"]);
+            assert_eq!(
+                (profile.generation, profile.config.clone(), profile.mode),
+                before,
+                "a filter edit never reconnects"
+            );
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+            let row = connection_row("e2e");
+            assert_eq!(workspace.connections.counts.get(&row), Some(&2));
+            assert_eq!(workspace.connections.totals.get(&row), Some(&3));
+        });
+        let saved = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        let saved = saved
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "e2e")
+            .expect("the profile was saved");
+        assert_eq!(saved.include_databases, ["other"]);
+        assert!(
+            connections_row(&workspace, cx, &database_row("e2e", "scratch")).is_none(),
+            "the database the list leaves out is not drawn"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_picker_lists_the_own_databases_schemas_and_saves_both_lists(cx: &mut TestAppContext) {
+    use super::filter_picker::{Listing, Which};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; CREATE TABLE extra.x (id INTEGER); \
+             CREATE SCHEMA more; CREATE TABLE more.y (id INTEGER);",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let before = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("the connection is in front")
+                .generation
+        });
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        assert!(cx.debug_bounds("filter-picker-list-schemas").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.heading(), "Filter databases and schemas");
+            let schemas = picker.schemas.as_ref().expect("DuckDB lists schemas");
+            assert_eq!(
+                schemas.listing,
+                Listing::Loaded(vec!["extra".into(), "main".into(), "more".into()]),
+                "every schema of the own database, in the server's order"
+            );
+            assert_eq!(picker.schema_hint("main"), Some("active schema"));
+            assert_eq!(picker.schema_hint("extra"), None);
+            assert_eq!(
+                picker.schemas_caption().as_deref(),
+                Some("Schemas of e2e. The schema filter applies inside every database.")
+            );
+            assert_eq!(
+                picker.preview(Which::Schemas).as_deref(),
+                Some("Showing all 3 schemas in e2e")
+            );
+        });
+
+        // The active schema is checked and cannot be unticked.
+        click_selector(cx, "filter-picker-row-schemas-1");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert!(picker.schemas.as_ref().unwrap().ticked.is_empty());
+        });
+        click_selector(cx, "filter-picker-row-schemas-0");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.schemas.as_ref().unwrap().ticked, ["extra"]);
+            assert_eq!(
+                picker.preview(Which::Schemas).as_deref(),
+                Some("Showing 2 of 3 schemas in e2e")
+            );
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None, "Save closes the dialog");
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.schemas, ["extra"]);
+            assert!(profile.include.databases.is_empty());
+            assert_eq!(profile.generation, before, "a filter edit never reconnects");
+        });
+        assert_eq!(
+            own_catalog(&workspace, cx).0,
+            ["extra", "main"],
+            "the catalog holds the ticked schema and the active one, not `more`"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn unticking_every_other_database_saves_the_own_one_alone_not_show_all(cx: &mut TestAppContext) {
+    use super::filter_picker::Which;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        click_selector(cx, "filter-picker-row-databases-1");
+        click_selector(cx, "filter-picker-row-databases-1");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["e2e"]);
+            assert_eq!(
+                picker.preview(Which::Databases).as_deref(),
+                Some("Showing 1 of 3 databases")
+            );
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.databases, ["e2e"]);
+            let row = connection_row("e2e");
+            assert_eq!(workspace.connections.counts.get(&row), Some(&1));
+            assert_eq!(workspace.connections.totals.get(&row), Some(&3));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn unticking_every_other_schema_saves_the_active_one_alone_not_show_all(cx: &mut TestAppContext) {
+    use super::filter_picker::Which;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_schemas_with_the_picker_open(cx);
+        click_selector(cx, "filter-picker-row-schemas-0");
+        click_selector(cx, "filter-picker-row-schemas-0");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.schemas.as_ref().unwrap().ticked, ["main"]);
+            assert_eq!(
+                picker.preview(Which::Schemas).as_deref(),
+                Some("Showing 1 of 3 schemas in e2e")
+            );
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.schemas, ["main"]);
+        });
+        assert_eq!(own_catalog(&workspace, cx).0, ["main"]);
+        quit(workspace, cx);
+    });
+}
+
+/// The DuckDB connection of `launch_duckdb_seeded` with `extra` and `more`
+/// schemas beside `main`, connected and in front, and the picker open over it.
+fn three_schemas_with_the_picker_open(
+    cx: &mut TestAppContext,
+) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_duckdb_seeded(
+        cx,
+        "",
+        "mode = \"full\"",
+        "CREATE TABLE t (id INTEGER); CREATE SCHEMA extra; CREATE TABLE extra.x (id INTEGER); \
+         CREATE SCHEMA more; CREATE TABLE more.y (id INTEGER);",
+        "CREATE TABLE u (id INTEGER);",
+    );
+    let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+    click_connections_row(cx, at);
+    open_the_picker_from_the_menu(&workspace, cx);
+    (workspace, cx)
+}
+
+fn open_the_picker_from_the_menu(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    let at = connections_row(workspace, cx, &connection_row("e2e")).expect("the connection shows");
+    pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+    settle(cx);
+    assert_eq!(front_dialog(workspace, cx), Some("filter-picker"));
+}
+
+#[gpui::test]
+fn saving_the_filter_while_the_catalog_loads_is_not_lost(cx: &mut TestAppContext) {
+    use crate::session::Routines;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_schemas_with_the_picker_open(cx);
+        let generation = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("the connection is in front")
+                .generation
+        });
+
+        // The routines of the catalog are on their way when Save lands.
+        click_selector(cx, "filter-picker-row-schemas-0");
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            let id = profile.id.clone();
+            let CatalogState::Loaded(_, routines) = &mut profile.catalog else {
+                panic!("the catalog has loaded");
+            };
+            *routines = Routines::Loading;
+            workspace.load_routines(&id, generation, cx);
+            workspace.save_filter(cx);
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.schemas,
+                ["extra"],
+                "the save is not dropped"
+            );
+            assert!(profile.reread_after_load, "it waits for the read under way");
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(!profile.reread_after_load, "the landing took it");
+            assert_eq!(profile.generation, generation, "no reconnect");
+        });
+        assert_eq!(own_catalog(&workspace, cx).0, ["extra", "main"]);
+
+        // A refresh under way is the same case.
+        open_the_picker_from_the_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-schemas-0");
+        workspace.update(cx, |workspace, cx| {
+            workspace.refresh_schema(cx);
+            workspace.save_filter(cx);
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.schemas,
+                ["main"],
+                "unticking the last leaves the active schema alone"
+            );
+            assert!(profile.reread_after_load);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(!profile.reread_after_load);
+            assert_eq!(profile.generation, generation);
+        });
+        assert_eq!(own_catalog(&workspace, cx).0, ["main"]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_listing_that_lands_after_the_picker_closed_changes_nothing(cx: &mut TestAppContext) {
+    use super::filter_picker::Listing;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\"e2e\"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let before = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("the connection is in front")
+                .include
+                .clone()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_filter_picker("e2e", window, cx);
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.listing, Listing::Loading);
+            workspace.close_filter_picker(cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.filter_picker.is_none(),
+                "the listing found no dialog"
+            );
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include, before);
+            assert!(!profile.reread_after_load);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_listing_from_an_earlier_open_that_lands_after_the_picker_was_put_up_again_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    use super::filter_picker::Listing;
+    use crate::db::{Databases, clickhouse_mock::Response};
+
+    store::tests::with_home(|| {
+        let (mock, workspace, cx) = launch_beside_a_clickhouse_mock(cx);
+        cx.executor().allow_parking();
+        connect_clicks(&workspace, cx);
+        let listed = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .filter_picker_in_front()
+                    .map(|picker| picker.databases.listing.clone())
+            })
+        };
+        let names = |names: &[&str]| {
+            Some(Listing::Loaded(
+                names.iter().map(ToString::to_string).collect(),
+            ))
+        };
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_filter_picker("clicks", window, cx);
+        });
+        drive_until(cx, |cx| {
+            matches!(listed(&workspace, cx), Some(Listing::Loaded(_)))
+        });
+        assert_eq!(listed(&workspace, cx), names(&["analytics", "dbdelve_dev"]));
+        let stale = workspace.read_with(cx, |workspace, _| workspace.last_filter_request);
+
+        // The server now has a third database, which only a read made after
+        // this point can bring back.
+        mock.on_statement(
+            "SELECT DISTINCT database",
+            [Response::rows(
+                &[("name", "String"), ("is_current", "UInt8")],
+                &[
+                    &["analytics", "0"],
+                    &["dbdelve_dev", "1"],
+                    &["reports", "0"],
+                ],
+            )],
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_filter_picker(cx);
+            workspace.open_filter_picker("clicks", window, cx);
+        });
+        drive_until(cx, |cx| {
+            matches!(listed(&workspace, cx), Some(Listing::Loaded(_)))
+        });
+        let three = names(&["analytics", "dbdelve_dev", "reports"]);
+        assert_eq!(listed(&workspace, cx), three);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.last_filter_request, stale + 1);
+        });
+
+        // The first open's answer lands now, under the number it was issued.
+        // It is handed to the landing rather than left to a second real read:
+        // in the test executor `spawn_blocking` runs each read inline and the
+        // scheduler picks among ready tasks at random, so with two reads in
+        // flight the test cannot set which lands last, and the request check
+        // decides anything only when the earlier one lands after the later.
+        // Calling it with the earlier number is that order on every run, and
+        // once the call returns there is nothing left to wait for.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.names_listed_for_picker(
+                stale,
+                Some(Ok(Databases {
+                    names: vec!["analytics".to_string(), "dbdelve_dev".to_string()],
+                    current: Some("dbdelve_dev".to_string()),
+                    left_out: 0,
+                })),
+                None,
+                window,
+                cx,
+            );
+            assert!(workspace.filter_picker_in_front().is_some());
+            let listing = workspace
+                .filter_picker_in_front()
+                .map(|picker| picker.databases.listing.clone());
+            assert_eq!(
+                listing, three,
+                "the earlier read's names replaced the later's"
+            );
+        });
+        settle(cx);
+        assert_eq!(listed(&workspace, cx), three);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn resaving_an_unchanged_filter_leaves_the_file_byte_identical(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(
+            cx,
+            "mode = \"full\"\ninclude_databases = [\"other\", \"s*\"]",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let file = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("profiles.toml");
+        let before = std::fs::read(&file).expect("profiles.toml reads");
+
+        open_the_picker_from_the_menu(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["other"]);
+            assert_eq!(picker.databases.patterns, ["s*"]);
+            assert!(!picker.can_save(), "the lists are the ones saved");
+        });
+        click_selector(cx, "filter-picker-0");
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(std::fs::read(&file).expect("profiles.toml reads"), before);
+        quit(workspace, cx);
+    });
+}
+
+/// A listing asked under the old filter can land after Save, and a failed
+/// refresh never replaces it: Save overtakes it and narrows the list held.
+#[gpui::test]
+fn save_filter_overtakes_a_listing_under_way_and_narrows_the_list_held(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        let names = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let databases = &workspace.profile().unwrap().databases;
+                (databases.names.clone(), databases.left_out)
+            })
+        };
+        assert_eq!(names(&workspace, cx).0, ["e2e", "other", "scratch"]);
+        let old = workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile().unwrap();
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            workspace.list_databases(&id, generation, cx);
+            let old = workspace.profile().unwrap().listings;
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.patterns = vec!["scr*".to_string()];
+            workspace.save_filter(cx);
+            old
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.profile().unwrap().latest_listing(old));
+        });
+        assert_eq!(
+            names(&workspace, cx),
+            (vec!["e2e".to_string(), "scratch".to_string()], 1),
+            "narrowed at Save, before any listing lands"
+        );
+        settle(cx);
+        assert_eq!(
+            names(&workspace, cx),
+            (vec!["e2e".to_string(), "scratch".to_string()], 1)
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// Save lets go of a session the tree opened to read a database the filter
+/// now hides, and keeps one a tab is bound to.
+#[gpui::test]
+fn save_filter_closes_a_hidden_databases_session_no_tab_is_bound_to(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        press(cx, "escape");
+        for database in ["other", "scratch"] {
+            let at = connections_row(&workspace, cx, &database_row("e2e", database))
+                .unwrap_or_else(|| panic!("`{database}` shows"));
+            click_connections_row(cx, at);
+        }
+        new_query_here(&workspace, cx, Some("scratch"), None);
+        let open = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let mut open: Vec<String> =
+                    workspace.profile().unwrap().bound.keys().cloned().collect();
+                open.sort();
+                open
+            })
+        };
+        assert_eq!(open(cx), ["other", "scratch"]);
+
+        let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection");
+        pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.patterns = vec!["e2e".to_string()];
+            workspace.save_filter(cx);
+        });
+        settle(cx);
+        assert_eq!(open(cx), ["scratch"], "the bound tab's session stays");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_save_past_the_cap_keeps_the_first_500_entries_in_the_profile_and_the_file(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        // 500 is `db::include::ENTRIES_CAP`, which is not reachable from here;
+        // the `from_stored` equality below is what ties it to the load path.
+        let patterns: Vec<String> = (0..507).map(|number| format!("zz{number:03}*")).collect();
+        workspace.update(cx, |workspace, cx| {
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.patterns = patterns.clone();
+            cx.notify();
+        });
+        workspace.update(cx, |workspace, cx| workspace.save_filter(cx));
+        settle(cx);
+
+        let profile_include = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("the connection is in front")
+                .include
+                .clone()
+        });
+        assert_eq!(profile_include.databases, patterns[..500]);
+        let saved = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        let saved = saved
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "e2e")
+            .expect("the profile was saved");
+        assert_eq!(saved.include_databases, profile_include.databases);
+        assert_eq!(
+            crate::db::Include::from_stored(
+                saved.include_databases.clone(),
+                saved.include_schemas.clone()
+            ),
+            profile_include,
+            "what the next launch loads is what Save kept"
+        );
+
+        open_the_picker_from_the_menu(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert!(!picker.can_save(), "the list is the one saved");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_padded_entry_in_the_file_loads_trimmed_and_opens_the_picker_with_nothing_to_save(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\" e2e \"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.databases, ["e2e"]);
+        });
+        open_the_picker_from_the_menu(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["e2e"]);
+            assert!(picker.databases.patterns.is_empty());
+            assert!(!picker.can_save(), "the list is the one saved");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_preview_counts_only_the_entries_save_keeps(cx: &mut TestAppContext) {
+    use super::filter_picker::Which;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        // 500 is `db::include::ENTRIES_CAP`, which is not reachable from here.
+        let mut patterns: Vec<String> = (0..500).map(|number| format!("zz{number:03}*")).collect();
+        patterns.push("sc*".into());
+        workspace.update(cx, |workspace, cx| {
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.patterns = patterns;
+            cx.notify();
+        });
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.preview(Which::Databases).as_deref(),
+                Some("Showing 1 of 3 databases"),
+                "sc* is the 501st entry, which Save drops"
+            );
+        });
+        workspace.update(cx, |workspace, cx| workspace.save_filter(cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let row = connection_row("e2e");
+            assert_eq!(workspace.connections.counts.get(&row), Some(&1));
+            assert_eq!(workspace.connections.totals.get(&row), Some(&3));
+        });
+        assert!(
+            connections_row(&workspace, cx, &database_row("e2e", "scratch")).is_none(),
+            "the database past the cap is not drawn"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_long_database_list_scrolls_inside_the_picker(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let preview = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .filter_picker
+                    .as_ref()
+                    .expect("the picker is up")
+                    .preview(super::filter_picker::Which::Databases)
+            })
+        };
+        open_the_picker_from_the_menu(&workspace, cx);
+        assert_eq!(preview(cx).as_deref(), Some("Showing all 1 database"));
+        press(cx, "escape");
+
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        for number in 1..=37 {
+            run_in_front(
+                &workspace,
+                cx,
+                &format!(
+                    "ATTACH '{}' AS d{number:02}",
+                    directory.join(format!("d{number:02}.duckdb")).display()
+                ),
+            );
+        }
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(700.)));
+        settle(cx);
+        open_the_picker_from_the_menu(&workspace, cx);
+        assert_eq!(preview(cx).as_deref(), Some("Showing all 38 databases"));
+        let list = cx
+            .debug_bounds("filter-picker-list-databases")
+            .expect("the list is drawn");
+        assert!(
+            list.size.height <= gpui::px(crate::theme::layout::DIALOG_TEXT_MAX_HEIGHT),
+            "the rows scroll inside a capped list, not past the window: {:?}",
+            list.size
+        );
+        let save = cx.debug_bounds("filter-picker-0").expect("Save is drawn");
+        assert!(
+            save.bottom() <= gpui::px(700.) && save.top() >= gpui::px(0.),
+            "the footer stays inside the window: {save:?}"
+        );
+        click_selector(cx, "filter-picker-row-databases-1");
+        assert_eq!(preview(cx).as_deref(), Some("Showing 2 of 38 databases"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn editing_a_filtered_profile_in_the_form_keeps_its_filter_and_a_duplicate_starts_unfiltered(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\"e2e\"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        let (config, generation) = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            (profile.config.clone(), profile.generation)
+        });
+
+        // The form edits the profile in place: the config is the same, so
+        // nothing reconnects, and the include is not the form's to drop.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_profile("e2e", "Renamed".into(), config, None, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.name, "Renamed");
+            assert_eq!(profile.include.databases, ["e2e"]);
+            assert_eq!(profile.generation, generation, "no reconnect");
+            assert!(matches!(profile.state, ProfileState::Connected(_)));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.duplicate_profile(0, window, cx);
+        });
+        settle(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.profiles.len(), 2);
+            let copy = workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id != "e2e")
+                .expect("the duplicate was saved");
+            assert_eq!(copy.include, crate::db::Include::default());
+            assert_eq!(workspace.profiles[0].include.databases, ["e2e"]);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn escape_closes_the_filter_picker_without_saving_and_hands_the_keyboard_back(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        click_selector(cx, "filter-picker-row-databases-1");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["other"]);
+        });
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.filter_picker.is_none());
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.databases.is_empty(), "nothing was saved");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_typed_pattern_shows_what_it_matches_before_saving(cx: &mut TestAppContext) {
+    use super::filter_picker::Which;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        click_selector(cx, "filter-picker-patterns-databases");
+        cx.simulate_input("sc*");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.listed_hint(Which::Databases, "scratch"),
+                Some("by pattern"),
+                "matched, not ticked: drawn checked and fixed"
+            );
+            assert_eq!(picker.listed_hint(Which::Databases, "other"), None);
+            assert_eq!(
+                picker.listed_hint(Which::Databases, "e2e"),
+                Some("current database"),
+                "the own database keeps its own hint"
+            );
+            assert_eq!(
+                picker.preview(Which::Databases).as_deref(),
+                Some("Showing 2 of 3 databases")
+            );
+            assert_eq!(picker.unmatched(Which::Databases), None);
+        });
+
+        cx.simulate_input(", tmp_*, ?_old, x?, y?");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.unmatched(Which::Databases).as_deref(),
+                Some("No database matches: tmp_*, ?_old, x? and 1 more")
+            );
+        });
+        assert!(
+            cx.debug_bounds("filter-picker-unmatched-databases")
+                .is_some()
+        );
+
+        // `enter` in the field is the field's own: nothing is saved.
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.databases.is_empty());
+        });
+
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.databases,
+                ["sc*", "tmp_*", "?_old", "x?", "y?"]
+            );
+            let row = connection_row("e2e");
+            assert_eq!(workspace.connections.counts.get(&row), Some(&2));
+            assert_eq!(workspace.connections.totals.get(&row), Some(&3));
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Whether the picker draws the row under `selector`.
+fn picker_row_drawn(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn the_picker_search_narrows_the_rows_and_the_bulk_actions_act_on_what_it_leaves(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        // The pattern field is the one the search and the bulk actions leave alone.
+        click_selector(cx, "filter-picker-patterns-databases");
+        cx.simulate_input("x*");
+        settle(cx);
+
+        click_selector(cx, "filter-picker-search-databases");
+        cx.simulate_input("ot");
+        settle(cx);
+        assert!(!picker_row_drawn(cx, "filter-picker-row-databases-0"));
+        assert!(
+            picker_row_drawn(cx, "filter-picker-row-databases-1"),
+            "`other` is drawn"
+        );
+        assert!(!picker_row_drawn(cx, "filter-picker-row-databases-2"));
+
+        click_selector(cx, "filter-picker-select-all-databases");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["other"], "only what is drawn");
+            assert_eq!(picker.databases.patterns, ["x*"]);
+        });
+
+        // A search nothing answers says so in place of the rows.
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("zzz");
+        settle(cx);
+        assert!(!picker_row_drawn(cx, "filter-picker-row-databases-1"));
+        assert!(
+            cx.debug_bounds("filter-picker-no-match-databases")
+                .is_some()
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.no_match_line(super::filter_picker::Which::Databases),
+                "No database matches the search."
+            );
+        });
+
+        cx.simulate_keystrokes("secondary-a backspace");
+        settle(cx);
+        assert!(picker_row_drawn(cx, "filter-picker-row-databases-2"));
+        click_selector(cx, "filter-picker-clear-databases");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert!(picker.databases.ticked.is_empty());
+            assert_eq!(picker.databases.patterns, ["x*"]);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn remove_filter_empties_the_dialog_and_takes_effect_on_save(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(
+            cx,
+            "mode = \"full\"\ninclude_databases = [\"other\", \"s*\"]",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        open_the_picker_from_the_menu(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert!(picker.can_remove(), "there is a filter to remove");
+        });
+
+        click_selector(cx, "filter-picker-remove");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert!(picker.databases.ticked.is_empty());
+            assert!(picker.databases.patterns.is_empty());
+            assert!(!picker.can_remove(), "nothing left to remove");
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.databases,
+                ["other", "s*"],
+                "only Save Filter takes effect"
+            );
+        });
+
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.databases.is_empty());
+            assert_eq!(
+                workspace.connections.totals.get(&connection_row("e2e")),
+                None
+            );
+        });
+        let file = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("profiles.toml");
+        let saved = std::fs::read_to_string(file).expect("profiles.toml reads");
+        assert!(!saved.contains("include_databases"), "{saved}");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_failed_listing_says_what_happened_and_keeps_save_and_the_patterns_usable(
+    cx: &mut TestAppContext,
+) {
+    use super::filter_picker::{Listing, Which};
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        workspace.update(cx, |workspace, cx| {
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.listing = Listing::Failed("boom".into());
+            cx.notify();
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("filter-picker-failed-databases").is_some());
+        assert!(cx.debug_bounds("filter-picker-retry-databases").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.status_line(Which::Databases).as_deref(),
+                Some("The list of databases could not be read: boom")
+            );
+            assert_eq!(
+                picker.preview(Which::Databases).as_deref(),
+                Some("Matches cannot be previewed: the names were not read.")
+            );
+        });
+
+        click_selector(cx, "filter-picker-patterns-databases");
+        cx.simulate_input("sc*");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.patterns, ["sc*"]);
+            assert!(picker.can_save(), "patterns are valid without the names");
+        });
+
+        click_selector(cx, "filter-picker-retry-databases");
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.databases.listing,
+                Listing::Loaded(vec!["e2e".into(), "other".into(), "scratch".into()])
+            );
+            assert_eq!(picker.databases.patterns, ["sc*"], "what was typed stays");
+        });
+        assert!(cx.debug_bounds("filter-picker-retry-databases").is_none());
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_server_that_lists_no_databases_says_so(cx: &mut TestAppContext) {
+    use super::filter_picker::{Listing, Which};
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        workspace.update(cx, |workspace, cx| {
+            let picker = workspace.filter_picker.as_mut().expect("the picker is up");
+            picker.databases.listing = Listing::Loaded(Vec::new());
+            cx.notify();
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("filter-picker-empty-databases").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.status_line(Which::Databases).as_deref(),
+                Some("The server lists no databases.")
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_picker_says_the_filter_is_not_an_access_boundary(cx: &mut TestAppContext) {
+    use super::filter_picker::boundary;
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        assert!(cx.debug_bounds("filter-picker-boundary").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.boundary(),
+                "This filter changes what is listed, not what can be reached: a statement can \
+                 still read a hidden database or schema, though completion and Go to Object \
+                 offer only what is listed."
+            );
+        });
+        assert_eq!(
+            boundary(crate::db::Levels::DatabaseIsSchema),
+            "This filter changes what is listed, not what can be reached: a statement can \
+             still read a hidden database, though completion and Go to Object offer only \
+             what is listed."
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn tab_walks_the_filter_picker_and_escape_hands_the_keyboard_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = three_databases_with_the_picker_open(cx);
+        let focus = |cx: &mut VisualTestContext| -> &'static str {
+            cx.update(|window, cx| {
+                let picker = workspace.read(cx).filter_picker.as_ref().expect("up");
+                let schemas = picker.schemas.as_ref().expect("DuckDB lists schemas");
+                let held = |input: &Entity<InputState>| input.focus_handle(cx).is_focused(window);
+                if held(&picker.databases.search) {
+                    "databases search"
+                } else if held(&picker.databases.pattern_field) {
+                    "databases patterns"
+                } else if held(&schemas.search) {
+                    "schemas search"
+                } else if held(&schemas.pattern_field) {
+                    "schemas patterns"
+                } else {
+                    "elsewhere"
+                }
+            })
+        };
+        let ticked = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+                picker.databases.ticked.clone()
+            })
+        };
+        assert_eq!(
+            focus(cx),
+            "databases search",
+            "the first search box has the keyboard"
+        );
+
+        // Select Names, then Clear Names, each pressed from the keyboard.
+        press(cx, "tab");
+        press(cx, "enter");
+        assert_eq!(ticked(cx), ["other", "scratch"]);
+        press(cx, "tab");
+        press(cx, "enter");
+        assert_eq!(ticked(cx), ["e2e"], "the own row is all Clear leaves");
+
+        // The checklist: `space` ticks the focused row, the next row is
+        // passed, then the pattern field.
+        press(cx, "tab");
+        press(cx, "space");
+        assert_eq!(ticked(cx), ["e2e", "other"]);
+        press(cx, "tab");
+        press(cx, "tab");
+        assert_eq!(focus(cx), "databases patterns");
+
+        // The second list in turn, then Remove Filter, Discard Changes and
+        // Save Filter.
+        cx.simulate_input("sc*");
+        settle(cx);
+        press(cx, "tab");
+        assert_eq!(focus(cx), "schemas search");
+        press(cx, "tab");
+        press(cx, "tab");
+        press(cx, "tab");
+        assert_eq!(focus(cx), "schemas patterns", "after its Select and Clear");
+        press(cx, "tab");
+        press(cx, "tab");
+        press(cx, "tab");
+        press(cx, "enter");
+        assert_eq!(
+            front_dialog(&workspace, cx),
+            None,
+            "Save Filter was the third stop after the last field"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.databases, ["e2e", "other", "sc*"]);
+        });
+
+        // `escape` from the search box closes it and hands the keyboard back.
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        pick_from_connections_menu(cx, at, FILTER_DATABASES_DOWNS);
+        settle(cx);
+        assert_eq!(focus(cx), "databases search");
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+/// What the palette's Commands scope draws at the end of each row.
+fn palette_hints(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, String)> {
+    cx.simulate_keystrokes("secondary-shift-p");
+    settle(cx);
+    let rows = workspace.read_with(cx, |workspace, cx| {
+        let palette = workspace.palette.as_ref().expect("the palette is up");
+        palette
+            .read(cx)
+            .labels_with_hints()
+            .into_iter()
+            .map(|(label, hint)| (label.to_string(), hint.to_string()))
+            .collect()
+    });
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    rows
+}
+
+#[gpui::test]
+fn filter_databases_in_the_palette_opens_the_picker_in_simple_mode(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\"e2e\"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(crate::sidebar::ViewMode::Simple, cx);
+            // The tree row that held the keyboard is gone with the tree.
+            workspace.refocus_front();
+        });
+        settle(cx);
+        assert_eq!(view_mode_in_effect(&workspace, cx), ViewMode::Simple);
+
+        let filter = palette_hints(&workspace, cx)
+            .into_iter()
+            .find(|(label, _)| label == "Filter databases…");
+        assert_eq!(
+            filter,
+            Some(("Filter databases…".to_string(), String::new())),
+            "simple mode has no count slot, though the filter leaves `other` out"
+        );
+
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Filter databases");
+        settle(cx);
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        assert!(cx.debug_bounds("filter-picker-list-databases").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.databases.listing,
+                super::filter_picker::Listing::Loaded(vec!["e2e".into(), "other".into()]),
+                "the names the filter hides are listed too"
+            );
+            assert_eq!(picker.databases.ticked, ["e2e"]);
+        });
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_filter_command_shows_the_count_the_tree_shows(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "mode = \"full\"\ninclude_databases = [\"e2e\"]");
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let hint = |cx: &mut VisualTestContext| {
+            palette_hints(&workspace, cx)
+                .into_iter()
+                .find(|(label, _)| label == "Filter databases…")
+                .map(|(_, hint)| hint)
+        };
+        assert_eq!(hint(cx).as_deref(), Some("1 of 2"));
+
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .databases
+                .clear();
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert_eq!(
+            hint(cx).as_deref(),
+            Some(""),
+            "an unfiltered profile has no count to show"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// A schema holding a view among its tables, for the table filter's tests.
+const RELATIONS: &str = "CREATE TABLE junk (id INTEGER); CREATE TABLE orders (id INTEGER); \
+     CREATE VIEW recent AS SELECT * FROM orders; CREATE TABLE users (id INTEGER);";
+
+/// The `Filter Tables` entry of a schema row's menu: Show Diagram, Set as
+/// Active Schema, New Query Here, Copy Name, Refresh, then it.
+const FILTER_TABLES_DOWNS: usize = 6;
+
+/// DuckDB over `RELATIONS`, connected, its database row open so the schema row
+/// shows.
+fn duckdb_with_relations(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_duckdb_seeded(
+        cx,
+        "",
+        "mode = \"full\"",
+        RELATIONS,
+        "CREATE TABLE u (id INTEGER);",
+    );
+    for id in [connection_row("e2e"), database_row("e2e", "e2e")] {
+        let at = connections_row(&workspace, cx, &id).expect("the row shows");
+        click_connections_row(cx, at);
+    }
+    (workspace, cx)
+}
+
+fn open_the_tables_picker_from_the_schema_menu(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) {
+    let schema = scoped_row("e2e", Some("e2e"), "schema-main");
+    let at = connections_row(workspace, cx, &schema).expect("the schema row shows");
+    pick_from_connections_menu(cx, at, FILTER_TABLES_DOWNS);
+    settle(cx);
+    assert_eq!(front_dialog(workspace, cx), Some("filter-picker"));
+}
+
+/// The relations of `main` the own catalog holds, in the order it lists them.
+fn main_relations(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| {
+        let catalog = workspace
+            .profile()
+            .and_then(|profile| profile.catalog_of(None))
+            .expect("the catalog has loaded");
+        let mut names: Vec<String> = catalog
+            .schemas
+            .iter()
+            .filter(|schema| schema.name == "main")
+            .flat_map(|schema| {
+                schema
+                    .relations
+                    .iter()
+                    .map(|relation| relation.name.clone())
+            })
+            .collect();
+        names.sort();
+        names
+    })
+}
+
+#[gpui::test]
+fn filter_tables_on_a_schema_menu_saves_a_ticked_list_and_rereads_without_reconnecting(
+    cx: &mut TestAppContext,
+) {
+    use super::filter_picker::{Listing, Which};
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_relations(cx);
+        let before = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            (profile.generation, profile.config.clone())
+        });
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        assert!(cx.debug_bounds("filter-picker-list-tables").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.heading(), "Filter Tables");
+            assert_eq!(
+                picker.databases.listing,
+                Listing::Loaded(vec![
+                    "junk".into(),
+                    "orders".into(),
+                    "recent".into(),
+                    "users".into()
+                ]),
+                "every relation of the schema, with no read"
+            );
+            assert_eq!(picker.kind_note(Which::Tables, 2), Some("view"), "recent");
+            assert_eq!(picker.kind_note(Which::Tables, 1), None, "orders");
+            assert_eq!(picker.kind_note(Which::Databases, 2), None);
+            assert_eq!(
+                picker.preview(Which::Tables).as_deref(),
+                Some("Showing all 4 tables in main")
+            );
+            assert!(picker.boundary().contains("a hidden table"));
+            assert!(!picker.can_save(), "nothing is changed");
+        });
+
+        click_selector(cx, "filter-picker-row-tables-1");
+        click_selector(cx, "filter-picker-row-tables-3");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["orders", "users"]);
+            assert_eq!(
+                picker.preview(Which::Tables).as_deref(),
+                Some("Showing 2 of 4 tables in main")
+            );
+            assert!(picker.can_save());
+        });
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+
+        assert_eq!(front_dialog(&workspace, cx), None, "Save closes the dialog");
+        assert!(editor_has_keyboard(&workspace, cx));
+        assert_eq!(
+            main_relations(&workspace, cx),
+            ["orders", "users"],
+            "the catalog is read again under the list"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.tables_of(Some("e2e"), "main"),
+                ["orders", "users"]
+            );
+            assert!(profile.include.databases.is_empty() && profile.include.schemas.is_empty());
+            assert_eq!(
+                (profile.generation, profile.config.clone()),
+                before,
+                "a filter edit never reconnects"
+            );
+            let nodes = &workspace.connections.nodes;
+            let row =
+                |name: &str| scoped_row("e2e", Some("e2e"), &explorer::relation_row("main", name));
+            assert!(nodes.contains_key(&row("orders")));
+            assert!(!nodes.contains_key(&row("junk")), "the table is gone");
+            assert!(
+                !nodes.contains_key(&row("recent")),
+                "views are filtered too"
+            );
+            let schema = scoped_row("e2e", Some("e2e"), "schema-main");
+            assert_eq!(workspace.connections.counts.get(&schema), Some(&2));
+            assert_eq!(
+                workspace.connections.totals.get(&schema),
+                Some(&4),
+                "the row reads `2 of 4`"
+            );
+        });
+        let saved = store::peek_profiles(&[]).expect("profiles.toml reads back");
+        let saved = saved
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "e2e")
+            .expect("the profile was saved");
+        assert_eq!(saved.include_tables.len(), 1);
+        assert_eq!(saved.include_tables[0].schema, "main");
+        assert_eq!(saved.include_tables[0].tables, ["orders", "users"]);
+
+        // Opened again, the dialog still lists what the list hides, ticked
+        // for what it shows.
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(
+                picker.databases.listing,
+                Listing::Loaded(vec![
+                    "junk".into(),
+                    "orders".into(),
+                    "recent".into(),
+                    "users".into()
+                ]),
+                "the hidden names are kept to be ticked again"
+            );
+            assert_eq!(picker.databases.ticked, ["orders", "users"]);
+        });
+        // Removing the filter and saving lists everything again.
+        click_selector(cx, "filter-picker-remove");
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        assert_eq!(
+            main_relations(&workspace, cx),
+            ["junk", "orders", "recent", "users"]
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.tables.is_empty());
+        });
+        let file = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("profiles.toml");
+        let text = std::fs::read_to_string(file).expect("profiles.toml reads");
+        assert!(!text.contains("include_tables"), "{text}");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn escape_closes_the_table_picker_without_saving(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_relations(cx);
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-tables-0");
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.databases.ticked, ["junk"]);
+        });
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(editor_has_keyboard(&workspace, cx));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.filter_picker.is_none());
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(profile.include.tables.is_empty(), "nothing was saved");
+        });
+        assert_eq!(main_relations(&workspace, cx).len(), 4);
+
+        // Discard Changes drops the edits the same way.
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-tables-0");
+        click_selector(cx, "filter-picker-1");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().unwrap().include.tables.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn filter_tables_in_the_palette_opens_the_picker_and_carries_the_count(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            RELATIONS,
+            "CREATE TABLE u (id INTEGER);",
+        );
+        for id in [connection_row("e2e"), database_row("e2e", "e2e")] {
+            let at = connections_row(&workspace, cx, &id).expect("the row shows");
+            click_connections_row(cx, at);
+        }
+        let hint = |cx: &mut VisualTestContext| {
+            palette_hints(&workspace, cx)
+                .into_iter()
+                .find(|(label, _)| label == "Filter tables…")
+                .map(|(_, hint)| hint)
+        };
+        assert_eq!(
+            hint(cx).as_deref(),
+            Some(""),
+            "offered, with no count while nothing is left out"
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .profile_mut()
+                .expect("a profile is in front")
+                .include
+                .set_tables(Some("e2e"), "main", vec!["orders".into(), "users".into()]);
+            workspace.refresh_schema(cx);
+        });
+        settle(cx);
+        assert_eq!(hint(cx).as_deref(), Some("2 of 4"), "the tree's count");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_view_mode(crate::sidebar::ViewMode::Simple, cx);
+            workspace.refocus_front();
+        });
+        settle(cx);
+        assert_eq!(
+            hint(cx).as_deref(),
+            Some(""),
+            "simple mode has no count slot"
+        );
+
+        cx.simulate_keystrokes("secondary-shift-p");
+        settle(cx);
+        cx.simulate_input("Filter tables");
+        settle(cx);
+        press(cx, "enter");
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        workspace.read_with(cx, |workspace, _| {
+            let picker = workspace.filter_picker.as_ref().expect("the picker is up");
+            assert_eq!(picker.heading(), "Filter Tables");
+            assert_eq!(picker.databases.ticked, ["orders", "users"]);
+            assert!(matches!(
+                &picker.databases.listing,
+                super::filter_picker::Listing::Loaded(names) if names.len() == 4
+            ));
+        });
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_hidden_table_is_not_offered_and_its_open_tab_and_pin_keep_working(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_relations(cx);
+        let click = |id: &str, cx: &mut VisualTestContext| {
+            let at = connections_row(&workspace, cx, id)
+                .unwrap_or_else(|| panic!("{id} is not showing"));
+            click_connections_row(cx, at);
+        };
+        let junk = scoped_row("e2e", Some("e2e"), &explorer::relation_row("main", "junk"));
+        for id in [
+            scoped_row("e2e", Some("e2e"), "schema-main"),
+            scoped_row("e2e", Some("e2e"), "category-Tables-main"),
+            junk.clone(),
+        ] {
+            click(&id, cx);
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_selection_action(crate::sidebar::SelectionAction::Pin, window, cx)
+        });
+        settle(cx);
+        let survivors = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("a profile is in front");
+                (
+                    profile
+                        .session
+                        .objects
+                        .iter()
+                        .map(|tab| tab.name.clone())
+                        .collect::<Vec<_>>(),
+                    profile.shortcuts.pins.len(),
+                )
+            })
+        };
+        assert_eq!(survivors(cx), (vec!["junk".to_string()], 1));
+
+        // Hidden through the dialog, as a person would.
+        open_the_tables_picker_from_the_schema_menu(&workspace, cx);
+        click_selector(cx, "filter-picker-row-tables-1");
+        click_selector(cx, "filter-picker-row-tables-3");
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        assert_eq!(main_relations(&workspace, cx), ["orders", "users"]);
+
+        cx.simulate_keystrokes("secondary-p");
+        settle(cx);
+        let objects = palette_labels(&workspace, cx);
+        assert!(
+            objects.iter().any(|label| label == "main.orders"),
+            "{objects:?}"
+        );
+        assert!(
+            !objects.iter().any(|label| label == "main.junk"),
+            "{objects:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        new_query_here(&workspace, cx, None, None);
+        let offered = completion_labels(&workspace, cx, "SELECT * FROM ju");
+        assert!(
+            !offered.iter().any(|label| label.contains("junk")),
+            "{offered:?}"
+        );
+        let offered = completion_labels(&workspace, cx, "SELECT * FROM ord");
+        assert!(
+            offered.iter().any(|label| label.contains("orders")),
+            "the shown ones still are: {offered:?}"
+        );
+
+        // Nothing was dropped by the save, and the tab still reads.
+        assert_eq!(survivors(cx), (vec!["junk".to_string()], 1));
+        let id = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.objects[0].id
+        });
+        workspace.update(cx, |workspace, cx| workspace.refresh_relation(id, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let tab = &workspace.profile().unwrap().session.objects[0];
+            let ObjectBody::Relation { query, .. } = &tab.body else {
+                panic!("junk is a table");
+            };
+            assert!(matches!(query, QueryState::Complete { .. }));
+            let hidden = workspace
+                .connections
+                .shortcuts
+                .values()
+                .any(|shortcut| shortcut.hidden_relation().is_some());
+            assert!(hidden, "the pin draws hidden, not dropped");
+        });
+
+        // Closed, the tab opens again from the pin by the relation's name.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_object(id, window, cx);
+        });
+        settle(cx);
+        assert!(survivors(cx).0.is_empty());
+        let pin = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .connections
+                .shortcuts
+                .iter()
+                .find(|(_, shortcut)| shortcut.hidden_relation().is_some())
+                .map(|(row, _)| row.clone())
+                .expect("the connections tree lists the hidden pin")
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.open_connection_row(&pin, window, cx));
+        });
+        settle(cx);
+        assert_eq!(survivors(cx).0, vec!["junk".to_string()]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_table_list_survives_a_relaunch_on_a_flat_connection(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (name text); create table nests (id integer); \
+             create view flocks as select * from birds;",
+        );
+        let names = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let catalog = workspace
+                    .profile()
+                    .and_then(|profile| profile.catalog_of(None))
+                    .expect("the catalog has loaded");
+                let mut names: Vec<_> = catalog
+                    .schemas
+                    .iter()
+                    .flat_map(|schema| schema.relations.iter().map(|r| r.name.clone()))
+                    .collect();
+                names.sort();
+                names
+            })
+        };
+        assert_eq!(names(&workspace, cx), ["birds", "flocks", "nests"]);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_command(Command::FilterTables, window, cx)
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("filter-picker"));
+        click_selector(cx, "filter-picker-row-tables-0");
+        click_selector(cx, "filter-picker-0");
+        settle(cx);
+        assert_eq!(names(&workspace, cx), ["birds"]);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.include.tables_of(None, "main"), ["birds"]);
+        });
+
+        drop(workspace);
+        let (workspace, cx) = relaunch(cx);
+        front_saved_sqlite(&workspace, cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.include.tables_of(None, "main"),
+                ["birds"],
+                "the list is read back from profiles.toml"
+            );
+        });
+        assert_eq!(names(&workspace, cx), ["birds"], "and narrows the catalog");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_flat_connection_offers_no_filter(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        assert!(
+            palette_hints(&workspace, cx)
+                .iter()
+                .all(|(label, _)| label != "Filter databases…"),
+            "a target with no databases to choose between has no command"
+        );
+        let target = workspace.read_with(cx, |workspace, _| workspace.target());
+        assert!(
+            !crate::sidebar::node_actions(crate::sidebar::NodeKind::Connection, "x", target)
+                .contains(&crate::sidebar::NodeAction::FilterDatabases)
+        );
+        // Asked for anyway, the picker does not open.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_command(Command::FilterDatabases, window, cx)
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_connection_that_is_not_open_offers_no_filter_until_it_connects(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
+        let path = directory.join("closed.duckdb");
+        // Bytes that are not a DuckDB database, so the connect fails.
+        std::fs::write(&path, b"not a database, not a database, not a database")
+            .expect("the file must be writable");
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "view_mode = \"complex\"",
+            &format!(
+                "[[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"duckdb\"\npath = {:?}\n",
+                path.display().to_string()
+            ),
+        );
+        cx.executor().allow_parking();
+        cx.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(900.)));
+        settle(cx);
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        assert_eq!(profile_state(&workspace, cx, "e2e"), "failed");
+
+        let offered = |cx: &mut VisualTestContext| {
+            let labels: Vec<String> = palette_hints(&workspace, cx)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect();
+            let has = |wanted: &str| labels.iter().any(|label| label == wanted);
+            (
+                has("Refresh"),
+                has("Filter Databases"),
+                has("Filter databases…"),
+            )
+        };
+        assert_eq!(
+            offered(cx),
+            (true, false, false),
+            "the node's rows are there, and neither way in to a picker that cannot list"
+        );
+
+        // The connection comes up with the same row still selected.
+        std::fs::remove_file(&path).expect("the broken file can go");
+        ::duckdb::Connection::open(&path)
+            .and_then(|connection| connection.execute_batch("CREATE TABLE t (id INTEGER);"))
+            .expect("the database is created");
+        run_command(&workspace, cx, Command::Reconnect);
+        assert_eq!(profile_state(&workspace, cx, "e2e"), "connected");
+        assert_eq!(
+            offered(cx),
+            (true, false, true),
+            "one way in, not the node's and the profile's both"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn filtering_a_connection_that_is_not_open_says_so_and_opens_nothing(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().expect("the test home has a data directory");
+        std::fs::create_dir_all(&directory).expect("the data directory must be creatable");
+        let path = directory.join("ducks.duckdb");
+        ::duckdb::Connection::open(&path)
+            .and_then(|connection| connection.execute_batch("CREATE TABLE t (id INTEGER)"))
+            .expect("the schema applies");
+        // The SQLite profile is in front, so `Ducks` is idle until asked for.
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &[
+                sqlite_profile("secret", "Secret", ""),
+                format!(
+                    "[[profiles]]\nid = \"ducks\"\nname = \"Ducks\"\nhost = \"\"\n\
+                     database = \"\"\nuser = \"\"\nengine = \"duckdb\"\npath = {:?}\n",
+                    path.display().to_string()
+                ),
+            ]
+            .concat(),
+        );
+        let node = crate::sidebar::SelectedNode {
+            profile: "ducks".into(),
+            database: None,
+            kind: crate::sidebar::NodeKind::Connection,
+            name: "Ducks".into(),
+            schema: None,
+            leaf: None,
+        };
+        let front = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_node_action(
+                &node,
+                crate::sidebar::NodeAction::FilterDatabases,
+                window,
+                cx,
+            );
+            let profile = workspace.profile().expect("a profile is in front");
+            (profile.id.clone(), profile.session.notice.clone())
+        });
+        assert_eq!(
+            front,
+            (
+                "ducks".to_string(),
+                Some("The connection is not open.".to_string())
+            ),
+            "the request brought Ducks to the front, whose connect has not landed"
+        );
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_profile_saved_with_relations_depth_reads_only_its_relations(cx: &mut TestAppContext) {
+    use crate::session::{Depth, Routines};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "sidebar_show_sizes = true",
+            "introspection_depth = \"routines\"",
+            "CREATE TABLE t (id INTEGER); CREATE SEQUENCE s;",
+            "CREATE TABLE u (id INTEGER);",
+        );
+        let reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                (workspace.routine_reads, workspace.size_reads)
+            })
+        };
+        let held = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("the connection is in front");
+                let CatalogState::Loaded(catalog, routines) = &profile.catalog else {
+                    panic!("the catalog has loaded");
+                };
+                let schemas = || catalog.schemas.iter();
+                (
+                    *routines,
+                    schemas().any(|s| s.relations.iter().any(|r| r.name == "t")),
+                    schemas().any(|s| s.sequences.iter().any(|name| name == "s")),
+                )
+            })
+        };
+        let (index, before) = workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.behaviour.depth, Depth::Routines);
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|candidate| candidate.id == profile.id)
+                .expect("it is listed");
+            (index, (profile.generation, profile.config.clone()))
+        });
+        let (routine_reads, size_reads) = reads(&workspace, cx);
+        assert!(routine_reads >= 1, "Routines reads the routines");
+        assert_eq!(size_reads, 0, "Routines reads no sizes, Show sizes or not");
+        assert_eq!(held(&workspace, cx), (Routines::Loaded, true, true));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.edit_profile(index, window, cx);
+            let form = workspace.form.as_mut().expect("the edit form is open");
+            assert_eq!(form.depth, Depth::Routines, "the form opens on the depth");
+            form.depth = Depth::Relations;
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.form.is_none(), "the form saved");
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.behaviour.depth, Depth::Relations);
+            assert_eq!(
+                (profile.generation, profile.config.clone()),
+                before,
+                "nothing reconnects"
+            );
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+            // The refresh's own confirmation, which a skip counts as
+            // complete for; the skip itself writes none.
+            assert_eq!(
+                profile.session.notice.as_deref(),
+                Some("Schema refreshed."),
+                "a skip is no failure"
+            );
+            assert_eq!(
+                profile.stored(cx).introspection_depth.as_deref(),
+                Some("relations")
+            );
+        });
+        assert_eq!(reads(&workspace, cx), (routine_reads, size_reads));
+        assert_eq!(held(&workspace, cx), (Routines::Skipped, true, false));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn each_depth_level_reads_only_its_loads(cx: &mut TestAppContext) {
+    use crate::session::{Behaviour, Depth, Routines};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_with(
+            cx,
+            "sidebar_show_sizes = true",
+            "mode = \"full\"\nintrospection_depth = \"relations\"",
+        );
+        let reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                (workspace.routine_reads, workspace.size_reads)
+            })
+        };
+        let other_routines = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                match workspace
+                    .profile()
+                    .expect("the connection is in front")
+                    .database_catalogs
+                    .get("other")
+                {
+                    Some(CatalogState::Loaded(_, routines)) => *routines,
+                    _ => panic!("the other database has not loaded"),
+                }
+            })
+        };
+        let at = connections_row(&workspace, cx, &connection_row("e2e")).expect("it shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        let at = connections_row(&workspace, cx, &database_row("e2e", "other"))
+            .expect("the attached database shows");
+        click_connections_row(cx, at);
+        let generation = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("the connection is in front")
+                .generation
+        });
+        let set = |depth: Depth, workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.set_behaviour(
+                    "e2e",
+                    Behaviour {
+                        depth,
+                        ..Behaviour::default()
+                    },
+                    cx,
+                );
+            });
+            settle(cx);
+        };
+
+        assert_eq!(reads(&workspace, cx), (0, 0), "Relations reads neither");
+        assert_eq!(other_routines(&workspace, cx), Routines::Skipped);
+
+        // The connection's own routines and the loaded database's are read again.
+        set(Depth::Routines, &workspace, cx);
+        assert_eq!(reads(&workspace, cx), (2, 0), "Routines reads no sizes");
+        assert_eq!(other_routines(&workspace, cx), Routines::Loaded);
+
+        set(Depth::Sizes, &workspace, cx);
+        assert_eq!(
+            reads(&workspace, cx),
+            (4, 2),
+            "Sizes reads both, twice over"
+        );
+
+        // Show sizes keeps the last word on sizes.
+        workspace.update(cx, |workspace, cx| workspace.set_show_sizes(false, cx));
+        settle(cx);
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        settle(cx);
+        assert_eq!(reads(&workspace, cx), (6, 2), "no size with Show sizes off");
+
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(profile.generation, generation, "nothing reconnected");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_depth_saved_while_the_catalog_loads_is_read_once_it_lands(cx: &mut TestAppContext) {
+    use crate::session::{Behaviour, Depth, Routines};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "");
+        let (generation, before) = workspace.read_with(cx, |workspace, _| {
+            (
+                workspace
+                    .profile()
+                    .expect("the connection is in front")
+                    .generation,
+                workspace.routine_reads,
+            )
+        });
+
+        // The routines of the catalog are on their way when the depth is saved.
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("the connection is in front");
+            let id = profile.id.clone();
+            let CatalogState::Loaded(_, routines) = &mut profile.catalog else {
+                panic!("the catalog has loaded");
+            };
+            *routines = Routines::Loading;
+            workspace.load_routines(&id, generation, cx);
+            workspace.set_behaviour(
+                &id,
+                Behaviour {
+                    depth: Depth::Relations,
+                    ..Behaviour::default()
+                },
+                cx,
+            );
+            assert_eq!(
+                workspace.routine_reads,
+                before + 1,
+                "the save starts no read"
+            );
+            let profile = workspace.profile().expect("the connection is in front");
+            assert_eq!(
+                profile.behaviour.depth,
+                Depth::Relations,
+                "it is not dropped"
+            );
+            assert!(profile.reread_after_load, "it waits for the read under way");
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the connection is in front");
+            assert!(!profile.reread_after_load, "the landing took it");
+            assert_eq!(profile.generation, generation, "no reconnect");
+            assert_eq!(
+                workspace.routine_reads,
+                before + 1,
+                "and read at the saved depth"
+            );
+            let CatalogState::Loaded(_, routines) = &profile.catalog else {
+                panic!("the catalog has loaded");
+            };
+            assert_eq!(*routines, Routines::Skipped);
+            assert!(
+                profile
+                    .session
+                    .notice
+                    .as_deref()
+                    .is_none_or(|notice| notice == "Schema refreshed."),
+                "a skip is no failure"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_duplicate_starts_with_the_copied_depth(cx: &mut TestAppContext) {
+    use crate::session::Depth;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "introspection_depth = \"relations\"");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.duplicate_profile(0, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().expect("the duplicate form is open");
+            assert_eq!(form.depth, Depth::Relations);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.profiles.len(), 2);
+            let copy = workspace.profiles.last().expect("the copy is listed");
+            assert_ne!(copy.id, "e2e");
+            assert_eq!(copy.behaviour.depth, Depth::Relations);
+            assert_eq!(
+                copy.stored(cx).introspection_depth.as_deref(),
+                Some("relations")
+            );
         });
         quit(workspace, cx);
     });
@@ -3826,6 +6629,1421 @@ fn show_ddl_opens_a_read_only_view_of_a_tables_definition_and_hands_the_keyboard
     });
 }
 
+/// Which object `birds_grants` are the grants of.
+fn birds_object() -> crate::grants::EditObject {
+    crate::grants::EditObject {
+        database: None,
+        schema: "main".into(),
+        name: "birds".into(),
+    }
+}
+
+/// A table's grants as Postgres would list them: an owner, a role with one
+/// member, and PUBLIC holding nothing.
+fn birds_grants() -> crate::db::roles::ObjectGrants {
+    use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
+    let role = |name: &str, login: bool| Role {
+        name: name.into(),
+        login,
+        superuser: false,
+        password_expires: None,
+        expired: false,
+        connection_limit: None,
+        has_password: None,
+        last_login: None,
+    };
+    ObjectGrants {
+        public: true,
+        owner: "keeper".into(),
+        sequence: false,
+        privileges: vec!["SELECT".into(), "INSERT".into()],
+        grants: vec![
+            Grant {
+                on: None,
+                grantee: Some("keeper".into()),
+                privilege: "SELECT".into(),
+                grantable: false,
+            },
+            Grant {
+                on: None,
+                grantee: Some("watchers".into()),
+                privilege: "SELECT".into(),
+                grantable: false,
+            },
+        ],
+        roles: Roles {
+            roles: vec![
+                role("keeper", true),
+                role("watchers", false),
+                role("ana", true),
+            ],
+            memberships: vec![("ana".into(), "watchers".into())],
+            ..Roles::default()
+        },
+    }
+}
+
+#[gpui::test]
+fn show_grants_of_a_role_lists_each_database_and_a_failed_read_stays_in_its_own(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let database = |name: String, connects: bool| DatabaseAccess {
+            inside: None,
+            name,
+            allows_connections: true,
+            rights: connects
+                .then(|| Right {
+                    privilege: "CONNECT".into(),
+                    sources: vec![Source::Public],
+                })
+                .into_iter()
+                .collect(),
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().expect("a connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let request = workspace.open_grants_view(
+                &id,
+                "Grants of ana".into(),
+                "login".into(),
+                None,
+                window,
+                cx,
+            );
+            let access = RoleAccess {
+                server: Vec::new(),
+                superuser: false,
+                databases: vec![
+                    database("main".into(), true),
+                    database("locked".into(), false),
+                ],
+            };
+            workspace.land_role_access(&id, generation, request, "ana".into(), Ok(access), cx);
+        });
+        settle(cx);
+        settle(cx);
+        // SQLite lists no grants, so the one read fails: said in its own
+        // row, with the database it cannot connect to listed beside it.
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            assert!(matches!(view.data, crate::users_view::Loaded::Ready(_)));
+            let rows = &view.matrix.rows;
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert!(rows[0].via.starts_with("could not read"), "{rows:?}");
+            assert_eq!(rows[1].via, "no CONNECT: not read");
+        });
+        assert!(cx.debug_bounds("show-grants-row-locked").is_some());
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_draws_roles_by_privileges_and_hands_the_keyboard_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        assert!(editor_has_keyboard(&workspace, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().expect("a connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let request = workspace.open_grants_view(
+                &id,
+                "Grants on birds".into(),
+                "table · main".into(),
+                Some(birds_object()),
+                window,
+                cx,
+            );
+            workspace.land_grants(
+                &id,
+                generation,
+                request,
+                Ok(super::GrantsOf::Object(birds_grants())),
+                cx,
+            );
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("show-grants"));
+        assert!(in_dialog(&workspace, cx), "the dialog holds the keyboard");
+        for row in [
+            "show-grants-row-keeper",
+            "show-grants-row-watchers",
+            "show-grants-row-ana",
+            "show-grants-row-PUBLIC",
+        ] {
+            assert!(cx.debug_bounds(row).is_some(), "{row} is drawn");
+        }
+
+        // Each cell's mark, as the matrix was built when the grants landed:
+        // keeper owns birds, so its SELECT can be passed on; ana holds it
+        // through watchers.
+        use crate::grants::Mark;
+        let marks = |workspace: &Workspace, name: &str| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            (view.matrix.rows.iter())
+                .find(|row| row.name == name)
+                .map(|row| row.marks.clone())
+        };
+        let built = workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                marks(workspace, "keeper"),
+                Some(vec![Mark::Grantable, Mark::None])
+            );
+            assert_eq!(
+                marks(workspace, "watchers"),
+                Some(vec![Mark::Granted, Mark::None])
+            );
+            assert_eq!(
+                marks(workspace, "ana"),
+                Some(vec![Mark::Through, Mark::None])
+            );
+            assert_eq!(
+                marks(workspace, "PUBLIC"),
+                Some(vec![Mark::None, Mark::None])
+            );
+            workspace.grants_view.as_ref().unwrap().matrix.built
+        });
+        // Frames alone build nothing.
+        settle(cx);
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.grants_view.as_ref().unwrap().matrix.built, built);
+        });
+
+        // The filter narrows the rows, the member kept under its role.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let filter = workspace.grants_view.as_ref().unwrap().filter.clone();
+            filter.update(cx, |input, cx| input.set_value("ana", window, cx));
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-ana").is_some());
+        assert!(cx.debug_bounds("show-grants-row-watchers").is_some());
+        assert!(cx.debug_bounds("show-grants-row-keeper").is_none());
+        workspace.update_in(cx, |workspace, window, cx| {
+            let filter = workspace.grants_view.as_ref().unwrap().filter.clone();
+            filter.update(cx, |input, cx| input.set_value("", window, cx));
+        });
+        settle(cx);
+
+        // Roles alone: the member listed under its role goes.
+        workspace.update(cx, |workspace, cx| workspace.set_grants_members(false, cx));
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-ana").is_none());
+        assert!(cx.debug_bounds("show-grants-row-watchers").is_some());
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.grants_view.is_none()));
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+/// The grants of a table that thousands of roles hold SELECT on.
+fn crowded_grants(roles: usize) -> crate::db::roles::ObjectGrants {
+    use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
+    let names = (0..roles).map(|ix| format!("role{ix:05}"));
+    ObjectGrants {
+        public: true,
+        owner: "role00000".into(),
+        sequence: false,
+        privileges: vec!["SELECT".into(), "INSERT".into()],
+        grants: (names.clone())
+            .map(|grantee| Grant {
+                on: None,
+                grantee: Some(grantee),
+                privilege: "SELECT".into(),
+                grantable: false,
+            })
+            .collect(),
+        roles: Roles {
+            roles: names
+                .map(|name| Role {
+                    name,
+                    login: true,
+                    superuser: false,
+                    password_expires: None,
+                    expired: false,
+                    connection_limit: None,
+                    has_password: None,
+                    last_login: None,
+                })
+                .collect(),
+            ..Roles::default()
+        },
+    }
+}
+
+fn open_crowded_grants(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, roles: usize) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile().expect("a connection is in front");
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let request = workspace.open_grants_view(
+            &id,
+            "Grants on birds".into(),
+            "table · main".into(),
+            Some(birds_object()),
+            window,
+            cx,
+        );
+        let grants = super::GrantsOf::Object(crowded_grants(roles));
+        workspace.land_grants(&id, generation, request, Ok(grants), cx);
+    });
+    settle(cx);
+    settle(cx);
+}
+
+#[gpui::test]
+fn show_grants_draws_only_the_rows_in_view_and_keeps_its_scroll(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_crowded_grants(&workspace, cx, 5_000);
+        let total = workspace.read_with(cx, |workspace, _| {
+            workspace.grants_view.as_ref().unwrap().matrix.rows.len()
+        });
+        assert!(total >= 5_000, "{total} rows are listed");
+        // Selectors are `&'static str`, so each probe's name is leaked: a
+        // few thousand short strings, in a test.
+        let drawn = |cx: &mut VisualTestContext| {
+            (0..total)
+                .filter(|ix| {
+                    let name = format!("show-grants-row-role{ix:05}");
+                    cx.debug_bounds(Box::leak(name.into_boxed_str())).is_some()
+                })
+                .count()
+        };
+        let first = drawn(cx);
+        assert!(first > 0, "the rows in view are drawn");
+        assert!(first < 60, "{first} of {total} rows were drawn");
+        assert!(cx.debug_bounds("show-grants-row-role04999").is_none());
+        // Each row spans the list, so the privilege columns line up whatever
+        // the length of the name before them.
+        let list = cx
+            .debug_bounds("show-grants-rows")
+            .expect("the list is drawn");
+        let row = cx
+            .debug_bounds("show-grants-row-role00000")
+            .expect("the first row is drawn");
+        assert_eq!(row.size.width, list.size.width);
+
+        // Scrolled down, a window of rows is still all that is drawn, and a
+        // frame does not send the list back to the top.
+        workspace.update(cx, |workspace, cx| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            view.scroll.scroll_to_item(2_500, gpui::ScrollStrategy::Top);
+            cx.notify();
+        });
+        settle(cx);
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-role00010").is_none());
+        let scrolled = drawn(cx);
+        assert!(scrolled > 0 && scrolled < 60, "{scrolled} rows were drawn");
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-row-role00010").is_none());
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+/// Opens Show Grants on a table granted to `crowd`, a role with `members`
+/// members, listed under it.
+fn open_role_with_members(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    members: usize,
+) {
+    use crate::db::roles::{Grant, ObjectGrants, Role, Roles};
+    let role = |name: String, login: bool| Role {
+        name,
+        login,
+        superuser: false,
+        password_expires: None,
+        expired: false,
+        connection_limit: None,
+        has_password: None,
+        last_login: None,
+    };
+    let names: Vec<String> = (0..members).map(|ix| format!("m{ix:04}")).collect();
+    let grants = ObjectGrants {
+        public: true,
+        owner: "keeper".into(),
+        sequence: false,
+        privileges: vec!["SELECT".into()],
+        grants: vec![Grant {
+            on: None,
+            grantee: Some("crowd".into()),
+            privilege: "SELECT".into(),
+            grantable: false,
+        }],
+        roles: Roles {
+            roles: std::iter::once(role("crowd".into(), false))
+                .chain(names.iter().map(|name| role(name.clone(), true)))
+                .collect(),
+            memberships: names
+                .iter()
+                .map(|name| (name.clone(), "crowd".into()))
+                .collect(),
+            ..Roles::default()
+        },
+    };
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile().expect("a connection is in front");
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let request = workspace.open_grants_view(
+            &id,
+            "Grants on birds".into(),
+            "table · main".into(),
+            Some(birds_object()),
+            window,
+            cx,
+        );
+        workspace.land_grants(
+            &id,
+            generation,
+            request,
+            Ok(super::GrantsOf::Object(grants)),
+            cx,
+        );
+    });
+    settle(cx);
+    settle(cx);
+}
+
+#[gpui::test]
+fn show_grants_folds_a_role_shut_and_opens_it_again_by_its_row(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_role_with_members(&workspace, cx, 3);
+        let members = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let view = workspace.grants_view.as_ref().unwrap();
+                view.matrix.rows.iter().filter(|row| row.member).count()
+            })
+        };
+        assert_eq!(members(cx), 3);
+
+        click_selector(cx, "show-grants-row-crowd");
+        settle(cx);
+        assert_eq!(members(cx), 0, "folded shut, its members leave the table");
+        assert!(cx.debug_bounds("show-grants-row-crowd").is_some());
+
+        click_selector(cx, "show-grants-row-crowd");
+        settle(cx);
+        assert_eq!(members(cx), 3, "opened again, they come back");
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_pins_the_role_in_view_until_the_pin_is_turned_off(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_role_with_members(&workspace, cx, 200);
+        // At the top the role's own row is in view: nothing is pinned.
+        assert!(cx.debug_bounds("show-grants-pinned-crowd").is_none());
+
+        workspace.update(cx, |workspace, cx| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            view.scroll.scroll_to_item(100, gpui::ScrollStrategy::Top);
+            cx.notify();
+        });
+        settle(cx);
+        settle(cx);
+        // Drawn at the top of the list in view, not where the top of its
+        // scrolled content is.
+        let list = cx
+            .debug_bounds("show-grants-rows")
+            .expect("the list is drawn");
+        let pinned = cx
+            .debug_bounds("show-grants-pinned-crowd")
+            .expect("scrolled into its members, the role stays over them");
+        assert!(
+            pinned.origin.y >= list.origin.y && pinned.bottom() <= list.bottom(),
+            "{pinned:?} sits inside {list:?}"
+        );
+
+        click_selector(cx, "show-grants-sticky");
+        settle(cx);
+        assert!(cx.debug_bounds("show-grants-pinned-crowd").is_none());
+        assert!(workspace.read_with(cx, |workspace, _| {
+            !workspace.grants_view.as_ref().unwrap().sticky
+        }));
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_is_resized_by_its_corner_within_the_window(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        open_crowded_grants(&workspace, cx, 20);
+        let card = cx.debug_bounds("show-grants").expect("the dialog is drawn");
+        let corner = cx
+            .debug_bounds("grants-resize-corner")
+            .expect("the corner grip is drawn")
+            .center();
+
+        // Pulled in, the centred card shrinks by twice the drag, down to its
+        // least size and no further.
+        drag(
+            cx,
+            corner,
+            corner - gpui::point(gpui::px(40.), gpui::px(30.)),
+        );
+        let smaller = cx.debug_bounds("show-grants").unwrap();
+        assert_eq!(smaller.size.width, card.size.width - gpui::px(80.));
+        assert_eq!(smaller.size.height, card.size.height - gpui::px(60.));
+        let corner = cx.debug_bounds("grants-resize-corner").unwrap().center();
+        drag(
+            cx,
+            corner,
+            corner - gpui::point(gpui::px(2_000.), gpui::px(2_000.)),
+        );
+        let least = cx.debug_bounds("show-grants").unwrap();
+        assert_eq!(
+            least.size.width,
+            gpui::px(crate::theme::layout::GRANTS_MIN_WIDTH)
+        );
+        assert_eq!(
+            least.size.height,
+            gpui::px(crate::theme::layout::GRANTS_MIN_HEIGHT)
+        );
+
+        // The size stays on the dialog's state through frames, and the
+        // bottom edge changes the height alone.
+        settle(cx);
+        let edge = cx.debug_bounds("grants-resize-bottom").unwrap().center();
+        drag(cx, edge, edge + gpui::point(gpui::px(0.), gpui::px(25.)));
+        let taller = cx.debug_bounds("show-grants").unwrap();
+        assert_eq!(taller.size.width, least.size.width);
+        assert_eq!(taller.size.height, least.size.height + gpui::px(50.));
+
+        // Dragged out, it stops at the window's share.
+        let corner = cx.debug_bounds("grants-resize-corner").unwrap().center();
+        drag(
+            cx,
+            corner,
+            corner + gpui::point(gpui::px(5_000.), gpui::px(5_000.)),
+        );
+        let window = cx.update(|window, _| window.viewport_size());
+        let largest = cx.debug_bounds("show-grants").unwrap();
+        assert!(largest.size.width <= window.width * 0.96 + gpui::px(1.));
+        assert!(largest.size.height <= window.height * 0.92 + gpui::px(1.));
+        assert!(largest.size.width > taller.size.width);
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+/// The front profile made to read as Postgres, the one engine that writes
+/// grant changes, while its live connection stays the SQLite one: what is
+/// built and gated is Postgres's, and anything sent reaches SQLite, which
+/// reads no `GRANT`.
+fn as_postgres(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    workspace.update(cx, |workspace, _| {
+        let profile = workspace.profile_mut().expect("a connection is in front");
+        profile.config = ConnectionConfig::postgres(crate::db::ServerConfig {
+            database: "main".into(),
+            ..Default::default()
+        });
+    });
+}
+
+fn open_birds_grants(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile().expect("a connection is in front");
+        let (id, generation) = (profile.id.clone(), profile.generation);
+        let request = workspace.open_grants_view(
+            &id,
+            "Grants on birds".into(),
+            "table · main".into(),
+            Some(birds_object()),
+            window,
+            cx,
+        );
+        let grants = super::GrantsOf::Object(birds_grants());
+        workspace.land_grants(&id, generation, request, Ok(grants), cx);
+    });
+    settle(cx);
+}
+
+fn staged_count(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+    workspace.read_with(cx, |workspace, _| {
+        workspace.grants_view.as_ref().unwrap().staged.len()
+    })
+}
+
+/// Clicks the cell of the row keyed `key` under `privilege`.
+fn click_grant_cell(cx: &mut VisualTestContext, key: &str, privilege: &str) {
+    let selector: &'static str = format!("show-grants-cell-{key}-{privilege}").leak();
+    click_selector(cx, selector);
+}
+
+#[gpui::test]
+fn show_grants_stages_grants_and_revokes_in_edit_mode_and_discards_them(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        // SQLite writes no grant: the dialog stays read-only and says so.
+        open_birds_grants(&workspace, cx);
+        assert!(cx.debug_bounds("show-grants-read-only").is_some());
+        assert!(cx.debug_bounds("show-grants-edit").is_none());
+        press(cx, "escape");
+
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        assert!(cx.debug_bounds("show-grants-read-only").is_none());
+        assert!(cx.debug_bounds("show-grants-edit-bar").is_none());
+        click_selector(cx, "show-grants-edit");
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.grants_view.as_ref().unwrap().editing
+        }));
+        assert!(cx.debug_bounds("show-grants-edit-bar").is_some());
+        assert_eq!(staged_count(&workspace, cx), 0);
+
+        // watchers holds SELECT directly: a click stages its revoke. ana,
+        // listed as watchers' member, holds INSERT through nothing: a click
+        // stages its grant.
+        click_grant_cell(cx, "watchers", "SELECT");
+        click_grant_cell(cx, "watchers\u{1f}ana", "INSERT");
+        assert_eq!(staged_count(&workspace, cx), 2);
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            let changes = view.staged.changes();
+            assert!(changes.iter().any(|change| change.grantee == "watchers"
+                && change.privilege == "SELECT"
+                && change.action == crate::db::roles::GrantAction::Revoke));
+            assert!(changes.iter().any(|change| change.grantee == "ana"
+                && change.privilege == "INSERT"
+                && change.action == crate::db::roles::GrantAction::Grant));
+        });
+
+        // The owner's cells are fixed: the click stages nothing and says why.
+        assert!(cx.debug_bounds("show-grants-refusal").is_none());
+        click_grant_cell(cx, "keeper", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 2);
+        assert!(cx.debug_bounds("show-grants-refusal").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            let refusal = workspace.grants_view.as_ref().unwrap().refusal.clone();
+            assert_eq!(
+                refusal.as_deref(),
+                Some("The owner holds every privilege on what it owns.")
+            );
+        });
+
+        // A staged cell clicked again is taken back.
+        click_grant_cell(cx, "watchers", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        assert!(cx.debug_bounds("show-grants-refusal").is_none());
+
+        click_selector(cx, "show-grants-discard");
+        assert_eq!(staged_count(&workspace, cx), 0);
+
+        // Back to View drops what was staged.
+        click_grant_cell(cx, "watchers", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        click_selector(cx, "show-grants-view");
+        assert_eq!(staged_count(&workspace, cx), 0);
+        assert!(cx.debug_bounds("show-grants-edit-bar").is_none());
+
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_of_a_role_lists_every_privilege_in_edit_mode(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = workspace.profile().expect("a connection is in front");
+            let (id, generation) = (profile.id.clone(), profile.generation);
+            let request = workspace.open_grants_view(
+                &id,
+                "Grants of ana".into(),
+                "login".into(),
+                None,
+                window,
+                cx,
+            );
+            let access = RoleAccess {
+                server: Vec::new(),
+                superuser: false,
+                databases: vec![DatabaseAccess {
+                    inside: None,
+                    name: "locked".into(),
+                    allows_connections: true,
+                    rights: vec![Right {
+                        privilege: "TEMPORARY".into(),
+                        sources: vec![Source::Public],
+                    }],
+                }],
+            };
+            workspace.land_role_access(&id, generation, request, "ana".into(), Ok(access), cx);
+        });
+        settle(cx);
+        let columns = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .grants_view
+                    .as_ref()
+                    .unwrap()
+                    .matrix
+                    .columns
+                    .clone()
+            })
+        };
+        assert_eq!(columns(&workspace, cx), ["TEMPORARY"]);
+        click_selector(cx, "show-grants-edit");
+        assert_eq!(
+            columns(&workspace, cx),
+            crate::db::roles::PRIVILEGE_ORDER.map(str::to_string)
+        );
+        // A database takes CONNECT, so its cell stages a grant; SELECT does
+        // not apply to one, and the click says so.
+        click_grant_cell(cx, "locked\u{1f}", "CONNECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        click_grant_cell(cx, "locked\u{1f}", "SELECT");
+        assert_eq!(staged_count(&workspace, cx), 1);
+        assert!(cx.debug_bounds("show-grants-refusal").is_some());
+        click_selector(cx, "show-grants-view");
+        assert_eq!(columns(&workspace, cx), ["TEMPORARY"]);
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_reviews_every_statement_and_sends_nothing_before_run(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        click_selector(cx, "show-grants-edit");
+        click_grant_cell(cx, "watchers", "SELECT");
+        click_grant_cell(cx, "watchers\u{1f}ana", "INSERT");
+        let history = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.history.len()
+        });
+
+        click_selector(cx, "show-grants-review");
+        assert_eq!(front_dialog(&workspace, cx), Some("apply-review"));
+        let shown = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                let review = session.apply_review.as_ref().expect("the review is up");
+                (
+                    review.title,
+                    review.sql.clone(),
+                    review.error.clone(),
+                    review.grants.as_ref().map(|run| run.running.is_some()),
+                )
+            })
+        };
+        // Every statement, exactly as it runs: one database, so no heading.
+        let (title, sql, error, running) = shown(&workspace, cx);
+        assert_eq!(title, "Change grants");
+        assert_eq!(
+            sql,
+            "REVOKE SELECT ON TABLE \"main\".\"birds\" FROM \"watchers\";\n\
+             GRANT INSERT ON TABLE \"main\".\"birds\" TO \"ana\";"
+        );
+        assert_eq!((error, running), (None, Some(false)));
+        let unsent = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let session = &workspace.profile().unwrap().session;
+                assert_eq!(session.history.len(), history, "nothing was run");
+                assert!(!matches!(
+                    session.active_query(),
+                    Some(QueryState::Running { .. })
+                ));
+                assert_eq!(workspace.grants_view.as_ref().unwrap().staged.len(), 2);
+            })
+        };
+        unsent(&workspace, cx);
+
+        // Read-write may not grant: Run asks for Full and sends nothing.
+        click_selector(cx, "apply-review-0");
+        assert_eq!(front_dialog(&workspace, cx), Some("pending-run"));
+        unsent(&workspace, cx);
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), Some("apply-review"));
+
+        // In Full it runs, on SQLite, which reads no GRANT: the server's
+        // error stays in the review, with what was staged.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        settle(cx);
+        click_selector(cx, "apply-review-0");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("apply-review"));
+        let (_, _, error, running) = shown(&workspace, cx);
+        let error = error.expect("the failure is said in the review");
+        assert!(
+            error.starts_with("Nothing was applied. In main, "),
+            "{error}"
+        );
+        assert!(error.contains("syntax error"), "{error}");
+        assert_eq!(running, Some(false));
+        assert!(cx.debug_bounds("apply-review-error").is_some());
+        unsent(&workspace, cx);
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), Some("show-grants"));
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn show_grants_lists_a_role_picked_by_grant_to_and_stages_its_grant(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        assert!(cx.debug_bounds("show-grants-grant-to").is_none());
+        click_selector(cx, "show-grants-edit");
+        assert!(cx.debug_bounds("show-grants-grant-to").is_some());
+        // ana holds nothing of its own on birds: listed only as watchers'
+        // member until it is picked.
+        assert!(cx.debug_bounds("show-grants-cell-ana-SELECT").is_none());
+        workspace.update(cx, |workspace, cx| workspace.add_grant_role("ana", cx));
+        settle(cx);
+        click_grant_cell(cx, "ana", "SELECT");
+        workspace.read_with(cx, |workspace, _| {
+            let view = workspace.grants_view.as_ref().unwrap();
+            assert_eq!(view.added, ["ana"]);
+            let changes = view.staged.changes();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(
+                (changes[0].grantee.as_str(), changes[0].privilege.as_str()),
+                ("ana", "SELECT")
+            );
+        });
+        // A role listed already is not picked twice, nor the owner at all.
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_grant_role("ana", cx);
+            workspace.add_grant_role("keeper", cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.grants_view.as_ref().unwrap().added, ["ana"]);
+        });
+        // Back to View lets the pick go with what was staged.
+        click_selector(cx, "show-grants-view");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.grants_view.as_ref().unwrap().added.is_empty());
+        });
+        assert!(cx.debug_bounds("show-grants-cell-ana-SELECT").is_none());
+        press(cx, "escape");
+        quit(workspace, cx);
+    });
+}
+
+/// A Users and roles tab put behind the editor, which SQLite never opens
+/// itself, and its id.
+fn users_tab_on(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut gpui::Context<Workspace>,
+) -> u64 {
+    let view = cx.new(|cx| crate::users_view::UsersView::new("main".into(), true, cx));
+    let results = crate::result_grid::new_grid(window, cx);
+    let profile = workspace.profile_mut().expect("a connection is in front");
+    let id = profile.session.next_object_id;
+    profile.session.next_object_id += 1;
+    profile.session.objects.push(crate::session::ObjectTab {
+        id,
+        database: None,
+        schema: String::new(),
+        name: crate::sidebar::USERS_AND_ROLES.into(),
+        kind: None,
+        body: ObjectBody::Users {
+            view,
+            query: QueryState::Idle,
+            results,
+            side: Default::default(),
+        },
+    });
+    id
+}
+
+/// A role of the Users and roles tests: `ana`'s kind by the flags given.
+fn test_role(name: &str, login: bool) -> crate::db::roles::Role {
+    crate::db::roles::Role {
+        name: name.into(),
+        login,
+        superuser: false,
+        password_expires: None,
+        expired: false,
+        connection_limit: None,
+        has_password: None,
+        last_login: None,
+    }
+}
+
+/// A Users and roles tab in front with `ana` and `bo` (logins) and
+/// `reporting` (a role) read, its events collected, and its list focused.
+fn users_tab_with_roles(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (
+    Entity<crate::users_view::UsersView>,
+    std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+) {
+    use crate::users_view::{Loaded, UsersEvent};
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let view = workspace.update_in(cx, |workspace, window, cx| {
+        let tab = users_tab_on(workspace, window, cx);
+        let profile = workspace.profile_mut().unwrap();
+        let roles = std::sync::Arc::new(crate::db::roles::Roles {
+            roles: vec![
+                test_role("ana", true),
+                test_role("bo", true),
+                test_role("reporting", false),
+            ],
+            ..Default::default()
+        });
+        profile.roles = crate::session::RolesState::Loaded(roles.clone());
+        let view = match &profile.session.objects.last().unwrap().body {
+            ObjectBody::Users { view, .. } => view.clone(),
+            _ => unreachable!(),
+        };
+        let log = events.clone();
+        cx.subscribe(&view, move |_, _, event: &UsersEvent, _| {
+            log.borrow_mut().push(match event {
+                UsersEvent::Select(name, _) => format!("select {name}"),
+                UsersEvent::Edit(name) => format!("edit {name}"),
+                UsersEvent::ShowGrants(name) => format!("grants {name}"),
+                _ => "other".into(),
+            })
+        })
+        .detach();
+        view.update(cx, |view, cx| view.set_roles(Loaded::Ready(roles), cx));
+        workspace.activate_tab(Tab::Object(tab), window, cx);
+        view
+    });
+    settle(cx);
+    settle(cx);
+    events.borrow_mut().clear();
+    (view, events)
+}
+
+#[gpui::test]
+fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let (view, events) = users_tab_with_roles(&workspace, cx);
+        let picked = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.selected().map(str::to_string))
+        };
+        // Logins first, then roles: ana, bo, reporting. The first is picked.
+        assert_eq!(picked(cx).as_deref(), Some("ana"));
+        press(cx, "down");
+        assert_eq!(picked(cx).as_deref(), Some("bo"));
+        assert_eq!(*events.borrow(), ["select bo"], "a fresh read, as a click");
+        press(cx, "end");
+        assert_eq!(picked(cx).as_deref(), Some("reporting"));
+        press(cx, "down");
+        assert_eq!(picked(cx).as_deref(), Some("ana"), "Down wraps");
+        press(cx, "up");
+        assert_eq!(picked(cx).as_deref(), Some("reporting"), "Up wraps");
+        press(cx, "home");
+        assert_eq!(picked(cx).as_deref(), Some("ana"));
+
+        // With a form up, its field holds the keys and the list keeps its pick.
+        let profile =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().id.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_role_form(
+                &profile,
+                super::RoleFormKind::New { login: true },
+                window,
+                cx,
+            )
+        });
+        settle(cx);
+        settle(cx);
+        press(cx, "down");
+        assert_eq!(picked(cx).as_deref(), Some("ana"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_right_click_on_a_users_row_offers_the_detail_panels_actions_for_that_row(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let (view, events) = users_tab_with_roles(&workspace, cx);
+        let menu_item = |cx: &mut VisualTestContext, row: &'static str, downs: usize| {
+            let at = cx.debug_bounds(row).expect("the row is drawn").center();
+            cx.simulate_event(gpui::MouseDownEvent {
+                position: at,
+                modifiers: gpui::Modifiers::default(),
+                button: gpui::MouseButton::Right,
+                click_count: 1,
+                first_mouse: false,
+            });
+            settle(cx);
+            cx.update(|window, _| {
+                assert!(
+                    window
+                        .context_stack()
+                        .iter()
+                        .any(|context| context.contains("PopupMenu")),
+                    "the row's menu is up"
+                )
+            });
+            // The first item is the first press.
+            for _ in 0..=downs {
+                cx.simulate_keystrokes("down");
+            }
+            press(cx, "enter");
+        };
+        // bo: Edit…, Reset Password…, Show Grants, Deactivate…. The right
+        // click picks the row first, as a left one does.
+        menu_item(cx, "users-row-bo", 0);
+        assert_eq!(*events.borrow(), ["select bo", "edit bo"]);
+        events.borrow_mut().clear();
+        menu_item(cx, "users-row-bo", 2);
+        assert_eq!(*events.borrow(), ["grants bo"]);
+        events.borrow_mut().clear();
+        // A role has no password to reset: Edit…, Show Grants, Allow Login….
+        menu_item(cx, "users-row-reporting", 1);
+        assert_eq!(*events.borrow(), ["select reporting", "grants reporting"]);
+        view.read_with(cx, |view, _| assert_eq!(view.selected(), Some("reporting")));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_does(
+    cx: &mut TestAppContext,
+) {
+    use crate::users_view::RoleAction;
+    crate::IGNORE_ENVIRONMENT.set(true);
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_connections(
+            cx,
+            "",
+            "",
+            &format!(
+                "{}[[profiles]]\nid = \"far\"\nname = \"Faraway\"\nhost = \"far.invalid\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"postgres\"\n",
+                sqlite_profile("e2e", "E2E", "")
+            ),
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_ne!(workspace.profile().unwrap().id, "far");
+            workspace.run_role_action("far", RoleAction::NewUser, None, window, cx);
+            let profile = workspace.profile().unwrap();
+            assert_eq!(profile.id, "far", "its connection came to the front");
+            assert!(
+                (profile.session.objects.iter())
+                    .any(|tab| matches!(tab.body, ObjectBody::Users { .. })),
+                "its Users and roles tab opened"
+            );
+            let form = workspace
+                .role_form
+                .as_ref()
+                .expect("New User… opened its form");
+            assert!(matches!(
+                form.kind,
+                super::RoleFormKind::New { login: true }
+            ));
+        });
+        // Bringing the connection forward forgets what it had read of its
+        // roles; with them read, Edit… names the role it was asked for.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let far = workspace.profile_mut().unwrap();
+            far.roles =
+                crate::session::RolesState::Loaded(std::sync::Arc::new(crate::db::roles::Roles {
+                    roles: vec![test_role("ana", true)],
+                    ..Default::default()
+                }));
+            workspace.run_role_action("far", RoleAction::Edit, Some("ana"), window, cx);
+            let form = workspace.role_form.as_ref().expect("Edit… opened its form");
+            assert!(matches!(&form.kind, super::RoleFormKind::Edit(role) if role.name == "ana"));
+            // Copy DROP ROLE puts text on the clipboard and sends nothing:
+            // the connection's user, `u`, is offered to take over.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+            workspace.run_role_action("far", RoleAction::CopyDropRole, Some("ana"), window, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            let copied = copied.unwrap_or_default();
+            assert!(
+                copied.contains("REASSIGN OWNED BY \"ana\" TO \"u\";"),
+                "{copied}"
+            );
+            assert!(copied.ends_with("DROP ROLE \"ana\";"), "{copied}");
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// The front profile made to read as MySQL, which lists its accounts and
+/// changes none of them, while its live connection stays the SQLite one:
+/// nothing in these tests reaches a server that reads an account.
+fn as_mysql(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+    workspace.update(cx, |workspace, cx| {
+        let profile = workspace.profile_mut().expect("a connection is in front");
+        profile.config = ConnectionConfig::MySql(crate::db::ServerConfig {
+            database: "main".into(),
+            user: "ana".into(),
+            ..Default::default()
+        });
+        let id = profile.id.clone();
+        // The connections tree, where the Users and roles row is.
+        workspace.set_view_mode(crate::sidebar::ViewMode::Complex, cx);
+        workspace.rebuild_connections(cx);
+        id
+    })
+}
+
+#[gpui::test]
+fn a_mysql_connection_lists_its_accounts_and_offers_nothing_that_writes(cx: &mut TestAppContext) {
+    use crate::users_view::RoleAction;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let id = as_mysql(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles =
+                crate::session::RolesState::Loaded(std::sync::Arc::new(crate::db::roles::Roles {
+                    roles: vec![
+                        test_role("ana@%", true),
+                        crate::db::roles::Role {
+                            has_password: Some(false),
+                            ..test_role("app_read@%", false)
+                        },
+                    ],
+                    ..Default::default()
+                }));
+            workspace.rebuild_connections(cx);
+        });
+        let login = crate::sidebar::role_row(&id, true, "ana@%");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let nodes = &workspace.connections.nodes;
+            assert!(nodes.contains_key(&crate::sidebar::users_row(&id)));
+            assert!(nodes.contains_key(&login));
+            assert!(nodes.contains_key(&crate::sidebar::role_row(&id, false, "app_read@%")));
+            let (_, name, actions) = workspace.role_menu(&login).expect("a role's row");
+            assert_eq!(name.as_deref(), Some("ana@%"));
+            assert_eq!(
+                actions,
+                [RoleAction::ShowGrants, RoleAction::CopyDropUser],
+                "nothing that writes"
+            );
+            let (_, _, actions) = workspace
+                .role_menu(&crate::sidebar::users_row(&id))
+                .expect("the Users and roles row");
+            assert!(actions.is_empty(), "no New User… or New Role…");
+
+            // Copy DROP USER puts the account's statement on the clipboard.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
+            workspace.run_role_action(&id, RoleAction::CopyDropUser, Some("ana@%"), window, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            let copied = copied.unwrap_or_default();
+            assert!(copied.ends_with("\nDROP USER 'ana'@'%';"), "{copied}");
+            assert!(
+                copied.contains("-- Warning: this connection signs in as ana"),
+                "{copied}"
+            );
+            // A change asked for anyway opens no form.
+            workspace.run_role_action(&id, RoleAction::NewUser, None, window, cx);
+            workspace.run_role_action(&id, RoleAction::Edit, Some("ana@%"), window, cx);
+            assert!(workspace.role_form.is_none());
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("users-row-ana@%").is_some(),
+            "the tab lists it"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_login_that_may_not_list_accounts_says_so_and_is_not_read_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let id = as_mysql(&workspace, cx);
+        let denied = "This login has no privilege to list users.";
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles =
+                crate::session::RolesState::Loaded(std::sync::Arc::new(crate::db::roles::Roles {
+                    denied: Some(denied.into()),
+                    ..Default::default()
+                }));
+            workspace.rebuild_connections(cx);
+        });
+        let users = crate::sidebar::users_row(&id);
+        let loaded = |workspace: &Workspace| {
+            matches!(
+                &workspace.profile().unwrap().roles,
+                crate::session::RolesState::Loaded(roles) if roles.denied.as_deref() == Some(denied)
+            )
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            let notice = format!("{users}/notice");
+            assert!(matches!(
+                workspace.connections.nodes.get(&notice),
+                Some(crate::sidebar::Node::Notice)
+            ));
+            // Opening the row and bringing the tab forward read nothing.
+            workspace.expand_node(&users.clone().into(), cx);
+            assert!(loaded(workspace), "the row's opening read nothing");
+            workspace.open_users(&id, None, window, cx);
+            assert!(loaded(workspace), "the tab's opening read nothing");
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| assert!(loaded(workspace)));
+        assert!(
+            cx.debug_bounds("users-denied").is_some(),
+            "the tab says why"
+        );
+        assert!(cx.debug_bounds("users-view-switch").is_none(), "no Reports");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_users_and_roles_tab_is_never_saved_with_the_session(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            workspace.activate_tab(Tab::Object(tab), window, cx);
+            let stored = workspace.profile().unwrap().stored(cx);
+            assert!(
+                !(stored.open_objects.iter())
+                    .any(|object| object.name == crate::sidebar::USERS_AND_ROLES),
+                "it is read again from the server, never restored"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Each Users and roles tab numbers its own reads from one: a read the closed
+/// tab asked for lands on that tab, never on the one opened since, which has
+/// asked under the same number.
+#[gpui::test]
+fn a_reach_read_lands_on_the_tab_that_asked_for_it(cx: &mut TestAppContext) {
+    use crate::users_view::Loaded;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let fresh = workspace.update_in(cx, |workspace, window, cx| {
+            let closed = users_tab_on(workspace, window, cx);
+            let view = |workspace: &Workspace, tab| {
+                (workspace.profile().unwrap().session.objects.iter())
+                    .find(|object| object.id == tab)
+                    .and_then(|object| match &object.body {
+                        ObjectBody::Users { view, .. } => Some(view.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let asked = view(workspace, closed);
+            let id = workspace.profile().unwrap().id.clone();
+            workspace.read_reach(&id, asked.downgrade(), "ana".into(), 1, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.session.objects.retain(|object| object.id != closed);
+            let opened = users_tab_on(workspace, window, cx);
+            let fresh = view(workspace, opened);
+            fresh.update(cx, |view, cx| view.select("bob", cx));
+            fresh
+        });
+        settle(cx);
+        fresh.read_with(cx, |view, _| {
+            assert!(matches!(view.reach(), Some(Loaded::Loading)));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_role_change_whose_users_tab_closed_under_it_leaves_the_roles_to_be_read_again(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles = crate::session::RolesState::Loaded(Default::default());
+            // The change goes out; the tab is closed before it lands.
+            workspace.execute_and_then(
+                "SELECT 1".into(),
+                Tab::Object(tab),
+                Some(crate::session::Refresh::Roles),
+                false,
+                None,
+                cx,
+            );
+            let profile = workspace.profile_mut().unwrap();
+            profile.session.objects.retain(|object| object.id != tab);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(
+                workspace.profile().unwrap().roles,
+                crate::session::RolesState::Unloaded
+            ));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_second_role_change_is_refused_while_one_runs_and_the_first_keeps_its_slot(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            let id = profile.id.clone();
+            let cancel = CancelToken::alongside();
+            let (state, _) = profile.session.slot(Tab::Object(tab)).unwrap();
+            *state = QueryState::Running {
+                started: std::time::Instant::now(),
+                cancelling: None,
+                cancel: cancel.clone(),
+            };
+            let refused = workspace.review_role_change(
+                &id,
+                "Deactivate login",
+                crate::db::roles::set_login("ana", false),
+                window,
+                cx,
+            );
+            assert_eq!(refused, Err(super::users::ROLE_CHANGE_RUNNING.into()));
+            let profile = workspace.profile_mut().unwrap();
+            assert!(profile.session.apply_review.is_none());
+            let (state, _) = profile.session.slot(Tab::Object(tab)).unwrap();
+            assert!(
+                matches!(state, QueryState::Running { cancel: kept, .. } if kept.is(&cancel)),
+                "the running change keeps its Cancel"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_refused_role_form_stays_up_with_what_was_typed_and_says_why(cx: &mut TestAppContext) {
+    use crate::db::roles::{Role, Roles};
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            users_tab_on(workspace, window, cx);
+            let profile = workspace.profile_mut().unwrap();
+            profile.roles = crate::session::RolesState::Loaded(std::sync::Arc::new(Roles {
+                roles: vec![Role {
+                    name: "root".into(),
+                    login: true,
+                    superuser: true,
+                    password_expires: None,
+                    expired: false,
+                    connection_limit: None,
+                    has_password: None,
+                    last_login: None,
+                }],
+                ..Roles::default()
+            }));
+            let id = profile.id.clone();
+            workspace.open_role_form(&id, super::RoleFormKind::New { login: true }, window, cx);
+            let form = workspace.role_form.as_ref().unwrap();
+            let (name, member_of) = (form.name.clone(), form.member_of.clone());
+            name.update(cx, |input, cx| input.set_value("ana", window, cx));
+            member_of.update(cx, |input, cx| input.set_value("root", window, cx));
+            workspace.submit_role_form(window, cx);
+            let form = workspace.role_form.as_ref().expect("the form stays up");
+            let error = form.error.clone().unwrap_or_default();
+            assert!(error.contains("superuser"), "{error}");
+            assert_eq!(form.name.read(cx).value().to_string(), "ana");
+
+            // Refused further on, by the gate, which reads no role change on
+            // SQLite: still up, still holding what was typed.
+            member_of.update(cx, |input, cx| input.set_value("", window, cx));
+            workspace.submit_role_form(window, cx);
+            let form = workspace.role_form.as_ref().expect("the form stays up");
+            let error = form.error.clone().unwrap_or_default();
+            assert!(error.contains("not a role change"), "{error}");
+            assert_eq!(form.name.read(cx).value().to_string(), "ana");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        // The form belongs to a Users and roles tab.
+        workspace.update_in(cx, |workspace, window, cx| {
+            users_tab_on(workspace, window, cx);
+            let profile = workspace.profile().unwrap().id.clone();
+            workspace.open_role_form(
+                &profile,
+                super::RoleFormKind::New { login: true },
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("role-form"));
+
+        cx.simulate_input("ana");
+        settle(cx);
+        let typed = workspace.read_with(cx, |workspace, cx| {
+            let form = workspace.role_form.as_ref().expect("the form is up");
+            form.name.read(cx).value().to_string()
+        });
+        assert_eq!(typed, "ana", "the name field took the keystrokes");
+
+        // Enter in a field is Review…: refused here by the gate, which reads
+        // no role change on SQLite, so the form says so and stays up.
+        press(cx, "enter");
+        let error = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .role_form
+                .as_ref()
+                .and_then(|form| form.error.clone())
+        });
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("not a role change")),
+            "{error:?}"
+        );
+
+        press(cx, "escape");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.role_form.is_none()));
+        assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_relation_menu_offers_show_ddl_where_the_target_copies_ddl(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -4492,6 +8710,64 @@ fn the_palette_opens_the_schema_export_through_the_schema_picker(cx: &mut TestAp
     });
 }
 
+/// Select Database reconnects or drops the sessions a transaction may be
+/// open on: refused while one is.
+#[gpui::test]
+fn select_database_is_refused_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(!workspace.set_database("other".into(), window, cx));
+            })
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_ne!(profile.config.database(), Some("other"));
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("transaction"), "{notice}");
+            assert!(profile.in_transaction);
+        });
+        run_in_front(&workspace, cx, "ROLLBACK");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(workspace.set_database("other".into(), window, cx));
+            })
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A switch made in the session (DuckDB) drops every landing of the old
+/// generation, so a transaction statement still marked in flight would keep
+/// every other tab's Commit waiting on it until a reconnect.
+#[gpui::test]
+fn a_database_switch_in_the_session_forgets_the_transaction_statement_in_flight(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.transaction_in_flight = Some(profile.session.active);
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(workspace.set_database("other".into(), window, cx));
+            })
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_eq!(profile.config.database(), Some("other"));
+            assert_eq!(profile.transaction_in_flight, None);
+        });
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
     cx: &mut TestAppContext,
@@ -4499,7 +8775,7 @@ fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
     store::tests::with_home(|| {
         let (workspace, cx) = two_databases_each_holding_t(cx);
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
@@ -4554,7 +8830,7 @@ fn a_database_switch_closes_the_schema_export_and_waits_for_a_running_export(
 
         // A disconnect drops the connection the dialog read its keys on.
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
@@ -4587,7 +8863,7 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         };
 
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         assert_eq!(front_dialog(&workspace, cx), Some("schema-export"));
@@ -4626,7 +8902,7 @@ fn the_schema_export_dialog_takes_the_keyboard_and_hands_it_back(cx: &mut TestAp
         // each table, Cancel and Export. `space` unticks a table and `enter`
         // on Export asks where, and writes what is ticked.
         workspace.update(cx, |workspace, cx| {
-            workspace.open_schema_export("main".into(), cx);
+            workspace.open_schema_export(None, "main".into(), cx);
         });
         settle(cx);
         for _ in 0..500 {
@@ -4971,6 +9247,7 @@ fn shortcut_row(
             member: member.clone(),
             folder: folder.map(str::to_string),
             missing: false,
+            hidden: false,
         };
         session
             .explorer_shortcuts
@@ -6161,6 +10438,167 @@ fn result_grid_scrollbars_stay_outside_the_viewport(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_startup_script_placeholder_follows_the_engine(cx: &mut TestAppContext) {
+    use crate::connection_form::placeholders;
+    use crate::db::Target;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("orders", "Orders", ""));
+        cx.executor().allow_parking();
+        run_command(&workspace, cx, Command::NewConnection);
+        let mut seen = Vec::new();
+        for engine in [Engine::Postgres, Engine::Sqlite, Engine::DuckDb] {
+            workspace.update(cx, |workspace, cx| {
+                let form = workspace.form.as_mut().expect("the form is open");
+                form.set_target(Target::built_in(engine));
+                cx.notify();
+            });
+            settle(cx);
+            let shown = workspace.read_with(cx, |workspace, cx| {
+                let form = workspace.form.as_ref().expect("the form is open");
+                form.startup_script
+                    .read(cx)
+                    .presentation()
+                    .placeholder()
+                    .to_string()
+            });
+            assert_eq!(
+                shown,
+                placeholders(Target::built_in(engine)).startup_script,
+                "{engine:?}"
+            );
+            seen.push(shown);
+        }
+        assert_ne!(seen[0], seen[1], "SQLite shows Postgres's example");
+        assert_ne!(seen[0], seen[2], "DuckDB shows Postgres's example");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_time_zone_row_is_drawn_only_where_a_session_takes_one(cx: &mut TestAppContext) {
+    use crate::db::Target;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("orders", "Orders", ""));
+        cx.executor().allow_parking();
+        run_command(&workspace, cx, Command::NewConnection);
+        let pick = |engine, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let form = workspace.form.as_mut().expect("the form is open");
+                form.set_target(Target::built_in(engine));
+                cx.notify();
+            });
+            settle(cx);
+        };
+        let zone_in = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let form = workspace.form.as_ref().expect("the form is open");
+                let (_, config) = form.config(cx).expect("the form reads");
+                config.server().and_then(|server| server.time_zone.clone())
+            })
+        };
+        let drawn = |cx: &mut VisualTestContext| cx.debug_bounds("form-time-zone").is_some();
+
+        pick(Engine::Postgres, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let form = workspace.form.as_ref().expect("the form is open");
+            form.host
+                .update(cx, |input, cx| input.set_value("db.example", window, cx));
+            form.user
+                .update(cx, |input, cx| input.set_value("me", window, cx));
+            form.time_zone.update(cx, |input, cx| {
+                input.set_value(" Europe/Paris ", window, cx)
+            });
+        });
+        settle(cx);
+        assert!(drawn(cx), "Postgres takes a zone");
+        assert_eq!(zone_in(cx).as_deref(), Some("Europe/Paris"));
+
+        for engine in [Engine::MySql, Engine::MariaDb, Engine::ClickHouse] {
+            pick(engine, cx);
+            assert!(drawn(cx), "{engine:?} takes a zone");
+            assert_eq!(zone_in(cx).as_deref(), Some("Europe/Paris"), "{engine:?}");
+        }
+        // The text stays in the row for the next engine that takes one, but is
+        // read by none that does not.
+        pick(Engine::SqlServer, cx);
+        assert!(!drawn(cx), "SQL Server takes none");
+        assert_eq!(zone_in(cx), None);
+        pick(Engine::DuckDb, cx);
+        assert!(!drawn(cx), "DuckDB takes none");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_driver_properties_row_is_drawn_only_where_the_engine_lists_some(cx: &mut TestAppContext) {
+    use crate::db::Target;
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("orders", "Orders", ""));
+        cx.executor().allow_parking();
+        run_command(&workspace, cx, Command::NewConnection);
+        let pick = |engine, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let form = workspace.form.as_mut().expect("the form is open");
+                form.set_target(Target::built_in(engine));
+                cx.notify();
+            });
+            settle(cx);
+        };
+        let read = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let form = workspace.form.as_ref().expect("the form is open");
+                form.config(cx).map(|(_, config)| {
+                    config
+                        .server()
+                        .map(|server| server.properties.stored())
+                        .unwrap_or_default()
+                })
+            })
+        };
+        let drawn =
+            |cx: &mut VisualTestContext| cx.debug_bounds("form-driver-properties").is_some();
+
+        pick(Engine::Postgres, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let form = workspace.form.as_ref().expect("the form is open");
+            form.host
+                .update(cx, |input, cx| input.set_value("db.example", window, cx));
+            form.user
+                .update(cx, |input, cx| input.set_value("me", window, cx));
+            form.properties.update(cx, |input, cx| {
+                input.set_value(
+                    "application_name = billing\nconnect_timeout = 5",
+                    window,
+                    cx,
+                )
+            });
+        });
+        settle(cx);
+        assert!(drawn(cx), "Postgres lists properties");
+        assert_eq!(
+            read(cx),
+            Ok(vec![
+                ("application_name".to_string(), "billing".to_string()),
+                ("connect_timeout".to_string(), "5".to_string()),
+            ])
+        );
+
+        // One key the engine does not list refuses the whole form, by name.
+        pick(Engine::SqlServer, cx);
+        assert!(drawn(cx), "SQL Server lists one");
+        let refused = read(cx).expect_err("SQL Server has no connect_timeout key");
+        assert!(refused.contains("`connect_timeout`"), "{refused}");
+
+        pick(Engine::DuckDb, cx);
+        assert!(!drawn(cx), "DuckDB lists none");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_click_on_an_empty_table_takes_the_keyboard_for_a_paste(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) =
@@ -6555,6 +10993,296 @@ fn refused_table_copies_preserve_the_clipboard(cx: &mut TestAppContext) {
                 );
             }
         }
+        quit(workspace, cx);
+    });
+}
+
+/// One `[[profiles]]` table of a ClickHouse profile `Clicks` (id `clicks`) on
+/// a mock's `port`, as `profiles.toml` spells one.
+fn clickhouse_profile(port: u16) -> String {
+    format!(
+        "[[profiles]]\nid = \"clicks\"\nname = \"Clicks\"\nhost = \"127.0.0.1\"\nport = {port}\n\
+         database = \"dbdelve_dev\"\nuser = \"me@example.com\"\nengine = \"clickhouse\"\n\
+         sslmode = \"disable\"\n"
+    )
+}
+
+/// The columns a ClickHouse mock answers a relations read with.
+const RELATION_COLUMNS: [(&str, &str); 5] = [
+    ("schema_name", "String"),
+    ("relation_name", "String"),
+    ("relation_kind", "String"),
+    ("size_bytes", "Nullable(UInt64)"),
+    ("row_estimate", "Nullable(UInt64)"),
+];
+
+/// Answer a ClickHouse mock the way a server holding `analytics` and
+/// `dbdelve_dev` does: one table in each, and those two as the databases the
+/// tree draws. A read that names `dbdelve_dev` alone gets that one's table
+/// only, as a server answering the `IN` list a filter writes does.
+fn route_clickhouse_catalog(mock: &crate::db::clickhouse_mock::Mock) {
+    use crate::db::clickhouse_mock::Response;
+
+    let relations = RELATION_COLUMNS;
+    let listing = [("name", "String"), ("is_current", "UInt8")];
+    mock.on_statement(
+        "relation_kind",
+        [Response::rows(
+            &relations,
+            &[
+                &["analytics", "events", "table", "\\N", "\\N"],
+                &["dbdelve_dev", "orders", "table", "\\N", "\\N"],
+            ],
+        )],
+    );
+    mock.on_statement(
+        "database IN ('dbdelve_dev')",
+        [Response::rows(
+            &relations,
+            &[&["dbdelve_dev", "orders", "table", "\\N", "\\N"]],
+        )],
+    );
+    for statement in ["SELECT DISTINCT database", "FROM system.databases"] {
+        mock.on_statement(
+            statement,
+            [Response::rows(
+                &listing,
+                &[&["analytics", "0"], &["dbdelve_dev", "1"]],
+            )],
+        );
+    }
+}
+
+/// The app launched with an SQLite profile in front and a ClickHouse profile
+/// `clicks` idle beside it, on a mock server that answers its catalog.
+///
+/// The SQLite one is first because the launch connects only the profile it
+/// puts in front, and the ClickHouse one must not be connected before
+/// [`connect_clicks`] has filled its password slot.
+fn launch_beside_a_clickhouse_mock(
+    cx: &mut TestAppContext,
+) -> (
+    crate::db::clickhouse_mock::Mock,
+    Entity<Workspace>,
+    &mut VisualTestContext,
+) {
+    crate::IGNORE_ENVIRONMENT.set(true);
+    let mock = crate::db::clickhouse_mock::Mock::start();
+    // Opened and dropped at once: what it leaves on the mock is the routes of
+    // the open handshake, which the app's own open then finds.
+    drop(mock.connection());
+    route_clickhouse_catalog(&mock);
+    let port = mock.server().port.expect("the mock listens on a port");
+    let (workspace, cx) = launch_connections(
+        cx,
+        "",
+        "",
+        &[
+            sqlite_profile("orders", "Orders", ""),
+            clickhouse_profile(port),
+        ]
+        .concat(),
+    );
+    (mock, workspace, cx)
+}
+
+fn clicks_connection_is_open(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "clicks")
+            .is_some_and(|profile| profile.connection().is_some())
+    })
+}
+
+/// Bring `clicks` to the front and wait until its connection is open.
+fn connect_clicks(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    workspace.update(cx, |workspace, _| {
+        let profile = workspace
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == "clicks")
+            .expect("the profile was restored");
+        // A password slot that holds something is never looked up in the OS
+        // keychain, which a headless Linux CI may not have and a test must not
+        // touch.
+        *profile
+            .config
+            .password_mut()
+            .expect("a server profile has a password slot") = "unused".to_string();
+    });
+    activate_by_id(workspace, cx, "clicks");
+    drive_until(cx, |cx| clicks_connection_is_open(workspace, cx));
+    settle(cx);
+}
+
+/// The generation and config of the profile `clicks`, which only a
+/// reconnect or an edit of the connection moves.
+fn clicks_connection(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (u64, crate::db::ConnectionConfig) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "clicks")
+            .expect("the profile was restored");
+        (profile.generation, profile.config.clone())
+    })
+}
+
+/// `clicks` connected in front, its filter picker open on it with `nomatch*`
+/// typed into the database patterns and its databases listed.
+fn clicks_with_a_pattern_typed(
+    cx: &mut TestAppContext,
+) -> (
+    crate::db::clickhouse_mock::Mock,
+    Entity<Workspace>,
+    &mut VisualTestContext,
+) {
+    use super::filter_picker::Listing;
+
+    let (mock, workspace, cx) = launch_beside_a_clickhouse_mock(cx);
+    cx.executor().allow_parking();
+    connect_clicks(&workspace, cx);
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_filter_picker("clicks", window, cx);
+    });
+    drive_until(cx, |cx| {
+        workspace.read_with(cx, |workspace, _| {
+            workspace
+                .filter_picker
+                .as_ref()
+                .is_some_and(|picker| matches!(picker.databases.listing, Listing::Loaded(_)))
+        })
+    });
+    settle(cx);
+    click_selector(cx, "filter-picker-patterns-databases");
+    cx.simulate_input("nomatch*");
+    settle(cx);
+    (mock, workspace, cx)
+}
+
+/// Start the first catalog read of `clicks` as a connect leaves it, and save
+/// the picker's filter in the same update.
+///
+/// No response is held: `spawn_blocking` runs each read inline on this thread
+/// inside `run_until_parked`, so a held one could never be released. The read
+/// is under way because it was started here and the scheduler has not run
+/// since, which the assert at the save shows.
+fn save_the_filter_during_the_first_read(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    during: impl FnOnce(&mut Workspace, &mut gpui::Window, &mut gpui::Context<Workspace>),
+) {
+    let (generation, _) = clicks_connection(workspace, cx);
+    workspace.update_in(cx, |workspace, window, cx| {
+        let profile = workspace.profile_mut().expect("clicks is in front");
+        profile.catalog = CatalogState::Loading;
+        workspace.load_catalog("clicks", generation, cx);
+        workspace.save_filter(cx);
+        let profile = workspace.profile().expect("clicks is in front");
+        assert_eq!(profile.include.databases, ["nomatch*"]);
+        assert!(profile.reread_after_load, "it waits for the read under way");
+        during(workspace, window, cx);
+    });
+}
+
+#[gpui::test]
+fn a_filter_saved_while_the_first_catalog_read_runs_is_not_left_waiting_when_that_read_fails(
+    cx: &mut TestAppContext,
+) {
+    use crate::db::clickhouse_mock::Response;
+
+    store::tests::with_home(|| {
+        let (mock, workspace, cx) = clicks_with_a_pattern_typed(cx);
+        mock.on_statement(
+            "relation_kind",
+            [
+                Response::error(500, 241, "MEMORY_LIMIT_EXCEEDED", "Memory limit exceeded"),
+                Response::rows(
+                    &RELATION_COLUMNS,
+                    &[&["dbdelve_dev", "orders", "table", "\\N", "\\N"]],
+                ),
+            ],
+        );
+        save_the_filter_during_the_first_read(&workspace, cx, |_, _, _| {});
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("clicks is in front");
+            assert!(
+                matches!(profile.catalog, CatalogState::Failed(_)),
+                "the first read failed"
+            );
+            assert!(
+                !profile.reread_after_load,
+                "a read that stored no catalog left the save waiting"
+            );
+        });
+
+        let before = mock.hits("relation_kind");
+        workspace.update(cx, |workspace, cx| workspace.refresh_schema(cx));
+        drive_until(cx, |cx| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("clicks is in front");
+                matches!(profile.catalog, CatalogState::Loaded(..)) && !profile.refreshing_schema()
+            })
+        });
+        settle(cx);
+        assert_eq!(
+            mock.hits("relation_kind"),
+            before + 1,
+            "the Refresh read once and nothing followed it"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace
+                    .profile()
+                    .expect("clicks is in front")
+                    .reread_after_load
+            );
+        });
+        assert_eq!(own_catalog(&workspace, cx).0, ["dbdelve_dev"]);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_connect_that_fails_leaves_no_saved_filter_waiting(cx: &mut TestAppContext) {
+    use crate::db::clickhouse_mock::Response;
+
+    store::tests::with_home(|| {
+        let (mock, workspace, cx) = clicks_with_a_pattern_typed(cx);
+        mock.on_statement(
+            "system.settings",
+            [Response::error(
+                500,
+                497,
+                "ACCESS_DENIED",
+                "Not enough privileges",
+            )],
+        );
+        // The reconnect bumps the generation, so the read started a moment
+        // before belongs to the old one and its landing is dropped.
+        save_the_filter_during_the_first_read(&workspace, cx, |workspace, window, cx| {
+            workspace.run_command(Command::Reconnect, window, cx);
+        });
+        drive_until(cx, |cx| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = workspace.profile().expect("clicks is in front");
+                profile.connection().is_none() && matches!(profile.catalog, CatalogState::Failed(_))
+            })
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("clicks is in front");
+            assert!(
+                !profile.reread_after_load,
+                "a connect that failed left the save waiting"
+            );
+        });
         quit(workspace, cx);
     });
 }
@@ -7350,7 +12078,7 @@ fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.open_diagram("main".into(), None, window, cx);
+            workspace.open_diagram(None, "main".into(), None, window, cx);
             // A reconnect landed while the read was out, and its own read
             // was refused because this one still held the slot.
             workspace.profile_mut().unwrap().generation += 1;
@@ -7365,6 +12093,28 @@ fn a_diagram_read_outlived_by_a_reconnect_is_read_again_for_the_tab_in_front(
     });
 }
 
+/// A filter saved while a read was out asks that read's landing to read
+/// again. A reconnect drops that landing, and the new connection's reads take
+/// the saved filter anyway, so no read nobody asked for follows the load.
+#[gpui::test]
+fn a_reconnect_forgets_a_reread_the_dropped_read_was_to_start(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb(cx, "");
+        let reads = workspace.update(cx, |workspace, cx| {
+            workspace.profile_mut().unwrap().reread_after_load = true;
+            let index = workspace.active.unwrap();
+            workspace.reconnect(index, cx);
+            assert!(!workspace.profile().unwrap().reread_after_load);
+            workspace.routine_reads
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.routine_reads, reads + 1, "the load's read alone");
+        });
+        quit(workspace, cx);
+    });
+}
+
 /// A reconnect lets go of a read still out from the connection it replaces,
 /// which could stall there and hold the slot the new connection's read needs.
 #[gpui::test]
@@ -7372,7 +12122,7 @@ fn a_reconnect_cancels_a_diagram_read_still_out_and_reads_again(cx: &mut TestApp
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(cx, DIAGRAM_SCHEMA);
         let held = workspace.update_in(cx, |workspace, window, cx| {
-            workspace.open_diagram("main".into(), None, window, cx);
+            workspace.open_diagram(None, "main".into(), None, window, cx);
             let index = workspace.active.unwrap();
             workspace.reconnect(index, cx);
             let tab = workspace
@@ -10292,6 +15042,60 @@ fn new_query_in_complex_mode_opens_an_unbound_tab_on_the_profiles_own_session(
     });
 }
 
+/// Commit ends the profile's own transaction, so it is sent from a tab of
+/// the profile's own session even when a tab bound elsewhere is in front.
+/// The Auto dialog's COMMIT goes to a tab of its own when a bound tab is in
+/// front, and that tab's run is what says it was sent, however busy the
+/// bound one is: Auto is read once it lands.
+#[gpui::test]
+fn the_auto_dialogs_commit_from_a_running_bound_tab_still_turns_auto_on(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        toggle_auto_commit(cx);
+        assert!(!transaction_state(&workspace, cx).0, "Manual");
+        new_query_here(&workspace, cx, Some("other"), None);
+        workspace.update(cx, |workspace, cx| {
+            let tab = workspace.profile().unwrap().session.active;
+            workspace.execute_sql("SELECT 1".into(), tab, cx);
+            assert!(workspace.profile().unwrap().session.running(tab));
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_auto_commit(&crate::actions::ToggleAutoCommit, window, cx);
+                workspace.end_transaction_for_auto("COMMIT", window, cx);
+            })
+        });
+        settle(cx);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "the COMMIT landed and Auto is read");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn commit_from_a_bound_tab_ends_the_profiles_own_transaction(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(profile_flags(&workspace, cx), (true, false));
+        new_query_here(&workspace, cx, Some("other"), None);
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(
+            front_binding(&workspace, cx),
+            None,
+            "the COMMIT went to a tab of the profile's own session"
+        );
+        assert_eq!(last_statement(&buffer(&workspace, cx)), "COMMIT");
+        assert_eq!(
+            profile_flags(&workspace, cx),
+            (false, false),
+            "the profile's transaction ended"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn a_session_a_bound_run_opened_is_kept_and_its_database_reads_over_it(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -10493,7 +15297,12 @@ fn an_edit_issued_before_a_transaction_opened_on_its_session_is_refused_when_its
             else {
                 panic!("the read opened a session for `other`");
             };
-            _ = session.leave(Some(true), false, || Ok::<_, crate::db::DbError>(()));
+            _ = session.leave(
+                Some(true),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            );
         });
         settle(cx);
         // Refused as an edit send is: the tab keeps what it showed and the
@@ -10916,6 +15725,57 @@ fn answer_in_the_first_query_tab(
     answered
 }
 
+/// A batch from a tab bound to another database runs on that database's
+/// session: the transaction open on the profile's own is not one it joins,
+/// so it brackets itself as it would with none open.
+#[gpui::test]
+fn a_bound_tabs_batch_brackets_itself_beside_the_profiles_transaction(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_duckdb_seeded(
+            cx,
+            "",
+            "mode = \"full\"",
+            "CREATE TABLE t (name TEXT, id INTEGER PRIMARY KEY);",
+            "CREATE TABLE t (name TEXT, id INTEGER PRIMARY KEY); \
+             INSERT INTO t VALUES ('a', 1), ('b', 2);",
+        );
+        let at =
+            connections_row(&workspace, cx, &connection_row("e2e")).expect("the connection shows");
+        click_connections_row(cx, at);
+        attach_other(&workspace, cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(profile_flags(&workspace, cx), (true, false));
+        new_query_here(&workspace, cx, Some("other"), None);
+        run_in_front(&workspace, cx, "SELECT name, id FROM t ORDER BY id");
+        let grid = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .unwrap()
+                .session
+                .active_results()
+                .expect("the query tab shows its rows")
+                .clone()
+        });
+        grid.update(cx, |grid, _| {
+            for row in 0..2 {
+                assert!(grid.delegate_mut().set_pending(
+                    row,
+                    0,
+                    crate::result_grid::NewValue::Value("edited".into())
+                ));
+            }
+        });
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        let sql = front_review_sql(&workspace, cx).expect("the batch is shown before it runs");
+        assert!(
+            sql.trim_start().starts_with("BEGIN"),
+            "the bound session has no transaction to join: {sql}"
+        );
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn an_edit_on_another_databases_table_is_written_there(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
@@ -11035,7 +15895,12 @@ fn an_export_of_another_databases_table_minds_only_that_databases_transaction(
             else {
                 panic!("the rows were read over a session of `other`'s own");
             };
-            _ = session.leave(Some(true), false, || Ok::<_, crate::db::DbError>(()));
+            _ = session.leave(
+                Some(true),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            );
         });
         assert!(
             workspace.read_with(cx, |workspace, _| workspace.refetch().is_err()),
@@ -11049,14 +15914,32 @@ fn an_export_of_another_databases_table_minds_only_that_databases_transaction(
             else {
                 panic!("the session of `other` is still open");
             };
-            _ = session.leave(Some(false), false, || {
-                Err::<(), _>(crate::db::DbError {
-                    message: "Cancelled before it was sent.".into(),
-                    position: None,
-                })
-            });
+            _ = session.leave(
+                Some(false),
+                false,
+                || {
+                    Err::<(), _>(crate::db::DbError {
+                        message: "Cancelled before it was sent.".into(),
+                        position: None,
+                    })
+                },
+                |_| false,
+            );
             assert!(session.in_transaction());
-            _ = session.leave(Some(false), false, || Ok::<_, crate::db::DbError>(()));
+            // One the driver says ended only a nested level.
+            _ = session.leave(
+                Some(false),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| true,
+            );
+            assert!(session.in_transaction());
+            _ = session.leave(
+                Some(false),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            );
             assert!(!session.in_transaction());
         });
         quit(workspace, cx);
@@ -18773,6 +23656,17 @@ fn launch_with_settings<'a>(
     launch_connections(cx, "", settings, profiles)
 }
 
+/// The app launched on `profiles`, the `[[profiles]]` tables of a hand-written
+/// `profiles.toml`, with no profile chosen to be in front. `DB_PATH` in the text
+/// stands for the path of an empty SQLite file written beside it, so a test can
+/// say what a profile looks like on disk without knowing where the home is.
+fn launch_with_profiles<'a>(
+    cx: &'a mut TestAppContext,
+    profiles: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    launch_with_settings(cx, "", profiles)
+}
+
 /// Let the window run while threads outside it work, until `done` holds. The
 /// executor never advances its clock here, so only real time passes.
 fn drive_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
@@ -18805,17 +23699,6 @@ fn drawn(cx: &mut VisualTestContext, selectors: &[&'static str]) -> Vec<bool> {
         .iter()
         .map(|selector| cx.debug_bounds(selector).is_some())
         .collect()
-}
-
-/// The app launched on `profiles`, the `[[profiles]]` tables of a hand-written
-/// `profiles.toml`, with no profile chosen to be in front. `DB_PATH` in the text
-/// stands for the path of an empty SQLite file written beside it, so a test can
-/// say what a profile looks like on disk without knowing where the home is.
-fn launch_with_profiles<'a>(
-    cx: &'a mut TestAppContext,
-    profiles: &str,
-) -> (Entity<Workspace>, &'a mut VisualTestContext) {
-    launch_with_settings(cx, "", profiles)
 }
 
 /// The window size and sidebar the status bar is drawn at.
@@ -23455,6 +28338,3674 @@ fn editing_display_name_preserves_connection_test_results(cx: &mut TestAppContex
                 Some(ConnectionTest::Passed(None))
             )
         }));
+        quit(workspace, cx);
+    });
+}
+
+/// The SQLite profile of `launch_on_sqlite_holding` over an empty table `t`,
+/// in Full so the tests' own writes run without a prompt.
+fn launch_on_a_writable_t(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_on_sqlite_holding(cx, "create table t (id integer);");
+    workspace.update(cx, |workspace, cx| {
+        workspace.set_mode(crate::sql::Mode::Full, cx)
+    });
+    settle(cx);
+    (workspace, cx)
+}
+
+/// What the profile in front has recorded of the statements its open
+/// transaction has run on the connection's own session.
+fn recorded_statements(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profile()
+            .expect("a profile is in front")
+            .transaction_statements
+            .clone()
+    })
+}
+
+/// The transaction state of the profile in front: its auto-commit switch, an
+/// open transaction, and how many statements its history holds.
+fn transaction_state(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (bool, bool, usize) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace.profile().expect("a profile is in front");
+        (
+            profile.auto_commit,
+            profile.in_transaction,
+            profile.session.history.len(),
+        )
+    })
+}
+
+/// The last statement of `text`, split on the terminator and trimmed.
+fn last_statement(text: &str) -> String {
+    text.split(';')
+        .map(str::trim)
+        .rfind(|statement| !statement.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Flips the auto-commit switch, as its chord does.
+fn toggle_auto_commit(cx: &mut VisualTestContext) {
+    cx.dispatch_action(crate::actions::ToggleAutoCommit);
+    settle(cx);
+}
+
+/// The connection holding Manual's transaction open with `statement` run in
+/// it.
+fn manual_with_open_transaction(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    statement: &str,
+) {
+    toggle_auto_commit(cx);
+    let (auto_commit, open, _) = transaction_state(workspace, cx);
+    assert!(!auto_commit && open, "the BEGIN ran");
+    run_in_front(workspace, cx, statement);
+}
+
+/// Applies `sql` from the tab in front as an edit does, reading back
+/// `SELECT count(*) FROM t` once it lands.
+fn apply_from_the_front_tab(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, sql: &str) {
+    use crate::session::Refresh;
+    let tab = workspace.read_with(cx, |workspace, _| {
+        workspace.profile().unwrap().session.active
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace.execute_unchecked(
+            sql.into(),
+            tab,
+            Some(Refresh::Statement {
+                sql: "SELECT count(*) FROM t".into(),
+                verify: None,
+            }),
+            false,
+            None,
+            None,
+            cx,
+        );
+    });
+    settle(cx);
+}
+
+#[gpui::test]
+fn the_open_transactions_statements_are_recorded_from_its_begin_to_its_end(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "nothing is open at the start"
+        );
+
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN"], "the BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            [
+                "BEGIN",
+                "INSERT INTO t VALUES (1)",
+                "SELECT count(*) FROM t"
+            ],
+            "the statements after the BEGIN, in order"
+        );
+
+        run_in_front(&workspace, cx, "COMMIT");
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "the COMMIT ended the transaction"
+        );
+        run_in_front(&workspace, cx, "SELECT 1");
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "a statement outside a transaction is not recorded"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_begin_inside_an_open_transaction_keeps_its_statements_unless_the_transaction_ended(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        assert_eq!(recorded_statements(&workspace, cx).len(), 2);
+
+        // As a BEGIN the server warns about and ignores would arrive: the
+        // transaction it sits in is still open, and its COMMIT still ends
+        // everything before it.
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .profile_mut()
+                .unwrap()
+                .record_sent("BEGIN", Some(true));
+        });
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN", "INSERT INTO t VALUES (1)", "BEGIN"],
+            "a BEGIN that ends nothing is appended"
+        );
+
+        // A COMMIT and a BEGIN in one submission: the open transaction ended.
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .profile_mut()
+                .unwrap()
+                .record_sent("COMMIT;\n\nBEGIN;", Some(true));
+        });
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN;"],
+            "a submission that ends one and opens the next starts the record again \
+             with the new transaction's BEGIN, not the COMMIT that closed the old"
+        );
+        run_in_front(&workspace, cx, "ROLLBACK");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+
+        // Manual's own reopen, as the controls send it.
+        toggle_auto_commit(cx);
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN"], "Manual");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (2)");
+        assert_eq!(recorded_statements(&workspace, cx).len(), 2);
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN;"],
+            "Manual's COMMIT and reopen leave only the BEGIN that opened the next transaction"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_refused_edit_is_not_recorded_in_the_open_transaction_and_a_reconnect_empties_it(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        // SQLite verifies an apply, whose own `BEGIN` and `COMMIT` would end
+        // the user's transaction: an edit sent while one is open is refused,
+        // so nothing of it joins the record.
+        apply_from_the_front_tab(&workspace, cx, "INSERT INTO t VALUES (7)");
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN", "INSERT INTO t VALUES (1)"],
+            "a refused edit ran nothing, so it is not listed"
+        );
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("1"),
+            "the edit was not sent"
+        );
+
+        workspace.update(cx, |workspace, cx| workspace.begin_connect(0, cx));
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "a connect leaves nothing of the transaction it replaces"
+        );
+        settle(cx);
+        assert!(!transaction_state(&workspace, cx).1);
+
+        run_in_front(&workspace, cx, "BEGIN");
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN"]);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.disconnect(&Disconnect, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = &workspace.profiles[0];
+            assert!(
+                profile.transaction_statements.is_empty() && !profile.in_transaction,
+                "a disconnect empties the record with the transaction"
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn auto_from_manual_asks_to_commit_or_roll_back_and_lists_the_transactions_statements(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+
+        let before = (
+            buffer(&workspace, cx),
+            transaction_state(&workspace, cx),
+            recorded_statements(&workspace, cx),
+        );
+        toggle_auto_commit(cx);
+        assert_eq!(
+            front_dialog(&workspace, cx),
+            Some("end-transaction"),
+            "Auto over an open transaction asks"
+        );
+        assert_eq!(
+            drawn(
+                cx,
+                &[
+                    "end-transaction-0",
+                    "end-transaction-1",
+                    "end-transaction-2",
+                    "end-transaction-statement-0"
+                ]
+            ),
+            [true, true, true, false],
+            "Commit, Roll back and Cancel are drawn, the statements collapsed"
+        );
+        assert_eq!(ringed_button(&workspace, cx), 2, "the ring opens on Cancel");
+        assert_eq!(
+            (
+                buffer(&workspace, cx),
+                transaction_state(&workspace, cx),
+                recorded_statements(&workspace, cx)
+            ),
+            before,
+            "raising the question sends nothing"
+        );
+
+        click_selector(cx, "end-transaction-statements");
+        assert_eq!(
+            drawn(
+                cx,
+                &[
+                    "end-transaction-statement-0",
+                    "end-transaction-statement-1",
+                    "end-transaction-statement-2"
+                ]
+            ),
+            [true, true, false],
+            "the toggle shows one block per statement"
+        );
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            ["BEGIN", "INSERT INTO t VALUES (7)"]
+        );
+
+        click_selector(cx, "end-transaction-0");
+        assert_eq!(front_dialog(&workspace, cx), None, "the answer closes it");
+        assert_eq!(
+            last_statement(&buffer(&workspace, cx)),
+            "COMMIT",
+            "a bare COMMIT, with no BEGIN after it"
+        );
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "the switch reads Auto, nothing open");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("1"),
+            "the INSERT was committed"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn manual_is_not_read_when_its_begin_is_not_sent(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        // A run that cannot start: a real disconnect would clear the switch.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().state = ProfileState::Idle;
+        });
+        toggle_auto_commit(cx);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(
+            auto_commit && !open,
+            "the switch did not read Manual over a session still autocommitting"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.notice.as_deref(),
+                Some("The BEGIN was not sent, so auto-commit is still on.")
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn manual_is_read_once_its_begin_is_sent_and_kept_once_it_lands(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_auto_commit(&crate::actions::ToggleAutoCommit, window, cx)
+            })
+        });
+        // Sent and not yet answered: Manual, with the transaction marked open.
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit && open);
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().unwrap();
+            let tab = profile.session.active;
+            assert_eq!(profile.session.manual_after_begin, Some(tab));
+        });
+        settle(cx);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit && open, "a BEGIN that landed keeps Manual");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.manual_after_begin,
+                None
+            );
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Manual's Commit sends its `COMMIT` with the next `BEGIN` behind it. When
+/// the `COMMIT` fails and the transaction stays open, as SQLite keeps one a
+/// deferred foreign key fails, the record still lists the work it holds.
+#[gpui::test]
+fn a_failed_commit_sent_with_the_next_begin_keeps_the_transactions_record(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "create table p (id integer primary key); \
+             create table c (p integer references p (id) deferrable initially deferred);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA foreign_keys = 1\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO c VALUES (1)");
+        let listed = recorded_statements(&workspace, cx);
+        assert_eq!(listed, ["BEGIN", "INSERT INTO c VALUES (1)"]);
+
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => {
+                assert!(error.message.contains("FOREIGN KEY"), "{}", error.message)
+            }
+            _ => panic!("the COMMIT should fail"),
+        });
+        let recorded = recorded_statements(&workspace, cx);
+        assert_eq!(
+            recorded[..2],
+            listed[..],
+            "the statements still to be committed are listed: {recorded:?}"
+        );
+        assert!(transaction_state(&workspace, cx).1, "still open");
+
+        // Once the work is put right, the pair lands and the record starts
+        // again after its end.
+        run_in_front(&workspace, cx, "INSERT INTO p VALUES (1)");
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(recorded_statements(&workspace, cx), ["BEGIN;"]);
+        quit(workspace, cx);
+    });
+}
+
+/// A `BEGIN` sent from one tab while another tab's `COMMIT` is still
+/// running waits: the two would race for the session, and the server could
+/// run them in either order. Once the `COMMIT` lands it goes ahead.
+#[gpui::test]
+fn a_begin_waits_for_another_tabs_commit_to_land(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        // Sent without waiting on the answer, as two tabs' Runs are.
+        let send = |cx: &mut VisualTestContext, sql: &str| {
+            workspace.update(cx, |workspace, cx| {
+                let tab = workspace.profile().unwrap().session.active;
+                workspace.execute_sql(sql.into(), tab, cx);
+                workspace.profile().unwrap().session.running(tab)
+            })
+        };
+        assert!(send(cx, "COMMIT"));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_query(&crate::actions::NewQuery, window, cx);
+            });
+        });
+        assert!(!send(cx, "BEGIN"), "the BEGIN waits for the COMMIT");
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            let notice = session
+                .tab_notice
+                .as_ref()
+                .map(|(_, notice)| notice.as_str());
+            assert!(
+                notice.is_some_and(|notice| notice.contains("another tab")),
+                "{notice:?}"
+            );
+        });
+        settle(cx);
+        assert!(!transaction_state(&workspace, cx).1, "the COMMIT ended it");
+        run_in_front(&workspace, cx, "BEGIN");
+        assert!(transaction_state(&workspace, cx).1);
+        run_in_front(&workspace, cx, "ROLLBACK");
+        quit(workspace, cx);
+    });
+}
+
+/// A queue whose `BEGIN` waits for another tab's `COMMIT` is stopped there,
+/// not left waiting for a result that is not coming.
+#[gpui::test]
+fn a_queue_whose_begin_waits_for_another_tab_is_stopped_there(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_query(&crate::actions::NewQuery, window, cx);
+            });
+            let editor = workspace
+                .read(cx)
+                .profile()
+                .and_then(|profile| profile.session.active_query_tab())
+                .expect("the new tab is in front")
+                .editor
+                .clone();
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.simulate_input("BEGIN; SELECT 2");
+        cx.simulate_keystrokes("secondary-a");
+        let (first, second) = workspace.read_with(cx, |workspace, _| {
+            let queries = &workspace.profile().unwrap().session.queries;
+            (queries[0].id, queries[1].id)
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_tab(Tab::Query(first), window, cx);
+                workspace.execute_sql("COMMIT".into(), Tab::Query(first), cx);
+                workspace.activate_tab(Tab::Query(second), window, cx);
+                workspace.run_query(&crate::actions::RunQuery, window, cx);
+            });
+        });
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().unwrap().session;
+            let queue = session
+                .query_tab(second)
+                .and_then(|tab| tab.queue.as_ref())
+                .expect("the selection runs as a queue");
+            assert!(!queue.awaiting, "nothing is awaited");
+            assert!(queue.remaining.is_empty(), "the rest is not sent past it");
+        });
+        settle(cx);
+        quit(workspace, cx);
+    });
+}
+
+/// What another tab sends while Manual's `COMMIT; BEGIN;` is out may run in
+/// the transaction the pair opens, so it stays in the record once the pair
+/// lands.
+#[gpui::test]
+fn a_statement_sent_while_a_pair_is_out_stays_recorded(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let first = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.queries[0].id
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.execute_sql("COMMIT;\n\nBEGIN;".into(), Tab::Query(first), cx);
+                workspace.new_query(&crate::actions::NewQuery, window, cx);
+                let second = workspace.profile().unwrap().session.active;
+                workspace.execute_sql("INSERT INTO t VALUES (2)".into(), second, cx);
+                assert!(workspace.profile().unwrap().session.running(second));
+            });
+        });
+        settle(cx);
+        let recorded = recorded_statements(&workspace, cx);
+        assert_eq!(recorded, ["BEGIN;", "INSERT INTO t VALUES (2)"]);
+        run_in_front(&workspace, cx, "ROLLBACK");
+        quit(workspace, cx);
+    });
+}
+
+/// A pair whose `COMMIT` failed where the engine does not keep the
+/// transaction ended it, and the `BEGIN` behind it never ran: nothing is
+/// open, and Manual gives way to Auto.
+#[gpui::test]
+fn a_failed_pair_that_ended_the_transaction_leaves_manual(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let ended = crate::db::DbError {
+            message: "cannot commit - no transaction is active".into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let since = profile.transaction_statements.len();
+            profile.reopen_landed("COMMIT;\n\nBEGIN;", since, false, Some(&ended));
+        });
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "no transaction, and Auto says so");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        quit(workspace, cx);
+    });
+}
+
+/// The Auto prompt describes the transaction open when it was asked: a pair
+/// landing under it ended that one, so the prompt goes rather than ending the
+/// transaction the pair opened.
+#[gpui::test]
+fn a_pair_landing_under_the_auto_prompt_closes_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("end-transaction"));
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let since = profile.transaction_statements.len();
+            profile.reopen_landed("COMMIT;\n\nBEGIN;", since, false, None);
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit && open, "the new transaction is left as it is");
+        quit(workspace, cx);
+    });
+}
+
+/// Quitting ends every session, and the server rolls back what an open
+/// transaction ran: Quit asks first, and Escape keeps the app going.
+#[gpui::test]
+fn quit_asks_first_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        cx.dispatch_action(crate::actions::Quit);
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        // Asked and asked again, it goes.
+        let asked = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(!asked, "the question goes up again");
+        let again = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(again, "a second Quit quits");
+        quit(workspace, cx);
+    });
+}
+
+/// The connection form is drawn in the surface's place, and closing the window
+/// over it still asks first; Escape backs out of the question, not the form.
+#[gpui::test]
+fn quit_asks_first_over_the_connection_form(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_command(&workspace, cx, Command::NewConnection);
+        settle(cx);
+        let asked = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(!asked, "the first close asks");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.form.is_some()));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        let asked = workspace.update(cx, |workspace, cx| workspace.may_quit(cx));
+        assert!(!asked, "a close after Cancel asks again");
+        quit(workspace, cx);
+    });
+}
+
+/// `main`'s app-level Quit, which quits unasked: whatever surface lets the
+/// action through to it quits over an open transaction. Whether it was
+/// reached.
+fn app_quit_reached(cx: &mut VisualTestContext) -> Rc<std::cell::Cell<bool>> {
+    let reached = Rc::new(std::cell::Cell::new(false));
+    let flag = reached.clone();
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &crate::actions::Quit, _| flag.set(true));
+    });
+    reached
+}
+
+/// The Quit chord over the connection form asks as it does over a tab, rather
+/// than falling through to the app's quit.
+#[gpui::test]
+fn the_quit_chord_over_the_connection_form_asks_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let app_quit = app_quit_reached(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_command(&workspace, cx, Command::NewConnection);
+        settle(cx);
+        cx.simulate_keystrokes("secondary-q");
+        settle(cx);
+        assert!(!app_quit.get(), "the app did not quit");
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        quit(workspace, cx);
+    });
+}
+
+/// The welcome surface, with a transaction still open on a connection behind
+/// it, asks too.
+#[gpui::test]
+fn the_quit_chord_over_the_welcome_surface_asks_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let app_quit = app_quit_reached(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        // Where disconnecting another connection leaves the window: no
+        // profile in front, this one's session still open behind it.
+        workspace.update(cx, |workspace, cx| {
+            workspace.active = None;
+            workspace.welcome_needs_focus = true;
+            cx.notify();
+        });
+        settle(cx);
+        cx.simulate_keystrokes("secondary-q");
+        settle(cx);
+        assert!(!app_quit.get(), "the app did not quit");
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        quit(workspace, cx);
+    });
+}
+
+/// A restart ends every session as a quit does, so it asks the same question,
+/// and Cancel forgets it: a Quit after that quits rather than restarts.
+#[gpui::test]
+fn a_restart_asks_first_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        workspace.update(cx, |workspace, cx| {
+            workspace.leave(super::Leaving::Restart(None), cx)
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.leaving, super::Leaving::Quit));
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A save that reconnects would drop the session holding the transaction:
+/// it is refused, and the form stays open.
+#[gpui::test]
+fn a_save_that_reconnects_is_refused_while_a_transaction_is_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        let before =
+            workspace.read_with(cx, |workspace, _| workspace.profile().unwrap().generation);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let index = workspace.active.expect("a profile is in front");
+            workspace.edit_profile(index, window, cx);
+            let form = workspace.form.as_mut().expect("the edit form is open");
+            form.path.update(cx, |input, cx| {
+                input.set_value("elsewhere.db".to_string(), window, cx)
+            });
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().expect("the form stays open");
+            let error = form.error.as_deref().expect("the refusal is shown");
+            assert!(error.contains("transaction"), "{error}");
+            let profile = workspace.profile().unwrap();
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            assert!(profile.in_transaction);
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// The notice the profile in front holds.
+fn profile_notice(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace.profile().unwrap().session.notice.clone()
+    })
+}
+
+/// A `COMMIT` typed in Manual ends the transaction Manual was holding: the
+/// session autocommits from there, and the switch says so rather than read
+/// Manual over it.
+#[gpui::test]
+fn a_typed_commit_in_manual_turns_auto_on_and_says_so(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        run_in_front(&workspace, cx, "COMMIT");
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "nothing is open, and Auto says so");
+        assert_eq!(
+            profile_notice(&workspace, cx).as_deref(),
+            Some("The transaction ended, so auto-commit is on again.")
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// The server's word that it ended the transaction (SQL Server's
+/// `XACT_ABORT`) clears it and leaves Manual; its word that the transaction
+/// outlived a failed end keeps it open. Neither reaches SQLite, so they are
+/// handed to the profile as the landing does.
+#[gpui::test]
+fn the_servers_word_on_the_transaction_outranks_what_was_sent(cx: &mut TestAppContext) {
+    use crate::db::{DbError, TRANSACTION_KEPT_OPEN, TRANSACTION_ROLLED_BACK};
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let kept = DbError {
+                message: format!("Invalid column name 'b'.\n\n{TRANSACTION_KEPT_OPEN}"),
+                position: None,
+            };
+            assert!(!profile.end_landed("UPDATE t SET b = 1; COMMIT", true, false, Some(&kept)));
+            assert!(profile.in_transaction && !profile.auto_commit, "still open");
+            let since = profile.transaction_statements.len();
+            assert!(!profile.reopen_landed(
+                "UPDATE t SET b = 1; COMMIT;\n\nBEGIN;",
+                since,
+                false,
+                Some(&kept)
+            ));
+            assert!(profile.in_transaction && !profile.auto_commit, "still open");
+
+            let rolled_back = DbError {
+                message: format!("Divide by zero error encountered.\n\n{TRANSACTION_ROLLED_BACK}"),
+                position: None,
+            };
+            assert!(crate::db::transaction_rolled_back(&rolled_back));
+            // A transaction opened after the statement went is not the one
+            // that ended.
+            let before = profile.transaction_sends();
+            profile.transaction_sent();
+            assert!(!profile.ended_by_server(before));
+            assert!(profile.in_transaction);
+            assert!(profile.ended_by_server(profile.transaction_sends()));
+            assert!(profile.auto_commit && !profile.in_transaction);
+            assert!(profile.transaction_statements.is_empty());
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Against the Postgres the environment names, as CI's live job sets: a
+/// statement failing inside the transaction leaves it able only to roll
+/// back, and a `COMMIT` sent anyway is said to have rolled it back.
+#[gpui::test]
+fn live_a_failed_postgres_transaction_only_rolls_back(cx: &mut TestAppContext) {
+    if std::env::var_os("PGHOST").is_none() {
+        return;
+    }
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.executor().allow_parking();
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        settle(cx);
+        let failed = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().transaction_failed()
+            })
+        };
+        let run = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, sql: &str| {
+            cx.update(|window, cx| {
+                let editor = workspace
+                    .read(cx)
+                    .profile()
+                    .and_then(|profile| profile.session.active_query_tab())
+                    .expect("a query tab")
+                    .editor
+                    .clone();
+                editor.update(cx, |input, cx| input.set_value(sql, window, cx));
+            });
+            cx.dispatch_action(crate::actions::RunQuery);
+            settle(cx);
+        };
+
+        toggle_auto_commit(cx);
+        assert!(!failed(&workspace, cx));
+        run(&workspace, cx, "SAVEPOINT s");
+        run(&workspace, cx, "SELECT 1/0");
+        assert!(failed(&workspace, cx), "the division failed inside it");
+        run(&workspace, cx, "ROLLBACK TO SAVEPOINT s");
+        assert!(!failed(&workspace, cx), "the savepoint took it back");
+
+        run(&workspace, cx, "SELECT 1/0");
+        assert!(failed(&workspace, cx));
+        cx.dispatch_action(crate::actions::CommitTransaction);
+        settle(cx);
+        assert_eq!(
+            profile_notice(&workspace, cx).as_deref(),
+            Some("A statement failed inside the transaction, so it can only be rolled back.")
+        );
+        assert!(in_transaction(&workspace, cx), "nothing was sent");
+
+        run(&workspace, cx, "COMMIT");
+        let said = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.tab_notice.clone()
+        });
+        assert!(
+            said.is_some_and(|(_, notice)| notice.contains(super::queries::COMMIT_ROLLED_BACK)),
+            "the COMMIT says it rolled back"
+        );
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open);
+        assert!(!failed(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_auto_prompt_leaves_auto_off_when_its_commit_is_not_sent(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("end-transaction"));
+
+        // A run that cannot start: a real disconnect would clear the prompt.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().state = ProfileState::Idle;
+        });
+        click_selector(cx, "end-transaction-0");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(
+            !auto_commit && open,
+            "the switch did not move to Auto over a transaction still open"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().unwrap().session.notice.as_deref(),
+                Some("The COMMIT was not sent, so auto-commit is still off.")
+            );
+        });
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => {
+                assert_eq!(error.message, "The connection is not open.")
+            }
+            _ => panic!("the run was refused"),
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_auto_prompt_rolls_back_or_cancels_and_cancelling_changes_nothing(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (8)");
+        let before = (
+            buffer(&workspace, cx),
+            transaction_state(&workspace, cx),
+            recorded_statements(&workspace, cx),
+        );
+        assert_eq!((before.1.0, before.1.1), (false, true));
+
+        let unchanged = |cx: &mut VisualTestContext, how: &str| {
+            assert_eq!(
+                front_dialog(&workspace, cx),
+                None,
+                "{how}: the dialog closes"
+            );
+            assert_eq!(
+                (
+                    buffer(&workspace, cx),
+                    transaction_state(&workspace, cx),
+                    recorded_statements(&workspace, cx)
+                ),
+                before,
+                "{how}: nothing changed"
+            );
+        };
+
+        toggle_auto_commit(cx);
+        click_selector(cx, "end-transaction-2");
+        unchanged(cx, "Cancel");
+
+        toggle_auto_commit(cx);
+        press(cx, "escape");
+        unchanged(cx, "Escape");
+
+        toggle_auto_commit(cx);
+        press(cx, "enter");
+        unchanged(cx, "Enter on the opening ring");
+
+        toggle_auto_commit(cx);
+        click_selector(cx, "end-transaction-1");
+        assert_eq!(front_dialog(&workspace, cx), None, "Roll back closes it");
+        assert_eq!(
+            last_statement(&buffer(&workspace, cx)),
+            "ROLLBACK",
+            "a bare ROLLBACK, with no BEGIN after it"
+        );
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(auto_commit && !open, "Roll back: Auto, nothing open");
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("0"),
+            "the INSERT was discarded"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_auto_prompt_arms_nothing_when_the_transaction_ended_under_its_dialog(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+        toggle_auto_commit(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("end-transaction"));
+
+        // Ended between the dialog being drawn and the answer arriving: the
+        // dialog stops drawing once the transaction is gone, so the answer is
+        // given directly.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().in_transaction = false;
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.end_transaction_for_auto("COMMIT", window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_eq!(
+                profile.session.auto_after_end, None,
+                "nothing was sent, so nothing waits on it"
+            );
+            assert!(!profile.auto_commit, "Auto stays off");
+        });
+
+        // A later success does not turn auto-commit on behind the user.
+        run_in_front(&workspace, cx, "SELECT 1");
+        let (auto_commit, _, _) = transaction_state(&workspace, cx);
+        assert!(!auto_commit, "the next statement's success reads nothing");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_batch_that_brackets_itself_is_not_sent_into_the_users_open_transaction(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        // As `sql::update_batch` writes a multi-row apply on SQLite.
+        let batch =
+            "BEGIN TRANSACTION;\nINSERT INTO t VALUES (8);\nINSERT INTO t VALUES (9);\nCOMMIT;";
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        let listed = recorded_statements(&workspace, cx);
+
+        apply_from_the_front_tab(&workspace, cx, batch);
+        let (auto_commit_now, open_now, _) = transaction_state(&workspace, cx);
+        assert_eq!(
+            (
+                auto_commit_now,
+                open_now,
+                recorded_statements(&workspace, cx)
+            ),
+            (auto_commit, open, listed),
+            "a refused batch changes nothing and is not listed"
+        );
+        run_in_front(&workspace, cx, "SELECT count(*) FROM t");
+        assert_eq!(
+            answer(&workspace, cx).as_deref(),
+            Some("1"),
+            "only the user's own INSERT ran"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_multi_row_edit_inside_the_users_open_transaction_is_refused_and_leaves_it_recorded(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(
+            cx,
+            "create table birds (id integer primary key, name text); \
+             insert into birds values (1, 'wren'), (2, 'tit');",
+        );
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        run_in_front(&workspace, cx, "BEGIN");
+        assert!(transaction_state(&workspace, cx).1, "the BEGIN ran");
+        run_in_front(&workspace, cx, "select * from birds order by id");
+        let listed = recorded_statements(&workspace, cx);
+        let grid = query_tab(&workspace, cx, |tab, _, _| tab.results.clone());
+        grid.update(cx, |grid, _| {
+            for (row, name) in [(0, "robin"), (1, "jay")] {
+                assert!(grid.delegate_mut().set_pending(
+                    row,
+                    1,
+                    crate::result_grid::NewValue::Value(name.into())
+                ));
+            }
+        });
+        // A verified apply brackets itself, and its `COMMIT` would end the
+        // user's transaction: it is refused rather than joined.
+        cx.dispatch_action(crate::actions::ApplyEdits);
+        settle(cx);
+        assert_eq!(
+            shown_notice(&workspace, cx).as_deref(),
+            Some(crate::session::APPLY_IN_TRANSACTION)
+        );
+        assert!(
+            grid.read_with(cx, |grid, _| grid.delegate().has_pending()),
+            "the draft is kept"
+        );
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "the user's transaction is still open"
+        );
+        assert_eq!(
+            recorded_statements(&workspace, cx),
+            listed,
+            "nothing was sent, so nothing joins the record"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_failed_commit_from_the_auto_prompt_does_not_keep_a_stale_open_flag(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (7)");
+
+        // Ended straight on the session, so the profile still reads the
+        // transaction as open and the COMMIT the dialog sends has none to end
+        // and fails.
+        let session = workspace
+            .read_with(cx, |workspace, _| {
+                workspace.profile().and_then(|profile| profile.connection())
+            })
+            .expect("the profile is connected");
+        session
+            .query("ROLLBACK", &CancelToken::default(), Fetch::default())
+            .expect("the session ends its transaction");
+
+        toggle_auto_commit(cx);
+        click_selector(cx, "end-transaction-0");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        query_tab(&workspace, cx, |tab, _, _| {
+            assert!(
+                matches!(tab.query, QueryState::Failed(_)),
+                "the COMMIT failed"
+            )
+        });
+        let (auto_commit, open, _) = transaction_state(&workspace, cx);
+        assert!(
+            auto_commit && !open,
+            "a COMMIT that failed because none was active is not read as leaving one open, \
+             and the switch says the session is autocommitting"
+        );
+        assert!(
+            recorded_statements(&workspace, cx).is_empty(),
+            "the list of a transaction no longer read as open is not put back"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// What `PRAGMA cache_size` reads on `connection`, which a startup script can
+/// set and a fresh session never has.
+fn cache_size(connection: &crate::db::Connection) -> Option<String> {
+    let result = connection
+        .query(
+            "PRAGMA cache_size",
+            &CancelToken::default(),
+            Fetch::default(),
+        )
+        .expect("the pragma reads");
+    result.rows[0].get(0).map(str::to_string)
+}
+
+/// Activates the profile `id` and lets its connect settle.
+fn connect_profile(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) {
+    workspace.update(cx, |workspace, cx| {
+        let index = workspace
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+            .expect("the saved profile is restored");
+        workspace.activate(index, cx);
+    });
+    settle(cx);
+}
+
+#[gpui::test]
+fn a_startup_script_runs_on_connect_and_on_every_session_beside_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile(
+                    "e2e",
+                    "E2E",
+                    "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\""
+                ),
+                sqlite_profile("plain", "Plain", "mode = \"full\""),
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        workspace.read_with(cx, |workspace, cx| {
+            let profile = workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "e2e")
+                .expect("the profile is listed");
+            if let ProfileState::Failed(message) = &profile.state {
+                panic!("{message}");
+            }
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+            assert_eq!(profile.behaviour.startup_script, "PRAGMA cache_size = 4000");
+            let connection = profile.connection().expect("it connected");
+            assert_eq!(cache_size(&connection).as_deref(), Some("4000"));
+            let apart = connection.apart().expect("a session beside it opens");
+            assert_eq!(cache_size(&apart).as_deref(), Some("4000"));
+            assert_eq!(
+                profile.stored(cx).startup_script.as_deref(),
+                Some("PRAGMA cache_size = 4000")
+            );
+            let plain = workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "plain")
+                .expect("the profile is listed");
+            assert_eq!(plain.stored(cx).startup_script, None);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_startup_script_that_is_refused_or_errors_fails_the_connect(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile(
+                    "refused",
+                    "Refused",
+                    "mode = \"read-only\"\nstartup_script = \"SELECT 1;\\nDELETE FROM t\""
+                ),
+                sqlite_profile(
+                    "errors",
+                    "Errors",
+                    "mode = \"full\"\nstartup_script = \"SELECT * FROM missing_table\""
+                ),
+            ),
+        );
+        let failure = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str| {
+            workspace.read_with(cx, |workspace, _| {
+                match &workspace
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .expect("the profile is listed")
+                    .state
+                {
+                    ProfileState::Failed(message) => message.clone(),
+                    _ => panic!("{id} did not fail"),
+                }
+            })
+        };
+        connect_profile(&workspace, cx, "refused");
+        let refused = failure(&workspace, cx, "refused");
+        assert!(refused.starts_with("The startup script"), "{refused}");
+        assert!(!refused.contains("DELETE FROM t"), "{refused}");
+
+        connect_profile(&workspace, cx, "errors");
+        let errors = failure(&workspace, cx, "errors");
+        assert!(errors.starts_with("The startup script failed"), "{errors}");
+        assert!(!errors.contains("SELECT * FROM"), "{errors}");
+
+        let database = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("e2e.db");
+        let rows: i64 = rusqlite::Connection::open(database)
+            .and_then(|connection| connection.query_row("SELECT count(*) FROM t", [], |r| r.get(0)))
+            .expect("the table reads");
+        assert_eq!(rows, 1, "no statement of the refused script ran");
+        quit(workspace, cx);
+    });
+}
+
+/// A new connection form on the SQLite file the launch wrote, as a person
+/// leaves it before Save or Test connection.
+fn fill_sqlite_form(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    mode: crate::sql::Mode,
+    script: &str,
+) {
+    let database = store::dbdelve_directory()
+        .expect("the test home has a data directory")
+        .join("e2e.db")
+        .display()
+        .to_string();
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.new_connection_in(None, window, cx);
+        let form = workspace.form.as_mut().expect("the form is open");
+        form.set_target(crate::db::Target::built_in(Engine::Sqlite));
+        form.mode = mode;
+        form.path
+            .update(cx, |input, cx| input.set_value(database, window, cx));
+        form.startup_script.update(cx, |input, cx| {
+            input.set_value(script.to_string(), window, cx)
+        });
+    });
+}
+
+#[gpui::test]
+fn test_connection_runs_the_startup_script(cx: &mut TestAppContext) {
+    use crate::connection_form::ConnectionTest;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile("dev", "Dev", "mode = \"full\""),
+        );
+        let tested = |script: &str, cx: &mut VisualTestContext| {
+            fill_sqlite_form(&workspace, cx, crate::sql::Mode::Full, script);
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.test_connection(
+                    &gpui::ClickEvent::Keyboard(Default::default()),
+                    window,
+                    cx,
+                );
+            });
+            settle(cx);
+            workspace.read_with(cx, |workspace, _| {
+                match workspace.form.as_ref().and_then(|form| form.test.as_ref()) {
+                    Some(ConnectionTest::Passed(_)) => None,
+                    Some(ConnectionTest::Failed(message)) => Some(message.clone()),
+                    _ => panic!("the test did not finish"),
+                }
+            })
+        };
+        let failed = tested("SELECT * FROM missing_table", cx).expect("the script errors");
+        assert!(failed.starts_with("The startup script failed"), "{failed}");
+        assert_eq!(tested("PRAGMA cache_size = 4000", cx), None);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_script_the_mode_refuses_is_not_saved(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile("dev", "Dev", "mode = \"full\""),
+        );
+        let listed = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.profiles.len())
+        };
+        let before = listed(&workspace, cx);
+
+        fill_sqlite_form(
+            &workspace,
+            cx,
+            crate::sql::Mode::ReadOnly,
+            "DELETE FROM t WHERE id = 1",
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let form = workspace.form.as_ref().expect("the form stays open");
+            let error = form.error.as_deref().expect("the refusal is shown");
+            assert!(error.starts_with("The startup script"), "{error}");
+            assert!(!error.contains("DELETE FROM"), "{error}");
+        });
+        assert_eq!(listed(&workspace, cx), before, "nothing was saved");
+
+        // An existing profile's own mode decides, not the form's default.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "dev")
+                .expect("the profile is listed");
+            workspace.edit_profile(index, window, cx);
+            let form = workspace.form.as_mut().expect("the edit form is open");
+            form.startup_script.update(cx, |input, cx| {
+                input.set_value("DELETE FROM t WHERE id = 1", window, cx)
+            });
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.form.is_none(), "the form saved");
+            let profile = workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "dev")
+                .expect("the profile is listed");
+            assert_eq!(
+                profile.behaviour.startup_script,
+                "DELETE FROM t WHERE id = 1"
+            );
+        });
+
+        // The settings land before the first connect starts.
+        fill_sqlite_form(
+            &workspace,
+            cx,
+            crate::sql::Mode::Full,
+            "PRAGMA cache_size = 4000",
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.submit_connection(&SubmitConnection, window, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.profiles.len(), before + 1);
+            let profile = workspace.profile().expect("the new profile is in front");
+            assert_eq!(profile.behaviour.startup_script, "PRAGMA cache_size = 4000");
+            let connection = profile.connection().expect("it connected");
+            assert_eq!(cache_size(&connection).as_deref(), Some("4000"));
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_stored_script_on_an_engine_without_the_row_is_dropped_at_restore(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            "[[profiles]]\nid = \"cache\"\nname = \"Cache\"\nhost = \"localhost\"\nport = 6379\n\
+             database = \"\"\nuser = \"\"\nengine = \"redis\"\nstartup_script = \"SET x 1\"\n",
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            let profile = workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "cache")
+                .expect("the profile is restored");
+            assert_eq!(profile.behaviour.startup_script, "");
+            assert_eq!(profile.stored(cx).startup_script, None);
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A filter just saved to show more is not yet in the catalog read under the
+/// old one: a stored routine waits for the read under the new one, and only a
+/// catalog read under it can say the routine is gone.
+#[gpui::test]
+fn a_stored_routine_waits_for_the_catalog_read_under_the_saved_filter(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let pending = || store::StoredObject {
+            database: None,
+            schema: "main".into(),
+            name: "digest()".into(),
+            routine: true,
+            structure: false,
+            diagram: false,
+            diagram_view: None,
+            kind: Default::default(),
+            filter: String::new(),
+            filter_engine: None,
+            origin: None,
+            filters: Vec::new(),
+            active: false,
+            bars: Vec::new(),
+        };
+        let waiting = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.pending_objects.len()
+            })
+        };
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            assert!(matches!(
+                profile.catalog,
+                CatalogState::Loaded(_, crate::session::Routines::Loaded)
+            ));
+            profile.include.schemas = vec!["audit".into()];
+            profile.session.pending_objects.push(pending());
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(waiting(&workspace, cx), 1, "kept for the catalog to come");
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            profile.catalog_include = profile.include.clone();
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(
+            waiting(&workspace, cx),
+            0,
+            "a catalog read under it lacks it"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// The same of another database: its catalog was read under the old lists,
+/// so a routine there waits until the read under the saved ones lands.
+#[gpui::test]
+fn a_stored_routine_of_another_database_waits_for_its_catalog_under_the_saved_filter(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = duckdb_with_other_attached(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.expand_node(&database_row("e2e", "other").into(), cx)
+        });
+        settle(cx);
+        let waiting = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.profile().unwrap().session.pending_objects.len()
+            })
+        };
+        workspace.update(cx, |workspace, cx| {
+            let profile = workspace.profile_mut().unwrap();
+            assert!(matches!(
+                profile.database_catalogs.get("other"),
+                Some(CatalogState::Loaded(_, crate::session::Routines::Loaded))
+            ));
+            profile.include.schemas = vec!["main".into(), "audit".into()];
+            profile.session.pending_objects.push(store::StoredObject {
+                database: Some("other".into()),
+                schema: "audit".into(),
+                name: "digest()".into(),
+                routine: true,
+                structure: false,
+                diagram: false,
+                diagram_view: None,
+                kind: Default::default(),
+                filter: String::new(),
+                filter_engine: None,
+                origin: None,
+                filters: Vec::new(),
+                active: false,
+                bars: Vec::new(),
+            });
+            cx.notify();
+        });
+        settle(cx);
+        assert_eq!(waiting(&workspace, cx), 1, "kept for its catalog to come");
+        workspace.update(cx, |workspace, cx| {
+            workspace.reload_database("e2e", "other".into(), cx);
+        });
+        settle(cx);
+        assert_eq!(
+            waiting(&workspace, cx),
+            0,
+            "a catalog read under it lacks it"
+        );
+        quit(workspace, cx);
+    });
+}
+
+fn generation_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) -> u64 {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .expect("the profile is listed")
+            .generation
+    })
+}
+
+#[gpui::test]
+fn lowering_the_mode_below_the_script_reconnects_and_says_why(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let script = "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"";
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile("e2e", "E2E", script),
+                sqlite_profile("busy", "Busy", script),
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        let before = generation_of(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::ReadWrite);
+            assert!(profile.generation > before, "the profile reconnected");
+            let ProfileState::Failed(message) = &profile.state else {
+                panic!("the connect should have failed");
+            };
+            assert!(message.starts_with("The startup script"), "{message}");
+            assert!(!message.contains("PRAGMA"), "{message}");
+        });
+
+        // An import holds the mode where it is: `reconnect` declines to
+        // interrupt it, so lowering would leave the badge below what the open
+        // sessions ran.
+        connect_profile(&workspace, cx, "busy");
+        let file = store::dbdelve_directory().unwrap().join("rows.csv");
+        std::fs::write(&file, "id\n1\n").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_import_file(
+                "busy".into(),
+                None,
+                "main".into(),
+                "t".into(),
+                file,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        // The file is checked a moment after it is opened.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        let before = generation_of(&workspace, cx, "busy");
+        workspace.update(cx, |workspace, cx| {
+            workspace.start_import(cx);
+            assert!(workspace.running_import_into("busy").is_some());
+            workspace.set_mode(Mode::ReadWrite, cx);
+        });
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile is in front");
+            assert_eq!(profile.mode, Mode::Full, "the mode was not lowered");
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("`main.t`"), "{notice}");
+            assert!(notice.contains("import"), "{notice}");
+        });
+        settle(cx);
+        quit(workspace, cx);
+    });
+}
+
+/// A script cleared while connected still has its statements on the live
+/// connection, which replays them on every later session: lowering the mode
+/// below them reconnects as it would for the saved script.
+#[gpui::test]
+fn lowering_the_mode_below_the_script_the_connection_ran_reconnects(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_behaviour("e2e", crate::session::Behaviour::default(), cx);
+        });
+        settle(cx);
+        let before = generation_of(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::ReadWrite);
+            assert!(profile.generation > before, "the profile reconnected");
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+            let connection = profile.connection().expect("it connected");
+            assert_ne!(cache_size(&connection).as_deref(), Some("4000"));
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// The reconnect a lowered mode needs would drop an open transaction, which
+/// the server rolls back: the mode stays until the user ends it.
+#[gpui::test]
+fn the_mode_is_not_lowered_below_the_script_inside_a_transaction(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let before = generation_of(&workspace, cx, "e2e");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::Full, "the mode was not lowered");
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            assert!(profile.in_transaction);
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("transaction"), "{notice}");
+        });
+        run_in_front(&workspace, cx, "ROLLBACK");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().unwrap();
+            assert_eq!(
+                profile.mode,
+                Mode::ReadWrite,
+                "with none open it goes ahead"
+            );
+            assert!(profile.generation > before);
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A DuckDB in memory reconnected for a lowered mode would come back empty:
+/// the mode stays, and the tables with it.
+#[gpui::test]
+fn the_mode_is_not_lowered_below_the_script_of_a_database_in_memory(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            "[[profiles]]\nid = \"memory\"\nname = \"Memory\"\nhost = \"\"\n\
+             database = \"\"\nuser = \"\"\nengine = \"duckdb\"\npath = \":memory:\"\n\
+             mode = \"full\"\nstartup_script = \"PRAGMA threads = 2\"\n",
+        );
+        connect_profile(&workspace, cx, "memory");
+        run_in_front(&workspace, cx, "CREATE TABLE kept (id INTEGER)");
+        let before = generation_of(&workspace, cx, "memory");
+        workspace.update(cx, |workspace, cx| workspace.set_mode(Mode::ReadWrite, cx));
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile stays in front");
+            assert_eq!(profile.mode, Mode::Full, "the mode was not lowered");
+            assert_eq!(profile.generation, before, "nothing reconnected");
+            let notice = profile.session.notice.as_deref().unwrap_or_default();
+            assert!(notice.contains("in-memory"), "{notice}");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn lowering_the_mode_to_one_the_script_passes_keeps_the_session(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &format!(
+                "{}{}",
+                sqlite_profile(
+                    "scripted",
+                    "Scripted",
+                    "mode = \"full\"\nstartup_script = \"SELECT 1\""
+                ),
+                sqlite_profile("plain", "Plain", "mode = \"full\""),
+            ),
+        );
+        for id in ["scripted", "plain"] {
+            connect_profile(&workspace, cx, id);
+            let before = generation_of(&workspace, cx, id);
+            for mode in [Mode::ReadOnly, Mode::Full] {
+                workspace.update(cx, |workspace, cx| workspace.set_mode(mode, cx));
+                settle(cx);
+                workspace.read_with(cx, |workspace, _| {
+                    let profile = workspace.profile().expect("the profile stays in front");
+                    assert_eq!(profile.mode, mode);
+                    assert_eq!(profile.generation, before, "{id} kept its sessions");
+                    assert!(matches!(profile.state, ProfileState::Connected(..)));
+                });
+            }
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_mode_lowered_while_connecting_regates_the_script(cx: &mut TestAppContext) {
+    use crate::sql::Mode;
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        settle(cx);
+        // One update, so the connect cannot land between: the profile is
+        // `Connecting` and `set_mode` finds no connection to re-gate.
+        workspace.update(cx, |workspace, cx| {
+            workspace.begin_connect(0, cx);
+            assert!(matches!(
+                workspace.profiles[0].state,
+                ProfileState::Connecting { .. }
+            ));
+            workspace.set_mode(Mode::ReadWrite, cx);
+        });
+        settle(cx);
+        workspace.read_with(cx, |workspace, _| {
+            let profile = &workspace.profiles[0];
+            assert_eq!(profile.mode, Mode::ReadWrite);
+            let ProfileState::Failed(message) = &profile.state else {
+                panic!("the landing should have connected again and failed");
+            };
+            assert!(message.starts_with("The startup script"), "{message}");
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Saves the edit form of `id` with `script` and, when given, `path`.
+fn save_script(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+    script: &str,
+    path: Option<String>,
+) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let index = workspace
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+            .expect("the profile is listed");
+        workspace.edit_profile(index, window, cx);
+        let form = workspace.form.as_mut().expect("the edit form is open");
+        form.startup_script.update(cx, |input, cx| {
+            input.set_value(script.to_string(), window, cx)
+        });
+        if let Some(path) = path {
+            form.path
+                .update(cx, |input, cx| input.set_value(path, window, cx));
+        }
+        workspace.submit_connection(&SubmitConnection, window, cx);
+    });
+    settle(cx);
+}
+
+fn session_notice(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profile()
+            .and_then(|profile| profile.session.notice.clone())
+            .unwrap_or_default()
+    })
+}
+
+fn front_cache_size(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    workspace.read_with(cx, |workspace, _| {
+        let connection = workspace
+            .profile()
+            .and_then(crate::session::Profile::connection)
+            .expect("the profile is connected");
+        cache_size(&connection)
+    })
+}
+
+#[gpui::test]
+fn a_script_saved_while_connected_applies_from_the_next_connect(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        let before = generation_of(&workspace, cx, "e2e");
+
+        save_script(&workspace, cx, "e2e", "PRAGMA cache_size = 3000", None);
+        assert_eq!(generation_of(&workspace, cx, "e2e"), before);
+        let notice = session_notice(&workspace, cx);
+        assert!(notice.contains("applies from the next connect"), "{notice}");
+        assert_eq!(front_cache_size(&workspace, cx).as_deref(), Some("4000"));
+
+        workspace.update(cx, |workspace, cx| workspace.reconnect(0, cx));
+        settle(cx);
+        assert_eq!(front_cache_size(&workspace, cx).as_deref(), Some("3000"));
+
+        // A save that leaves the script as it was says nothing about it.
+        workspace.update(cx, |workspace, _| workspace.clear_notice());
+        save_script(&workspace, cx, "e2e", "PRAGMA cache_size = 3000", None);
+        assert_eq!(session_notice(&workspace, cx), "");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_save_that_edits_the_script_and_reconnects_runs_the_new_script(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"PRAGMA cache_size = 4000\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        let other = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("other.db");
+        rusqlite::Connection::open(&other).expect("the second database creates");
+
+        save_script(
+            &workspace,
+            cx,
+            "e2e",
+            "PRAGMA cache_size = 3000",
+            Some(other.display().to_string()),
+        );
+        // The reconnect the save starts read the script before it was saved;
+        // the landing connects again so no session runs the old one.
+        assert_eq!(front_cache_size(&workspace, cx).as_deref(), Some("3000"));
+        let notice = session_notice(&workspace, cx);
+        assert!(
+            !notice.contains("applies from the next connect"),
+            "{notice}"
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// A save that moves the profile and clears its script reconnects with no
+/// script: the old one never runs on the new target, where a write it made
+/// would stay whatever the landing did next.
+#[gpui::test]
+fn a_save_that_clears_the_script_and_reconnects_never_runs_the_old_one(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE audit (v TEXT);",
+            "",
+            &sqlite_profile(
+                "e2e",
+                "E2E",
+                "mode = \"full\"\nstartup_script = \"INSERT INTO audit VALUES ('old')\"",
+            ),
+        );
+        connect_profile(&workspace, cx, "e2e");
+        let other = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("other.db");
+        rusqlite::Connection::open(&other)
+            .and_then(|connection| connection.execute_batch("CREATE TABLE audit (v TEXT);"))
+            .expect("the second database creates");
+
+        save_script(&workspace, cx, "e2e", "", Some(other.display().to_string()));
+        let written: i64 = rusqlite::Connection::open(&other)
+            .and_then(|connection| {
+                connection.query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+            })
+            .expect("the audit table reads");
+        assert_eq!(written, 0, "the old script never ran on the new target");
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("the profile is in front");
+            assert!(matches!(profile.state, ProfileState::Connected(..)));
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// What a keep-alive round must leave as it found it: what the user can see
+/// of the profile in front.
+fn user_visible_state(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (
+    u64,
+    bool,
+    std::mem::Discriminant<CatalogState>,
+    String,
+    bool,
+    bool,
+) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = workspace.profile().expect("a profile is in front");
+        (
+            profile.generation,
+            matches!(profile.state, crate::session::ProfileState::Connected(_)),
+            std::mem::discriminant(&profile.catalog),
+            profile.session.notice.clone().unwrap_or_default(),
+            profile.session_changed,
+            profile.in_transaction,
+        )
+    })
+}
+
+fn keep_alive_every(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    seconds: Option<u32>,
+) {
+    workspace.update(cx, |workspace, cx| {
+        workspace.set_behaviour(
+            "e2e",
+            crate::session::Behaviour {
+                keep_alive: seconds,
+                ..crate::session::Behaviour::default()
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+}
+
+fn pings(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+    workspace.read_with(cx, |workspace, _| workspace.pings)
+}
+
+fn keep_alive_armed(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profile()
+            .expect("a profile is in front")
+            .keep_alive_task
+            .is_some()
+    })
+}
+
+#[gpui::test]
+fn a_keep_alive_ping_is_sent_at_its_interval_and_is_not_activity(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        let before = user_visible_state(&workspace, cx);
+        keep_alive_every(&workspace, cx, Some(30));
+        assert!(keep_alive_armed(&workspace, cx), "an interval arms a timer");
+
+        cx.executor().advance_clock(Duration::from_secs(29));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 0, "not before the interval");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 1);
+        assert!(
+            keep_alive_armed(&workspace, cx),
+            "and the next round is set"
+        );
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 2);
+        assert_eq!(
+            user_visible_state(&workspace, cx),
+            before,
+            "a ping changes nothing the user sees"
+        );
+
+        keep_alive_every(&workspace, cx, None);
+        assert!(
+            !keep_alive_armed(&workspace, cx),
+            "clearing it drops the timer"
+        );
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 2);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_profile_without_keep_alive_arms_no_timer(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        assert!(!keep_alive_armed(&workspace, cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(600));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 0);
+        quit(workspace, cx);
+    });
+}
+
+/// A round set while no transaction was open asks again once it holds each
+/// session: a `BEGIN` sent meanwhile, on the profile's own session or on one
+/// of another database, leaves that session unpinged.
+#[gpui::test]
+fn a_keep_alive_round_asks_again_under_the_session_whether_a_begin_went_out(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let set = workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            let session =
+                crate::session::Bound::new(profile.connection().expect("the profile is connected"));
+            profile.bound.insert(
+                "other".to_string(),
+                crate::session::BoundSession::Open(session.clone()),
+            );
+            (profile.sessions_to_ping(), session)
+        });
+        let (sessions, bound) = set;
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|(_, idle)| idle()), "nothing open yet");
+
+        run_in_front(&workspace, cx, "BEGIN");
+        assert!(!sessions[0].1(), "the profile's own session took a BEGIN");
+        assert!(sessions[1].1(), "the other session did not");
+        bound
+            .leave(
+                Some(true),
+                false,
+                || Ok::<_, crate::db::DbError>(()),
+                |_| false,
+            )
+            .expect("nothing is sent");
+        assert!(!sessions[1].1(), "until it did");
+        run_in_front(&workspace, cx, "ROLLBACK");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_keep_alive_round_is_skipped_inside_a_transaction(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        keep_alive_every(&workspace, cx, Some(30));
+        let set = |in_transaction: bool,
+                   bound: bool,
+                   workspace: &Entity<Workspace>,
+                   cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, _| {
+                let profile = workspace.profile_mut().expect("a profile is in front");
+                profile.in_transaction = in_transaction;
+                profile.bound.remove("other");
+                if bound {
+                    // A session for another database a tab's statement has
+                    // left a transaction open on.
+                    let session = crate::session::Bound::new(
+                        profile.connection().expect("the profile is connected"),
+                    );
+                    session
+                        .leave(
+                            Some(true),
+                            false,
+                            || Ok::<_, crate::db::DbError>(()),
+                            |_| false,
+                        )
+                        .expect("nothing is sent");
+                    profile.bound.insert(
+                        "other".to_string(),
+                        crate::session::BoundSession::Open(session),
+                    );
+                }
+            });
+        };
+
+        set(true, false, &workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(
+            pings(&workspace, cx),
+            0,
+            "the user's transaction is left alone"
+        );
+        assert!(
+            keep_alive_armed(&workspace, cx),
+            "and the next round is set"
+        );
+
+        set(false, true, &workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 0, "so is a bound session's");
+        assert!(keep_alive_armed(&workspace, cx));
+
+        set(false, false, &workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(pings(&workspace, cx), 1, "cleared, the next round pings");
+
+        keep_alive_every(&workspace, cx, None);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_failed_ping_stops_the_keep_alive_quietly(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        keep_alive_every(&workspace, cx, Some(30));
+        let generation = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profile()
+                .expect("a profile is in front")
+                .generation
+        });
+        let before = user_visible_state(&workspace, cx);
+        let lost = || crate::db::DbError {
+            message: "the connection is closed".to_string(),
+            position: None,
+        };
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.keep_alive_landed("e2e", generation + 1, Err(lost()), cx)
+        });
+        assert!(
+            keep_alive_armed(&workspace, cx),
+            "a stale landing changes nothing"
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.keep_alive_landed("e2e", generation, Err(lost()), cx)
+        });
+        assert!(
+            !keep_alive_armed(&workspace, cx),
+            "a failed ping stops the rounds"
+        );
+        assert_eq!(
+            user_visible_state(&workspace, cx),
+            before,
+            "and says nothing: the lost session is found on its next use"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_stored_keep_alive_is_kept_only_where_a_session_stays_open_and_from_ten_seconds_to_an_hour(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let postgres = |id: &str, extra: &str| {
+            format!(
+                "[[profiles]]\nid = {id:?}\nname = {id:?}\nhost = \"localhost\"\nport = 5432\n\
+                 database = \"app\"\nuser = \"app\"\nengine = \"postgres\"\n{extra}\n"
+            )
+        };
+        let profiles = [
+            postgres("kept", "keep_alive_seconds = 120"),
+            postgres("floor", "keep_alive_seconds = 10"),
+            postgres("low", "keep_alive_seconds = 9"),
+            postgres("ceiling", "keep_alive_seconds = 3600"),
+            postgres("high", "keep_alive_seconds = 3601"),
+            postgres("none", ""),
+            sqlite_profile("file", "File", "keep_alive_seconds = 120"),
+        ]
+        .concat();
+        let (workspace, cx) = launch_with_profiles(cx, &profiles);
+        let restored: Vec<_> = workspace.read_with(cx, |workspace, cx| {
+            ["kept", "floor", "low", "ceiling", "high", "none", "file"]
+                .map(|id| {
+                    let profile = workspace
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == id)
+                        .expect("the profile is restored");
+                    (
+                        profile.behaviour.keep_alive,
+                        profile.stored(cx).keep_alive_seconds,
+                    )
+                })
+                .to_vec()
+        });
+        assert_eq!(
+            restored,
+            [
+                (Some(120), Some(120)),
+                (Some(10), Some(10)),
+                (None, None),
+                (Some(3600), Some(3600)),
+                (None, None),
+                (None, None),
+                (None, None)
+            ]
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// Where `id`'s connection stands, by name.
+fn state_of(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) -> &'static str {
+    use crate::session::ProfileState;
+    workspace.read_with(cx, |workspace, _| {
+        match workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .expect("the profile is listed")
+            .state
+        {
+            ProfileState::Idle => "idle",
+            ProfileState::Connecting { .. } => "connecting",
+            ProfileState::Connected(_) => "connected",
+            ProfileState::Failed(_) => "failed",
+        }
+    })
+}
+
+/// Saves `id`'s edit form with the Idle timeout row reading `minutes`.
+fn save_idle_timeout(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+    minutes: &str,
+) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let index = workspace
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+            .expect("the profile is listed");
+        workspace.edit_profile(index, window, cx);
+        let form = workspace.form.as_mut().expect("the edit form is open");
+        form.idle_timeout.update(cx, |input, cx| {
+            input.set_value(minutes.to_string(), window, cx)
+        });
+        workspace.submit_connection(&SubmitConnection, window, cx);
+    });
+    settle(cx);
+}
+
+/// `id`'s idle task is set.
+fn idle_armed(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str) -> bool {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .expect("the profile is listed")
+            .idle_task
+            .is_some()
+    })
+}
+
+/// The app on one SQLite profile `Orders`, connected, with `SELECT 1` typed
+/// and not run.
+fn idle_orders(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, cx) = launch_with_profiles(cx, &sqlite_profile("orders", "Orders", ""));
+    cx.executor().allow_parking();
+    connect_profile(&workspace, cx, "orders");
+    assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+    cx.update(|window, cx| {
+        let editor = workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .expect("a connected profile opens on a query tab")
+            .editor
+            .clone();
+        editor.update(cx, |input, cx| input.set_value("SELECT 1", window, cx));
+    });
+    (workspace, cx)
+}
+
+/// A DuckDB in memory holds its tables only as long as its connection, so
+/// it is never closed for being idle, whether the timeout was saved in the
+/// file or typed in the form; a DuckDB file keeps it.
+#[gpui::test]
+fn a_database_in_memory_is_never_closed_for_being_idle(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        crate::IGNORE_ENVIRONMENT.set(true);
+        let file = store::dbdelve_directory()
+            .expect("the test home has a data directory")
+            .join("kept.duckdb");
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &format!(
+                "[[profiles]]\nid = \"memory\"\nname = \"Memory\"\nhost = \"\"\n\
+                 database = \"\"\nuser = \"\"\nengine = \"duckdb\"\npath = \":memory:\"\n\
+                 idle_timeout_minutes = 1\n{}",
+                duckdb_profile("file", "File", &file, "idle_timeout_minutes = 1"),
+            ),
+        );
+        let timeout = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, id: &str| {
+            workspace.read_with(cx, |workspace, _| {
+                workspace
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .expect("the profile is listed")
+                    .behaviour
+                    .idle_timeout
+            })
+        };
+        assert_eq!(timeout(&workspace, cx, "memory"), None, "restored off");
+        assert_eq!(timeout(&workspace, cx, "file"), Some(1));
+
+        connect_profile(&workspace, cx, "memory");
+        assert_eq!(state_of(&workspace, cx, "memory"), "connected");
+        assert!(!idle_armed(&workspace, cx, "memory"));
+        save_idle_timeout(&workspace, cx, "memory", "5");
+        assert_eq!(
+            timeout(&workspace, cx, "memory"),
+            None,
+            "the form keeps it off"
+        );
+        assert!(!idle_armed(&workspace, cx, "memory"));
+
+        connect_profile(&workspace, cx, "file");
+        assert!(
+            idle_armed(&workspace, cx, "file"),
+            "a file closes as before"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_idle_profile_is_closed_with_its_tabs_kept(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    store::tests::with_home(|| {
+        let (workspace, cx) = idle_orders(cx);
+        let (generation, active) = workspace.read_with(cx, |workspace, _| {
+            (
+                workspace.profile().expect("in front").generation,
+                workspace.active,
+            )
+        });
+
+        save_idle_timeout(&workspace, cx, "orders", "1");
+        workspace.read_with(cx, |workspace, cx| {
+            let profile = workspace.profile().expect("in front");
+            assert_eq!(profile.behaviour.idle_timeout, Some(1));
+            assert_eq!(profile.generation, generation, "nothing reconnected");
+            assert_eq!(profile.stored(cx).idle_timeout_minutes, Some(1));
+        });
+        assert!(idle_armed(&workspace, cx, "orders"));
+
+        cx.executor().advance_clock(Duration::from_secs(59));
+        cx.run_until_parked();
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(state_of(&workspace, cx, "orders"), "idle");
+
+        assert_eq!(buffer(&workspace, cx), "SELECT 1", "the tab is kept");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.active, active, "the profile stays in front");
+            let profile = workspace.profile().expect("in front");
+            assert!(profile.generation > generation);
+            assert!(
+                profile
+                    .session
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("without use")),
+                "{:?}",
+                profile.session.notice
+            );
+            assert!(profile.bound.is_empty());
+            assert!(profile.idle_task.is_none() && profile.keep_alive_task.is_none());
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// The app on one SQLite profile `Orders`, connected, over a database `schema`
+/// has been run against, that closes after a minute without use.
+fn closing_after_a_minute<'a>(
+    cx: &'a mut TestAppContext,
+    schema: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    let (workspace, cx) = launch_connections(
+        cx,
+        schema,
+        "",
+        &sqlite_profile("orders", "Orders", "idle_timeout_minutes = 1"),
+    );
+    cx.executor().allow_parking();
+    connect_profile(&workspace, cx, "orders");
+    assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+    (workspace, cx)
+}
+
+/// Lets a minute pass over `closing_after_a_minute`'s profile, which closes,
+/// and disarms its timer so nothing that waits afterwards can close it again.
+fn let_it_go_idle(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(state_of(workspace, cx, "orders"), "idle");
+    workspace.update(cx, |workspace, _| {
+        if let Some(profile) = workspace.profile_mut() {
+            profile.behaviour.idle_timeout = None;
+        }
+    });
+}
+
+/// `closing_after_a_minute` gone idle, in front with its query tab holding `text`.
+fn gone_idle<'a>(
+    cx: &'a mut TestAppContext,
+    text: &str,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    let (workspace, cx) = closing_after_a_minute(cx, "");
+    cx.update(|window, cx| {
+        let editor = workspace
+            .read(cx)
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .expect("a connected profile opens on a query tab")
+            .editor
+            .clone();
+        editor.update(cx, |input, cx| input.set_value(text, window, cx));
+    });
+    let_it_go_idle(&workspace, cx);
+    (workspace, cx)
+}
+
+/// The front profile's first query tab's first cell.
+fn first_cell(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    query_tab(workspace, cx, |tab, _, cx| {
+        tab.results
+            .read(cx)
+            .delegate()
+            .cell(0, 0)
+            .map(str::to_string)
+    })
+}
+
+#[gpui::test]
+fn a_front_profile_that_went_idle_reconnects_on_run(cx: &mut TestAppContext) {
+    use crate::session::ProfileState;
+    store::tests::with_home(|| {
+        let (workspace, cx) = gone_idle(cx, "SELECT 42");
+
+        // In one update, so the connect the run starts cannot land between.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.run_query(&crate::RunQuery, window, cx);
+            let profile = workspace.profile().expect("in front");
+            assert!(matches!(profile.state, ProfileState::Connecting { .. }));
+            let tab = profile.session.active_query_tab().expect("a query tab").id;
+            assert_eq!(
+                workspace.runs_on_connect,
+                [("orders".to_string(), tab, "SELECT 42".to_string())],
+                "the run waits on the connect"
+            );
+        });
+
+        settle(cx);
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.runs_on_connect.is_empty());
+        });
+        assert_eq!(first_cell(&workspace, cx).as_deref(), Some("42"));
+
+        // Not a plain run: an explain is not parked, it fails as it did.
+        gone_idle_again(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            let tab = workspace
+                .profile()
+                .and_then(|profile| profile.session.active_query_tab())
+                .expect("a query tab")
+                .id;
+            workspace.execute_and_then(
+                "SELECT 1".into(),
+                Tab::Query(tab),
+                None,
+                false,
+                Some(crate::db::ExplainMode::Plan),
+                cx,
+            );
+            assert!(workspace.runs_on_connect.is_empty(), "nothing is parked");
+        });
+        assert_eq!(state_of(&workspace, cx, "orders"), "idle");
+        query_tab(&workspace, cx, |tab, _, _| match &tab.query {
+            QueryState::Failed(error) => assert_eq!(error.message, "The connection is not open."),
+            _ => panic!("the explain should have failed"),
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// Closes the front profile's sessions as the idle timer does.
+fn gone_idle_again(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    workspace.update(cx, |workspace, cx| {
+        let index = workspace.active.expect("a profile is in front");
+        workspace.close_sessions(index, cx);
+    });
+    settle(cx);
+    assert_eq!(state_of(workspace, cx, "orders"), "idle");
+}
+
+#[gpui::test]
+fn the_idle_close_and_a_disconnect_let_the_users_tabs_session_go(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = closing_after_a_minute(cx, "");
+        // The tab's side session, opened as its first read opens it.
+        let open_side = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let tab = users_tab_on(workspace, window, cx);
+                let profile = workspace.profile().expect("in front");
+                let connection = profile.connection().expect("connected");
+                let side = profile
+                    .session
+                    .objects
+                    .iter()
+                    .find_map(|object| match &object.body {
+                        ObjectBody::Users { side, .. } if object.id == tab => Some(side.clone()),
+                        _ => None,
+                    })
+                    .expect("the tab is there");
+                side.read(&connection, profile.generation, |_| Ok(()))
+                    .unwrap();
+                assert!(side.is_open());
+                side
+            })
+        };
+
+        let side = open_side(&workspace, cx);
+        gone_idle_again(&workspace, cx);
+        assert!(!side.is_open(), "the idle close lets it go");
+
+        connect_profile(&workspace, cx, "orders");
+        let side = open_side(&workspace, cx);
+        disconnect(cx);
+        assert!(!side.is_open(), "a disconnect lets it go");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_idle_profile_shows_the_reconnect_button(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = closing_after_a_minute(cx, "");
+        settle(cx);
+        assert!(
+            cx.debug_bounds("reconnect-button").is_none(),
+            "a connected profile offers none"
+        );
+
+        let_it_go_idle(&workspace, cx);
+        settle(cx);
+        assert!(
+            cx.debug_bounds("reconnect-button").is_some(),
+            "an idle one does"
+        );
+
+        click_selector(cx, "reconnect-button");
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        assert!(cx.debug_bounds("reconnect-button").is_none());
+        quit(workspace, cx);
+    });
+}
+
+/// SQLite opens a transaction at a `SAVEPOINT`, so the update after it is
+/// still to be released or rolled back: an idle close would drop it.
+#[gpui::test]
+fn a_savepoint_keeps_the_idle_close_from_dropping_what_it_holds(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = closing_after_a_minute(cx, "CREATE TABLE t (a INTEGER);");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_mode(crate::sql::Mode::Full, cx)
+        });
+        settle(cx);
+        run_in_front(&workspace, cx, "SAVEPOINT s; INSERT INTO t VALUES (1)");
+        assert!(in_transaction(&workspace, cx), "the SAVEPOINT opened one");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(60));
+        cx.run_until_parked();
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        workspace.update(cx, |workspace, _| {
+            if let Some(profile) = workspace.profile_mut() {
+                profile.behaviour.idle_timeout = None;
+            }
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A `RELEASE` run on its own commits the transaction a `SAVEPOINT` opened in
+/// an earlier submission: the engine says so, and the workspace believes it.
+#[gpui::test]
+fn a_release_in_a_later_submission_ends_the_savepoints_transaction(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "SAVEPOINT s");
+        assert!(in_transaction(&workspace, cx), "the SAVEPOINT opened one");
+        run_in_front(&workspace, cx, "RELEASE s");
+        assert!(!in_transaction(&workspace, cx), "the RELEASE committed it");
+        quit(workspace, cx);
+    });
+}
+
+/// A submission sqlparser cannot read that names a `BEGIN` may have left a
+/// transaction open on the session: read as open, as a bound session's
+/// would be, so an idle close does not roll it back.
+#[gpui::test]
+fn a_submission_that_may_have_opened_a_transaction_is_read_as_opening_one(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        let tab = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.active
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.execute_and_then(
+                "BEGIN; INSERT INTO t VALUES (1); SELEC nonsense".into(),
+                tab,
+                None,
+                false,
+                None,
+                cx,
+            );
+        });
+        settle(cx);
+        if workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().session.pending_run.is_some()
+        }) {
+            workspace.update(cx, |workspace, cx| workspace.approve_pending_run(cx));
+            settle(cx);
+        }
+        // SQLite refuses the whole of it, but whether a server ran the
+        // `BEGIN` cannot be told from the text: the open side is the one an
+        // idle close cannot lose work on.
+        assert!(in_transaction(&workspace, cx), "read as open");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_relation_visited_on_an_idle_profile_reconnects_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) =
+            closing_after_a_minute(cx, "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (7);");
+        let id = workspace.update_in(cx, |workspace, window, cx| {
+            let opened = crate::session::OpenedObject::Relation {
+                schema: "main".into(),
+                name: "t".into(),
+                kind: Default::default(),
+                filter: String::new(),
+                filters: Vec::new(),
+            };
+            let id = workspace
+                .open_object(opened, None, window, cx)
+                .expect("the relation opens");
+            workspace.activate_tab(Tab::Object(id), window, cx);
+            id
+        });
+        settle(cx);
+        assert_eq!(
+            front_object_database_and_cell(&workspace, cx),
+            Some((None, Some("7".into())))
+        );
+
+        let_it_go_idle(&workspace, cx);
+        // In one update, so the connect it starts cannot land between.
+        workspace.update(cx, |workspace, cx| {
+            workspace.load_relation(id, cx);
+            assert!(matches!(
+                workspace.profile().map(|profile| &profile.state),
+                Some(ProfileState::Connecting { .. })
+            ));
+        });
+        settle(cx);
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        assert_eq!(
+            front_object_database_and_cell(&workspace, cx),
+            Some((None, Some("7".into()))),
+            "the landing loaded the relation"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_stored_idle_timeout_of_zero_or_past_a_day_restores_as_off(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let profiles = [
+            sqlite_profile("on", "On", "idle_timeout_minutes = 15"),
+            sqlite_profile("zero", "Zero", "idle_timeout_minutes = 0"),
+            sqlite_profile("day", "Day", "idle_timeout_minutes = 1440"),
+            sqlite_profile("long", "Long", "idle_timeout_minutes = 1441"),
+            sqlite_profile("none", "None", ""),
+        ]
+        .concat();
+        let (workspace, cx) = launch_with_profiles(cx, &profiles);
+        let restored: Vec<_> = workspace.read_with(cx, |workspace, cx| {
+            ["on", "zero", "day", "long", "none"]
+                .map(|id| {
+                    let profile = workspace
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == id)
+                        .expect("the profile is restored");
+                    (
+                        profile.behaviour.idle_timeout,
+                        profile.stored(cx).idle_timeout_minutes,
+                    )
+                })
+                .to_vec()
+        });
+        assert_eq!(
+            restored,
+            [
+                (Some(15), Some(15)),
+                (None, None),
+                (Some(1440), Some(1440)),
+                (None, None),
+                (None, None)
+            ]
+        );
+        quit(workspace, cx);
+    });
+}
+
+/// `id`'s last use, and the scheduler's clock now.
+fn idle_clock(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+) -> (std::time::Instant, std::time::Instant) {
+    let now = cx.update(|_, cx| cx.background_executor().now());
+    let last = workspace.read_with(cx, |workspace, _| {
+        workspace
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .expect("the profile is listed")
+            .last_activity
+    });
+    (last, now)
+}
+
+/// Moves the clock `seconds` and lets every timer that came due run.
+fn tick(cx: &mut VisualTestContext, seconds: u64) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(seconds));
+    cx.run_until_parked();
+}
+
+/// Makes the work `set` says on `back`, lets a timeout and more pass, and holds
+/// that it stayed connected and set its timer again, then ends the work with
+/// `clear`.
+///
+/// The work is made before the clock moves, so that the timer finds it there
+/// whichever task the scheduler runs first.
+fn held_open_by(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    label: &str,
+    set: impl FnOnce(&mut crate::session::Profile, &mut gpui::Context<Workspace>),
+    clear: impl FnOnce(&mut crate::session::Profile, &mut gpui::Context<Workspace>),
+) {
+    let back = |workspace: &mut Workspace| {
+        workspace
+            .profiles
+            .iter()
+            .position(|profile| profile.id == "back")
+            .expect("the profile is listed")
+    };
+    workspace.update(cx, |workspace, cx| {
+        let index = back(workspace);
+        set(&mut workspace.profiles[index], cx);
+    });
+    tick(cx, 61);
+    let (last, now) = idle_clock(workspace, cx, "back");
+    assert!(
+        now >= last + std::time::Duration::from_secs(60),
+        "{label}: the deadline has passed"
+    );
+    assert_eq!(state_of(workspace, cx, "back"), "connected", "{label}");
+    assert!(idle_armed(workspace, cx, "back"), "{label}: set again");
+    workspace.update(cx, |workspace, cx| {
+        let index = back(workspace);
+        clear(&mut workspace.profiles[index], cx);
+    });
+}
+
+#[gpui::test]
+fn idle_disconnect_waits_for_unfinished_work(cx: &mut TestAppContext) {
+    use crate::session::{Exporting, QueryState, Queue};
+
+    store::tests::with_home(|| {
+        let profiles = [
+            sqlite_profile("front", "Front", ""),
+            sqlite_profile("back", "Back", "idle_timeout_minutes = 1"),
+        ]
+        .concat();
+        let (workspace, cx) = launch_connections(
+            cx,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, email TEXT);\
+             INSERT INTO t VALUES (1, 'a@x'), (2, NULL), (3, 'c@x');",
+            "",
+            &profiles,
+        );
+        cx.executor().allow_parking();
+        connect_profile(&workspace, cx, "back");
+        run_in_front(&workspace, cx, "SELECT * FROM t");
+        connect_profile(&workspace, cx, "front");
+        assert_eq!(state_of(&workspace, cx, "back"), "connected");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.profile().map(|profile| profile.id.as_str()),
+                Some("front"),
+                "the profile under test is not in front"
+            );
+        });
+
+        held_open_by(
+            &workspace,
+            cx,
+            "a transaction",
+            |profile, _| profile.in_transaction = true,
+            |profile, _| profile.in_transaction = false,
+        );
+        held_open_by(
+            &workspace,
+            cx,
+            "a bound session's transaction",
+            |profile, _| {
+                // A session for another database a tab's statement has left
+                // a transaction open on.
+                let session = crate::session::Bound::new(
+                    profile.connection().expect("the profile is connected"),
+                );
+                session
+                    .leave(
+                        Some(true),
+                        false,
+                        || Ok::<_, crate::db::DbError>(()),
+                        |_| false,
+                    )
+                    .expect("nothing is sent");
+                profile.bound.insert(
+                    "other".to_string(),
+                    crate::session::BoundSession::Open(session),
+                );
+            },
+            |profile, _| {
+                profile.bound.remove("other");
+            },
+        );
+        held_open_by(
+            &workspace,
+            cx,
+            "a statement running",
+            |profile, _| {
+                profile.session.queries[0].query = QueryState::Running {
+                    started: std::time::Instant::now(),
+                    cancelling: None,
+                    cancel: crate::db::CancelToken::default(),
+                };
+            },
+            |profile, _| profile.session.queries[0].query = QueryState::Idle,
+        );
+        let queue = |awaiting: bool, remaining: Vec<std::ops::Range<usize>>| Queue {
+            sql: "SELECT 1; SELECT 2".to_string(),
+            remaining,
+            done: Vec::new(),
+            showing: 0,
+            awaiting,
+            spare: Vec::new(),
+        };
+        held_open_by(
+            &workspace,
+            cx,
+            "a queue awaiting a statement",
+            |profile, _| profile.session.queries[0].queue = Some(queue(true, Vec::new())),
+            |profile, _| profile.session.queries[0].queue = None,
+        );
+        held_open_by(
+            &workspace,
+            cx,
+            "a queue with statements left",
+            |profile, _| {
+                profile.session.queries[0].queue =
+                    Some(queue(false, std::iter::once(9..18).collect()))
+            },
+            |profile, _| profile.session.queries[0].queue = None,
+        );
+        held_open_by(
+            &workspace,
+            cx,
+            "an export running",
+            |profile, _| {
+                profile.session.exporting = Some(Exporting {
+                    file: "out.csv".to_string(),
+                    started: std::time::Instant::now(),
+                    progress: Default::default(),
+                });
+            },
+            |profile, _| profile.session.exporting = None,
+        );
+        let grid = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .profiles
+                .iter()
+                .find(|profile| profile.id == "back")
+                .expect("the profile is listed")
+                .session
+                .queries[0]
+                .results
+                .clone()
+        });
+        held_open_by(
+            &workspace,
+            cx,
+            "a cell edit nobody applied",
+            |_, cx| {
+                grid.update(cx, |grid, _| {
+                    assert!(grid.delegate_mut().set_pending(
+                        0,
+                        1,
+                        crate::result_grid::NewValue::Value("edited".into())
+                    ));
+                });
+            },
+            |_, cx| grid.update(cx, |grid, _| grid.delegate_mut().discard_pending()),
+        );
+
+        // An import into it, which holds its own session, started while it was
+        // in front.
+        connect_profile(&workspace, cx, "back");
+        let file = store::dbdelve_directory().unwrap().join("rows.csv");
+        std::fs::write(&file, "id\n9\n").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_import_file(
+                "back".into(),
+                None,
+                "main".into(),
+                "t".into(),
+                file,
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        tick(cx, 1);
+        settle(cx);
+        // The import's own task is let run with the dialog set aside, so that
+        // it lands on nothing and leaves the dialog running for ever.
+        let dialog = workspace.update(cx, |workspace, cx| {
+            workspace.start_import(cx);
+            assert!(workspace.running_import_into("back").is_some());
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "back")
+                .expect("the profile is listed");
+            workspace.profiles[index].session.import_rows.take()
+        });
+        settle(cx);
+        workspace.update(cx, |workspace, cx| {
+            let index = workspace
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "back")
+                .expect("the profile is listed");
+            workspace.profiles[index].session.import_rows = dialog;
+            assert!(workspace.running_import_into("back").is_some());
+            workspace.activate(0, cx);
+        });
+        held_open_by(
+            &workspace,
+            cx,
+            "an import running into it",
+            |_, _| {},
+            |_, _| {},
+        );
+        held_open_by(
+            &workspace,
+            cx,
+            "an import running into it, a timeout later",
+            |_, _| {},
+            |profile, _| profile.session.import_rows = None,
+        );
+
+        // Nothing left unfinished: the import's landing is let run first, and
+        // the next deadline closes it.
+        settle(cx);
+        tick(cx, 61);
+        assert_eq!(state_of(&workspace, cx, "back"), "idle");
+        assert_eq!(state_of(&workspace, cx, "front"), "connected");
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn only_the_users_work_moves_the_idle_deadline(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &sqlite_profile("orders", "Orders", "idle_timeout_minutes = 1"),
+        );
+        connect_profile(&workspace, cx, "orders");
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+
+        tick(cx, 40);
+        run_in_front(&workspace, cx, "SELECT 1");
+        tick(cx, 21);
+        assert_eq!(
+            state_of(&workspace, cx, "orders"),
+            "connected",
+            "a statement at 40 s moves the deadline past 61 s"
+        );
+        tick(cx, 40);
+        assert_eq!(state_of(&workspace, cx, "orders"), "idle", "and to 100 s");
+
+        // A keep-alive beside it: its pings are not use, and a statement is.
+        connect_profile(&workspace, cx, "orders");
+        assert_eq!(state_of(&workspace, cx, "orders"), "connected");
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_behaviour(
+                "orders",
+                crate::session::Behaviour {
+                    keep_alive: Some(10),
+                    idle_timeout: Some(1),
+                    ..crate::session::Behaviour::default()
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        tick(cx, 25);
+        run_in_front(&workspace, cx, "SELECT 1");
+        let pinged = workspace.read_with(cx, |workspace, _| workspace.pings);
+        assert!(pinged >= 2, "{pinged} pings by 25 s");
+        tick(cx, 30);
+        tick(cx, 29);
+        assert_eq!(
+            state_of(&workspace, cx, "orders"),
+            "connected",
+            "60 s of pings are not use: the deadline is 60 s after the statement"
+        );
+        tick(cx, 2);
+        assert_eq!(state_of(&workspace, cx, "orders"), "idle");
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("in front");
+            assert!(
+                profile.keep_alive_task.is_none(),
+                "the keep-alive goes with the close"
+            );
+            assert!(workspace.pings > pinged, "and pinged until then");
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_idle_deadline_leaves_a_lost_connection_failed(cx: &mut TestAppContext) {
+    use crate::session::ProfileState;
+    store::tests::with_home(|| {
+        let (workspace, cx) = closing_after_a_minute(cx, "");
+        const LOST: &str = "Connection to Orders was lost.";
+        // What a lost session leaves: the state, with the generation the
+        // armed timer was set on.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().expect("in front").state = ProfileState::Failed(LOST.into());
+        });
+
+        tick(cx, 60);
+
+        assert_eq!(state_of(&workspace, cx, "orders"), "failed");
+        workspace.read_with(cx, |workspace, _| {
+            let profile = workspace.profile().expect("in front");
+            assert!(matches!(&profile.state, ProfileState::Failed(text) if text == LOST));
+            assert!(
+                profile
+                    .session
+                    .notice
+                    .as_deref()
+                    .is_none_or(|notice| !notice.contains("without use")),
+                "{:?}",
+                profile.session.notice
+            );
+            assert!(profile.idle_task.is_none());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_relation_export_from_a_row_of_a_database_the_connection_left_is_refused(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite(cx);
+        // As a row listed under `db_a` asks once a switch to another has
+        // landed under its open menu.
+        workspace.update(cx, |workspace, cx| {
+            workspace.export_relation(
+                crate::export::FileAs::Rows(crate::export::Format::Csv),
+                Some("db_a".into()),
+                "main".into(),
+                "orders".into(),
+                cx,
+            );
+        });
+        settle(cx);
+        let notice = shown_notice(&workspace, cx).expect("the refusal is said");
+        assert!(notice.contains("db_a"), "{notice}");
+        workspace.read_with(cx, |workspace, _| {
+            let session = &workspace.profile().expect("a profile is in front").session;
+            assert!(session.exporting.is_none(), "nothing is exported");
+        });
+        quit(workspace, cx);
+    });
+}
+
+/// A MongoDB row's collection is read from whichever database the session
+/// is on, so its rows name their database as a Postgres row's do, and an
+/// export a switch overtook is refused; MySQL's rows name theirs in the
+/// schema, and carry none.
+#[gpui::test]
+fn the_rows_of_a_database_holding_its_objects_name_their_database(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let server = |id: &str, engine: &str| {
+            format!(
+                "[[profiles]]\nid = \"{id}\"\nname = \"{id}\"\nhost = \"db.internal\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"{engine}\"\n"
+            )
+        };
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &["mongodb", "postgres", "mysql"]
+                .map(|engine| server(engine, engine))
+                .concat(),
+        );
+        workspace.read_with(cx, |workspace, _| {
+            let listed = |id: &str| {
+                (workspace.profiles.iter())
+                    .find(|profile| profile.id == id)
+                    .unwrap()
+                    .listed_database()
+            };
+            assert_eq!(listed("mongodb").as_deref(), Some("d"));
+            assert_eq!(listed("postgres").as_deref(), Some("d"));
+            assert_eq!(listed("mysql"), None);
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn a_schema_export_from_a_database_the_connection_left_is_refused(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_databases_each_holding_t(cx);
+        // What simple mode's rows and the palette's schema list carry: the
+        // database they were drawn from, as the connections tree's rows do.
+        let listed = workspace.read_with(cx, |workspace, _| {
+            workspace.profile().unwrap().listed_database()
+        });
+        assert_eq!(listed.as_deref(), Some("e2e"));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert!(workspace.set_database("other".into(), window, cx));
+            })
+        });
+        settle(cx);
+        // As the menu or the palette opened over `e2e` asks once the switch
+        // has landed under it.
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_schema_export(listed, "main".into(), cx);
+        });
+        settle(cx);
+        let notice = shown_notice(&workspace, cx).expect("the refusal is said");
+        assert!(notice.contains("e2e"), "{notice}");
+        assert_eq!(front_dialog(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.profile().unwrap().session.schema_export.is_none());
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn an_end_of_the_transaction_dropped_unsent_leaves_it_open(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        run_in_front(&workspace, cx, "BEGIN");
+        run_in_front(&workspace, cx, "INSERT INTO t VALUES (1)");
+        let listed = recorded_statements(&workspace, cx);
+        let unsent = crate::db::DbError {
+            message: crate::db::CANCELLED_UNSENT.into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.end_landed("ROLLBACK", true, false, Some(&unsent));
+        });
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "a ROLLBACK the server never saw ended nothing"
+        );
+        assert_eq!(recorded_statements(&workspace, cx), listed);
+        // SQL Server's words for one a Cancel reached while it waited for the
+        // session say the same.
+        let queued = crate::db::DbError {
+            message: crate::db::CANCELLED_QUEUED.into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.end_landed("COMMIT", true, false, Some(&queued));
+        });
+        assert!(
+            transaction_state(&workspace, cx).1,
+            "a COMMIT cancelled while queued ended nothing"
+        );
+        assert_eq!(recorded_statements(&workspace, cx), listed);
+
+        // One the server refused, on an engine that says the transaction is
+        // gone then, ended it; so did one whose session was lost.
+        let refused = crate::db::DbError {
+            message: "cannot rollback - no transaction is active".into(),
+            position: None,
+        };
+        workspace.update(cx, |workspace, _| {
+            let profile = workspace.profile_mut().expect("a profile is in front");
+            profile.end_landed("ROLLBACK", true, false, Some(&refused));
+            assert!(!profile.in_transaction && profile.transaction_statements.is_empty());
+            profile.in_transaction = true;
+            profile.end_landed("ROLLBACK", true, true, Some(&unsent));
+            assert!(!profile.in_transaction, "a lost session keeps nothing");
+        });
+
+        // The real thing: the transaction the BEGIN opened is still open on
+        // the session, and once a ROLLBACK lands it is gone.
+        workspace.update(cx, |workspace, _| {
+            workspace.profile_mut().unwrap().in_transaction = true;
+        });
+        run_in_front(&workspace, cx, "ROLLBACK");
+        assert!(!transaction_state(&workspace, cx).1);
+        assert!(recorded_statements(&workspace, cx).is_empty());
+        quit(workspace, cx);
+    });
+}
+
+/// The profile `id`'s own catalog with `schema` listed unread and none of its
+/// relations, `failed` saying why its last read failed where one did, as a
+/// MySQL 5.x catalog leaves another database; both trees built again over it.
+/// No built-in engine that runs without a server leaves a schema unread, so it
+/// is set by hand.
+fn list_unread(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+    schema: &str,
+    failed: Option<&str>,
+) {
+    workspace.update(cx, |workspace, cx| {
+        let profile = (workspace.profiles.iter_mut())
+            .find(|profile| profile.id == id)
+            .expect("the profile was restored");
+        let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+            panic!("the catalog has not loaded");
+        };
+        catalog
+            .unread
+            .insert(schema.to_string(), failed.map(str::to_string));
+        // What such a catalog holds of it: no relations until it is read.
+        if let Some(listed) = (catalog.schemas.iter_mut()).find(|listed| listed.name == schema) {
+            listed.relations.clear();
+        }
+        workspace.refresh_explorer(id, cx);
+    });
+    settle(cx);
+}
+
+/// The schemas of `id`'s own catalog still unread, and the schema names it
+/// lists.
+fn unread_and_listed(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    id: &str,
+) -> (Vec<String>, Vec<String>) {
+    workspace.read_with(cx, |workspace, _| {
+        let profile = (workspace.profiles.iter())
+            .find(|profile| profile.id == id)
+            .expect("the profile was restored");
+        match &profile.catalog {
+            CatalogState::Loaded(catalog, _) => (
+                catalog.unread.keys().cloned().collect(),
+                (catalog.schemas.iter())
+                    .map(|schema| schema.name.clone())
+                    .collect(),
+            ),
+            _ => panic!("the catalog has not loaded"),
+        }
+    })
+}
+
+fn relation_reads(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+    workspace.read_with(cx, |workspace, _| workspace.relation_reads.clone())
+}
+
+/// The one row an unread schema holds, as the explorer names it.
+fn unread_row(schema: &str) -> String {
+    format!("unread:{}:{schema}", schema.len())
+}
+
+#[gpui::test]
+fn opening_an_unread_database_row_in_the_connections_tree_reads_it_once_and_again_after_a_failure(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = two_connections_folded(cx);
+        assert_eq!(profile_state(&workspace, cx, "a"), "connected");
+        let schema = scoped_row("a", None, &explorer::schema_row("main"));
+        let unread = scoped_row("a", None, &unread_row("main"));
+        // Opened while it is read, which reads nothing: a row built folded
+        // holds one inert row in place of its own.
+        reveal_connections_row(&workspace, cx, &schema);
+        let at = connections_row(&workspace, cx, &schema).expect("the schema row is listed");
+        click_connections_row(cx, at);
+        assert!(connections_item(&workspace, cx, &schema).unwrap().0);
+        list_unread(&workspace, cx, "a", "main", None);
+        assert!(connections_item(&workspace, cx, &schema).unwrap().0);
+        let children = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            connections_item(workspace, cx, &schema)
+                .expect("the schema row is listed")
+                .1
+        };
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), LOADING.to_string(), true)],
+            "an unread schema holds one inert row saying it is loading"
+        );
+        assert!(relation_reads(&workspace, cx).is_empty());
+
+        // Opened twice before the first read lands: one read.
+        let expand = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.connections.tree.update(cx, |_, cx| {
+                    cx.emit(TreeEvent::Expanded(schema.clone().into()));
+                });
+            });
+        };
+        expand(&workspace, cx);
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"]);
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), LOADING.to_string(), true)],
+            "the row says it is loading while the read is out"
+        );
+
+        settle(cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "a").0,
+            Vec::<String>::new(),
+            "the read landed and the schema is read"
+        );
+        // What SQLite's read of one schema finds is nothing: only MySQL
+        // before 8.0 lists one unread, so its relations cannot be shown here.
+        let landed = connections_item(&workspace, cx, &schema).map(|item| item.1);
+        assert!(
+            landed
+                .unwrap_or_default()
+                .iter()
+                .all(|(id, ..)| *id != unread),
+            "the loading row is gone"
+        );
+
+        // A failed read says why in the row, and opening it reads again.
+        list_unread(&workspace, cx, "a", "main", Some("denied"));
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), "denied".to_string(), true)]
+        );
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main", "main"]);
+        assert_eq!(
+            children(&workspace, cx),
+            [(unread.clone(), LOADING.to_string(), true)],
+            "the failure gives way to loading while it reads again"
+        );
+        settle(cx);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "a").0,
+            Vec::<String>::new()
+        );
+
+        // Folded and opened again with the mouse, as a person retries.
+        list_unread(&workspace, cx, "a", "main", Some("denied"));
+        let at = connections_row(&workspace, cx, &schema).unwrap();
+        click_connections_row(cx, at);
+        assert!(!connections_item(&workspace, cx, &schema).unwrap().0);
+        assert_eq!(
+            relation_reads(&workspace, cx).len(),
+            2,
+            "folding reads nothing"
+        );
+        let at = connections_row(&workspace, cx, &schema).unwrap();
+        click_connections_row(cx, at);
+        assert_eq!(relation_reads(&workspace, cx), ["main", "main", "main"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "a").0,
+            Vec::<String>::new()
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn opening_an_unread_schema_row_in_the_simple_tree_reads_it_once_and_again_after_a_failure(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let id = front_profile(&workspace, cx);
+        let schema = explorer::schema_row("main");
+        let children = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let tree = workspace
+                    .read(cx)
+                    .profile()
+                    .unwrap()
+                    .session
+                    .explorer_tree
+                    .read(cx);
+                let index = tree.index_of(&schema.clone().into())?;
+                let item = tree.entry(index)?.item().clone();
+                Some(
+                    item.children
+                        .iter()
+                        .map(|child| {
+                            (
+                                child.id.to_string(),
+                                child.label.to_string(),
+                                child.is_disabled(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        let expand = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let tree = workspace.profile().unwrap().session.explorer_tree.clone();
+                tree.update(cx, |_, cx| {
+                    cx.emit(TreeEvent::Expanded(schema.clone().into()));
+                });
+            });
+        };
+        let loading = vec![(unread_row("main"), LOADING.to_string(), true)];
+
+        list_unread(&workspace, cx, &id, "main", None);
+        assert_eq!(children(&workspace, cx), Some(loading.clone()));
+        expand(&workspace, cx);
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"], "one read");
+        assert_eq!(children(&workspace, cx), Some(loading.clone()));
+        settle(cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, &id).0,
+            Vec::<String>::new()
+        );
+        assert!(
+            children(&workspace, cx)
+                .unwrap_or_default()
+                .iter()
+                .all(|(row, ..)| *row != unread_row("main")),
+            "the loading row is gone"
+        );
+
+        list_unread(&workspace, cx, &id, "main", Some("denied"));
+        assert_eq!(
+            children(&workspace, cx),
+            Some(vec![(unread_row("main"), "denied".to_string(), true)])
+        );
+        expand(&workspace, cx);
+        assert_eq!(relation_reads(&workspace, cx), ["main", "main"]);
+        assert_eq!(children(&workspace, cx), Some(loading));
+        settle(cx);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, &id).0,
+            Vec::<String>::new()
+        );
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn select_database_keeps_a_catalog_listing_every_database_and_reads_the_one_moved_to(
+    cx: &mut TestAppContext,
+) {
+    store::tests::with_home(|| {
+        let (_mock, workspace, cx) = launch_beside_a_clickhouse_mock(cx);
+        cx.executor().allow_parking();
+        connect_clicks(&workspace, cx);
+        let settled = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| {
+                let profile = (workspace.profiles.iter())
+                    .find(|profile| profile.id == "clicks")
+                    .unwrap();
+                profile.connection().is_some()
+                    && profile.schema_reads.is_empty()
+                    && matches!(
+                        profile.catalog,
+                        CatalogState::Loaded(_, ref routines)
+                            if !matches!(routines, crate::session::Routines::Loading)
+                    )
+            })
+        };
+        let catalog_reads = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.catalog_reads)
+        };
+        let switch = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, name: &str| {
+            let (generation, _) = clicks_connection(workspace, cx);
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    assert!(workspace.set_database(name.into(), window, cx));
+                })
+            });
+            drive_until(cx, |cx| {
+                clicks_connection(workspace, cx).0 != generation && settled(workspace, cx)
+            });
+            settle(cx);
+        };
+        drive_until(cx, |cx| settled(&workspace, cx));
+        let both = ["analytics", "dbdelve_dev"].map(String::from).to_vec();
+        assert_eq!(unread_and_listed(&workspace, cx, "clicks").1, both);
+
+        // Listed unread, as a MySQL 5.x catalog lists every database but the
+        // own one: the switch keeps the catalog and reads the one moved to.
+        list_unread(&workspace, cx, "clicks", "analytics", None);
+        let reads = catalog_reads(&workspace, cx);
+        switch(&workspace, cx, "analytics");
+        assert_eq!(catalog_reads(&workspace, cx), reads, "nothing read again");
+        assert_eq!(relation_reads(&workspace, cx), ["analytics"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "clicks"),
+            (Vec::new(), both.clone()),
+            "the kept catalog, with the database moved to read"
+        );
+
+        // Back onto one the catalog has read: kept, and nothing read at all.
+        switch(&workspace, cx, "dbdelve_dev");
+        assert_eq!(catalog_reads(&workspace, cx), reads);
+        assert_eq!(relation_reads(&workspace, cx), ["analytics"]);
+        assert_eq!(
+            unread_and_listed(&workspace, cx, "clicks"),
+            (Vec::new(), both)
+        );
+
         quit(workspace, cx);
     });
 }

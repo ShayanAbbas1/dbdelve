@@ -22,7 +22,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use ::redis::{
@@ -33,8 +33,8 @@ use ::redis::{
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
     Catalog, Cell, Column, ColumnDefinition, DbError, EditTarget, Engine, Fetch, NamedDefinition,
-    QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig, SslMode, Stopped,
-    Structure, plain_error,
+    Properties, QueryResult, Relation, RelationKind, Row, RowBuilder, Schema, ServerConfig,
+    SslMode, Stopped, Structure, plain_error,
 };
 use crate::redis_cmd::browse::PREVIEWED;
 use crate::redis_cmd::{self, Command, edit};
@@ -130,6 +130,8 @@ pub fn config_from_url(url: &str) -> Result<ServerConfig, String> {
         ssm: None,
         ssh: None,
         schema: None,
+        time_zone: None,
+        properties: Properties::default(),
     })
 }
 
@@ -269,10 +271,8 @@ impl Connection {
             .arg("NO-TOUCH")
             .arg("ON")
             .query::<()>(&mut client);
-        let timeout = (server.statement_timeout > 0)
-            .then(|| Duration::from_secs(u64::from(server.statement_timeout)));
         client
-            .set_read_timeout(timeout)
+            .set_read_timeout(session_timeout(server))
             .map_err(|error| plain_error(message(&error)))?;
         Ok(Session {
             client,
@@ -280,6 +280,55 @@ impl Connection {
             multi: false,
             watching: false,
         })
+    }
+
+    /// One `PING` on the session. A command holding it is the session in use,
+    /// so the ping is skipped, never queued behind it; a session not dialled
+    /// is left alone, and so is one with a `MULTI` open, where the `PING`
+    /// would be queued into the user's transaction instead of answered. A
+    /// ping that does not come back whole takes the session with it, as any
+    /// command does (`send`), and so does one with no answer within
+    /// [`super::PING_WITHIN`], whose socket no later command could trust.
+    pub fn ping(&self) -> Result<(), DbError> {
+        let mut held = match self.session.try_lock() {
+            Ok(held) => held,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            // A panic mid-command leaves nothing a later command would not
+            // find out, which is how `lock` treats it too.
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        let Some(live) = held.as_mut() else {
+            return Ok(());
+        };
+        if live.multi {
+            return Ok(());
+        }
+        let bound = session_timeout(&self.server).map_or(super::PING_WITHIN, |timeout| {
+            timeout.min(super::PING_WITHIN)
+        });
+        let pinged = live
+            .client
+            .set_read_timeout(Some(bound))
+            .and_then(|()| ::redis::cmd("PING").query::<String>(&mut live.client));
+        // The session's own bound back, or no session: one left with the
+        // ping's would cut a long command short.
+        let restored = live.client.set_read_timeout(session_timeout(&self.server));
+        let error = match (pinged, restored) {
+            (Ok(_), Ok(())) => return Ok(()),
+            (_, Err(error)) => {
+                *held = None;
+                return Err(plain_error(message(&error)));
+            }
+            (Err(error), Ok(())) => error,
+        };
+        if error.is_io_error()
+            || error.is_unrecoverable_error()
+            || error.is_timeout()
+            || !live.client.is_open()
+        {
+            *held = None;
+        }
+        Err(plain_error(message(&error)))
     }
 
     /// `CLIENT KILL ID` over a connection of its own, because the session
@@ -655,6 +704,7 @@ impl Connection {
         Ok(super::Databases {
             names: (0..count).map(|index| format!("db{index}")).collect(),
             current: Some(format!("db{}", database_number(&self.server.database)?)),
+            left_out: 0,
         })
     }
 
@@ -687,6 +737,7 @@ impl Connection {
                 sequences: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         })
     }
 
@@ -881,6 +932,12 @@ fn connect_error(error: &RedisError, server: &ServerConfig) -> DbError {
     } else {
         format!("{endpoint}: {}", message(error))
     })
+}
+
+/// The read bound a session's commands run under: the statement timeout,
+/// or none.
+fn session_timeout(server: &ServerConfig) -> Option<Duration> {
+    (server.statement_timeout > 0).then(|| Duration::from_secs(u64::from(server.statement_timeout)))
 }
 
 /// The server's own words for its errors (`WRONGTYPE Operation against a key
@@ -2472,6 +2529,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_keep_alive_ping_with_no_answer_gives_up_and_drops_the_session() {
+        // Refuses every command but a client's `PING`, which it never
+        // answers. The inline one `prefer` probes with is answered.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    // Bytes kept until they make whole requests, however
+                    // TCP splits them.
+                    let mut pending = Vec::new();
+                    let mut buffer = [0; 4096];
+                    loop {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => pending.extend_from_slice(&buffer[..read]),
+                        }
+                        while let Some((used, name, inline)) = whole_request(&pending) {
+                            pending.drain(..used);
+                            let reply: &[u8] = match (name.eq_ignore_ascii_case(b"PING"), inline) {
+                                (true, true) => b"+PONG\r\n",
+                                (true, false) => {
+                                    std::thread::sleep(Duration::from_secs(10));
+                                    return;
+                                }
+                                (false, _) => b"-ERR unknown command\r\n",
+                            };
+                            let _ = stream.write_all(reply);
+                        }
+                    }
+                });
+            }
+        });
+        let connection = Connection::open(
+            &config_from_url(&format!("redis://127.0.0.1:{port}?sslmode=disable")).unwrap(),
+        )
+        .expect("the session opens");
+
+        let started = Instant::now();
+        assert!(connection.ping().is_err(), "the unanswered ping fails");
+        assert!(
+            started.elapsed() < super::super::PING_WITHIN * 5,
+            "within its bound: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            lock(&connection.session).is_none(),
+            "and the session it went out on is not kept"
+        );
+    }
+
+    /// The first whole request in `sent`, for the test servers: how many
+    /// bytes it takes, its command name, and whether it came inline rather
+    /// than as a RESP array. `None` until its last byte has arrived.
+    fn whole_request(sent: &[u8]) -> Option<(usize, Vec<u8>, bool)> {
+        let line = |from: usize| {
+            let end = from
+                + sent
+                    .get(from..)?
+                    .windows(2)
+                    .position(|pair| pair == b"\r\n")?;
+            Some((&sent[from..end], end + 2))
+        };
+        let number = |text: &[u8]| {
+            std::str::from_utf8(text.get(1..)?)
+                .ok()?
+                .parse::<usize>()
+                .ok()
+        };
+        if sent.first()? != &b'*' {
+            let (text, used) = line(0)?;
+            let name = text.split(|byte| *byte == b' ').next().unwrap_or_default();
+            return Some((used, name.to_vec(), true));
+        }
+        let (count, mut at) = line(0)?;
+        let mut name = None;
+        for _ in 0..number(count)? {
+            let (length, start) = line(at)?;
+            let end = start + number(length)?;
+            let argument = sent.get(start..end)?;
+            sent.get(end..end + 2).filter(|ending| *ending == b"\r\n")?;
+            name.get_or_insert_with(|| argument.to_vec());
+            at = end + 2;
+        }
+        Some((at, name.unwrap_or_default(), false))
+    }
+
     fn live_config() -> ServerConfig {
         let url = std::env::var("dbdelve_REDIS_URL").expect("dbdelve_REDIS_URL is required");
         config_from_url(&url).expect("dbdelve_REDIS_URL should parse")
@@ -2479,6 +2625,40 @@ mod tests {
 
     fn live() -> Connection {
         Connection::open(&live_config()).expect("connection should open")
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_skips_an_open_multi() {
+        const KEY: &str = "live:keep:alive";
+        let connection = live();
+        ran(&connection, &format!("DEL {KEY}"));
+        assert!(connection.ping().is_ok(), "an idle session answers");
+
+        // A command holds the session for as long as it runs; the round
+        // skips it rather than queue behind it.
+        let busy = lock(&connection.session);
+        let started = Instant::now();
+        assert!(connection.ping().is_ok(), "a busy session is skipped");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "and the skip does not wait"
+        );
+        drop(busy);
+
+        // The ping sends nothing inside the user's MULTI: a PING queued there
+        // would be one more command EXEC ran, and its reply one more element.
+        ran(&connection, "MULTI");
+        assert!(connection.ping().is_ok(), "an open MULTI is skipped");
+        ran(&connection, &format!("SET {KEY} 1"));
+        let exec = ran(&connection, "EXEC");
+        assert_eq!(
+            exec.rows.len(),
+            1,
+            "EXEC ran only what was queued before it: {:?}",
+            cells(&exec)
+        );
+        ran(&connection, &format!("DEL {KEY}"));
     }
 
     fn ran(connection: &Connection, text: &str) -> QueryResult {
@@ -2636,6 +2816,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cells(&ran(&other, "GET other:key")), [some(&["in db 1"])]);
+    }
+
+    #[test]
+    #[ignore = "requires the repository development database configured through dbdelve_REDIS_URL"]
+    fn live_the_include_list_lists_only_the_matched_databases() {
+        use crate::db::{Include, Levels, Shown};
+        let connection = crate::db::Connection::Redis(live());
+        let all = connection
+            .databases(Engine::Redis, &Shown::everything())
+            .expect("databases should list");
+        let shown = Include::from_stored(vec!["db1".into()], Vec::new()).resolve(
+            Levels::DatabaseHoldsObjects,
+            Some("db0"),
+            None,
+        );
+        let listed = connection
+            .databases(Engine::Redis, &shown)
+            .expect("databases should list");
+        assert_eq!(listed.names, ["db0", "db1"]);
+        assert_eq!(listed.left_out, all.names.len() - 2);
     }
 
     #[test]

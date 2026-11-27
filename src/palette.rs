@@ -57,8 +57,8 @@ use crate::{
         routine_name,
     },
     sidebar::{
-        ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, node_actions,
-        selection_header,
+        ListingScope, NodeAction, SelectedNode, SelectionAction, ViewMode, connection_row,
+        count_label, node_actions, scoped_row, selection_header,
     },
     sql,
     store::{HistoryEntry, StoredProject},
@@ -309,8 +309,10 @@ impl Mode {
 pub enum Command {
     OpenObject(ExplorerTarget),
     /// A schema's ER diagram, by name, showing the neighbourhood of `centre`
-    /// where one is named.
+    /// where one is named. The schema is `database`'s, the connection's own
+    /// where none is named.
     ShowDiagram {
+        database: Option<String>,
         schema: String,
         centre: Option<String>,
     },
@@ -442,13 +444,20 @@ pub enum Command {
     ImportTheme(user::Source, usize, Option<Appearance>),
     /// Fetch the server's databases and put the palette back up over them.
     SelectDatabase,
+    /// Open the filter picker over the front connection's databases.
+    FilterDatabases,
+    /// Open the filter picker over the tables of the schema the front
+    /// connection is in.
+    FilterTables,
     SetDatabase(String),
     /// Put the palette back up over the catalog's schemas.
     SelectSchema,
     SetSchema(String),
     /// Put the palette back up over the catalog's schemas, to export one.
     PickSchemaToExport,
-    ExportSchema(String),
+    /// The schema, and the database the list was of where the connections
+    /// tree names one, so a switch that landed meanwhile is refused.
+    ExportSchema(Option<String>, String),
     /// Put the palette back up over the font list for this slot.
     PickFont(FontSlot),
     SetFont(FontSlot, String),
@@ -1545,6 +1554,15 @@ impl Palette {
         self.items
             .iter()
             .map(|item| (item.label.as_str(), item.detail.as_deref()))
+            .collect()
+    }
+
+    /// Each row's label with the hint drawn at its end, empty where it has none.
+    #[cfg(test)]
+    pub fn labels_with_hints(&self) -> Vec<(&str, &str)> {
+        self.items
+            .iter()
+            .map(|item| (item.label.as_str(), item.hint.as_ref()))
             .collect()
     }
 
@@ -3361,12 +3379,19 @@ fn schema_items(profile: &Profile, pick: SchemaPick) -> Vec<Item> {
         .by_name()
         .into_iter()
         .map(|(_, schema)| &schema.name);
-    schema_items_from(names, profile.schema_in().as_deref(), pick)
+    let database = profile.listed_database();
+    schema_items_from(
+        names,
+        profile.schema_in().as_deref(),
+        database.as_deref(),
+        pick,
+    )
 }
 
 fn schema_items_from<'a>(
     names: impl Iterator<Item = &'a String>,
     active: Option<&str>,
+    database: Option<&str>,
     pick: SchemaPick,
 ) -> Vec<Item> {
     names
@@ -3378,7 +3403,9 @@ fn schema_items_from<'a>(
             };
             let command = match pick {
                 SchemaPick::Activate => Command::SetSchema(name.clone()),
-                SchemaPick::Export => Command::ExportSchema(name.clone()),
+                SchemaPick::Export => {
+                    Command::ExportSchema(database.map(str::to_string), name.clone())
+                }
             };
             Item::new(name.clone(), icon::SCHEMA, command).hint(hint)
         })
@@ -4024,6 +4051,7 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 &format!("Show {} in diagram", tab.name),
                 icon::DIAGRAM,
                 Command::ShowDiagram {
+                    database: tab.database.clone(),
                     schema: tab.schema.clone(),
                     centre: Some(tab.name.clone()),
                 },
@@ -4086,21 +4114,32 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                 }),
         );
     } else if let Some(node) = workspace.selected_node(cx)
-        && let Some(target) = workspace
+        && let Some((target, filterable)) = workspace
             .profiles
             .iter()
             .find(|found| found.id == node.profile)
-            .map(|found| found.config.target())
+            .map(|found| (found.config.target(), found.offers_filter()))
     {
         items.extend(
             node_actions(node.kind, &node.name, target)
                 .into_iter()
+                // The profile's own `Filter databases…` runs the same
+                // command where the node is the profile in front: listed
+                // once, as that one, which carries the count.
+                .filter(|action| match action {
+                    NodeAction::FilterDatabases => filterable && node.profile != profile.id,
+                    NodeAction::FilterTables => workspace.table_scope_of(&node).is_some(),
+                    _ => true,
+                })
                 .map(|action| {
                     let icon = match action {
                         NodeAction::NewQueryHere => icon::PLUS,
                         NodeAction::CopyName(_) => icon::COPY,
                         NodeAction::ShowDdl => icon::STRUCTURE,
+                        NodeAction::ShowGrants => icon::SHIELD,
                         NodeAction::Refresh => icon::REFRESH,
+                        NodeAction::FilterDatabases => icon::DATABASE,
+                        NodeAction::FilterTables => icon::TABLE,
                     };
                     command(
                         action.label(),
@@ -4602,11 +4641,16 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         items.extend(
             Workspace::diagram_schemas(profile)
                 .into_iter()
-                .map(|schema| {
+                .map(|(database, schema)| {
+                    let label = match &database {
+                        Some(database) => format!("Show diagram of {schema} in {database}"),
+                        None => format!("Show diagram of {schema}"),
+                    };
                     command(
-                        &format!("Show diagram of {schema}"),
+                        &label,
                         icon::DIAGRAM,
                         Command::ShowDiagram {
+                            database,
                             schema,
                             centre: None,
                         },
@@ -4614,6 +4658,60 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
                     )
                 }),
         );
+    }
+    // Offered where there are databases to choose between, and omitted rather
+    // than disabled where there are none.
+    if profile.offers_filter() {
+        // The count the tree draws, from what it already holds: simple mode
+        // has no count slot and shows none.
+        let row = connection_row(&profile.id);
+        let counted = (workspace.view_mode() == ViewMode::Complex)
+            .then(|| {
+                let shown = workspace.connections.counts.get(&row)?;
+                let total = workspace.connections.totals.get(&row)?;
+                Some(count_label(*shown, Some(*total)))
+            })
+            .flatten();
+        let item = command(
+            "Filter databases…",
+            icon::DATABASE,
+            Command::FilterDatabases,
+            CONNECTION,
+        );
+        items.push(match counted {
+            Some(count) => item.hint(count),
+            None => item,
+        });
+    }
+    if let Some(scope) = workspace.front_table_scope() {
+        // The schema row's count, as the tree draws it.
+        // Under the database row only where the shape has schemas inside a
+        // database.
+        let under = (profile.config.target().levels() == crate::db::Levels::DatabaseThenSchema)
+            .then_some(scope.database.as_deref())
+            .flatten();
+        let row = scoped_row(
+            &profile.id,
+            under,
+            &crate::explorer::schema_row(&scope.schema),
+        );
+        let counted = (workspace.view_mode() == ViewMode::Complex)
+            .then(|| {
+                let shown = workspace.connections.counts.get(&row)?;
+                let total = workspace.connections.totals.get(&row)?;
+                Some(count_label(*shown, Some(*total)))
+            })
+            .flatten();
+        let item = command(
+            "Filter tables…",
+            icon::TABLE,
+            Command::FilterTables,
+            CONNECTION,
+        );
+        items.push(match counted {
+            Some(count) => item.hint(count),
+            None => item,
+        });
     }
     if profile.config.target().picks_schema() {
         items.push(command(
@@ -5441,9 +5539,12 @@ mod tests {
     #[test]
     fn the_schema_list_exports_or_activates_as_it_was_opened_for() {
         let names = ["main".to_string(), "sales".to_string()];
-        let rows = |pick| schema_items_from(names.iter(), Some("sales"), pick);
+        let rows = |pick| schema_items_from(names.iter(), Some("sales"), Some("shop"), pick);
         let exporting = rows(SchemaPick::Export);
-        assert!(matches!(&exporting[1].command, Command::ExportSchema(name) if name == "sales"));
+        assert!(matches!(
+            &exporting[1].command,
+            Command::ExportSchema(Some(database), name) if database == "shop" && name == "sales"
+        ));
         assert_eq!(exporting[1].hint.as_ref(), "active");
         let activating = rows(SchemaPick::Activate);
         assert!(matches!(&activating[0].command, Command::SetSchema(name) if name == "main"));

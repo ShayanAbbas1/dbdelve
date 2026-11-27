@@ -49,6 +49,29 @@ impl Workspace {
         }
     }
 
+    /// Open a pinned relation the connection's filter hides, by its name: the
+    /// narrowed catalog does not list it, and a relation's tab needs nothing
+    /// the catalog holds.
+    pub(crate) fn open_hidden_relation(
+        &mut self,
+        object: &crate::explorer::ObjectRef,
+        kind: RelationKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opened = OpenedObject::Relation {
+            schema: object.schema.clone(),
+            name: object.name.clone(),
+            kind,
+            filter: String::new(),
+            filters: Vec::new(),
+        };
+        if let Some(id) = self.open_object(opened, None, window, cx) {
+            self.activate_tab(Tab::Object(id), window, cx);
+            self.remember_profiles(cx);
+        }
+    }
+
     /// Open the object `target` names in the catalog read for `database`,
     /// another database of `profile`'s server, as a tab bound to it: the
     /// profile comes to the front first, and a database whose catalog has not
@@ -240,6 +263,17 @@ impl Workspace {
         ) {
             return;
         }
+        // An idle-closed profile stays in front with its tabs, so visiting one
+        // is its reconnect; the landing's `reload_front_object` loads this tab.
+        if let Some(index) = self.active
+            && matches!(
+                self.profiles.get(index).map(|profile| &profile.state),
+                Some(ProfileState::Idle)
+            )
+        {
+            self.begin_connect(index, cx);
+            return;
+        }
         let (schema, relation) = (tab.schema.clone(), tab.name.clone());
         let (query, stale, sent) = match &tab.body {
             ObjectBody::Relation {
@@ -260,6 +294,10 @@ impl Workspace {
             }
             ObjectBody::Diagram { .. } => {
                 self.load_diagram(id, cx);
+                return;
+            }
+            ObjectBody::Users { .. } => {
+                self.show_users(cx);
                 return;
             }
             ObjectBody::Routine(_) => return,
@@ -318,7 +356,8 @@ impl Workspace {
                     } => Some((filter.clone(), sort.clone(), *limit, *offset)),
                     ObjectBody::Routine(_)
                     | ObjectBody::Structure { .. }
-                    | ObjectBody::Diagram { .. } => None,
+                    | ObjectBody::Diagram { .. }
+                    | ObjectBody::Users { .. } => None,
                 }
             })
         else {
@@ -742,6 +781,14 @@ impl Workspace {
                     _ => {}
                 }
             }
+            NodeAction::ShowGrants => {
+                let kind = match node.kind {
+                    NodeKind::Relation(kind) => relation_kind_label(kind),
+                    NodeKind::Sequence => "sequence",
+                    _ => return,
+                };
+                self.show_object_grants(node, kind, window, cx);
+            }
             NodeAction::NewQueryHere => {
                 if !self.make_front(&node.profile, cx) {
                     return;
@@ -778,6 +825,18 @@ impl Workspace {
                 match self.elsewhere(node.database.clone()) {
                     Some(database) => self.reload_database(&node.profile, database, cx),
                     None => self.refresh_schema(cx),
+                }
+            }
+            NodeAction::FilterDatabases => {
+                if self.make_front(&node.profile, cx) {
+                    self.open_filter_picker(&node.profile, window, cx);
+                }
+            }
+            NodeAction::FilterTables => {
+                if let Some(scope) = self.table_scope_of(node)
+                    && self.make_front(&node.profile, cx)
+                {
+                    self.open_table_picker(scope, &node.profile, window, cx);
                 }
             }
         }
@@ -937,7 +996,11 @@ impl Workspace {
     /// `id`, in front or not, by id and generation, with how to reach it.
     /// Another database's is its session, which a read with none open opens
     /// first.
-    fn route_in(&self, id: &str, database: Option<String>) -> Option<(String, u64, Routed)> {
+    pub(super) fn route_in(
+        &self,
+        id: &str,
+        database: Option<String>,
+    ) -> Option<(String, u64, Routed)> {
         let profile = self.profiles.iter().find(|found| found.id == id)?;
         let own = profile.active_database();
         let database = database.filter(|database| own.as_ref() != Some(database));
@@ -1423,7 +1486,9 @@ impl Workspace {
                             }
                             *structure = loaded(result);
                         }
-                        ObjectBody::Routine(_) | ObjectBody::Diagram { .. } => {}
+                        ObjectBody::Routine(_)
+                        | ObjectBody::Diagram { .. }
+                        | ObjectBody::Users { .. } => {}
                     }
                     let pages_by_key = profile.config.engine().pages_by_key();
                     cx.notify();
@@ -1475,6 +1540,8 @@ impl Workspace {
         };
         // The session already open, to take out if the read finds it lost.
         let bound = routed.bound();
+        // A tab's read of its own: the user is looking at it.
+        self.mark_activity(id, cx);
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
             let resolved = match opens {
@@ -2543,6 +2610,8 @@ impl Workspace {
             let (got, waiting) = restorable(
                 profile.config.engine(),
                 profile.draws_diagrams(),
+                profile.filter_hides(stored.database.as_deref(), &stored.schema, None)
+                    || !profile.catalog_under_saved_filter(stored.database.as_deref()),
                 profile.catalog_state_of(stored.database.as_deref()),
                 std::slice::from_ref(stored),
             );
@@ -2565,7 +2634,9 @@ impl Workspace {
         for (opened, active, database) in opened {
             let id = match opened {
                 Reopened::Object(opened) => self.open_object(opened, database, window, cx),
-                Reopened::Diagram(schema, view) => self.diagram_tab(schema, Some(view), window, cx),
+                Reopened::Diagram(schema, view) => {
+                    self.diagram_tab(database, schema, Some(view), window, cx)
+                }
             };
             if active {
                 restored_active = id;
@@ -2654,10 +2725,15 @@ fn opened_from(catalog: &Catalog, target: ExplorerTarget) -> Option<OpenedObject
 /// A routine waits for the routines, not just the catalog: resolved against
 /// relations alone it would find nothing and be dropped for good. One whose
 /// routines failed to load keeps waiting, because a failed listing says nothing
-/// about whether the routine still exists.
+/// about whether the routine still exists. One in a schema or database the
+/// connection's filter hides, `hidden`, waits too: the narrowed catalog does
+/// not list it, which says nothing about whether it still exists either. So
+/// does one the filter has just come to show, until a catalog read under it
+/// lands.
 fn restorable(
     engine: Engine,
     draws: bool,
+    hidden: bool,
     catalog: &CatalogState,
     pending: &[store::StoredObject],
 ) -> (Vec<(Reopened, bool)>, Vec<store::StoredObject>) {
@@ -2679,6 +2755,8 @@ fn restorable(
                 ),
                 stored.active,
             ));
+        } else if stored.routine && hidden {
+            still_pending.push(stored.clone());
         } else if stored.routine {
             match catalog {
                 Some(catalog) if routines == Routines::Loaded => opened.extend(
@@ -2805,6 +2883,17 @@ fn loaded(result: Result<Structure, DbError>) -> StructureState {
     }
 }
 
+/// What Show Grants calls a relation of `kind` under its title.
+fn relation_kind_label(kind: RelationKind) -> &'static str {
+    match kind {
+        RelationKind::Table | RelationKind::PartitionedTable => "table",
+        RelationKind::View => "view",
+        RelationKind::MaterializedView => "materialized view",
+        RelationKind::ForeignTable => "foreign table",
+        RelationKind::Dictionary => "dictionary",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2857,8 +2946,13 @@ mod tests {
             stored("digest()", true),
         ];
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
 
         assert_eq!(opened.len(), 2, "before the catalog, as a relation");
         assert_eq!(name(&opened[0].0), "accounts");
@@ -2887,8 +2981,13 @@ mod tests {
         };
         let pending = [stored("accounts", false), diagram.clone()];
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, false, &CatalogState::Loading, &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            false,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
         assert_eq!(opened.len(), 1);
         assert_eq!(name(&opened[0].0), "accounts");
         assert_eq!(
@@ -2897,8 +2996,13 @@ mod tests {
             "kept whole, view and all"
         );
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, true, &CatalogState::Loading, &waiting);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &waiting,
+        );
         assert!(matches!(opened[..], [(Reopened::Diagram(..), true)]));
         assert!(waiting.is_empty());
     }
@@ -2924,6 +3028,7 @@ mod tests {
                     sequences: Vec::new(),
                 }],
                 database: None,
+                ..Default::default()
             },
             routines,
         )
@@ -2936,8 +3041,13 @@ mod tests {
         // Relations are in, routines are not: the relation opens, and the
         // routine is neither resolved against a catalog without it nor dropped.
         for routines in [Routines::Loading, Routines::Failed] {
-            let (opened, waiting) =
-                restorable(Engine::Postgres, true, &catalog_with(routines), &pending);
+            let (opened, waiting) = restorable(
+                Engine::Postgres,
+                true,
+                false,
+                &catalog_with(routines),
+                &pending,
+            );
             assert_eq!(opened.len(), 1);
             assert_eq!(name(&opened[0].0), "accounts");
             assert_eq!(waiting, [stored("digest()", true)]);
@@ -2946,11 +3056,43 @@ mod tests {
         let (opened, waiting) = restorable(
             Engine::Postgres,
             true,
+            false,
             &catalog_with(Routines::Loaded),
             &pending,
         );
         assert_eq!(opened.len(), 2);
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_routine_in_a_schema_the_filter_hides_waits_rather_than_being_dropped() {
+        let pending = [stored("digest()", true)];
+        let hidden = CatalogState::Loaded(Catalog::default(), Routines::Loaded);
+
+        let (opened, waiting) = restorable(Engine::Postgres, true, true, &hidden, &pending);
+
+        assert!(opened.is_empty());
+        assert_eq!(
+            waiting, pending,
+            "kept on disk for when the filter shows it"
+        );
+    }
+
+    #[test]
+    fn a_stored_routine_waits_while_the_depth_skips_the_routines() {
+        let pending = [stored("accounts", false), stored("digest()", true)];
+
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &catalog_with(Routines::Skipped),
+            &pending,
+        );
+
+        assert_eq!(opened.len(), 1);
+        assert_eq!(name(&opened[0].0), "accounts");
+        assert_eq!(waiting, [stored("digest()", true)]);
     }
 
     #[test]
@@ -2964,7 +3106,13 @@ mod tests {
             stored("accounts", false),
         ];
 
-        let (opened, _) = restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+        let (opened, _) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
 
         assert!(matches!(
             opened[0].0,
@@ -2984,13 +3132,82 @@ mod tests {
             ..stored("accounts", false)
         }];
 
-        let (opened, waiting) =
-            restorable(Engine::Postgres, true, &CatalogState::Loading, &pending);
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            false,
+            &CatalogState::Loading,
+            &pending,
+        );
 
         assert_eq!(opened.len(), 1);
         assert_eq!(name(&opened[0].0), "accounts");
         assert!(opened[0].1, "the tab that was in front comes back in front");
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_stored_relation_the_table_list_hides_still_opens_with_the_kind_the_record_keeps() {
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["other".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let narrowed = shown.narrow_catalog(crate::db::Catalog {
+            schemas: vec![crate::db::Schema {
+                name: "public".into(),
+                relations: vec![
+                    crate::db::Relation {
+                        name: "accounts".into(),
+                        kind: RelationKind::View,
+                        partition_of: None,
+                        size: None,
+                        rows: None,
+                    },
+                    crate::db::Relation {
+                        name: "other".into(),
+                        kind: RelationKind::Table,
+                        partition_of: None,
+                        size: None,
+                        rows: None,
+                    },
+                ],
+                routines: Vec::new(),
+                sequences: Vec::new(),
+            }],
+            ..Default::default()
+        });
+        assert!(shown.lists_object(None, "public", Some("other")));
+        assert!(!shown.lists_object(None, "public", Some("accounts")));
+        let pending = [store::StoredObject {
+            active: true,
+            ..stored("accounts", false)
+        }];
+
+        // `hidden` is what `restore_objects` passes: a relation tab does not
+        // wait on it, since it opens by name without the catalog.
+        let (opened, waiting) = restorable(
+            Engine::Postgres,
+            true,
+            true,
+            &CatalogState::Loaded(narrowed, Routines::Loaded),
+            &pending,
+        );
+
+        assert!(waiting.is_empty());
+        let Some((Reopened::Object(OpenedObject::Relation { name, kind, .. }), true)) =
+            opened.first()
+        else {
+            panic!("the tab of a hidden table is reopened in front");
+        };
+        assert_eq!(name, "accounts");
+        assert_eq!(
+            *kind,
+            RelationKind::View,
+            "the kind comes from the record of what the list hid"
+        );
     }
 
     #[test]

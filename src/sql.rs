@@ -1218,6 +1218,232 @@ pub fn is_generated_write_on(engine: Engine, statement: &str) -> bool {
     }
 }
 
+/// The gate every role change DBDelve writes passes before it is shown for
+/// review: `CREATE ROLE` and `ALTER ROLE`, one or more, in the shapes
+/// `db::roles` writes and no other. A
+/// password is admitted only as a SCRAM verifier, so a statement that would
+/// carry one in the clear is refused here whoever wrote it. Never a
+/// superuser, a privilege on an object, or a change of anything else.
+pub fn is_generated_role_change(engine: Engine, sql: &str) -> bool {
+    let spec = &engine.spec().sql;
+    if engine.syntax() != Syntax::Sql || spec.parser_dialect != ParserDialect::PostgreSql {
+        return false;
+    }
+    let dialect = parser(spec.parser_dialect);
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    !statements.is_empty() && statements.iter().all(role_change)
+}
+
+/// The gate every grant change DBDelve writes passes before it is shown for
+/// review: `GRANT` and `REVOKE` of named privileges on one database, schema,
+/// table or sequence to one role, in the shapes `db::roles::grant_statements`
+/// writes and no other. Never `ALL`, `PUBLIC`, a grant option, `CASCADE`, a
+/// column list, a bulk `ALL TABLES IN SCHEMA`, nor a role's membership.
+pub fn is_generated_grant_change(engine: Engine, sql: &str) -> bool {
+    let spec = &engine.spec().sql;
+    if engine.syntax() != Syntax::Sql || spec.parser_dialect != ParserDialect::PostgreSql {
+        return false;
+    }
+    let dialect = parser(spec.parser_dialect);
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    !statements.is_empty()
+        && statements.iter().all(|statement| match statement {
+            Statement::Grant(grant) => {
+                !grant.with_grant_option
+                    && grant.as_grantor.is_none()
+                    && grant.granted_by.is_none()
+                    && grant.current_grants.is_none()
+                    && grant_shape(&grant.privileges, grant.objects.as_ref(), &grant.grantees)
+            }
+            Statement::Revoke(revoke) => {
+                !revoke.grant_option_for
+                    && revoke.granted_by.is_none()
+                    && revoke.cascade.is_none()
+                    && grant_shape(
+                        &revoke.privileges,
+                        revoke.objects.as_ref(),
+                        &revoke.grantees,
+                    )
+            }
+            _ => false,
+        })
+}
+
+/// The part `GRANT` and `REVOKE` share: named privileges the object takes
+/// (`db::roles::grant_applies`, so the builder and the gate cannot drift),
+/// one object, one plain role.
+fn grant_shape(
+    privileges: &sqlparser::ast::Privileges,
+    objects: Option<&sqlparser::ast::GrantObjects>,
+    grantees: &[sqlparser::ast::Grantee],
+) -> bool {
+    use crate::db::roles::{GrantObject, grant_applies};
+    use sqlparser::ast::{Action, GrantObjects, GranteeName, GranteesType, Privileges};
+    let single = |names: &[sqlparser::ast::ObjectName], parts: usize| -> Option<Vec<String>> {
+        let [name] = names else { return None };
+        let idents: Vec<String> = name
+            .0
+            .iter()
+            .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+            .collect::<Option<_>>()?;
+        (idents.len() == parts).then_some(idents)
+    };
+    let object = match objects {
+        Some(GrantObjects::Databases(names)) => {
+            single(names, 1).map(|n| GrantObject::Database(n[0].clone()))
+        }
+        Some(GrantObjects::Schemas(names)) => {
+            single(names, 1).map(|n| GrantObject::Schema(n[0].clone()))
+        }
+        Some(GrantObjects::Tables(names)) => single(names, 2).map(|n| GrantObject::Relation {
+            schema: n[0].clone(),
+            name: n[1].clone(),
+            sequence: false,
+        }),
+        Some(GrantObjects::Sequences(names)) => single(names, 2).map(|n| GrantObject::Relation {
+            schema: n[0].clone(),
+            name: n[1].clone(),
+            sequence: true,
+        }),
+        _ => None,
+    };
+    let Some(object) = object else { return false };
+    let Privileges::Actions(actions) = privileges else {
+        return false;
+    };
+    let named = |action: &Action| match action {
+        Action::Connect => Some("CONNECT"),
+        Action::Temporary => Some("TEMPORARY"),
+        Action::Create { obj_type: None } => Some("CREATE"),
+        Action::Usage => Some("USAGE"),
+        Action::Select { columns: None } => Some("SELECT"),
+        Action::Insert { columns: None } => Some("INSERT"),
+        Action::Update { columns: None } => Some("UPDATE"),
+        Action::Delete => Some("DELETE"),
+        Action::Truncate => Some("TRUNCATE"),
+        Action::References { columns: None } => Some("REFERENCES"),
+        Action::Trigger => Some("TRIGGER"),
+        _ => None,
+    };
+    let [grantee] = grantees else { return false };
+    // `TO "r"` reads as a bare name; `TO PUBLIC` as the PUBLIC type, and a
+    // role named `public` is refused too: `TO public` is the keyword.
+    let plain_role = grantee.grantee_type == GranteesType::None
+        && matches!(
+            &grantee.name,
+            Some(GranteeName::ObjectName(name))
+                if matches!(name.0.as_slice(), [part]
+                    if part.as_ident().is_some_and(|ident| !ident.value.eq_ignore_ascii_case("public")))
+        );
+    plain_role
+        && !actions.is_empty()
+        && actions
+            .iter()
+            .all(|action| named(action).is_some_and(|privilege| grant_applies(&object, privilege)))
+}
+
+/// Whether `text` is a SCRAM-SHA-256 verifier the server takes as one,
+/// `SCRAM-SHA-256$<iterations>:<salt>$<stored key>:<server key>`: an
+/// iteration count above 0 that fits an `int`, a salt that is base64, and
+/// two keys that are base64 of 32 bytes each, as Postgres's
+/// `parse_scram_secret` reads it.
+/// The server takes a string of any other shape, a prefix-alike or one
+/// that only looks like base64 included, as the password itself.
+fn is_scram_verifier(text: &str) -> bool {
+    use base64::Engine as _;
+    const KEY_LEN: usize = 32;
+    let decoded = |part: &str| base64::engine::general_purpose::STANDARD.decode(part).ok();
+    let Some(rest) = text.strip_prefix("SCRAM-SHA-256$") else {
+        return false;
+    };
+    let Some((head, keys)) = rest.split_once('$') else {
+        return false;
+    };
+    let (Some((iterations, salt)), Some((stored, server))) =
+        (head.split_once(':'), keys.split_once(':'))
+    else {
+        return false;
+    };
+    iterations.bytes().all(|b| b.is_ascii_digit())
+        && iterations.parse::<i32>().is_ok_and(|count| count > 0)
+        && decoded(salt).is_some_and(|salt| !salt.is_empty())
+        && decoded(stored).is_some_and(|key| key.len() == KEY_LEN)
+        && decoded(server).is_some_and(|key| key.len() == KEY_LEN)
+}
+
+fn role_change(statement: &Statement) -> bool {
+    use sqlparser::ast::{AlterRoleOperation, CreateRole, Password, RoleOption};
+    let number = |expr: &Expr| matches!(expr, Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::Number(..)));
+    let string = |expr: &Expr| matches!(expr, Expr::Value(value) if matches!(value.value, sqlparser::ast::Value::SingleQuotedString(_)));
+    let verifier = |password: &Password| match password {
+        Password::Password(Expr::Value(value)) => matches!(
+            &value.value,
+            sqlparser::ast::Value::SingleQuotedString(text) if is_scram_verifier(text)
+        ),
+        _ => false,
+    };
+    match statement {
+        Statement::CreateRole(CreateRole {
+            names,
+            if_not_exists: false,
+            login: Some(_),
+            inherit: None,
+            bypassrls: None,
+            password,
+            superuser: None,
+            create_db: None,
+            create_role: None,
+            replication: None,
+            connection_limit,
+            valid_until,
+            in_role,
+            in_group,
+            role,
+            user,
+            admin,
+            authorization_owner: None,
+        }) => {
+            names.len() == 1
+                && password.as_ref().is_none_or(verifier)
+                && connection_limit.as_ref().is_none_or(number)
+                && valid_until.as_ref().is_none_or(string)
+                // Never a way into superuser: `postgres` and the predefined
+                // roles that reach the server's files, programs or sessions.
+                // A superuser of another name is the form's to refuse, which
+                // has the roles read (`Roles::refuses_membership`).
+                && in_role.iter().all(|role| {
+                    let name = match role.quote_style {
+                        Some(_) => role.value.clone(),
+                        None => role.value.to_lowercase(),
+                    };
+                    !crate::db::roles::privileged_name(&name)
+                })
+                && in_group.is_empty()
+                && role.is_empty()
+                && user.is_empty()
+                && admin.is_empty()
+        }
+        Statement::AlterRole {
+            operation: AlterRoleOperation::WithOptions { options },
+            ..
+        } => {
+            !options.is_empty()
+                && options.iter().all(|option| match option {
+                    RoleOption::ConnectionLimit(limit) => number(limit),
+                    RoleOption::ValidUntil(date) => string(date),
+                    RoleOption::Login(_) => true,
+                    RoleOption::Password(password) => verifier(password),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
 /// The statements of a write [`is_generated_write_on`] admits, each as its own
 /// text, the transaction bracket the gate sees through dropped: for a driver
 /// that brackets them in a transaction of its own rather than in text. Each
@@ -2816,12 +3042,32 @@ pub(crate) fn update_batch(engine: Engine, rows: &[PendingRow]) -> Result<String
     }
 }
 
+/// [`update_batch`] for a session that already has a transaction of the
+/// user's open: no brackets of its own, so the batch runs inside that
+/// transaction and is committed or rolled back with it. Bracketed, its
+/// `COMMIT` would end the user's transaction, and on MySQL and MariaDB its
+/// `START TRANSACTION` would commit it first.
+pub(crate) fn update_batch_joining(engine: Engine, rows: &[PendingRow]) -> Result<String, String> {
+    match engine.syntax() {
+        Syntax::Sql => sql_statements(engine.spec(), rows, false),
+        _ => update_batch(engine, rows),
+    }
+}
+
 pub(crate) fn sql_update_batch(spec: &EngineSpec, rows: &[PendingRow]) -> Result<String, String> {
+    sql_statements(spec, rows, true)
+}
+
+fn sql_statements(spec: &EngineSpec, rows: &[PendingRow], bracket: bool) -> Result<String, String> {
     if rows.is_empty() {
         return Err(NO_EDITS.into());
     }
     let statements = update_statements(spec, rows).ok_or(NO_KEY)?;
-    Ok(bracketed(spec, statements.join("\n"), statements.len()))
+    let batch = statements.join("\n");
+    Ok(match bracket {
+        true => bracketed(spec, batch, statements.len()),
+        false => batch,
+    })
 }
 
 const NO_EDITS: &str = "There are no edits to apply.";
@@ -4998,9 +5244,42 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
         return leaves;
     };
     match SqlParser::parse_sql(dialect.as_ref(), sql) {
-        Ok(statements) => statements
-            .iter()
-            .for_each(|statement| leaves.add(statement)),
+        Ok(statements) => {
+            // The savepoints this submission opened outside a transaction it
+            // began itself, and what the transaction read before the first:
+            // releasing that one ends what it opened, and leaves the
+            // transaction as the submission found it, open or not.
+            let mut savepoints: Vec<&str> = Vec::new();
+            let mut before = None;
+            for statement in &statements {
+                match statement {
+                    Statement::Savepoint { name } if savepoint_opens_transaction(engine) => {
+                        if savepoints.is_empty() {
+                            before = leaves.transaction;
+                        }
+                        savepoints.push(&name.value);
+                    }
+                    Statement::ReleaseSavepoint { name } => {
+                        if let Some(at) = savepoints
+                            .iter()
+                            .rposition(|open| open.eq_ignore_ascii_case(&name.value))
+                        {
+                            savepoints.truncate(at);
+                            if savepoints.is_empty() {
+                                leaves.transaction = before;
+                            }
+                        }
+                    }
+                    Statement::StartTransaction { .. }
+                    | Statement::Commit { .. }
+                    | Statement::Rollback {
+                        savepoint: None, ..
+                    } => savepoints.clear(),
+                    _ => {}
+                }
+                leaves.add(engine, statement);
+            }
+        }
         Err(_) => {
             let tokens = Tokenizer::new(dialect.as_ref(), sql)
                 .tokenize()
@@ -5014,15 +5293,56 @@ pub(crate) fn leaves(engine: Engine, sql: &str) -> Leaves {
                 Some(Keyword::PRAGMA) => tokens.contains(&Token::Eq),
                 _ => false,
             };
+            if defines_stored_program(engine, &tokens) {
+                leaves.transaction = Some(false);
+            }
         }
     }
     leaves.settings |= touches_session(engine, sql);
     leaves
 }
 
+/// MySQL's `autocommit` as the last assignment of it in `sql` leaves it:
+/// `Some(true)` on, `Some(false)` off, `None` where no statement assigns it.
+pub(crate) fn autocommit_assigned(engine: Engine, sql: &str) -> Option<bool> {
+    if !implicitly_commits(engine) {
+        return None;
+    }
+    let dialect = dialect(engine)?;
+    let statements = SqlParser::parse_sql(dialect.as_ref(), sql).ok()?;
+    (statements.iter().rev()).find_map(|statement| match statement {
+        Statement::Set(set) => transaction_by_setting(&set.to_string()).map(|open| !open),
+        _ => None,
+    })
+}
+
+/// Whether the end [`leaves`] reads in `sql` rests on `autocommit` turned on
+/// alone: the last statement of it that opens or ends a transaction is that
+/// assignment, which commits only where `autocommit` was off.
+pub(crate) fn ends_by_autocommit_alone(engine: Engine, sql: &str) -> bool {
+    if !implicitly_commits(engine) {
+        return false;
+    }
+    let Some(dialect) = dialect(engine) else {
+        return false;
+    };
+    let Ok(statements) = SqlParser::parse_sql(dialect.as_ref(), sql) else {
+        return false;
+    };
+    let last = (statements.iter().rev()).find_map(|statement| {
+        let mut one = Leaves::default();
+        one.add(engine, statement);
+        one.transaction.map(|open| (open, statement))
+    });
+    matches!(
+        last,
+        Some((false, Statement::Set(set))) if transaction_by_setting(&set.to_string()) == Some(false)
+    )
+}
+
 /// Whether `sql` may leave a transaction open where [`leaves`] cannot say:
-/// text sqlparser cannot read that names a `BEGIN` or `START TRANSACTION`
-/// the server may well read, or transaction control among other statements,
+/// text sqlparser cannot read with a statement that starts `BEGIN` or
+/// `START TRANSACTION`, which the server may well read, or transaction control among other statements,
 /// which an error part way through stops short of a `COMMIT` that would end
 /// it.
 pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
@@ -5048,33 +5368,210 @@ pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
     let tokens = Tokenizer::new(dialect.as_ref(), sql)
         .tokenize()
         .unwrap_or_default();
-    let keywords: Vec<Keyword> = tokens
-        .iter()
-        .filter_map(|token| match token {
-            Token::Word(word) => Some(word.keyword),
-            _ => None,
-        })
-        .collect();
-    keywords
-        .iter()
-        .enumerate()
-        .any(|(at, keyword)| match keyword {
-            Keyword::BEGIN => true,
-            Keyword::START => keywords.get(at + 1) == Some(&Keyword::TRANSACTION),
-            _ => false,
+    if defines_stored_program(engine, &tokens) {
+        return false;
+    }
+    // Only where a statement starts: a `BEGIN` inside one is a compound
+    // block's, which opens no transaction.
+    statement_heads(&tokens).any(|keywords| match keywords.first() {
+        Some(Keyword::BEGIN) => true,
+        Some(Keyword::START) => keywords.get(1) == Some(&Keyword::TRANSACTION),
+        _ => false,
+    })
+}
+
+/// The first two keywords of each `;`-separated piece of `tokens`, which is
+/// as near to where a statement starts as text the grammar cannot read gets.
+fn statement_heads(tokens: &[Token]) -> impl Iterator<Item = Vec<Keyword>> + '_ {
+    tokens
+        .split(|token| *token == Token::SemiColon)
+        .map(|piece| {
+            piece
+                .iter()
+                .filter_map(|token| match token {
+                    Token::Word(word) => Some(word.keyword),
+                    _ => None,
+                })
+                .take(2)
+                .collect()
         })
 }
 
+/// Whether unreadable `tokens` define a stored program on MySQL or MariaDB:
+/// a `CREATE` naming a `PROCEDURE`, `FUNCTION`, `TRIGGER` or `EVENT` before
+/// its body. The `BEGIN … END` that body holds runs only when the program
+/// does, and the `CREATE` commits the open transaction as any DDL there does.
+fn defines_stored_program(engine: Engine, tokens: &[Token]) -> bool {
+    let mut keywords = tokens.iter().filter_map(|token| match token {
+        Token::Word(word) => Some(word.keyword),
+        _ => None,
+    });
+    implicitly_commits(engine)
+        && keywords.next() == Some(Keyword::CREATE)
+        && keywords
+            .take_while(|keyword| !matches!(keyword, Keyword::BEGIN | Keyword::DO))
+            .any(|keyword| {
+                matches!(
+                    keyword,
+                    Keyword::PROCEDURE | Keyword::FUNCTION | Keyword::TRIGGER | Keyword::EVENT
+                )
+            })
+}
+
+/// Whether `sql` ends a transaction somewhere in it. A submission can end the
+/// open transaction and open the next in one go (`COMMIT;` then `BEGIN;`), and
+/// [`Leaves`] only says where it lands.
+pub(crate) fn ends_transaction(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::Commit { .. }
+                    | Statement::Rollback {
+                        savepoint: None,
+                        ..
+                    }
+            )
+        })
+    })
+}
+
+/// Whether `sql` ends a transaction at any depth: [`ends_transaction`], but
+/// also inside a T-SQL `BEGIN … END` block or an `IF` branch, which
+/// [`leaves`] reads as ending the transaction just the same.
+pub(crate) fn ends_transaction_at_any_depth(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        visit_statements(&statements, |statement| match statement {
+            Statement::Commit { .. }
+            | Statement::Rollback {
+                savepoint: None, ..
+            } => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break()
+    })
+}
+
+/// Whether `sql` may commit somewhere in it: a `COMMIT` it parses to, at
+/// any depth (a `BEGIN … END` block, an `IF` branch), or,
+/// where the text cannot be read whole, the word anywhere in it, the side
+/// that never says a transaction was rolled back when it may have
+/// committed.
+pub(crate) fn may_commit(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    match SqlParser::parse_sql(dialect.as_ref(), sql) {
+        Ok(statements) => visit_statements(&statements, |statement| match statement {
+            Statement::Commit { .. } => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break(),
+        Err(_) => Tokenizer::new(dialect.as_ref(), sql)
+            .tokenize()
+            .unwrap_or_default()
+            .iter()
+            .any(|token| matches!(token, Token::Word(word) if word.keyword == Keyword::COMMIT)),
+    }
+}
+
+/// Whether the last statement of `sql` that ends a transaction commits it,
+/// rather than rolling it back.
+pub(crate) fn last_end_commits(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements
+            .iter()
+            .rev()
+            .find(|statement| {
+                matches!(
+                    statement,
+                    Statement::Commit { .. }
+                        | Statement::Rollback {
+                            savepoint: None,
+                            ..
+                        }
+                )
+            })
+            .is_some_and(|statement| matches!(statement, Statement::Commit { .. }))
+    })
+}
+
+/// Whether `sql` rolls back to a savepoint, which takes a failed Postgres
+/// transaction back to before its failure.
+pub(crate) fn rolls_back_to_savepoint(engine: Engine, sql: &str) -> bool {
+    let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
+        return false;
+    };
+    SqlParser::parse_sql(dialect.as_ref(), sql).is_ok_and(|statements| {
+        statements.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::Rollback {
+                    savepoint: Some(_),
+                    ..
+                }
+            )
+        })
+    })
+}
+
+/// What `sql` runs after the last statement that ends a transaction: all of
+/// it when none does or the text cannot be read, nothing when it ends on the
+/// end. What a submission leaves inside the transaction it opens, for a
+/// `COMMIT;` and `BEGIN;` sent as one is not part of the transaction after it.
+///
+/// Cut by [`Buffer::for_engine`], the same boundaries a run is cut at, with
+/// each piece read as [`ends_transaction`] reads a submission.
+pub(crate) fn after_last_end(engine: Engine, sql: &str) -> &str {
+    let buffer = Buffer::for_engine(engine, sql);
+    let statements = buffer.statements();
+    match statements
+        .iter()
+        .rposition(|range| ends_transaction(engine, &sql[range.clone()]))
+    {
+        Some(last) => statements
+            .get(last + 1)
+            .map_or("", |next| sql[next.start..].trim()),
+        None => sql,
+    }
+}
+
+/// Whether a `SAVEPOINT` outside a transaction opens one, as SQLite's does.
+fn savepoint_opens_transaction(engine: Engine) -> bool {
+    matches!(engine, Engine::Sqlite | Engine::Turso)
+}
+
 impl Leaves {
-    fn add(&mut self, statement: &Statement) {
+    fn add(&mut self, engine: Engine, statement: &Statement) {
         match statement {
             // A T-SQL `BEGIN … END` block, which opens no transaction itself.
             Statement::StartTransaction {
                 has_end_keyword: true,
                 statements,
                 ..
-            } => statements.iter().for_each(|statement| self.add(statement)),
+            } => statements
+                .iter()
+                .for_each(|statement| self.add(engine, statement)),
             Statement::StartTransaction { .. } => self.transaction = Some(true),
+            // SQLite opens a transaction at a `SAVEPOINT` outside one, which
+            // stays open until its `RELEASE`. One released in the submission
+            // that opened it is settled in [`leaves`]; one opened by an
+            // earlier submission is read as nothing here, so a transaction
+            // it may have ended is still read as open, the side an idle close
+            // cannot lose work on, until the engine says otherwise once the
+            // run lands (`QueryResult::transaction_open`).
+            Statement::Savepoint { .. } if savepoint_opens_transaction(engine) => {
+                self.transaction = Some(true)
+            }
             // `AND CHAIN` opens the next one as it ends this one.
             Statement::Commit { chain, .. }
             | Statement::Rollback {
@@ -5089,11 +5586,60 @@ impl Leaves {
                     self.transaction = Some(open);
                 }
             }
+            // MySQL and MariaDB commit the open transaction before these
+            // run, and `LOCK TABLES` does as well.
+            Statement::LockTables { .. } if implicitly_commits(engine) => {
+                self.settings = true;
+                self.transaction = Some(false);
+            }
+            // `UNLOCK TABLES` commits only where `LOCK TABLES` took a lock,
+            // which nothing here can see: read as ending nothing, so a
+            // transaction it may have ended is still read as open, the side
+            // an idle close cannot lose work on.
             Statement::Use(_)
             | Statement::LockTables { .. }
+            | Statement::UnlockTables
             | Statement::Pragma { is_eq: true, .. } => self.settings = true,
             Statement::CreateTable(table) => {
                 self.settings |= table.temporary || table.name.to_string().starts_with('#');
+                if !table.temporary && implicitly_commits(engine) {
+                    self.transaction = Some(false);
+                }
+            }
+            Statement::Drop { temporary, .. } if !temporary && implicitly_commits(engine) => {
+                self.transaction = Some(false)
+            }
+            Statement::CreateView(_)
+            | Statement::CreateIndex(_)
+            | Statement::CreateRole(_)
+            | Statement::CreateSchema { .. }
+            | Statement::CreateDatabase { .. }
+            | Statement::CreateFunction(_)
+            | Statement::CreateProcedure { .. }
+            | Statement::CreateTrigger(_)
+            | Statement::CreateServer(_)
+            | Statement::CreateUser(_)
+            | Statement::CreateSequence { .. }
+            | Statement::AlterTable(_)
+            | Statement::AlterSchema(_)
+            | Statement::AlterIndex { .. }
+            | Statement::AlterView { .. }
+            | Statement::AlterFunction(_)
+            | Statement::AlterRole { .. }
+            | Statement::AlterUser(_)
+            | Statement::DropFunction(_)
+            | Statement::DropProcedure { .. }
+            | Statement::DropTrigger(_)
+            | Statement::RenameTable(_)
+            | Statement::Truncate(_)
+            | Statement::Grant(_)
+            | Statement::Revoke(_)
+            | Statement::Analyze(_)
+            | Statement::OptimizeTable { .. }
+            | Statement::Flush { .. }
+                if implicitly_commits(engine) =>
+            {
+                self.transaction = Some(false)
             }
             Statement::Query(query) => {
                 if let SetExpr::Select(select) = query.body.as_ref()
@@ -5109,6 +5655,13 @@ impl Leaves {
             _ => {}
         }
     }
+}
+
+/// Whether `engine` commits the open transaction at a data definition
+/// statement, a table lock or an account statement: MySQL and MariaDB do,
+/// so the transaction a Manual switch is holding ends with one.
+pub(crate) fn implicitly_commits(engine: Engine) -> bool {
+    matches!(engine, Engine::MySql | Engine::MariaDb)
 }
 
 /// What a `SET` does to the session's transaction, read off its text:
@@ -5516,6 +6069,68 @@ pub(crate) fn gate_own_run(
     gate(verdict, mode, confirmed).filter(|stop| !(run_unreadable && *stop == Stop::RunOnce))
 }
 
+/// The statements of a profile's startup script, judged as the statements of
+/// any other submission are, or why the script may not run. Called at the
+/// form's save and again at every connect, under the profile's mode as it
+/// stands, so a script written under one mode and a profile since lowered
+/// does not run on trust.
+///
+/// All of it or none of it: every unit passes [`gate`] under `mode`, and the
+/// whole leaves no transaction open, which a session that replays the script
+/// on every connection it opens could not close. No dialog is raised -- a
+/// script has no one to ask -- so a statement the gate would stop at a
+/// confirmation fails the script the same way one it refuses does. A blank
+/// script is no script and returns no statements; one holding only comments
+/// is refused, as it was written to do something.
+///
+/// The messages say what the gate found and never repeat the script.
+pub(crate) fn startup_statements(
+    engine: Engine,
+    mode: Mode,
+    confirmed: &[Destructive],
+    script: &str,
+) -> Result<Vec<String>, String> {
+    if script.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let refused = |reason: String| format!("The startup script was not run: {reason}");
+    batch_counts(engine, script).map_err(refused)?;
+    let units: Vec<String> = queued_statements(engine, script, None)
+        .into_iter()
+        .map(|range| script[range].to_string())
+        .collect();
+    if units.is_empty() {
+        return Err("The startup script holds no statement.".into());
+    }
+    for unit in &units {
+        match gate(&classify(engine, unit), mode, confirmed) {
+            None => {}
+            Some(Stop::Upgrade(needed)) => {
+                return Err(refused(format!(
+                    "it holds a statement that needs {}, and this connection is {}.",
+                    needed.label(),
+                    mode.label()
+                )));
+            }
+            Some(Stop::Confirm(kind)) => {
+                return Err(refused(format!(
+                    "it holds a {} statement, which this connection asks about first.",
+                    kind.label()
+                )));
+            }
+            Some(Stop::RunOnce) => {
+                return Err(refused(
+                    "DBDelve could not read one of its statements.".into(),
+                ));
+            }
+        }
+    }
+    if leaves(engine, script).transaction == Some(true) || transaction_uncertain(engine, script) {
+        return Err(refused("it would leave a transaction open.".into()));
+    }
+    Ok(units)
+}
+
 /// `sql` laid out over several lines: the same tokens, indented. Refused when
 /// the buffer holds a dollar-quoted body, which this cannot reflow safely.
 ///
@@ -5785,6 +6400,422 @@ fn has_dollar_quote(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_role_gate_admits_what_db_roles_writes() {
+        use crate::db::roles::{NewRole, create_role, reset_password, set_login};
+        let pg = Engine::Postgres;
+        let create = create_role(&NewRole {
+            name: "ana".into(),
+            login: true,
+            password: Some("pw".into()),
+            connection_limit: Some(5),
+            password_expires: Some("2027-01-31".into()),
+            member_of: vec!["reporting".into()],
+        });
+        for sql in [
+            create.as_str(),
+            "CREATE ROLE app_rw NOLOGIN;",
+            &reset_password("ana", "pw"),
+            &set_login("ana", false),
+            "ALTER ROLE ana WITH CONNECTION LIMIT 3 VALID UNTIL 'infinity';",
+        ] {
+            assert!(is_generated_role_change(pg, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn the_role_gate_refuses_anything_else() {
+        let pg = Engine::Postgres;
+        for sql in [
+            "CREATE ROLE ana LOGIN PASSWORD 'in the clear';",
+            // Shaped like a verifier only at its start: the server would
+            // store it as the password.
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$hunter2';",
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5 :c2VydmVy';",
+            // Well formed, but the keys are not 32 bytes: the server would
+            // store the whole string as the password.
+            "ALTER ROLE ana WITH PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$a2V5:c2VydmVy';",
+            "CREATE ROLE ana LOGIN SUPERUSER;",
+            // Ways into superuser, by membership.
+            "CREATE ROLE ana LOGIN IN ROLE postgres;",
+            "CREATE ROLE ana LOGIN IN ROLE \"postgres\";",
+            "CREATE ROLE ana LOGIN IN ROLE POSTGRES;",
+            "CREATE ROLE ana LOGIN IN ROLE reporting, pg_execute_server_program;",
+            "CREATE ROLE ana NOLOGIN IN ROLE \"pg_write_server_files\";",
+            "CREATE ROLE ana NOLOGIN IN ROLE pg_read_server_files;",
+            "CREATE ROLE ana NOLOGIN IN ROLE pg_signal_backend;",
+            "CREATE ROLE ana NOLOGIN IN ROLE pg_checkpoint;",
+            // Every option `db::roles` never writes.
+            "CREATE ROLE ana LOGIN PASSWORD NULL;",
+            "ALTER ROLE ana WITH PASSWORD NULL;",
+            "CREATE ROLE ana LOGIN ENCRYPTED PASSWORD 'in the clear';",
+            "CREATE ROLE ana LOGIN IN GROUP reporting;",
+            "CREATE ROLE ana LOGIN ROLE bo;",
+            "CREATE ROLE ana LOGIN ADMIN bo;",
+            "CREATE ROLE ana LOGIN USER bo;",
+            "CREATE ROLE ana LOGIN INHERIT;",
+            "CREATE ROLE ana LOGIN CREATEDB;",
+            "CREATE ROLE ana LOGIN CREATEROLE;",
+            "CREATE ROLE ana LOGIN REPLICATION;",
+            "CREATE ROLE ana LOGIN BYPASSRLS;",
+            "ALTER ROLE ana WITH CREATEDB;",
+            "ALTER ROLE ana WITH BYPASSRLS;",
+            "ALTER ROLE ana WITH INHERIT;",
+            "ALTER ROLE ana RESET search_path;",
+            "ALTER ROLE ana RESET ALL;",
+            "CREATE ROLE ana;",
+            "ALTER ROLE ana SUPERUSER;",
+            "ALTER ROLE ana RENAME TO bo;",
+            // sqlparser cannot read a negative limit, so neither could the
+            // mode check: no limit is never written back.
+            "ALTER ROLE ana WITH CONNECTION LIMIT -1;",
+            "ALTER ROLE ana SET search_path = x;",
+            "GRANT SELECT ON t TO ana;",
+            "GRANT ALL ON t TO ana;",
+            // sqlparser cannot read a membership grant, so the mode check
+            // could not either: refused rather than run unread.
+            "GRANT reporting TO ana;",
+            "DROP ROLE ana;",
+            "CREATE ROLE ana NOLOGIN; DROP TABLE t;",
+            "",
+        ] {
+            assert!(!is_generated_role_change(pg, sql), "{sql}");
+        }
+        assert!(!is_generated_role_change(
+            Engine::MySql,
+            "CREATE ROLE app_rw NOLOGIN;"
+        ));
+    }
+
+    #[test]
+    fn the_grant_gate_admits_what_db_roles_writes() {
+        use crate::db::roles::{
+            GrantAction, GrantChange, GrantObject, PRIVILEGE_ORDER, grant_applies, grant_statements,
+        };
+        let pg = Engine::Postgres;
+        let objects = [
+            GrantObject::Database("shop".into()),
+            GrantObject::Schema("sa\"les".into()),
+            GrantObject::Relation {
+                schema: "Sales".into(),
+                name: "or ders".into(),
+                sequence: false,
+            },
+            GrantObject::Relation {
+                schema: "sales".into(),
+                name: "orders_id_seq".into(),
+                sequence: true,
+            },
+        ];
+        // Every privilege on every kind, applicable or not: the gate admits
+        // exactly the ones the builder writes, so the two cannot drift.
+        let mut written = 0;
+        for object in &objects {
+            for privilege in PRIVILEGE_ORDER {
+                for action in [GrantAction::Grant, GrantAction::Revoke] {
+                    let change = GrantChange {
+                        database: None,
+                        object: object.clone(),
+                        grantee: "An\"a".into(),
+                        privilege: privilege.into(),
+                        action,
+                    };
+                    let batches = grant_statements(&[change]);
+                    let applies = grant_applies(object, privilege);
+                    assert_eq!(batches.len(), usize::from(applies));
+                    for batch in batches {
+                        written += 1;
+                        assert!(is_generated_grant_change(pg, &batch.sql), "{}", batch.sql);
+                    }
+                }
+            }
+        }
+        assert!(written > 0);
+        let both = grant_statements(&[
+            GrantChange {
+                database: None,
+                object: objects[2].clone(),
+                grantee: "ana".into(),
+                privilege: "INSERT".into(),
+                action: GrantAction::Grant,
+            },
+            GrantChange {
+                database: None,
+                object: objects[2].clone(),
+                grantee: "ana".into(),
+                privilege: "SELECT".into(),
+                action: GrantAction::Revoke,
+            },
+        ]);
+        assert!(
+            is_generated_grant_change(pg, &both[0].sql),
+            "{}",
+            both[0].sql
+        );
+        assert!(is_generated_grant_change(
+            pg,
+            "GRANT SELECT, INSERT ON TABLE \"s\".\"t\" TO \"r\"; REVOKE USAGE ON SEQUENCE \"s\".\"q\" FROM \"r\";"
+        ));
+    }
+
+    #[test]
+    fn the_grant_gate_refuses_everything_else() {
+        let pg = Engine::Postgres;
+        for sql in [
+            "DROP TABLE \"s\".\"t\";",
+            "ALTER ROLE \"r\" WITH LOGIN;",
+            "SELECT 1;",
+            "GRANT ALL ON TABLE \"s\".\"t\" TO \"r\";",
+            "GRANT ALL PRIVILEGES ON TABLE \"s\".\"t\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO PUBLIC;",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"public\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO public;",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\" WITH GRANT OPTION;",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\" CASCADE;",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\" RESTRICT;",
+            "REVOKE GRANT OPTION FOR SELECT ON TABLE \"s\".\"t\" FROM \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\" GRANTED BY \"o\";",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\" GRANTED BY \"o\";",
+            "GRANT SELECT ON ALL TABLES IN SCHEMA \"s\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\", \"q\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\", \"s\".\"u\" TO \"r\";",
+            "GRANT SELECT (\"c\") ON TABLE \"s\".\"t\" TO \"r\";",
+            "GRANT USAGE ON DATABASE \"d\" TO \"r\";",
+            "GRANT SELECT ON SCHEMA \"s\" TO \"r\";",
+            "GRANT INSERT ON SEQUENCE \"s\".\"q\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"t\" TO \"r\";",
+            "GRANT CONNECT ON DATABASE \"a\".\"d\" TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO GROUP \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\"@\"h\";",
+            "GRANT EXECUTE ON FUNCTION f() TO \"r\";",
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\"; DROP TABLE x;",
+            "GRANT reporting TO ana;",
+            "",
+        ] {
+            assert!(!is_generated_grant_change(pg, sql), "{sql}");
+        }
+        assert!(!is_generated_grant_change(
+            Engine::MySql,
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\";"
+        ));
+    }
+
+    #[test]
+    fn a_generated_grant_is_never_read_as_a_read() {
+        for sql in [
+            "GRANT SELECT ON TABLE \"s\".\"t\" TO \"r\";",
+            "REVOKE SELECT ON TABLE \"s\".\"t\" FROM \"r\";",
+        ] {
+            assert!(is_generated_grant_change(Engine::Postgres, sql));
+            assert_eq!(classify(Engine::Postgres, sql).mode, Mode::Full, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_verifier_is_one_only_once_its_parts_decode_as_the_server_reads_them() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let key = b64(&[7; 32]);
+        let short = b64(&[7; 31]);
+        let salt = b64(b"saltsaltsaltsalt");
+        let real = postgres_protocol::password::scram_sha_256(b"pw");
+        assert!(is_scram_verifier(&real), "{real}");
+        assert!(is_scram_verifier(&format!(
+            "SCRAM-SHA-256$4096:{salt}${key}:{key}"
+        )));
+        // The server reads the count into an `int`.
+        assert!(is_scram_verifier(&format!(
+            "SCRAM-SHA-256$2147483647:{salt}${key}:{key}"
+        )));
+        for bad in [
+            format!("SCRAM-SHA-256$2147483648:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$4294967295:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$+4096:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$-4096:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$0:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$99999999999:{salt}${key}:{key}"),
+            format!("SCRAM-SHA-256$4096:c2Fsd===${key}:{key}"),
+            format!("SCRAM-SHA-256$4096:${key}:{key}"),
+            format!("SCRAM-SHA-256$4096:{salt}${short}:{key}"),
+            format!("SCRAM-SHA-256$4096:{salt}${key}:{short}"),
+            format!("SCRAM-SHA-256$4096:{salt}${key}A:{key}"),
+        ] {
+            assert!(!is_scram_verifier(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_engine_that_opens_a_transaction_spells_one_the_gate_reads() {
+        use crate::db::Engine;
+
+        for engine in Engine::ALL {
+            let Some(begin) = engine.begins_transaction() else {
+                continue;
+            };
+            // The buffer gets this text and the user may run it again, so it
+            // has to read back as a bracket rather than as a statement the
+            // gate cannot place.
+            assert!(is_transaction_bracket(begin), "{engine:?}: {begin}");
+            assert!(
+                is_transaction_bracket(&format!("{begin};")),
+                "{engine:?}: {begin};"
+            );
+            // Transaction control runs in every mode: asking for Read-write
+            // to end a transaction would teach people to live in Full.
+            assert_eq!(classify(engine, begin).mode, Mode::ReadOnly, "{engine:?}");
+            for verb in ["COMMIT", "ROLLBACK"] {
+                assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_reads_a_statement_that_commits_implicitly_as_ending_the_transaction() {
+        use crate::db::Engine;
+
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for sql in [
+                "CREATE TABLE u (id INT)",
+                "ALTER TABLE t ADD COLUMN b INT",
+                "DROP TABLE t",
+                "TRUNCATE TABLE t",
+                "CREATE INDEX i ON t (a)",
+                "RENAME TABLE t TO u",
+                "LOCK TABLES t WRITE",
+                "LOCK TABLES t WRITE; UNLOCK TABLES",
+                "GRANT SELECT ON d.* TO 'ana'@'%'",
+                "INSERT INTO t VALUES (1); CREATE TABLE u (id INT)",
+            ] {
+                assert_eq!(
+                    leaves(engine, sql).transaction,
+                    Some(false),
+                    "{engine:?}: {sql}"
+                );
+            }
+            for sql in [
+                // It commits only where `LOCK TABLES` took a lock, which an
+                // open transaction may never have.
+                "UNLOCK TABLES",
+                "CREATE TEMPORARY TABLE u (id INT)",
+                "DROP TEMPORARY TABLE u",
+                "INSERT INTO t VALUES (1)",
+                "SELECT 1",
+            ] {
+                assert_eq!(leaves(engine, sql).transaction, None, "{engine:?}: {sql}");
+            }
+            // One that opens the next transaction after it leaves one open.
+            assert_eq!(
+                leaves(engine, "CREATE TABLE u (id INT); BEGIN").transaction,
+                Some(true)
+            );
+        }
+        // Postgres runs DDL inside the transaction.
+        assert_eq!(
+            leaves(Engine::Postgres, "CREATE TABLE u (id INT)").transaction,
+            None
+        );
+    }
+
+    #[test]
+    fn a_savepoint_opens_a_transaction_on_sqlite_and_turso_only() {
+        use crate::db::Engine;
+
+        for engine in [Engine::Sqlite, Engine::Turso] {
+            assert_eq!(
+                leaves(engine, "SAVEPOINT s").transaction,
+                Some(true),
+                "{engine:?}"
+            );
+            assert_eq!(
+                leaves(engine, "SAVEPOINT s; UPDATE t SET a = 1").transaction,
+                Some(true),
+                "{engine:?}"
+            );
+            // A startup script would start every session inside it.
+            let refused = startup_statements(engine, Mode::Full, &[], "SAVEPOINT s")
+                .expect_err("a savepoint leaves a transaction open");
+            assert!(refused.contains("transaction"), "{refused}");
+        }
+        // Postgres refuses one outside a transaction; inside one it ends
+        // nothing.
+        assert_eq!(leaves(Engine::Postgres, "SAVEPOINT s").transaction, None);
+    }
+
+    #[test]
+    fn a_savepoint_released_where_it_was_opened_leaves_the_transaction_as_it_was() {
+        use crate::db::Engine;
+
+        for engine in [Engine::Sqlite, Engine::Turso] {
+            let left = |sql| leaves(engine, sql).transaction;
+            // Outside a transaction it opened one, and the release ended it;
+            // inside one it left the enclosing one open. Either way, as the
+            // submission found it.
+            assert_eq!(left("SAVEPOINT s; UPDATE t SET a = 1; RELEASE s"), None);
+            assert_eq!(left("SAVEPOINT s; RELEASE SAVEPOINT S"), None);
+            assert_eq!(left("SAVEPOINT a; SAVEPOINT b; RELEASE a"), None);
+            // A release of an inner one keeps the outer one open.
+            assert_eq!(left("SAVEPOINT a; SAVEPOINT b; RELEASE b"), Some(true));
+            // One the submission's own `BEGIN` encloses.
+            assert_eq!(left("BEGIN; SAVEPOINT s; RELEASE s"), Some(true));
+            assert_eq!(left("COMMIT; SAVEPOINT s; RELEASE s"), Some(false));
+            // Opened by an earlier submission: whether its release ends the
+            // transaction cannot be told, so it is still read as open.
+            assert_eq!(left("RELEASE s"), None);
+            assert_eq!(left("SAVEPOINT a; RELEASE s"), Some(true));
+        }
+    }
+
+    #[test]
+    fn an_engine_whose_requests_keep_no_session_offers_no_manual() {
+        use crate::db::Engine;
+
+        // A `BEGIN` there ends with its request, so a switch reading Manual
+        // would sit over writes that each commit on their own.
+        for engine in Engine::ALL {
+            if engine.spec().sql.stateless_requests {
+                assert_eq!(engine.begins_transaction(), None, "{engine:?}");
+            }
+        }
+        assert_eq!(Engine::Snowflake.begins_transaction(), None);
+    }
+
+    #[test]
+    fn opening_a_transaction_is_not_the_same_question_as_bracketing_a_batch() {
+        use crate::db::Engine;
+
+        // The one engine the two answer differently, and the reason
+        // `begins_transaction` exists at all: collapsing them into one method
+        // would stop Postgres ever opening a transaction.
+        assert_eq!(Engine::Postgres.transaction_start(), None);
+        assert_eq!(Engine::Postgres.begins_transaction(), Some("BEGIN"));
+
+        // Where neither has a transaction to offer, both say so.
+        for engine in [Engine::MongoDb, Engine::Redis] {
+            assert_eq!(engine.transaction_start(), None, "{engine:?}");
+            assert_eq!(engine.begins_transaction(), None, "{engine:?}");
+        }
+    }
+
+    #[test]
+    fn ending_a_transaction_and_opening_the_next_leaves_one_open() {
+        use crate::db::Engine;
+
+        // What Commit sends while auto-commit is off. `leaves` reading the
+        // pair as closed would leave the switch saying "off" over a session
+        // that is autocommitting again.
+        for engine in [Engine::Postgres, Engine::MySql, Engine::Sqlite] {
+            let begin = engine.begins_transaction().expect("opens one");
+            let sent = format!("COMMIT;\n\n{begin};");
+            assert_eq!(leaves(engine, &sent).transaction, Some(true), "{engine:?}");
+            assert_eq!(
+                leaves(engine, "COMMIT;").transaction,
+                Some(false),
+                "{engine:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_mode_cycle_runs_read_only_to_full_and_back() {
@@ -8782,6 +9813,26 @@ mod tests {
     }
 
     #[test]
+    fn only_a_batch_that_brackets_itself_ends_the_transaction_it_runs_in() {
+        let rows = vec![
+            pending_row(&[("name", set("a"))], &[("id", "1")]),
+            pending_row(&[("name", set("b"))], &[("id", "2")]),
+        ];
+        for (engine, brackets) in [
+            (Engine::MySql, true),
+            (Engine::MariaDb, true),
+            (Engine::Sqlite, true),
+            (Engine::SqlServer, true),
+            (Engine::Postgres, false),
+        ] {
+            let batch = update_batch(engine, &rows).unwrap();
+            assert_eq!(ends_transaction(engine, &batch), brackets, "{engine:?}");
+            let lone = update_batch(engine, &rows[..1]).unwrap();
+            assert!(!ends_transaction(engine, &lone), "{engine:?}: one row");
+        }
+    }
+
+    #[test]
     fn several_pending_rows_become_one_semicolon_joined_batch() {
         let rows = vec![
             pending_row(&[("name", set("Ada"))], &[("id", "1")]),
@@ -8825,6 +9876,30 @@ mod tests {
 
         let postgres = update_batch(Engine::Postgres, &rows).unwrap();
         assert!(!postgres.contains("BEGIN"), "{postgres}");
+    }
+
+    #[test]
+    fn a_batch_joining_an_open_transaction_carries_no_brackets_and_passes_the_gate() {
+        // Its own COMMIT would end the user's transaction, and MySQL's
+        // START TRANSACTION would commit it first.
+        let rows = vec![
+            pending_row(&[("name", set("Ada"))], &[("id", "1")]),
+            pending_row(&[("name", set("Bo"))], &[("id", "2")]),
+        ];
+        for engine in [
+            Engine::MySql,
+            Engine::MariaDb,
+            Engine::Sqlite,
+            Engine::SqlServer,
+            Engine::Postgres,
+        ] {
+            let batch = update_batch_joining(engine, &rows).unwrap();
+            assert_eq!(batch.matches("UPDATE").count(), 2, "{engine:?} {batch}");
+            assert!(!ends_transaction(engine, &batch), "{engine:?} {batch}");
+            assert!(!batch.contains("BEGIN"), "{engine:?} {batch}");
+            assert!(!batch.contains("START TRANSACTION"), "{engine:?} {batch}");
+            assert!(is_generated_write_on(engine, &batch), "{engine:?} {batch}");
+        }
     }
 
     #[test]
@@ -11394,6 +12469,112 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_program_body_unread_on_mysql_ends_the_transaction() {
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            for statement in [
+                "CREATE PROCEDURE p() BEGIN SELECT 1; END",
+                "CREATE DEFINER = CURRENT_USER PROCEDURE p()\nBEGIN\n  DECLARE x INT;\n  \
+                 BEGIN\n    SET x = 1;\n  END;\n  SELECT x;\nEND",
+                "CREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW BEGIN SET NEW.b = 1; END",
+                "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN DELETE FROM a; END",
+            ] {
+                assert!(
+                    !transaction_uncertain(engine, statement),
+                    "{engine:?} {statement}"
+                );
+                assert_eq!(
+                    leaves(engine, statement).transaction,
+                    Some(false),
+                    "{engine:?} {statement}"
+                );
+            }
+        }
+        // A `BEGIN` that starts a statement the grammar cannot read still
+        // counts, at the head of the text or after a `;`.
+        for statement in ["BEGIN WORK\nselec 1", "selec 1;\nBEGIN"] {
+            assert!(
+                transaction_uncertain(Engine::MySql, statement),
+                "{statement}"
+            );
+        }
+        assert!(!transaction_uncertain(Engine::MySql, "selec begin"));
+    }
+
+    #[test]
+    fn a_commit_or_rollback_anywhere_in_a_submission_ends_its_transaction() {
+        for (engine, statement) in [
+            (Engine::Postgres, "COMMIT"),
+            (Engine::Postgres, "ROLLBACK"),
+            (Engine::Postgres, "COMMIT;\n\nBEGIN;"),
+            (Engine::Postgres, "ROLLBACK;\n\nBEGIN;"),
+            (Engine::MySql, "COMMIT;\n\nBEGIN;"),
+            (Engine::SqlServer, "COMMIT TRANSACTION"),
+        ] {
+            assert!(ends_transaction(engine, statement), "{statement}");
+        }
+        for (engine, statement) in [
+            (Engine::Postgres, "BEGIN"),
+            (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
+            (Engine::Postgres, "SELECT 1"),
+            (Engine::Postgres, "COMMIT\nselec 1"),
+            (Engine::Redis, "EXEC"),
+            (Engine::Snowflake, "COMMIT"),
+        ] {
+            let ended = ends_transaction(engine, statement);
+            // Snowflake's requests are stateless: no session holds a
+            // transaction there for a submission to end.
+            assert!(!ended, "{statement}");
+        }
+    }
+
+    #[test]
+    fn an_end_inside_a_block_is_seen_at_any_depth_but_not_at_the_top_level() {
+        let nested = "BEGIN UPDATE t SET a = 1; COMMIT; END";
+        assert!(!ends_transaction(Engine::SqlServer, nested));
+        assert!(ends_transaction_at_any_depth(Engine::SqlServer, nested));
+        assert_eq!(
+            leaves(Engine::SqlServer, nested).transaction,
+            Some(false),
+            "leaves reads the nested COMMIT as ending the transaction"
+        );
+        for statement in ["SELECT 1", "BEGIN SELECT 1; END", "ROLLBACK TRANSACTION a"] {
+            assert!(
+                !ends_transaction_at_any_depth(Engine::SqlServer, statement),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_what_follows_the_last_end_belongs_to_the_next_transaction() {
+        for (engine, sql, rest) in [
+            (Engine::Postgres, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::Postgres, "ROLLBACK;\n\nBEGIN;", "BEGIN;"),
+            (Engine::MySql, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::MariaDb, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::Sqlite, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (Engine::DuckDb, "COMMIT;\n\nBEGIN;", "BEGIN;"),
+            (
+                Engine::SqlServer,
+                "COMMIT;\n\nBEGIN TRANSACTION;",
+                "BEGIN TRANSACTION;",
+            ),
+            (
+                Engine::Postgres,
+                "INSERT INTO t VALUES (1); COMMIT; BEGIN; INSERT INTO t VALUES (2);",
+                "BEGIN; INSERT INTO t VALUES (2);",
+            ),
+            (Engine::Postgres, "COMMIT", ""),
+            (Engine::Postgres, "INSERT INTO t VALUES (1); COMMIT;", ""),
+            (Engine::Postgres, "BEGIN", "BEGIN"),
+            (Engine::Postgres, "SELECT 1; SELECT 2", "SELECT 1; SELECT 2"),
+            (Engine::Postgres, "selec 1", "selec 1"),
+        ] {
+            assert_eq!(after_last_end(engine, sql), rest, "{engine:?}: {sql}");
+        }
+    }
+
+    #[test]
     fn only_an_open_transaction_or_a_changed_session_is_left_behind() {
         let open = Leaves {
             transaction: Some(true),
@@ -11458,7 +12639,7 @@ mod tests {
             (Engine::Postgres, "EXPLAIN SELECT 1"),
             (Engine::Postgres, "SELEC 1"),
             (Engine::Postgres, "INSERT INTO t VALUES (1)"),
-            (Engine::MySql, "CREATE TABLE t (a int)"),
+            (Engine::Postgres, "CREATE TABLE t (a int)"),
             (Engine::Postgres, "SELECT * INTO t2 FROM t"),
             (Engine::Postgres, "ROLLBACK TO SAVEPOINT a"),
             (Engine::Sqlite, "PRAGMA table_info(t)"),
@@ -11651,6 +12832,37 @@ mod tests {
         }
     }
 
+    /// `SET autocommit = 1` commits only from off, so whether it ended the
+    /// transaction depends on what the session held before it.
+    #[test]
+    fn an_autocommit_on_alone_is_told_apart_from_a_commit() {
+        for (sql, alone) in [
+            ("SET autocommit = 1", true),
+            ("SET SESSION autocommit = 1", true),
+            ("UPDATE t SET a = 1; SET autocommit = ON", true),
+            ("SET autocommit = 1; COMMIT", false),
+            ("COMMIT", false),
+            ("SET autocommit = 0", false),
+            ("SET autocommit = 1; START TRANSACTION", false),
+        ] {
+            assert_eq!(ends_by_autocommit_alone(Engine::MySql, sql), alone, "{sql}");
+        }
+        assert!(!ends_by_autocommit_alone(Engine::Postgres, "COMMIT"));
+        assert_eq!(
+            autocommit_assigned(Engine::MySql, "SET autocommit = 0"),
+            Some(false)
+        );
+        assert_eq!(
+            autocommit_assigned(Engine::MariaDb, "SET autocommit = 0; SET autocommit = 1"),
+            Some(true)
+        );
+        assert_eq!(autocommit_assigned(Engine::MySql, "SELECT 1"), None);
+        assert_eq!(
+            autocommit_assigned(Engine::SqlServer, "SET IMPLICIT_TRANSACTIONS ON"),
+            None
+        );
+    }
+
     #[test]
     fn insert_rows_writes_one_multi_row_insert_in_each_engines_spelling() {
         use crate::import_rows::Value;
@@ -11783,5 +12995,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A startup script is judged by the gate every statement is, one unit at
+    /// a time under the profile's mode, and refused whole: a refusal runs none
+    /// of it, and what it says never repeats the script.
+    #[test]
+    fn a_startup_script_is_gated_like_any_statement() {
+        let read_only =
+            |engine, script: &str| startup_statements(engine, Mode::ReadOnly, &[], script);
+        let full = |script: &str| startup_statements(Engine::Postgres, Mode::Full, &[], script);
+
+        assert_eq!(
+            read_only(Engine::Postgres, "SET search_path TO app, public"),
+            Ok(vec!["SET search_path TO app, public".to_string()])
+        );
+        let two = read_only(
+            Engine::Postgres,
+            "SET search_path TO a;\nSET search_path TO b",
+        )
+        .expect("two settings are two units");
+        assert_eq!(two.len(), 2);
+        assert!(
+            two[0].starts_with("SET search_path TO a") && two[1] == "SET search_path TO b",
+            "{two:?}"
+        );
+
+        assert_eq!(read_only(Engine::Postgres, "   \n"), Ok(vec![]));
+        for script in [
+            "-- nothing\n/* here */",
+            "SELEC nonsense ??",
+            "SET GLOBAL x = 1;;;;( ",
+        ] {
+            let refused = read_only(Engine::Postgres, script).expect_err(script);
+            assert!(refused.starts_with("The startup script"), "{refused}");
+        }
+        let write = read_only(Engine::MySql, "INSERT INTO secret_table VALUES (1)")
+            .expect_err("a write needs more");
+        assert!(write.starts_with("The startup script"), "{write}");
+        assert!(!write.contains("secret_table"), "{write}");
+
+        for script in ["BEGIN", "BEGIN; SET search_path TO app; COMMIT"] {
+            let refused = full(script).expect_err(script);
+            assert!(refused.starts_with("The startup script"), "{refused}");
+            assert!(refused.contains("transaction"), "{refused}");
+        }
+
+        let dropped = full("DROP TABLE secret_table").expect_err("a drop asks first");
+        assert!(dropped.starts_with("The startup script"), "{dropped}");
+        assert!(!dropped.contains("secret_table"), "{dropped}");
+        assert!(
+            startup_statements(
+                Engine::Postgres,
+                Mode::Full,
+                &[Destructive::Drop],
+                "DROP TABLE secret_table"
+            )
+            .is_ok()
+        );
+
+        // A mix is refused whole, the permitted statement included.
+        let mixed = read_only(
+            Engine::Postgres,
+            "SELECT 1;\nDELETE FROM secret_table WHERE id = 1",
+        )
+        .expect_err("a write is not a read");
+        assert!(mixed.starts_with("The startup script"), "{mixed}");
+        assert!(!mixed.contains("secret_table"), "{mixed}");
+
+        let counted = startup_statements(Engine::SqlServer, Mode::Full, &[], "SELECT 1;\nGO 2")
+            .expect_err("a counted GO repeats its batch");
+        assert!(counted.starts_with("The startup script"), "{counted}");
     }
 }

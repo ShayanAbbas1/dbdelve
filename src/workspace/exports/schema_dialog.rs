@@ -147,10 +147,27 @@ impl Workspace {
     /// lists is left out, as the file's header says; a partitioned table is
     /// named in the dialog too. Each table's foreign keys are read behind it, so
     /// it can say what the tables ticked point at and leave unwritten.
-    pub(crate) fn open_schema_export(&mut self, schema: String, cx: &mut Context<Self>) {
+    ///
+    /// `database` is the one the schema was listed under. The export names no
+    /// database and reads the connection's own, so, as a relation's export,
+    /// it is refused when that is no longer the one: a switch that landed
+    /// while the menu or the palette was up would otherwise write another
+    /// database's schema of the same name.
+    pub(crate) fn open_schema_export(
+        &mut self,
+        database: Option<String>,
+        schema: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profile() else {
             return;
         };
+        if let Some(refusal) =
+            super::export_moved_refusal(database.as_deref(), profile.active_database())
+        {
+            self.note(refusal, cx);
+            return;
+        }
         let engine = profile.config.engine();
         let refused = |reason: &str| format!("The schema was not exported: {reason}");
         if profile.config.target().exports_schema().is_none() {

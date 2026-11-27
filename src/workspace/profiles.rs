@@ -10,11 +10,17 @@ use gpui_component::tree::{TreeEvent, TreeState};
 use crate::connection_form::{
     ConnectionTest, Reported, duplicate_profile_name, keep_schema, name_is_automatic,
 };
-use crate::db::{ExternalConfig, PasswordCommand, Plugin};
+use crate::db::{
+    ExternalConfig, Include, PasswordCommand, Plugin, Properties, TableFilter, Target,
+    check_time_zone,
+};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::palette::SchemaPick;
-use crate::session::{Bound, BoundSession, EditMode, STALE_ROWS, restored_shortcuts};
+use crate::session::{
+    Behaviour, Bound, BoundSession, Depth, EditMode, KeptCatalog, MAX_IDLE_TIMEOUT, MAX_KEEP_ALIVE,
+    MIN_KEEP_ALIVE, STALE_ROWS, restored_shortcuts,
+};
 use crate::sidebar::OPEN_ROWS_CAP;
 use crate::sql::{Destructive, Mode};
 
@@ -72,6 +78,30 @@ fn forget_what_was_read(profile: &mut Profile, window: &mut Window, cx: &mut Con
     profile.session.insert_form = None;
 }
 
+/// Which grid of `profile` holds cell edits nobody applied, said as the start
+/// of a refusal. Of any profile, not only the one in front: the idle close asks
+/// it of every one.
+pub(super) fn unapplied_edits_of(profile: &Profile, cx: &App) -> Option<String> {
+    let session = &profile.session;
+    let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
+        results.read(cx).delegate().has_pending()
+    };
+    if !session.grids().any(unapplied) {
+        return None;
+    }
+    let edited = session
+        .objects
+        .iter()
+        .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
+    Some(match edited {
+        Some(tab) => format!(
+            "{}.{} has cell edits that have not been applied",
+            tab.schema, tab.name
+        ),
+        None => "A query tab has cell edits that have not been applied".into(),
+    })
+}
+
 /// What `profile` lists in the sidebar under `filter`: its Pinned group and
 /// folders, its files and saved queries in `order`, then the catalog's schemas. Both trees draw
 /// this, so a connection's rows are the same in either.
@@ -89,6 +119,7 @@ pub(super) fn explorer_content(
         catalog,
         &profile.session.saved_queries,
         &profile.shortcut_database(),
+        &profile.shown(),
         filter,
     );
     explorer.extend(explorer::files(
@@ -121,6 +152,59 @@ pub(super) fn database_content(
         }
     }
 }
+
+/// Whether `profile`'s catalog stays as it is across a database switch off
+/// `left`, the database the session was on, onto the one its config names
+/// now, which on such a target reconnects rather than reading it all again
+/// over the new connection. Only a
+/// catalog that lists every database as a schema does not depend on which
+/// one the session is on, and even then only where no database list
+/// narrows it (it always shows the session's own) and neither database is
+/// one of the server's own (listed only while it is the session's). One
+/// whose routines are still reading is read again whole: the new generation
+/// turns their answer away.
+fn keeps_catalog_across_switch(profile: &Profile, left: &str) -> bool {
+    catalog_survives_switch(
+        profile.config.target(),
+        &profile.catalog,
+        profile.shown().narrows_catalog(),
+        left,
+        profile.config.database_name().as_deref(),
+    )
+}
+
+/// [`keeps_catalog_across_switch`] of a profile on `target` whose catalog is
+/// `catalog`, `narrowed` by a database list or not, moving off `left` onto
+/// `moved_to`.
+fn catalog_survives_switch(
+    target: Target,
+    catalog: &CatalogState,
+    narrowed: bool,
+    left: &str,
+    moved_to: Option<&str>,
+) -> bool {
+    let Some(moved_to) = moved_to else {
+        return false;
+    };
+    let CatalogState::Loaded(catalog, routines) = catalog else {
+        return false;
+    };
+    let system = |name| target.engine.is_system_database(name);
+    target.catalog_lists_databases()
+        && !matches!(routines, Routines::Loading)
+        && !narrowed
+        && !system(left)
+        && !system(moved_to)
+        && catalog.schemas.iter().any(|schema| schema.name == moved_to)
+}
+
+/// Why a connection save that reconnects is refused.
+const TRANSACTION_BLOCKS_SAVE: &str = "A transaction is open on this connection, and saving \
+     reconnects it, which would roll it back. Commit or roll it back first.";
+
+/// Why Select Database is refused.
+const TRANSACTION_BLOCKS_SWITCH: &str = "The database was not switched: a transaction is open on \
+     this connection. Commit or roll it back first.";
 
 impl Workspace {
     pub(crate) fn remember_profiles(&mut self, cx: &mut Context<Self>) {
@@ -253,6 +337,12 @@ impl Workspace {
                 return;
             }
         };
+        // Left out of the config rather than refused with the profile: the rest
+        // of it is still the connection that was asked for.
+        let refused = config
+            .server()
+            .and_then(|_| stored_session_settings(&stored, config.engine()).2)
+            .map(|message| format!("{message} It is not applied."));
         let stored_queries = stored_buffers(
             stored.open_queries,
             stored.next_query_id,
@@ -304,8 +394,9 @@ impl Workspace {
                     .filter(|_| config.server().is_some())
                     .map(|message| format!("{message} Connecting as verify-full."))
             });
-        if let Some(message) = notice {
-            session.notice = Some(message);
+        let notice = [notice, refused].into_iter().flatten().collect::<Vec<_>>();
+        if !notice.is_empty() {
+            session.notice = Some(notice.join(" "));
         }
         let held = self
             .profiles
@@ -322,6 +413,9 @@ impl Workspace {
             stored.recent_added,
             &session.query_directory,
         );
+        let takes_script = config.target().takes_startup_script();
+        let keeps_alive = config.target().keeps_alive();
+        let closes_idle = !config.lives_with_its_connection();
         self.profiles.push(Profile {
             id: stored.id,
             name: stored.name,
@@ -342,6 +436,50 @@ impl Workspace {
             }),
             // A silenced kind this build cannot read is dropped, which only
             // means that kind still asks.
+            // A file is a person's to edit: blanks are dropped and each list is
+            // capped, as `open_rows` is.
+            include: Include::from_stored(stored.include_databases, stored.include_schemas)
+                .with_tables(
+                    stored
+                        .include_tables
+                        .into_iter()
+                        .map(|list| TableFilter {
+                            database: list.database,
+                            schema: list.schema,
+                            tables: list.tables,
+                        })
+                        .collect(),
+                ),
+            // A slug this build cannot read costs this one field: every load.
+            behaviour: Behaviour {
+                depth: stored
+                    .introspection_depth
+                    .as_deref()
+                    .and_then(Depth::from_slug)
+                    .unwrap_or_default(),
+                // An engine with no row has no way to show or change it, and
+                // nothing would run it.
+                startup_script: stored
+                    .startup_script
+                    .filter(|_| takes_script)
+                    .unwrap_or_default(),
+                // Off where the engine keeps no session to ping, under the
+                // floor a hand-edited file could set a ping storm with, and
+                // past the ceiling it would set a timer that never fires.
+                keep_alive: stored.keep_alive_seconds.filter(|&seconds| {
+                    keeps_alive && (MIN_KEEP_ALIVE..=MAX_KEEP_ALIVE).contains(&seconds)
+                }),
+                // Every engine can be left idle; a 0 is the form's way of
+                // saying off, and a file can say it too. Past the ceiling the
+                // deadline would never be reached, so that is off as well, as
+                // it is for a database that would close with its connection.
+                idle_timeout: stored
+                    .idle_timeout_minutes
+                    .filter(|minutes| closes_idle && (1..=MAX_IDLE_TIMEOUT).contains(minutes)),
+            },
+            keep_alive_task: None,
+            last_activity: cx.background_executor().now(),
+            idle_task: None,
             confirmed: stored
                 .confirmed
                 .iter()
@@ -354,12 +492,27 @@ impl Workspace {
             held: false,
             holds: Arc::default(),
             in_transaction: false,
+            autocommit_off: false,
+            transaction_aborted: false,
+            transaction_statements: Vec::new(),
+            transaction_sends: Arc::default(),
+            transaction_in_flight: None,
+            connected_script: String::new(),
+            listings: 0,
+            auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
+            catalog_include: Include::default(),
             schema_refresh: None,
+            reread_after_load: false,
             databases: Databases::default(),
+            roles: RolesState::default(),
+            roles_request: 0,
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
+            database_catalogs_shown: HashMap::new(),
+            schema_reads: HashMap::new(),
+            kept_catalog: None,
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
             folds: stored.folds,
@@ -422,6 +575,14 @@ impl Workspace {
             config,
             color,
             mode,
+            // Every way a profile is made starts unfiltered, for the same
+            // reason it starts hidden: the lists are the owner's to write.
+            include: Include::default(),
+            // The form's value is applied by `save_form` once this returns.
+            behaviour: Behaviour::default(),
+            keep_alive_task: None,
+            last_activity: cx.background_executor().now(),
+            idle_task: None,
             confirmed: Vec::new(),
             confirmed_stale: false,
             generation: 0,
@@ -430,12 +591,27 @@ impl Workspace {
             held: false,
             holds: Arc::default(),
             in_transaction: false,
+            autocommit_off: false,
+            transaction_aborted: false,
+            transaction_statements: Vec::new(),
+            transaction_sends: Arc::default(),
+            transaction_in_flight: None,
+            connected_script: String::new(),
+            listings: 0,
+            auto_commit: true,
             session_changed: false,
             catalog: CatalogState::Loading,
+            catalog_include: Include::default(),
             schema_refresh: None,
+            reread_after_load: false,
             databases: Databases::default(),
+            roles: RolesState::default(),
+            roles_request: 0,
             bound: HashMap::new(),
             database_catalogs: HashMap::new(),
+            database_catalogs_shown: HashMap::new(),
+            schema_reads: HashMap::new(),
+            kept_catalog: None,
             left_database: false,
             shortcuts: Shortcuts::default(),
             folds: BTreeMap::new(),
@@ -886,6 +1062,36 @@ impl Workspace {
                 return;
             }
         };
+        let behaviour = match form.behaviour(cx) {
+            Ok(behaviour) => behaviour,
+            Err(error) => {
+                if let Some(form) = &mut self.form {
+                    form.error = Some(error);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        // As Test connection and every connect will judge it: under the mode
+        // the profile has, which for a new one is the form's.
+        let (script_mode, script_confirmed) = editing
+            .as_deref()
+            .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
+            .map_or((mode, Vec::new()), |profile| {
+                (profile.mode, profile.confirmed.clone())
+            });
+        if let Err(error) = sql::startup_statements(
+            config.engine(),
+            script_mode,
+            &script_confirmed,
+            &behaviour.startup_script,
+        ) {
+            if let Some(form) = &mut self.form {
+                form.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
         if let Some(editing) = editing.as_deref()
             && let Some(profile) = self.profiles.iter().find(|profile| profile.id == editing)
         {
@@ -907,13 +1113,37 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The reconnect would drop the sessions, and the server would roll
+        // back work the user chose neither to commit nor to discard.
+        if editing.as_deref().is_some_and(|id| {
+            self.profiles.iter().any(|profile| {
+                profile.id == id
+                    && profile.config.needs_reconnect(&config)
+                    && profile.any_transaction_open()
+            })
+        }) {
+            if let Some(form) = &mut self.form {
+                form.error = Some(TRANSACTION_BLOCKS_SAVE.into());
+            }
+            cx.notify();
+            return;
+        }
         self.form = None;
         if let Some(project) = &project {
             self.project_named(project);
         }
         match editing {
             Some(id) => {
+                // A save that reconnects starts its connect in `save_profile`,
+                // which reads the script then: the new one, or the old one
+                // would run on the new target before anything noticed.
+                if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id)
+                    && profile.config.needs_reconnect(&config)
+                {
+                    profile.behaviour.startup_script = behaviour.startup_script.clone();
+                }
                 self.save_profile(&id, name, config, color, window, cx);
+                self.set_behaviour(&id, behaviour, cx);
                 if self.group_of(&id) != project.as_deref()
                     && let Some(index) = self.profiles.iter().position(|profile| profile.id == id)
                 {
@@ -923,6 +1153,10 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
+                // Before `activate`, which starts the first connect: that
+                // connect has to read with the form's settings.
+                let id = self.profiles[index].id.clone();
+                self.set_behaviour(&id, behaviour, cx);
                 if shortcuts != Shortcuts::default() || !folds.is_empty() {
                     self.profiles[index].shortcuts = shortcuts;
                     self.profiles[index].folds = folds;
@@ -935,6 +1169,63 @@ impl Workspace {
                 }
                 self.activate(index, cx);
             }
+        }
+    }
+
+    /// The one writer of a profile's [`Behaviour`], which is not part of its
+    /// connection: changing it re-reads over the session already open and
+    /// never reconnects, so no tab closes. A profile with no session only
+    /// stores the value, which its next connect reads.
+    pub(crate) fn set_behaviour(&mut self, id: &str, behaviour: Behaviour, cx: &mut Context<Self>) {
+        let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
+            return;
+        };
+        let profile = &mut self.profiles[index];
+        if profile.behaviour == behaviour {
+            return;
+        }
+        let depth_changed = profile.behaviour.depth != behaviour.depth;
+        let script_changed = profile.behaviour.startup_script != behaviour.startup_script;
+        let keep_alive_changed = profile.behaviour.keep_alive != behaviour.keep_alive;
+        let idle_changed = profile.behaviour.idle_timeout != behaviour.idle_timeout;
+        profile.behaviour = behaviour;
+        self.remember_profiles(cx);
+        if keep_alive_changed {
+            // A new interval counts from now and a cleared one drops the timer;
+            // neither touches the connection.
+            self.arm_keep_alive(id, cx);
+        }
+        if idle_changed {
+            // Counted from the last use, so a longer timeout is not cut short
+            // by one that was shorter, and a cleared one drops the timer.
+            self.arm_idle(id, cx);
+        }
+        let profile = &mut self.profiles[index];
+        if profile.connection().is_none() {
+            // Nothing live to disagree with the text: the next connect reads
+            // it. A save that reconnects is in this arm too, and the connect
+            // it started has its landing check the script (`begin_connect`).
+            return;
+        }
+        if script_changed {
+            // The sessions already open were given the statements the connect
+            // ran, and are not changed under the user.
+            profile.session.notice =
+                Some("The startup script applies from the next connect.".to_string());
+        }
+        if !depth_changed {
+            return;
+        }
+        // A refresh declines to start while a read is under way, so the one
+        // that lands reads again with the saved depth.
+        let under_way = profile.refreshing_schema()
+            || matches!(
+                profile.catalog,
+                CatalogState::Loading | CatalogState::Loaded(_, Routines::Loading)
+            );
+        profile.reread_after_load = under_way;
+        if !under_way {
+            self.refresh_schema_of(index, cx);
         }
     }
 
@@ -960,11 +1251,24 @@ impl Workspace {
                 return;
             }
         };
+        let behaviour = match form.behaviour(cx) {
+            Ok(behaviour) => behaviour,
+            Err(error) => {
+                form.error = Some(error);
+                form.test = None;
+                cx.notify();
+                return;
+            }
+        };
         let editing = form.editing.clone();
-        let mode = editing
+        let (mode, confirmed) = editing
             .as_ref()
             .and_then(|id| self.profiles.iter().find(|profile| &profile.id == id))
-            .map_or(form.mode, |profile| profile.mode);
+            .map_or((form.mode, Vec::new()), |profile| {
+                (profile.mode, profile.confirmed.clone())
+            });
+        let script = behaviour.startup_script;
+        let speaks = config.engine();
         form.error = None;
 
         let attempt = crate::db::ConnectAttempt::default();
@@ -997,6 +1301,7 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| error.message)?;
                 }
+                let connection = run_startup(connection, speaks, mode, &confirmed, &script)?;
                 Ok::<_, String>(Reported::of(&connection))
             })();
             let elapsed = started.elapsed();
@@ -1197,9 +1502,20 @@ impl Workspace {
     /// at once, so the sidebar neither blanks nor loses the rows folded open.
     /// With no session to read over, this is a connect.
     pub(crate) fn refresh_schema(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.active else {
+        if let Some(index) = self.active {
+            self.refresh_schema_of(index, cx);
+        }
+    }
+
+    /// [`Self::refresh_schema`] for the profile at `index`, which is the front
+    /// one except when a read that was under way when a filter or depth was
+    /// saved comes
+    /// back after the user moved on.
+    fn refresh_schema_of(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.profiles.get(index).map(|profile| profile.id.clone()) else {
             return;
         };
+        self.mark_activity(&id, cx);
         let Some(profile) = self.profiles.get_mut(index) else {
             return;
         };
@@ -1220,6 +1536,12 @@ impl Workspace {
         profile.schema_refresh = Some(profile.generation);
         let (id, generation) = (profile.id.clone(), profile.generation);
         let in_transaction = profile.in_transaction;
+        let (shown, include) = (profile.shown(), profile.include.clone());
+        let depth = profile.behaviour.depth;
+        #[cfg(test)]
+        if depth >= Depth::Routines {
+            self.routine_reads += 1;
+        }
         cx.notify();
 
         let refresh_task = spawn_blocking(cx.background_executor(), move || {
@@ -1231,8 +1553,9 @@ impl Workspace {
                 true => connection.apart().map_err(lost)?,
                 false => connection.clone(),
             };
-            let catalog = reader.catalog().map_err(lost)?;
-            Ok::<_, (DbError, bool)>((catalog, reader.routines()))
+            let catalog = reader.catalog(&shown).map_err(lost)?;
+            let routines = (depth >= Depth::Routines).then(|| reader.routines(&shown));
+            Ok::<_, (DbError, bool)>((catalog, routines))
         });
 
         cx.spawn(async move |workspace, cx| {
@@ -1249,6 +1572,8 @@ impl Workspace {
                         // A session that is gone has no transaction left to
                         // keep, and a new one is the only way to get an answer.
                         Err((_, true)) => {
+                            // The new session reads with the saved filter and depth.
+                            profile.reread_after_load = false;
                             let index = workspace
                                 .profiles
                                 .iter()
@@ -1263,30 +1588,37 @@ impl Workspace {
                         // they were rather than trading them for an error.
                         Err((error, false)) => {
                             profile.session.notice = Some(error.message);
+                            workspace.reread_if_saved(&id, cx);
                             return;
                         }
                     };
                     let routines = match routines {
-                        Ok(routines) => {
+                        Some(Ok(routines)) => {
                             catalog.merge(routines);
                             Routines::Loaded
                         }
-                        Err(error) => {
+                        Some(Err(error)) => {
                             profile.session.notice = Some(error.message);
                             Routines::Failed
                         }
+                        // The depth's choice, not a failure: no notice.
+                        None => Routines::Skipped,
                     };
-                    let complete = matches!(routines, Routines::Loaded);
+                    let complete = matches!(routines, Routines::Loaded | Routines::Skipped);
                     // Worn until `load_sizes` answers, which a lock can hold up
                     // for as long as the transaction holding it stays open.
                     // What the catalog itself carries stays on top: on some
                     // engines these are its numbers and `load_sizes` has none.
+                    // Below `Sizes` nothing reads them, so the old ones go.
                     if let CatalogState::Loaded(old, _) = &profile.catalog {
                         let fresh = catalog.sizes();
-                        catalog.set_sizes(&old.sizes());
+                        if depth == Depth::Sizes {
+                            catalog.set_sizes(&old.sizes());
+                        }
                         catalog.set_sizes(&fresh);
                     }
                     profile.catalog = CatalogState::Loaded(catalog, routines);
+                    profile.catalog_include = include;
                     profile.session.structure_requests.clear();
                     mark_objects_stale(profile);
                     workspace.catalog_replaced(&id, generation, true, cx);
@@ -1296,10 +1628,22 @@ impl Workspace {
                     if complete && workspace.profile().is_some_and(|front| front.id == id) {
                         workspace.confirm("Schema refreshed.".into(), cx);
                     }
+                    workspace.reread_if_saved(&id, cx);
                 })
                 .ok();
         })
         .detach();
+    }
+
+    /// A filter or depth was saved while the read that has just landed was
+    /// under way: read again, which now starts, so what was saved applies.
+    fn reread_if_saved(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.profiles.iter().position(|profile| profile.id == id) else {
+            return;
+        };
+        if std::mem::take(&mut self.profiles[index].reread_after_load) {
+            self.refresh_schema_of(index, cx);
+        }
     }
 
     /// Ask the server which databases it holds, then offer them in the palette.
@@ -1329,8 +1673,13 @@ impl Workspace {
             return;
         };
         let (id, generation) = (profile.id.clone(), profile.generation);
+        let shown = profile.shown();
+        let asked = shown.clone();
+        let Some(listing) = self.profile_mut().map(Profile::start_listing) else {
+            return;
+        };
         let fetch = spawn_blocking(cx.background_executor(), move || {
-            connection.databases(target.engine)
+            connection.databases(target.engine, &shown)
         });
         cx.spawn_in(window, async move |workspace, cx| {
             let result = fetch.await;
@@ -1338,6 +1687,17 @@ impl Workspace {
                 let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
+                // Overtaken by a listing started since, which a catalog or a
+                // refresh landing starts as readily as a second press. Under
+                // the same filter this answer is as good as that one's, and
+                // the press still wants its palette; under another, it is
+                // asked again, so the keypress is never lost.
+                if !profile.latest_listing(listing) && profile.shown() != asked {
+                    if workspace.profile().is_some_and(|profile| profile.id == id) {
+                        workspace.select_database(&SelectDatabase, window, cx);
+                    }
+                    return;
+                }
                 match result {
                     Ok(databases) => profile.databases = databases,
                     Err(error) => {
@@ -1412,6 +1772,12 @@ impl Workspace {
             self.note(format!("{edited}, so the database was not switched."), cx);
             return false;
         }
+        // A switch reconnects or drops the sessions open for other
+        // databases, and the server rolls back what the transaction ran.
+        if self.profile().is_some_and(Profile::any_transaction_open) {
+            self.note(TRANSACTION_BLOCKS_SWITCH.into(), cx);
+            return false;
+        }
 
         self.leave_database(window, cx);
 
@@ -1437,6 +1803,18 @@ impl Workspace {
                 false => name,
             });
         let in_session = profile.config.target().switches_database_in_session();
+        // The new connection's connect puts it back rather than reading it all
+        // again ([`keeps_catalog_across_switch`]).
+        if !in_session && keeps_catalog_across_switch(profile, &left.0) {
+            let kept = std::mem::replace(&mut profile.catalog, CatalogState::Loading);
+            if let CatalogState::Loaded(catalog, routines) = kept {
+                profile.kept_catalog = Some(KeptCatalog {
+                    config: profile.config.clone(),
+                    catalog,
+                    routines,
+                });
+            }
+        }
         self.remember_profiles(cx);
         match in_session {
             true => self.use_database(index, left, cx),
@@ -1448,24 +1826,77 @@ impl Workspace {
     /// Which grid of the profile in front holds cell edits nobody applied,
     /// said as the start of a refusal.
     fn unapplied_edits(&self, cx: &App) -> Option<String> {
-        let session = &self.profile()?.session;
-        let unapplied = |results: &Entity<gpui_component::table::TableState<ResultGrid>>| {
-            results.read(cx).delegate().has_pending()
+        unapplied_edits_of(self.profile()?, cx)
+    }
+
+    /// What closing a profile's connection changes in the profile itself, shared
+    /// by [`Self::disconnect`] and the idle close: the sessions go, an open
+    /// transaction with them, and every answer issued to the old generation
+    /// lands on one that is no longer the profile's and is dropped. Tabs and
+    /// buffers stay. Answers whether an open transaction was rolled back, which
+    /// only a disconnect the user asked for can meet.
+    ///
+    /// An SSM session the connection held is cleaned up as it closes, and a
+    /// cleanup the service did not confirm is said once it answers.
+    pub(super) fn close_sessions(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let Some(profile) = self.profiles.get_mut(index) else {
+            return false;
         };
-        if !session.grids().any(unapplied) {
-            return None;
+        let cleanup = if matches!(
+            profile.state,
+            ProfileState::Connecting { .. } | ProfileState::Connected(_)
+        ) {
+            profile
+                .cleanup_attempt
+                .take()
+                .map(|attempt| attempt.observe_cleanup())
+        } else {
+            profile.cleanup_attempt = None;
+            None
+        };
+        let rolled_back = profile.in_transaction && profile.connection().is_some();
+        tracing::info!(
+            connection = crate::logging::connection_number(&profile.id),
+            engine = profile.config.target().label(),
+            was_connected = profile.connection().is_some(),
+            rolled_back,
+            "disconnected"
+        );
+        profile.generation = generation;
+        // A read the old generation had under way lands nowhere now, and every
+        // read of the new one takes the saved filter and depth as it starts.
+        profile.reread_after_load = false;
+        profile.drop_sessions();
+        profile.keep_alive_task = None;
+        profile.idle_task = None;
+        profile.state = ProfileState::Idle;
+        profile.in_transaction = false;
+        profile.autocommit_off = false;
+        profile.transaction_statements.clear();
+        profile.transaction_in_flight = None;
+        profile.session.auto_after_end = None;
+        profile.session.manual_after_begin = None;
+        profile.session_changed = false;
+        profile.session.clear_prompts();
+        mark_objects_stale(profile);
+        if let Some(cleanup) = cleanup {
+            cx.spawn(async move |workspace, cx| {
+                if let Ok(result) = cleanup.await
+                    && !result.accepted
+                {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.cleanup_notices.push(result);
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            })
+            .detach();
         }
-        let edited = session
-            .objects
-            .iter()
-            .find(|tab| session.results(Tab::Object(tab.id)).is_some_and(unapplied));
-        Some(match edited {
-            Some(tab) => format!(
-                "{}.{} has cell edits that have not been applied",
-                tab.schema, tab.name
-            ),
-            None => "A query tab has cell edits that have not been applied".into(),
-        })
+        rolled_back
     }
 
     /// Closes the connection in front and leads to the welcome surface. Its
@@ -1530,57 +1961,15 @@ impl Workspace {
         if let Some(index) = self.active {
             self.cancel_diagram_reads(index, cx);
         }
-        // A connect still on its way, and every answer issued to this one,
-        // land on a generation that is no longer the profile's and are dropped.
-        self.next_generation += 1;
-        let generation = self.next_generation;
-        let Some(profile) = self.profile_mut() else {
+        let Some(index) = self.active else {
             return;
         };
-        let cleanup = if matches!(
-            profile.state,
-            ProfileState::Connecting { .. } | ProfileState::Connected(_)
-        ) {
-            profile
-                .cleanup_attempt
-                .take()
-                .map(|attempt| attempt.observe_cleanup())
-        } else {
-            profile.cleanup_attempt = None;
-            None
+        let rolled_back = self.close_sessions(index, cx);
+        let Some(profile) = self.profiles.get(index) else {
+            return;
         };
-        let rolled_back = profile.in_transaction && profile.connection().is_some();
-        tracing::info!(
-            connection = crate::logging::connection_number(&profile.id),
-            engine = profile.config.target().label(),
-            was_connected = profile.connection().is_some(),
-            rolled_back,
-            "disconnected"
-        );
-        profile.generation = generation;
-        profile.drop_sessions();
-        profile.state = ProfileState::Idle;
-        profile.in_transaction = false;
-        profile.session_changed = false;
-        profile.session.clear_prompts();
-        mark_objects_stale(profile);
         let name = profile.name.clone();
         self.active = None;
-        if let Some(cleanup) = cleanup {
-            cx.spawn(async move |workspace, cx| {
-                if let Ok(result) = cleanup.await
-                    && !result.accepted
-                {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.cleanup_notices.push(result);
-                            cx.notify();
-                        })
-                        .ok();
-                }
-            })
-            .detach();
-        }
         self.remember_profiles(cx);
         self.rebuild_connections(cx);
         self.refocus_front();
@@ -1633,6 +2022,15 @@ impl Workspace {
         if let Some(profile) = self.profile_mut() {
             profile.session.schema_export = None;
         }
+        // A Show Grants of one of its objects reads and writes through the
+        // connection's own session, which the switch moves: left open, its
+        // staged changes would run on the same-named object of the next.
+        if (self.grants_view.as_ref()).is_some_and(|view| {
+            view.profile == profile_id
+                && (view.object.as_ref()).is_some_and(|object| object.database.is_none())
+        }) {
+            self.grants_view = None;
+        }
         for id in closing {
             self.close_object(id, window, cx);
         }
@@ -1655,6 +2053,7 @@ impl Workspace {
         }
         forget_what_was_read(profile, window, cx);
         profile.databases = Databases::default();
+        profile.roles = RolesState::default();
     }
 
     /// The connect's half of [`Self::leave_database`], for a profile whose
@@ -1694,9 +2093,16 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
+        // A read the old generation had under way lands nowhere now, and every
+        // read of the new one takes the saved filter and depth as it starts.
+        profile.reread_after_load = false;
         profile.drop_sessions();
         profile.catalog = CatalogState::Loading;
         profile.session.structure_requests.clear();
+        // A transaction statement still out lands on the old generation and
+        // is dropped, so nothing would ever clear what it marked, and every
+        // other tab's transaction control would wait on it until a reconnect.
+        profile.transaction_in_flight = None;
         let id = profile.id.clone();
         connection.set_database(profile.config.database_name().as_deref());
         let applying = connection.clone();
@@ -2065,15 +2471,33 @@ impl Workspace {
             return;
         };
         profile.generation = generation;
+        // A read the old generation had under way lands nowhere now, and every
+        // read of the new one takes the saved filter and depth as it starts.
+        profile.reread_after_load = false;
         profile.drop_sessions();
+        profile.keep_alive_task = None;
+        profile.idle_task = None;
         let attempt = crate::db::ConnectAttempt::default();
         profile.cleanup_attempt = profile.config.ssm().map(|_| attempt.clone());
         profile.state = ProfileState::Connecting {
             _attempt: attempt.guard(),
         };
         profile.in_transaction = false;
+        profile.transaction_statements.clear();
+        profile.transaction_in_flight = None;
+        profile.session.auto_after_end = None;
+        profile.session.manual_after_begin = None;
+        // The transaction it was holding died with the session, and silently
+        // opening another on a connection the user has just watched drop is
+        // the kind of surprise this feature exists to avoid.
+        profile.auto_commit = true;
         profile.session_changed = false;
         profile.catalog = CatalogState::Loading;
+        // A catalog a switch kept belongs to the connection that switch
+        // opens; a later edit retargeting the profile supersedes it.
+        if (profile.kept_catalog.as_ref()).is_some_and(|kept| kept.config != profile.config) {
+            profile.kept_catalog = None;
+        }
         // Every structure still out was asked on the old generation, and
         // `issued_to` drops its answer. A structure tab counts an entry here as
         // asked and waits on it, so one caught mid-load would sit on Loading
@@ -2084,11 +2508,16 @@ impl Workspace {
         // onto another database, and `active_database` reads this first, so a
         // folder would go on naming the old one.
         profile.databases = Databases::default();
+        profile.roles = RolesState::default();
 
         let id = profile.id.clone();
         let mut config = profile.config.clone();
         config.set_connect_attempt(attempt.clone());
         let mode = profile.mode;
+        let confirmed = profile.confirmed.clone();
+        let script = profile.behaviour.startup_script.clone();
+        let ran_script = script.clone();
+        let engine_of = config.engine();
         // The sidebar draws the tree whenever there are saved queries, so the
         // old catalog's rows have to leave it with the catalog.
         self.refresh_explorer(&id, cx);
@@ -2163,6 +2592,12 @@ impl Workspace {
                         .set_read_only(true)
                         .map_err(|error| failed("read-only hold", error.message))?;
                 }
+                // The replays the driver makes on later sessions run before
+                // `query_alongside`, `open_database` and `Routed::resolve` apply
+                // the hold. That is safe because every replayed statement passed
+                // the gate under the profile's current mode.
+                let connection = run_startup(connection, engine_of, mode, &confirmed, &script)
+                    .map_err(|message| failed("startup script", message))?;
                 connection.warm();
                 attempt.finish().map_err(|error| error.message)?;
                 let elapsed = started.elapsed();
@@ -2184,7 +2619,15 @@ impl Workspace {
                     // cannot read in Read-only on the strength of that hold.
                     let held_otherwise =
                         (profile.mode == Mode::ReadOnly) != (mode == Mode::ReadOnly);
-                    if held_otherwise && result.is_ok() {
+                    // The same for the startup script, in two ways. A mode
+                    // lowered meanwhile may refuse a script that ran under the
+                    // mode this set out under, and the drivers replay it on
+                    // every later session. And a script saved meanwhile -- a
+                    // save that edits it and reconnects starts this connect
+                    // before the edit lands -- was not the one this ran.
+                    let regate = profile.mode < mode && script_refused(profile, profile.mode);
+                    let script_moved = profile.behaviour.startup_script != ran_script;
+                    if ((held_otherwise || regate) && result.is_ok()) || script_moved {
                         if let Some(index) = workspace.profiles.iter().position(|p| p.id == id) {
                             workspace.begin_connect(index, cx);
                         }
@@ -2205,9 +2648,24 @@ impl Workspace {
                     }
                     let reported = result.as_ref().ok().and_then(Reported::of);
                     profile.held = result.is_ok();
+                    profile.connected_script = ran_script;
                     profile.state = match result {
                         Ok(connection) => ProfileState::Connected(Box::new(connection)),
                         Err(message) => ProfileState::Failed(message),
+                    };
+                    // Only onto the database it was kept for: one that was
+                    // gone opened where nothing is picked.
+                    let kept = profile.kept_catalog.take().filter(|_| {
+                        unpicked.is_none() && matches!(profile.state, ProfileState::Connected(_))
+                    });
+                    let kept = match kept {
+                        Some(KeptCatalog {
+                            catalog, routines, ..
+                        }) => {
+                            profile.catalog = CatalogState::Loaded(catalog, routines);
+                            true
+                        }
+                        None => false,
                     };
                     // A plugin's driver is the user's own, so what it reached
                     // is news; what a built-in reached is the profile.
@@ -2221,7 +2679,13 @@ impl Workspace {
                     if unpicked.is_some() {
                         workspace.remember_profiles(cx);
                     }
-                    workspace.load_catalog(&id, generation, cx);
+                    workspace.mark_activity(&id, cx);
+                    workspace.arm_keep_alive(&id, cx);
+                    workspace.arm_idle(&id, cx);
+                    match kept {
+                        true => workspace.catalog_kept(&id, generation, cx),
+                        false => workspace.load_catalog(&id, generation, cx),
+                    }
                     workspace.load_import_columns(&id, cx);
                     workspace.reload_front_object(&id, cx);
                     workspace.run_waiting_files(&id, cx);
@@ -2248,7 +2712,29 @@ impl Workspace {
         }
     }
 
+    /// The catalog a database switch kept ([`keeps_catalog_across_switch`])
+    /// brought up to the database the new connection is on: what reads it
+    /// again, the sidebar's open schemas among them, and the database moved to
+    /// if it was listed unread.
+    fn catalog_kept(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        let database = profile.active_database();
+        self.catalog_replaced(id, generation, false, cx);
+        if let Some(database) = database {
+            self.read_schema(id, &database, cx);
+        }
+    }
+
     pub(crate) fn load_catalog(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        if self.issued_to(id, generation).is_some() {
+            self.mark_activity(id, cx);
+        }
+        #[cfg(test)]
+        {
+            self.catalog_reads += 1;
+        }
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
@@ -2260,11 +2746,14 @@ impl Workspace {
         // paints the same sentence twice in the same red.
         let Some(connection) = profile.connection() else {
             profile.catalog = CatalogState::Failed("Not connected.".into());
+            profile.reread_after_load = false;
             self.refresh_explorer(id, cx);
             self.catalog_landed(id, cx);
             return;
         };
-        let catalog_task = spawn_blocking(cx.background_executor(), move || connection.catalog());
+        let (shown, include) = (profile.shown(), profile.include.clone());
+        let catalog_task =
+            spawn_blocking(cx.background_executor(), move || connection.catalog(&shown));
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2275,8 +2764,18 @@ impl Workspace {
                         return;
                     };
                     profile.catalog = match result {
-                        Ok(catalog) => CatalogState::Loaded(catalog, Routines::Loading),
-                        Err(error) => CatalogState::Failed(error.message),
+                        Ok(catalog) => {
+                            profile.catalog_include = include;
+                            CatalogState::Loaded(catalog, Routines::Loading)
+                        }
+                        Err(error) => {
+                            // A failed read stored nothing drawn with the old filter, and every
+                            // read takes `shown()` and the depth as it starts, so the next one
+                            // applies what was saved; reading again here would be a retry nobody
+                            // asked for.
+                            profile.reread_after_load = false;
+                            CatalogState::Failed(error.message)
+                        }
                     };
                     workspace.catalog_replaced(&id, generation, false, cx);
                     cx.notify();
@@ -2312,8 +2811,11 @@ impl Workspace {
         let (engine, in_transaction) = (profile.config.engine(), profile.in_transaction);
         // A refresh lists them again, and inside the user's transaction a
         // failed read would fail it on Postgres, as `refresh_schema` says.
+        let shown = profile.shown();
+        let started = profile.start_listing();
         let listing = spawn_blocking(cx.background_executor(), move || {
-            metadata_reader(&connection, in_transaction).and_then(|reader| reader.databases(engine))
+            metadata_reader(&connection, in_transaction)
+                .and_then(|reader| reader.databases(engine, &shown))
         });
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2322,6 +2824,11 @@ impl Workspace {
                 let Some(profile) = workspace.issued_to(&id, generation) else {
                     return;
                 };
+                // Overtaken by a listing started since, perhaps under another
+                // filter: that one's answer is the one to show.
+                if !profile.latest_listing(started) {
+                    return;
+                }
                 match result {
                     Ok(databases) => profile.databases = databases,
                     Err(error) => profile.session.notice = Some(error.message),
@@ -2341,10 +2848,16 @@ impl Workspace {
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
+        // A session a bound tab opened for a database the filter hides is the
+        // tab's, and the tree reads nothing it does not draw: reading it would
+        // spend a catalog read on rows the filter keeps off the screen.
+        let shown = profile.shown();
         let open: Vec<String> = profile
             .bound
             .iter()
-            .filter(|(_, session)| matches!(session, BoundSession::Open(_)))
+            .filter(|(database, session)| {
+                matches!(session, BoundSession::Open(_)) && shown.shows_database(database)
+            })
             .map(|(database, _)| database.clone())
             .collect();
         self.list_databases(id, generation, cx);
@@ -2492,8 +3005,12 @@ impl Workspace {
             .bound
             .insert(database.clone(), BoundSession::Open(session.clone()));
         // The connection's own database is read over its own session, and
-        // another is not asked for again once a session is registered.
-        if profile.active_database().as_deref() != Some(database.as_str()) {
+        // another is not asked for again once a session is registered. One the
+        // filter hides keeps its session for the tab and is never read, since
+        // the tree draws nothing of it.
+        if profile.active_database().as_deref() != Some(database.as_str())
+            && profile.shown().shows_database(&database)
+        {
             profile
                 .database_catalogs
                 .entry(database.clone())
@@ -2514,13 +3031,24 @@ impl Workspace {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
+        if self.issued_to(id, generation).is_some() {
+            self.mark_activity(id, cx);
+        }
         let Some(session) = self.session_for(id, &database, generation) else {
             return;
         };
+        // The active schema is kept in the connection's own database only.
+        let Some(shown) = self
+            .issued_to(id, generation)
+            .map(|profile| profile.shown().in_another_database(&database))
+        else {
+            return;
+        };
+        let asked = shown.clone();
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
             move || {
-                let result = session.metadata(Connection::catalog);
+                let result = session.metadata(|connection| connection.catalog(&shown));
                 let lost = result.is_err() && session.connection.is_lost();
                 (result, lost)
             }
@@ -2533,6 +3061,16 @@ impl Workspace {
                     return;
                 };
                 if !profile.is_registered(&database, &session) {
+                    return;
+                }
+                // Asked under a filter saved over since: it would put back
+                // what that one hides. Read again under this one, if it
+                // still shows the database at all.
+                let current = profile.shown().in_another_database(&database);
+                if current != asked {
+                    if current.shows_database(&database) {
+                        workspace.load_database_catalog(&id, database, generation, cx);
+                    }
                     return;
                 }
                 match result {
@@ -2552,6 +3090,9 @@ impl Workspace {
                             database.clone(),
                             CatalogState::Loaded(catalog, Routines::Loading),
                         );
+                        profile
+                            .database_catalogs_shown
+                            .insert(database.clone(), asked);
                         workspace.rebuild_connections(cx);
                         workspace.load_database_routines(&id, &database, generation, cx);
                         workspace.load_database_sizes(&id, &database, generation, cx);
@@ -2595,17 +3136,43 @@ impl Workspace {
         let Some(session) = self.session_for(id, database, generation) else {
             return;
         };
+        // The profile's depth, as `load_routines` reads it: a skipped read
+        // lands `Skipped` so nothing waits on `Loading`.
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        if profile.behaviour.depth < Depth::Routines {
+            if let Some(CatalogState::Loaded(_, routines)) =
+                profile.database_catalogs.get_mut(database)
+            {
+                *routines = Routines::Skipped;
+            }
+            self.rebuild_connections(cx);
+            cx.notify();
+            return;
+        }
+        // The active schema is kept in the connection's own database only.
+        let shown = profile.shown().in_another_database(database);
+        #[cfg(test)]
+        {
+            self.routine_reads += 1;
+        }
+        let asked = shown.clone();
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || session.metadata(Connection::routines)
+            move || session.metadata(|connection| connection.routines(&shown))
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
             let result = task.await;
             _ = workspace.update(cx, |workspace, cx| {
+                // Under a filter saved over since, a schema it hides would
+                // come back through the merge; the catalog read again under
+                // the new one reads its routines too.
                 let Some(profile) = workspace
                     .issued_to(&id, generation)
                     .filter(|profile| profile.is_registered(&database, &session))
+                    .filter(|profile| profile.shown().in_another_database(&database) == asked)
                 else {
                     return;
                 };
@@ -2675,7 +3242,21 @@ impl Workspace {
         if !self.settings.show_sizes {
             return;
         }
+        // Sizes load only when the profile's depth allows them too.
+        if self
+            .issued_to(id, generation)
+            .is_none_or(|profile| profile.behaviour.depth < Depth::Sizes)
+        {
+            return;
+        }
         let Some(session) = self.session_for(id, database, generation) else {
+            return;
+        };
+        // The active schema is kept in the connection's own database only.
+        let Some(shown) = self
+            .issued_to(id, generation)
+            .map(|profile| profile.shown().in_another_database(database))
+        else {
             return;
         };
         #[cfg(test)]
@@ -2684,7 +3265,7 @@ impl Workspace {
         }
         let task = spawn_blocking(cx.background_executor(), {
             let session = session.clone();
-            move || session.metadata(Connection::sizes)
+            move || session.metadata(|connection| connection.sizes(&shown))
         });
         let (id, database) = (id.to_string(), database.to_string());
         cx.spawn(async move |workspace, cx| {
@@ -2742,6 +3323,7 @@ impl Workspace {
         self.install_completions(id, cx);
         self.rebuild_explorer(id, keep, cx);
         self.catalog_landed(id, cx);
+        self.read_open_schemas(id, cx);
     }
 
     /// Fill the routines in behind the relations already on screen.
@@ -2753,17 +3335,28 @@ impl Workspace {
     /// A failure here leaves the relations alone and is said once in the status
     /// bar. Replacing a working explorer with an error because the functions
     /// could not be listed would cost more than it reports.
-    fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+    pub(crate) fn load_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
         let Some(profile) = self.issued_to(id, generation) else {
             return;
         };
+        if profile.behaviour.depth < Depth::Routines {
+            self.skip_routines(id, generation, cx);
+            return;
+        }
         let Some(connection) = profile.connection() else {
             if let CatalogState::Loaded(_, routines) = &mut profile.catalog {
                 *routines = Routines::Failed;
             }
             return;
         };
-        let routines_task = spawn_blocking(cx.background_executor(), move || connection.routines());
+        let shown = profile.shown();
+        #[cfg(test)]
+        {
+            self.routine_reads += 1;
+        }
+        let routines_task = spawn_blocking(cx.background_executor(), move || {
+            connection.routines(&shown)
+        });
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2794,11 +3387,32 @@ impl Workspace {
                     workspace.install_completions(&id, cx);
                     workspace.refresh_explorer(&id, cx);
                     workspace.catalog_landed(&id, cx);
+                    workspace.reread_if_saved(&id, cx);
                     cx.notify();
                 })
                 .ok();
         })
         .detach();
+    }
+
+    /// The profile's depth chose not to read the routines: land them as
+    /// `Skipped` and run what their landing runs, so nothing waits on
+    /// `Routines::Loading` (a restored routine tab stays pending, as it does
+    /// for a read that failed).
+    fn skip_routines(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let Some(profile) = self.issued_to(id, generation) else {
+            return;
+        };
+        // Only onto a catalog that loaded, as a read's landing is.
+        let CatalogState::Loaded(_, routines) = &mut profile.catalog else {
+            return;
+        };
+        *routines = Routines::Skipped;
+        self.install_completions(id, cx);
+        self.refresh_explorer(id, cx);
+        self.catalog_landed(id, cx);
+        self.reread_if_saved(id, cx);
+        cx.notify();
     }
 
     /// Fill table sizes in behind the relations, alongside the routines and in
@@ -2809,14 +3423,39 @@ impl Workspace {
     /// connect about something the user never asked for.
     ///
     /// With Show sizes off nothing is asked: a role whose statistics read takes
-    /// locks or opens every table is never sent it.
+    /// locks or opens every table is never sent it. Nor is it below the
+    /// profile's `Sizes` depth: sizes load only when both allow it.
+    ///
+    /// A catalog that left schemas unread asks for the sizes of those it read
+    /// alone, so a sizes read never opens every table on such a server.
     fn load_sizes(&mut self, id: &str, generation: u64, cx: &mut Context<Self>) {
+        let only = self
+            .issued_to(id, generation)
+            .and_then(|profile| match &profile.catalog {
+                CatalogState::Loaded(catalog, _) if !catalog.unread.is_empty() => {
+                    Some(catalog.read_schemas())
+                }
+                _ => None,
+            });
+        self.load_sizes_of(id, generation, only, cx);
+    }
+
+    /// [`Self::load_sizes`] of the schemas `only` names, or of every one the
+    /// filter shows.
+    fn load_sizes_of(
+        &mut self,
+        id: &str,
+        generation: u64,
+        only: Option<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.settings.show_sizes {
             return;
         }
-        let Some(connection) = self
+        let Some((connection, shown)) = self
             .issued_to(id, generation)
-            .and_then(|profile| profile.connection())
+            .filter(|profile| profile.behaviour.depth == Depth::Sizes)
+            .and_then(|profile| Some((profile.connection()?, profile.shown())))
         else {
             return;
         };
@@ -2824,7 +3463,10 @@ impl Workspace {
         {
             self.size_reads += 1;
         }
-        let sizes_task = spawn_blocking(cx.background_executor(), move || connection.sizes());
+        let sizes_task = spawn_blocking(cx.background_executor(), move || match only {
+            Some(schemas) => connection.sizes_of(&schemas),
+            None => connection.sizes(&shown),
+        });
 
         let id = id.to_string();
         cx.spawn(async move |workspace, cx| {
@@ -2846,6 +3488,103 @@ impl Workspace {
                 .ok();
         })
         .detach();
+    }
+
+    /// Read the relations of `schema`, which the profile's own catalog lists
+    /// unread ([`crate::db::Catalog::unread`]), now that its row was opened;
+    /// then its sizes, behind them as at connect. Nothing for a schema that is
+    /// read or being read. A failure is said in the schema's row, and opening
+    /// the row again reads it again.
+    pub(crate) fn read_schema(&mut self, id: &str, schema: &str, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter_mut().find(|found| found.id == id) else {
+            return;
+        };
+        let generation = profile.generation;
+        if profile.schema_reads.get(schema) == Some(&generation) {
+            return;
+        }
+        let Some(connection) = profile.connection() else {
+            return;
+        };
+        let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+            return;
+        };
+        let Some(state) = catalog.unread.get_mut(schema) else {
+            return;
+        };
+        // What a failed read said gives way to `Loading…` while it reads again.
+        *state = None;
+        profile.schema_reads.insert(schema.to_string(), generation);
+        let shown = profile.shown();
+        #[cfg(test)]
+        self.relation_reads.push(schema.to_string());
+        let task = spawn_blocking(cx.background_executor(), {
+            let schema = schema.to_string();
+            move || connection.schema_relations(&schema, &shown)
+        });
+        self.rebuild_explorer(id, true, cx);
+        let (id, schema) = (id.to_string(), schema.to_string());
+        cx.spawn(async move |workspace, cx| {
+            let result = task.await;
+            _ = workspace.update(cx, |workspace, cx| {
+                let Some(profile) = workspace.issued_to(&id, generation) else {
+                    return;
+                };
+                profile.schema_reads.remove(&schema);
+                let CatalogState::Loaded(catalog, _) = &mut profile.catalog else {
+                    return;
+                };
+                // A refresh since has read it, or listed it no more.
+                let Some(state) = catalog.unread.get_mut(&schema) else {
+                    return;
+                };
+                let read = match result {
+                    Ok(read) => {
+                        catalog.read_relations(&schema, read);
+                        true
+                    }
+                    Err(error) => {
+                        *state = Some(error.message);
+                        false
+                    }
+                };
+                workspace.install_completions(&id, cx);
+                workspace.rebuild_explorer(&id, true, cx);
+                workspace.catalog_landed(&id, cx);
+                if read {
+                    workspace.load_sizes_of(&id, generation, Some(vec![schema]), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Read every unread schema of `id`'s catalog whose row is open: one the
+    /// user left open in either tree comes back open, and no `Expanded` is
+    /// heard for a row that was built open.
+    fn read_open_schemas(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.iter().find(|found| found.id == id) else {
+            return;
+        };
+        let CatalogState::Loaded(catalog, _) = &profile.catalog else {
+            return;
+        };
+        let open: Vec<String> = catalog
+            .unread
+            .keys()
+            .filter(|schema| {
+                let row = explorer::schema_row(schema);
+                profile.folds.get(&row) == Some(&true)
+                    || profile
+                        .open_rows
+                        .contains(&crate::sidebar::scoped_row(id, None, &row))
+            })
+            .cloned()
+            .collect();
+        for schema in open {
+            self.read_schema(id, &schema, cx);
+        }
     }
 
     /// Point this profile's editor at what its catalog now holds.
@@ -3336,6 +4075,41 @@ fn metadata_reader(session: &Connection, in_transaction: bool) -> Result<Connect
     }
 }
 
+/// Whether the profile's startup script, which is not blank, is refused under
+/// `mode`: the same gate a connect applies, asked without opening anything.
+pub(super) fn script_refused(profile: &Profile, mode: Mode) -> bool {
+    startup_refused(profile, &profile.behaviour.startup_script, mode)
+}
+
+/// [`script_refused`] for `script`, such as the one the live connection ran
+/// at its connect ([`Profile::connected_script`]).
+pub(super) fn startup_refused(profile: &Profile, script: &str, mode: Mode) -> bool {
+    !script.trim().is_empty()
+        && sql::startup_statements(profile.config.engine(), mode, &profile.confirmed, script)
+            .is_err()
+}
+
+/// Gates the profile's startup script under `mode` and runs it on `connection`,
+/// which is handed back with the statements kept for every session the driver
+/// opens beside it. A blank script returns it untouched. The same call at a
+/// connect and in Test connection, so a pass there is a promise about the
+/// connect. The messages never quote the script.
+fn run_startup(
+    connection: Connection,
+    engine: Engine,
+    mode: Mode,
+    confirmed: &[Destructive],
+    script: &str,
+) -> Result<Connection, String> {
+    let statements = sql::startup_statements(engine, mode, confirmed, script)?;
+    if statements.is_empty() {
+        return Ok(connection);
+    }
+    connection
+        .with_startup(statements)
+        .map_err(|error| format!("The startup script failed: {}", error.message))
+}
+
 /// The connection a stored profile describes and any notice it opens with, or,
 /// for one on a plugin it cannot open, why. No engine at all is a profile
 /// written before dbdelve had a second one, and Postgres is what it was. A
@@ -3398,6 +4172,39 @@ fn restored_config(
     })
 }
 
+/// A stored profile's session time zone and driver properties as `engine` may
+/// have them, and what was refused. A hand-edited value is checked here, never
+/// trusted from disk: a zone that fails [`check_time_zone`] is dropped, and a
+/// property list [`Properties::parse`] refuses is dropped whole. A zone on an
+/// engine with no time-zone row is left unread without a word, as a startup
+/// script is.
+fn stored_session_settings(
+    stored: &store::StoredProfile,
+    engine: Engine,
+) -> (Option<String>, Properties, Option<String>) {
+    let mut refused = Vec::new();
+    // The check trims, and a hand-edited file can carry whitespace the form
+    // never would: keep the text that was checked, so it is the text sent.
+    let time_zone = stored
+        .time_zone
+        .as_deref()
+        .map(|zone| zone.trim().to_string())
+        .filter(|_| Target::built_in(engine).takes_time_zone())
+        .filter(|zone| match check_time_zone(zone) {
+            Ok(()) => true,
+            Err(message) => {
+                refused.push(message);
+                false
+            }
+        });
+    let properties =
+        Properties::parse(engine, &stored.driver_properties).unwrap_or_else(|message| {
+            refused.push(message);
+            Properties::default()
+        });
+    let refused = (!refused.is_empty()).then(|| refused.join(" "));
+    (time_zone, properties, refused)
+}
 /// The connection a stored profile on a built-in `engine` describes, with
 /// `sslmode` as [`Workspace::restore_profile`] read it.
 fn stored_config(
@@ -3427,6 +4234,7 @@ fn stored_config(
         | Engine::ClickHouse
         | Engine::MongoDb
         | Engine::Redis => {
+            let (time_zone, properties, _) = stored_session_settings(stored, engine);
             let server = ServerConfig {
                 host: stored.host.clone(),
                 port: stored.port,
@@ -3441,6 +4249,8 @@ fn stored_config(
                 ssm: stored.ssm.clone(),
                 ssh: stored.ssh.clone(),
                 schema: stored.schema.clone(),
+                time_zone,
+                properties,
             };
             match engine {
                 Engine::MySql => ConnectionConfig::MySql(server),
@@ -3758,6 +4568,127 @@ target = 'i-0123456789abcdef0'
     }
 
     #[test]
+    fn a_stored_time_zone_and_driver_properties_reach_the_config() {
+        use crate::db::Properties;
+
+        let profile = |engine: &str, extra: &str| {
+            format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = '{engine}'\n{extra}"
+            )
+        };
+        let both = "time_zone = 'Europe/Paris'\n\
+            driver_properties = [['connect_timeout', '5'], ['application_name', 'billing']]\n";
+        let restored_server = |text: &str| {
+            let configs = restored(text);
+            configs[0].1.server().expect("a server engine").clone()
+        };
+
+        let postgres = restored_server(&profile("postgres", both));
+        assert_eq!(postgres.time_zone.as_deref(), Some("Europe/Paris"));
+        assert_eq!(
+            postgres.properties,
+            Properties {
+                application_name: Some("billing".into()),
+                connect_timeout: Some(5),
+            }
+        );
+        assert_eq!(
+            postgres.properties.stored(),
+            vec![
+                ("application_name".to_string(), "billing".to_string()),
+                ("connect_timeout".to_string(), "5".to_string()),
+            ],
+            "the list's order, not the file's"
+        );
+
+        let sql_server = restored_server(&profile("sqlserver", both));
+        assert_eq!(
+            sql_server.time_zone, None,
+            "SQL Server has no time-zone row"
+        );
+        assert_eq!(
+            sql_server.properties,
+            Properties::default(),
+            "connect_timeout is not on its list, so the whole list is refused"
+        );
+
+        let bare = restored_server(&profile("postgres", ""));
+        assert_eq!(bare.time_zone, None);
+        assert_eq!(bare.properties, Properties::default());
+    }
+
+    #[test]
+    fn a_stored_time_zone_reaches_the_config_without_its_surrounding_whitespace() {
+        let zone_of = |zone: &str| {
+            let text = format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = 'postgres'\ntime_zone = \"{zone}\"\n"
+            );
+            let configs = restored(&text);
+            configs[0]
+                .1
+                .server()
+                .expect("a server engine")
+                .time_zone
+                .clone()
+        };
+        assert_eq!(
+            zone_of(" Europe/Paris\\n"),
+            Some("Europe/Paris".to_string())
+        );
+        assert_eq!(
+            zone_of(" \\t "),
+            None,
+            "a zone that is only whitespace is blank"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_zone_or_property_that_fails_its_check_is_not_restored() {
+        use crate::db::Properties;
+
+        let restored_server = |extra: &str| {
+            let text = format!(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\n\
+                 user = 'u'\nengine = 'postgres'\n{extra}"
+            );
+            restored(&text)[0]
+                .1
+                .server()
+                .expect("a server engine")
+                .clone()
+        };
+
+        let zone = restored_server("time_zone = \"Europe/Paris'; RESET ALL\"\n");
+        assert_eq!(zone.time_zone, None);
+        let options = restored_server("driver_properties = [['options', '-c x=1']]\n");
+        assert_eq!(options.properties, Properties::default());
+
+        let kept = restored_server(
+            "time_zone = 'Europe/Paris'\ndriver_properties = [['application_name', 'billing']]\n",
+        );
+        assert_eq!(kept.time_zone.as_deref(), Some("Europe/Paris"));
+        assert_eq!(kept.properties.application_name.as_deref(), Some("billing"));
+
+        let (_, _, refusal) = stored_session_settings(
+            &store::decode_profiles(
+                "[[profiles]]\nid = 'a'\nname = 'A'\nhost = 'h'\ndatabase = 'd'\nuser = 'u'\ntime_zone = \"x'y\"\n\
+                 driver_properties = [['options', 'z']]\n",
+                &[],
+            )
+            .expect("loads")
+            .profiles[0],
+            Engine::Postgres,
+        );
+        let refusal = refusal.expect("both refusals are reported");
+        assert!(
+            refusal.contains("x'y") && refusal.contains("`options`"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
     fn only_a_postgres_profile_restores_the_service_it_names() {
         let profile = |engine: &str| {
             format!(
@@ -3967,6 +4898,98 @@ target = 'i-0123456789abcdef0'
         // Blank is wherever the login landed, which the listing names.
         assert!(already_on("", Some("master"), "master"));
         assert!(!already_on("", Some("master"), "tempdb"));
+    }
+
+    /// A switch on a catalog that lists every database keeps it, so one on a
+    /// server with thousands of tables does not read them all again.
+    #[test]
+    fn a_switch_keeps_a_catalog_that_lists_every_database_and_rereads_the_rest() {
+        let schema = |name: &str| crate::db::Schema {
+            name: name.into(),
+            relations: Vec::new(),
+            routines: Vec::new(),
+            sequences: Vec::new(),
+        };
+        let listed = |routines| {
+            CatalogState::Loaded(
+                Catalog {
+                    schemas: vec![schema("app"), schema("other"), schema("mysql")],
+                    ..Catalog::default()
+                },
+                routines,
+            )
+        };
+        let mysql = Target::built_in(Engine::MySql);
+        let loaded = listed(Routines::Loaded);
+        assert!(catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "app",
+            Some("other")
+        ));
+        assert!(catalog_survives_switch(
+            Target::built_in(Engine::MariaDb),
+            &listed(Routines::Skipped),
+            false,
+            "app",
+            Some("other"),
+        ));
+        // The routines' answer would land on the old generation.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &listed(Routines::Loading),
+            false,
+            "app",
+            Some("other")
+        ));
+        // A database list keeps the session's own whatever it says.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            true,
+            "app",
+            Some("other")
+        ));
+        // The server's own is listed only while the session is on it.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "app",
+            Some("mysql")
+        ));
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "mysql",
+            Some("app")
+        ));
+        // One the catalog does not list, or none named.
+        assert!(!catalog_survives_switch(
+            mysql,
+            &loaded,
+            false,
+            "app",
+            Some("new")
+        ));
+        assert!(!catalog_survives_switch(mysql, &loaded, false, "app", None));
+        assert!(!catalog_survives_switch(
+            mysql,
+            &CatalogState::Loading,
+            false,
+            "app",
+            Some("other")
+        ));
+        // A catalog of one database is another database's after the move.
+        assert!(!catalog_survives_switch(
+            Target::built_in(Engine::Postgres),
+            &loaded,
+            false,
+            "app",
+            Some("other"),
+        ));
     }
 
     #[test]

@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -20,11 +21,12 @@ use super::ssh::{self, Bridged, SocketBridge};
 use super::tunnel::{Tunnel, tunnelled};
 use super::{
     ApplyOutcome, ApplyStage, Catalog, Column, DbError, EditTarget, Engine, ExportDdl, Feed, Fetch,
-    GraphCancel, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch, SchemaGraph,
-    Sending, Sequences, ServerConfig, Sizes, Stopped, Structure, VerifiedStep, assemble_catalog,
-    assemble_databases, assemble_foreign_keys, assemble_references, assemble_schema_graph,
-    assemble_sequences, assemble_sizes, assemble_structure, create_table, non_utf8_error,
-    optional_cell, plain_error, required_cell, split_foreign_keys, terminated,
+    GraphCancel, Properties, QueryResult, Reference, RelationKind, Row, RowBuilder, RowMatch,
+    SchemaGraph, Sending, Sequences, ServerConfig, Sizes, Stopped, Structure, VerifiedStep,
+    assemble_catalog, assemble_databases, assemble_foreign_keys, assemble_references,
+    assemble_schema_graph, assemble_sequences, assemble_sizes, assemble_structure, create_table,
+    non_utf8_error, optional_cell, plain_error, required_cell, split_foreign_keys, terminated,
+    time_zone_statement,
 };
 
 mod pgpass;
@@ -672,6 +674,8 @@ pub fn config_from_url(url: &str) -> Result<PostgresConfig, String> {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         },
         service,
     })
@@ -701,7 +705,19 @@ fn connection_string(server: &ServerConfig) -> String {
     // Without this the driver waits out the OS SYN retry budget, so a host
     // that resolves but drops packets pins the UI in "Connecting…" for
     // minutes with no cancel.
-    parts.push(format!("connect_timeout={CONNECT_TIMEOUT_SECONDS}"));
+    // The profile's own number replaces it, never adds a second key.
+    parts.push(format!(
+        "connect_timeout={}",
+        server
+            .properties
+            .connect_timeout
+            .map_or(CONNECT_TIMEOUT_SECONDS, u64::from)
+    ));
+    // Shown in `pg_stat_activity` for the session. Never in `options`, which
+    // carries the statement timeout.
+    if let Some(name) = &server.properties.application_name {
+        parts.push(format!("application_name={}", quote(name)));
+    }
     if server.statement_timeout > 0 {
         // A session default set once, here, rather than a `SET` prepended to
         // the user's submission -- see `ServerConfig::statement_timeout`. It
@@ -751,15 +767,33 @@ fn set_search_path_sql(schema: Option<&str>) -> String {
     )
 }
 
+/// The profile's startup statements on `client`, in the order written, rows
+/// discarded. The first error stops the rest.
+fn replay(client: &mut Client, startup: &[String]) -> Result<(), DbError> {
+    let Client { client, driver, .. } = client;
+    startup.iter().try_for_each(|statement| {
+        driver
+            .block_on(client.simple_query(statement))
+            .and_then(|done| done)
+            .map(|_| ())
+            .map_err(|error| query_error(&error, statement))
+    })
+}
+
 /// A `SET` after connecting rather than a startup option: PgBouncer and other
 /// poolers refuse a connection that sends `options` at all.
 fn set_search_path(client: &mut Client, schema: Option<&str>) -> Result<(), DbError> {
-    let set = set_search_path_sql(schema);
+    apply_search_path(client, &set_search_path_sql(schema))
+}
+
+/// Sends `set`, a guarded `set_config` of the `search_path`, and refuses when
+/// the guard answered no row: a transaction is open and the path is another.
+fn apply_search_path(client: &mut Client, set: &str) -> Result<(), DbError> {
     let Client { client, driver, .. } = client;
     let messages = driver
-        .block_on(client.simple_query(&set))
+        .block_on(client.simple_query(set))
         .and_then(|done| done)
-        .map_err(|error| query_error(&error, &set))?;
+        .map_err(|error| query_error(&error, set))?;
     match messages
         .iter()
         .any(|message| matches!(message, SimpleQueryMessage::Row(_)))
@@ -771,6 +805,47 @@ fn set_search_path(client: &mut Client, schema: Option<&str>) -> Result<(), DbEr
     }
 }
 
+/// What puts a session back on the `search_path` a bound run with no schema
+/// expects: the one it held once its startup script ran. The captured text is
+/// the server's own stored value, which it already accepted, so it is set back
+/// verbatim. Guarded as [`set_search_path_sql`] is: inside a transaction block
+/// it sets nothing and answers only when the path is already the one it would
+/// set.
+fn put_back_search_path_sql(path: &str) -> String {
+    let path = path.replace('\\', r"\\").replace('\'', "''");
+    format!(
+        "SELECT CASE WHEN outside THEN pg_catalog.set_config('search_path', path, false) END \
+         FROM (SELECT E'{path}' AS path, \
+         pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS outside) \
+         AS wanted WHERE outside OR pg_catalog.current_setting('search_path') = path"
+    )
+}
+
+/// The session back on the `search_path` a bound run with no schema expects:
+/// the one it held after its startup script ran, or its own default where it
+/// ran none.
+fn put_back_search_path(client: &mut Client, after_startup: Option<&str>) -> Result<(), DbError> {
+    match after_startup {
+        None => set_search_path(client, None),
+        Some(path) => apply_search_path(client, &put_back_search_path_sql(path)),
+    }
+}
+
+/// The `search_path` `client` holds now, for putting a session back on what a
+/// startup script left. A failed read fails the open like the script's own
+/// error: a connect never promises a `search_path` it cannot put back.
+fn read_search_path(client: &mut Client) -> Result<Option<String>, DbError> {
+    let read = "SELECT pg_catalog.current_setting('search_path')";
+    let Client { client, driver, .. } = client;
+    let messages = driver
+        .block_on(client.simple_query(read))
+        .and_then(|done| done)
+        .map_err(|error| query_error(&error, read))?;
+    Ok(messages.into_iter().find_map(|message| match message {
+        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+        _ => None,
+    }))
+}
 /// The server's own name, which TLS verifies, dialled at the tunnel's address
 /// through `hostaddr`, which the certificate check never sees.
 /// An empty `dbname` would have the server pick the user's name, often a
@@ -1048,6 +1123,36 @@ pub struct Connection {
     server: Arc<Mutex<ServerConfig>>,
     /// A Cancel for this session's schema graph read ([`Self::schema_graph`]).
     graph: GraphCancel,
+    /// The statements the profile's gated startup script came to, replayed in
+    /// [`Self::connect`] on every session opened for the user. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
+    /// The `search_path` this session held once its startup script ran on it.
+    /// A bound run that picks no schema puts the session back on it. `None`
+    /// where no script ran, and `RESET` does the job there.
+    after_startup_search_path: Option<String>,
+    /// Whether the profile holds this connection to reads
+    /// ([`super::Connection::set_read_only`]): every session opened for it
+    /// from here on takes the hold before the startup script replays, so the
+    /// script never runs unheld. Shared with the sessions opened beside it.
+    held: Arc<AtomicBool>,
+    /// Whether the server keeps an inherit option per membership (Postgres 16
+    /// on). Fixed for the server's life, so the role reads probe it once; the
+    /// password probe is not kept, as `SET ROLE` changes what the session may read.
+    per_membership: Arc<OnceLock<bool>>,
+}
+
+/// What `cell` holds, or what `probe` learns and `cell` then keeps. A failed
+/// probe keeps nothing, so the next read asks again.
+fn cached_once(
+    cell: &OnceLock<bool>,
+    probe: impl FnOnce() -> Result<bool, DbError>,
+) -> Result<bool, DbError> {
+    if let Some(known) = cell.get() {
+        return Ok(*known);
+    }
+    let learned = probe()?;
+    Ok(*cell.get_or_init(|| learned))
 }
 
 #[derive(Clone)]
@@ -1068,10 +1173,15 @@ impl Connection {
         match &server.ssh {
             Some(ssh) if server.host.starts_with('/') => {
                 let bridge = SocketBridge::new(ssh, &socket_path(server))?;
-                Self::connect(server, Route::Socket(Arc::new(bridge)))
+                Self::connect(server, Route::Socket(Arc::new(bridge)), &[], false)
             }
             _ => tunnelled(server, DEFAULT_PORT, |tunnel| {
-                Self::connect(server, tunnel.map_or(Route::Direct, Route::Tunnel))
+                Self::connect(
+                    server,
+                    tunnel.map_or(Route::Direct, Route::Tunnel),
+                    &[],
+                    false,
+                )
             }),
         }
     }
@@ -1087,11 +1197,35 @@ impl Connection {
         std::thread::spawn(move || this.aside(Duration::ZERO, |_| Some(())));
     }
 
-    fn connect(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
-        server.forgetting_on_failure(Engine::Postgres, Self::sign_in(server, route))
+    /// A session at `server`, `held` to reads before `startup` replays.
+    fn connect(
+        server: &ServerConfig,
+        route: Route,
+        startup: &[String],
+        held: bool,
+    ) -> Result<Self, DbError> {
+        server.forgetting_on_failure(
+            Engine::Postgres,
+            Self::sign_in(server, route, startup, held),
+        )
     }
 
-    fn sign_in(server: &ServerConfig, route: Route) -> Result<Self, DbError> {
+    /// What [`super::Connection::set_read_only`] just set on this session,
+    /// for the sessions opened from here on to take too.
+    pub(super) fn remember_hold(&self, read_only: bool) {
+        self.held.store(read_only, Ordering::SeqCst);
+    }
+
+    fn held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
+
+    fn sign_in(
+        server: &ServerConfig,
+        route: Route,
+        startup: &[String],
+        held: bool,
+    ) -> Result<Self, DbError> {
         let connector = tls::connector(server.sslmode, server.root_certificate.as_deref())
             .map_err(|message| DbError {
                 message,
@@ -1173,9 +1307,29 @@ impl Connection {
                 });
         let pid = row.as_ref().and_then(|row| row.get(0)?.parse().ok());
         let current_schema = row.and_then(|row| row.get(1).map(str::to_string));
+        // Before the pick and the script, so a zone the script sets wins. A
+        // `SET` after connecting, not a startup option, as the pick is.
+        if let Some(statement) = server
+            .time_zone
+            .as_deref()
+            .and_then(|zone| time_zone_statement(Engine::Postgres, zone))
+        {
+            replay(&mut client, &[statement])?;
+        }
         if let Some(schema) = &server.schema {
             set_search_path(&mut client, Some(schema))?;
         }
+        // Before the script: a function call the gate reads as a read is one
+        // only because the hold stops its writes.
+        if held && let Some(hold) = super::read_only_statement(Engine::Postgres, true) {
+            replay(&mut client, &[hold.to_string()])?;
+        }
+        // After the schema pick, so a `search_path` the script sets wins.
+        replay(&mut client, startup)?;
+        let after_startup_search_path = match startup.is_empty() {
+            true => None,
+            false => read_search_path(&mut client)?,
+        };
 
         Ok(Self {
             cancel: client.client.cancel_token(),
@@ -1188,7 +1342,33 @@ impl Connection {
             route,
             server: Arc::new(Mutex::new(server.clone())),
             graph: GraphCancel::default(),
+            startup: startup.into(),
+            after_startup_search_path,
+            held: Arc::new(AtomicBool::new(held)),
+            per_membership: Arc::default(),
         })
+    }
+
+    /// Runs `statements` now on this session and keeps them for every session
+    /// this connection opens from here on. The first error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        let mut client = self.client.lock().map_err(|_| DbError {
+            message: "The connection is unavailable after an earlier internal failure.".into(),
+            position: None,
+        })?;
+        replay(&mut client, &statements)?;
+        let after_startup = match statements.is_empty() {
+            true => None,
+            false => read_search_path(&mut client)?,
+        };
+        drop(client);
+        self.after_startup_search_path = after_startup;
+        self.startup = statements.into();
+        // One opened before the script was known has not run it.
+        if let Ok(mut side) = self.side.lock() {
+            *side = None;
+        }
+        Ok(self)
     }
 
     fn server(&self) -> ServerConfig {
@@ -1246,7 +1426,13 @@ impl Connection {
         Ok(Self {
             side: self.side.clone(),
             server: self.server.clone(),
-            ..Self::connect(&self.server(), self.route.clone())?
+            held: self.held.clone(),
+            ..Self::connect(
+                &self.server(),
+                self.route.clone(),
+                &self.startup,
+                self.held(),
+            )?
         })
     }
 
@@ -1278,7 +1464,29 @@ impl Connection {
                 ..self.server()
             },
             self.route.clone(),
+            &self.startup,
+            self.held(),
         )
+    }
+
+    /// This side session with its bound back after the startup script ran on
+    /// it: the script is the user's text and may `SET statement_timeout` away
+    /// the 2 seconds the connection string gave it, which bounds every
+    /// describe and size read on it. In the same milliseconds the startup
+    /// option sends.
+    fn with_side_bound(self) -> Result<Self, DbError> {
+        if !self.startup.is_empty() {
+            let bound = format!(
+                "SET statement_timeout = {}",
+                u64::from(SIDE_TIMEOUT_SECONDS) * 1_000
+            );
+            let mut client = self.client.lock().map_err(|_| DbError {
+                message: "The connection is unavailable after an earlier internal failure.".into(),
+                position: None,
+            })?;
+            replay(&mut client, &[bound])?;
+        }
+        Ok(self)
     }
 
     /// A poisoned mutex counts: every later statement would fail on it too.
@@ -1286,6 +1494,47 @@ impl Connection {
         self.client
             .lock()
             .map_or(true, |client| client.client.is_closed())
+    }
+
+    /// One `SELECT 1` on the session. A statement holding the client is the
+    /// session in use, so the ping is skipped, never queued behind it; a
+    /// poisoned lock is a session every later statement would fail on, as
+    /// [`Connection::is_lost`] counts it. `idle` is asked once the session is
+    /// held, and a `false` skips it too: a `BEGIN` that landed since the
+    /// round was set has a transaction open, whose snapshot a ping would take.
+    /// One with no answer within [`super::PING_WITHIN`] closes the
+    /// connection before letting go of it, so the next statement finds it
+    /// lost rather than waiting behind the ping on a socket gone quiet.
+    pub fn ping(&self, idle: &dyn Fn() -> bool) -> Result<(), DbError> {
+        let mut client = match self.client.try_lock() {
+            Ok(client) => client,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(plain_error("The connection is closed.".into()));
+            }
+        };
+        if !idle() {
+            return Ok(());
+        }
+        let ping = "SELECT 1";
+        let Client { client, driver, .. } = &mut *client;
+        // The timer is made inside the runtime, which has the clock it reads.
+        let answered = driver.block_on(async {
+            tokio::time::timeout(super::PING_WITHIN, client.simple_query(ping)).await
+        });
+        match answered {
+            Ok(Ok(done)) => done.map(|_| ()).map_err(|error| query_error(&error, ping)),
+            Ok(Err(_)) => {
+                // Dropping the connection closes the client with it.
+                driver.connection = None;
+                Err(plain_error(format!(
+                    "The server did not answer a keep-alive within {} seconds, so the \
+                     connection was closed.",
+                    super::PING_WITHIN.as_secs()
+                )))
+            }
+            Err(error) => Err(query_error(&error, ping)),
+        }
     }
 
     /// Cancellation is advisory and racy by the driver's own admission: the
@@ -1336,8 +1585,9 @@ impl Connection {
     }
 
     /// [`Self::query`] for a tab bound to this session's database: `schema`
-    /// goes first on the `search_path`, or the session's own default is put
-    /// back where the tab binds none, before the statement and under the lock
+    /// goes first on the `search_path`, or the session is put back on the one
+    /// it held after its startup script ran (its own default where it ran
+    /// none) where the tab binds none, before the statement and under the lock
     /// that runs it. A statement of another tab, or one of the user's own,
     /// may have moved it since, and two tabs bound to different schemas of one
     /// database share this session, so applying and running as two
@@ -1562,8 +1812,15 @@ impl Connection {
             position: None,
         })?;
         let held = fetch.hold()?;
-        if let Some(schema) = bound {
-            set_search_path(&mut client, schema).map_err(super::unplaced)?;
+        match bound {
+            Some(Some(schema)) => {
+                set_search_path(&mut client, Some(schema)).map_err(super::unplaced)?
+            }
+            Some(None) => {
+                put_back_search_path(&mut client, self.after_startup_search_path.as_deref())
+                    .map_err(super::unplaced)?
+            }
+            None => {}
         }
         let (mut result, commands) = self.ran(&mut client, sql, typed, fetch, bound)?;
 
@@ -1664,7 +1921,9 @@ impl Connection {
                 statement_timeout: SIDE_TIMEOUT_SECONDS,
                 ..self.server()
             };
-            *side = Self::connect(&server, self.route.clone()).ok();
+            *side = Self::connect(&server, self.route.clone(), &self.startup, self.held())
+                .and_then(|side| side.with_side_bound())
+                .ok();
         }
         ask(side.as_ref()?)
     }
@@ -1792,7 +2051,12 @@ impl Connection {
     /// waiting on a relation's lock never holds the mutex a user's query waits
     /// on. The side connection is dropped on return.
     pub fn sizes(&self) -> Result<Sizes, DbError> {
-        let side = Self::connect(&self.server(), self.route.clone())?;
+        let side = Self::connect(
+            &self.server(),
+            self.route.clone(),
+            &self.startup,
+            self.held(),
+        )?;
         assemble_sizes(side.internal_query(SIZES_SQL)?)
     }
 
@@ -1835,6 +2099,82 @@ impl Connection {
             let foreign_keys = query(GRAPH_FOREIGN_KEYS_SQL)?;
             assemble_schema_graph(schema, &columns, &unique_keys, &foreign_keys)
         })
+    }
+
+    /// Whether the connection may read passwords (`pg_authid`), and whether
+    /// the server keeps an inherit option per membership (Postgres 16 on).
+    fn role_catalog(&self) -> Result<(bool, bool), DbError> {
+        let probe = self.internal_query(
+            "SELECT CASE WHEN pg_catalog.has_table_privilege('pg_catalog.pg_authid', 'SELECT')
+                 THEN 'y' ELSE 'n' END AS passwords,
+                 CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 160000
+                 THEN 'y' ELSE 'n' END AS per_membership",
+        )?;
+        let row = probe.rows.first().cloned().unwrap_or_default();
+        let per_membership = required_cell(&probe, &row, "per_membership")? == "y";
+        _ = self.per_membership.set(per_membership);
+        Ok((
+            required_cell(&probe, &row, "passwords")? == "y",
+            per_membership,
+        ))
+    }
+
+    /// [`Self::role_catalog`]'s second answer, asked of the server once.
+    fn per_membership(&self) -> Result<bool, DbError> {
+        cached_once(&self.per_membership, || Ok(self.role_catalog()?.1))
+    }
+
+    pub fn roles(&self) -> Result<super::roles::Roles, DbError> {
+        use super::roles::{assemble_roles, memberships_sql, roles_sql};
+        let (passwords, per_membership) = self.role_catalog()?;
+        let roles = self.internal_query(&roles_sql(passwords))?;
+        let memberships = self.internal_query(&memberships_sql(per_membership))?;
+        assemble_roles(&roles, &memberships)
+    }
+
+    pub fn object_grants(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<super::roles::ObjectGrants, DbError> {
+        use super::roles::{RELATION_GRANTS_SQL, assemble_grants};
+        let grants = self.internal_query(&structure_sql(RELATION_GRANTS_SQL, schema, name))?;
+        assemble_grants(&grants, self.roles()?)
+    }
+
+    pub fn role_reach(&self, name: &str) -> Result<super::roles::Reach, DbError> {
+        use super::roles::{assemble_reach, owns_sql, reach_sql};
+        let per_membership = self.per_membership()?;
+        let reach = self.internal_query(&reach_sql(name, per_membership))?;
+        let owns = self.internal_query(&owns_sql(name, per_membership))?;
+        assemble_reach(&reach, &owns)
+    }
+
+    pub fn role_grants(&self, name: &str) -> Result<super::roles::RoleGrants, DbError> {
+        use super::roles::{assemble_role_grants, owns_sql, role_grants_sql, schema_access_sql};
+        let per_membership = self.per_membership()?;
+        let held = self.internal_query(&role_grants_sql(name, per_membership))?;
+        let schemas = self.internal_query(&schema_access_sql(name, per_membership))?;
+        let owns = self.internal_query(&owns_sql(name, per_membership))?;
+        assemble_role_grants(&held, &schemas, &owns)
+    }
+
+    /// What the role `name` holds on every database of the server.
+    pub fn role_access(&self, name: &str) -> Result<super::roles::RoleAccess, DbError> {
+        use super::roles::{assemble_role_access, database_access_sql};
+        let per_membership = self.per_membership()?;
+        assemble_role_access(&self.internal_query(&database_access_sql(name, per_membership))?)
+    }
+
+    pub fn role_reports(
+        &self,
+        roles: &super::roles::Roles,
+    ) -> Result<super::roles::Reports, DbError> {
+        use super::roles::{PUBLIC_GRANTS_SQL, SESSIONS_SQL, UNUSED_ROLES_SQL, assemble_reports};
+        let public = self.internal_query(PUBLIC_GRANTS_SQL)?;
+        let unused = self.internal_query(UNUSED_ROLES_SQL)?;
+        let sessions = self.internal_query(SESSIONS_SQL)?;
+        assemble_reports(roles, &public, &unused, &sessions)
     }
 
     /// A view's options are its `WITH (…)`, its check option among them.
@@ -2614,8 +2954,9 @@ fn outside_bounds(value: &str, minimum: &str, maximum: &str) -> bool {
     }
 }
 
+/// Under either `standard_conforming_strings` ([`super::postgres_literal`]).
 fn structure_sql(template: &str, schema: &str, relation: &str) -> String {
-    super::structure_sql(super::Engine::Postgres, template, schema, relation)
+    super::structure_sql_quoted(template, schema, relation, super::postgres_literal)
 }
 
 /// What `pg_sequences` says of a sequence's definition, each as text.
@@ -3001,6 +3342,24 @@ fn io_source(error: &tokio_postgres::Error) -> Option<&std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_probe_that_succeeded_is_not_asked_again_but_a_failed_one_is() {
+        let cell = OnceLock::new();
+        let asked = std::cell::Cell::new(0);
+        let failing = || {
+            asked.set(asked.get() + 1);
+            Err(plain_error("down".into()))
+        };
+        assert!(cached_once(&cell, failing).is_err());
+        let learn = || {
+            asked.set(asked.get() + 1);
+            Ok(true)
+        };
+        assert!(cached_once(&cell, learn).unwrap());
+        assert!(cached_once(&cell, learn).unwrap());
+        assert_eq!(asked.get(), 2);
+    }
+
     use super::*;
     use crate::db::{
         ApplyOutcome, CancelToken, Drift, FetchedCell, ForeignKey, IndexKind, RelationKind,
@@ -3021,6 +3380,8 @@ mod tests {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         }
     }
 
@@ -3064,7 +3425,221 @@ mod tests {
             ssm: None,
             ssh: None,
             schema: None,
+            time_zone: None,
+            properties: Properties::default(),
         }
+    }
+
+    /// A counter the script bumps, so a session that ran it twice reads 2.
+    const STARTUP_COUNT: &str = "SELECT current_setting('dbdelve.n', true)";
+
+    fn startup_script() -> Vec<String> {
+        vec![
+            "SELECT set_config('dbdelve.n', \
+             (COALESCE(NULLIF(current_setting('dbdelve.n', true), ''), '0')::int + 1)::text, false)"
+                .into(),
+            "SET search_path TO pg_catalog".into(),
+        ]
+    }
+
+    fn cell(connection: &Connection, sql: &str) -> Option<String> {
+        let result = connection
+            .query(sql, Fetch::default())
+            .expect("the statement runs");
+        result.rows[0].get(0).map(str::to_string)
+    }
+
+    #[test]
+    fn a_bound_run_with_no_schema_puts_back_the_search_path_the_script_left() {
+        assert!(put_back_search_path_sql("pg_catalog").contains("E'pg_catalog' AS path"));
+        // Neither character may end the `E''` literal early.
+        assert!(
+            put_back_search_path_sql(r#""it's", "a\b""#).contains(r#"E'"it''s", "a\\b"' AS path"#)
+        );
+        // Guarded as a schema switch is: nothing is set inside a transaction
+        // block, where only a path already in place answers.
+        assert!(put_back_search_path_sql("x").contains("WHERE outside OR"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_startup_script_holds_on_every_user_session() {
+        let scripted = Connection::open(&live_config())
+            .and_then(|connection| connection.with_startup(startup_script()))
+            .expect("the script runs");
+        assert_eq!(cell(&scripted, STARTUP_COUNT).as_deref(), Some("1"));
+        let beside = scripted.alongside().expect("a session beside it opens");
+        assert_eq!(cell(&beside, STARTUP_COUNT).as_deref(), Some("1"));
+        assert_eq!(
+            cell(&beside, "SHOW search_path").as_deref(),
+            Some("pg_catalog")
+        );
+        let database = scripted.current_database().to_string();
+        let other = scripted.on_database(&database).expect("a session opens");
+        assert_eq!(cell(&other, STARTUP_COUNT).as_deref(), Some("1"));
+        // A bound tab that picks no schema keeps the script's `search_path`; one
+        // that picks a schema overrides it, and the next no-schema run is back.
+        let bound = |connection: &Connection, schema: Option<&str>| {
+            let result = connection
+                .query_bound(schema, "SHOW search_path", Fetch::default())
+                .expect("the bound run works");
+            result.rows[0].get(0).map(str::to_string)
+        };
+        assert_eq!(bound(&other, None).as_deref(), Some("pg_catalog"));
+        assert_eq!(
+            bound(&other, Some("public")).as_deref(),
+            Some("\"public\", \"$user\", public")
+        );
+        assert_eq!(bound(&other, None).as_deref(), Some("pg_catalog"));
+        assert_eq!(cell(&other, STARTUP_COUNT).as_deref(), Some("1"));
+        let unscripted = Connection::open(&live_config())
+            .and_then(|connection| connection.on_database(&database))
+            .expect("a session opens");
+        assert_eq!(
+            bound(&unscripted, None).as_deref(),
+            Some("\"$user\", public")
+        );
+        let side = scripted
+            .aside(Duration::from_secs(10), |side| {
+                Some(cell(side, STARTUP_COUNT))
+            })
+            .expect("the side session opens");
+        assert_eq!(side.as_deref(), Some("1"));
+        let sizes = Connection::connect(
+            &scripted.server(),
+            scripted.route.clone(),
+            &scripted.startup,
+            false,
+        )
+        .expect("a session opens");
+        assert_eq!(cell(&sizes, STARTUP_COUNT).as_deref(), Some("1"));
+        // A reused session is not replayed again.
+        assert_eq!(cell(&scripted, STARTUP_COUNT).as_deref(), Some("1"));
+
+        // The schema is picked first, so the script's own `search_path` wins.
+        let picked = ServerConfig {
+            schema: Some("public".into()),
+            ..live_config()
+        };
+        let scripted = Connection::open(&picked)
+            .and_then(|connection| connection.with_startup(startup_script()))
+            .expect("the script runs");
+        assert_eq!(
+            cell(&scripted, "SHOW search_path").as_deref(),
+            Some("pg_catalog")
+        );
+        let beside = scripted.alongside().expect("a session beside it opens");
+        assert_eq!(
+            cell(&beside, "SHOW search_path").as_deref(),
+            Some("pg_catalog")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_the_time_zone_reaches_every_session() {
+        let paris = ServerConfig {
+            time_zone: Some("Europe/Paris".into()),
+            ..live_config()
+        };
+        let main = Connection::open(&paris).expect("the connection opens");
+        let zone = |connection: &Connection| cell(connection, "SHOW timezone");
+        assert_eq!(zone(&main).as_deref(), Some("Europe/Paris"));
+        let beside = main.alongside().expect("a session beside it opens");
+        assert_eq!(zone(&beside).as_deref(), Some("Europe/Paris"));
+        let database = main.current_database().to_string();
+        let other = main.on_database(&database).expect("a session opens");
+        assert_eq!(zone(&other).as_deref(), Some("Europe/Paris"));
+        let side = main
+            .aside(Duration::from_secs(10), |side| Some(zone(side)))
+            .expect("the side session opens");
+        assert_eq!(side.as_deref(), Some("Europe/Paris"));
+
+        // Set before the script, so the script's own zone wins.
+        let scripted = Connection::open(&paris)
+            .and_then(|connection| connection.with_startup(vec!["SET TIME ZONE 'UTC'".into()]))
+            .expect("the script runs");
+        assert_eq!(zone(&scripted).as_deref(), Some("UTC"));
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_driver_properties_reach_the_server() {
+        let config = ServerConfig {
+            properties: Properties {
+                application_name: Some("o'brien app".to_string()),
+                connect_timeout: Some(5),
+            },
+            ..live_config()
+        };
+        let main = Connection::open(&config).expect("the connection opens");
+        assert_eq!(
+            cell(&main, "SHOW application_name").as_deref(),
+            Some("o'brien app")
+        );
+        let beside = main.alongside().expect("a session beside it opens");
+        assert_eq!(
+            cell(&beside, "SHOW application_name").as_deref(),
+            Some("o'brien app")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_keep_alive_ping_answers_and_never_waits_on_a_busy_session() {
+        let connection = Connection::open(&live_config()).expect("the connection opens");
+        assert!(connection.ping(&|| true).is_ok(), "an idle session answers");
+
+        // A statement holds the client for as long as it runs; the round
+        // skips that session rather than queue behind it.
+        let busy = connection.client.lock().expect("nothing else holds it");
+        let started = Instant::now();
+        assert!(
+            connection.ping(&|| true).is_ok(),
+            "a busy session is skipped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "and the skip does not wait"
+        );
+        drop(busy);
+
+        let pid = cell(&connection, "SELECT pg_backend_pid()").expect("the pid is read");
+        Connection::open(&live_config())
+            .expect("a second connection opens")
+            .query(
+                &format!("SELECT pg_terminate_backend({pid})"),
+                Fetch::default(),
+            )
+            .expect("the terminate runs");
+        assert!(
+            connection.ping(&|| false).is_ok(),
+            "a session a transaction was opened on since is sent nothing"
+        );
+        assert!(
+            connection.ping(&|| true).is_err(),
+            "a terminated session is lost"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_script_cannot_lift_the_side_sessions_bound() {
+        let scripted = Connection::open(&live_config())
+            .and_then(|connection| {
+                connection.with_startup(vec!["SET statement_timeout = 0".into()])
+            })
+            .expect("the script runs");
+        assert_eq!(
+            cell(&scripted, "SHOW statement_timeout").as_deref(),
+            Some("0")
+        );
+        let side = scripted
+            .aside(Duration::from_secs(10), |side| {
+                Some(cell(side, "SHOW statement_timeout"))
+            })
+            .expect("the side session opens");
+        assert_eq!(side.as_deref(), Some("2s"));
     }
 
     #[test]
@@ -3239,6 +3814,40 @@ mod tests {
     }
 
     #[test]
+    fn stored_driver_properties_reach_the_connection_string() {
+        let config = ServerConfig {
+            properties: Properties {
+                application_name: Some("o'brien app".to_string()),
+                connect_timeout: Some(5),
+            },
+            ..config()
+        };
+        let string = connection_string(&config);
+        assert!(
+            string.contains(&format!("application_name={}", quote("o'brien app"))),
+            "{string}"
+        );
+        assert!(string.contains("connect_timeout=5"), "{string}");
+        assert!(!string.contains("connect_timeout=10"), "{string}");
+        assert_eq!(string.matches("connect_timeout=").count(), 1, "{string}");
+        // The hold's channel is the `options` parameter, and no property rides it.
+        assert!(!string.contains("options="), "{string}");
+    }
+
+    #[test]
+    fn no_driver_property_leaves_the_connection_string_as_it_was() {
+        let config = ServerConfig {
+            properties: Properties::default(),
+            ..config()
+        };
+        assert_eq!(
+            connection_string(&config),
+            "host='db.example.test' dbname='dbdelve_test' user='someone' port=8432 \
+             sslmode=prefer connect_timeout=10"
+        );
+    }
+
+    #[test]
     fn statement_timeout_rides_in_as_a_startup_option_in_milliseconds() {
         let config = ServerConfig {
             statement_timeout: 30,
@@ -3345,6 +3954,164 @@ mod tests {
 
     #[test]
     #[ignore = "requires the compose databases"]
+    fn live_roles_grants_and_reach_read_what_the_server_holds() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let reset = "DROP SCHEMA IF EXISTS dbdelve_roles_probe CASCADE; \
+                     DROP ROLE IF EXISTS dbdelve_probe_ana; \
+                     DROP ROLE IF EXISTS dbdelve_probe_new; \
+                     DROP ROLE IF EXISTS dbdelve_probe_team";
+        plain
+            .query(reset, Fetch::default())
+            .expect("an earlier run's roles should drop");
+        plain
+            .query(
+                "CREATE SCHEMA dbdelve_roles_probe; \
+                 CREATE TABLE dbdelve_roles_probe.orders (id int); \
+                 CREATE ROLE dbdelve_probe_team NOLOGIN; \
+                 CREATE ROLE dbdelve_probe_ana LOGIN CONNECTION LIMIT 5 \
+                     VALID UNTIL '2000-01-01' IN ROLE dbdelve_probe_team; \
+                 GRANT SELECT ON dbdelve_roles_probe.orders TO dbdelve_probe_team; \
+                 GRANT INSERT ON dbdelve_roles_probe.orders TO PUBLIC; \
+                 GRANT USAGE ON SCHEMA dbdelve_roles_probe TO dbdelve_probe_team",
+                Fetch::default(),
+            )
+            .expect("the probe roles should be created");
+
+        let roles = plain.roles().expect("roles should read");
+        let grants = plain
+            .object_grants("dbdelve_roles_probe", "orders")
+            .expect("grants should read");
+        let reach = plain
+            .role_reach("dbdelve_probe_ana")
+            .expect("reach should read");
+        let held = plain
+            .role_grants("dbdelve_probe_ana")
+            .expect("a role's grants should read");
+        let reports = plain.role_reports(&roles).expect("reports should read");
+
+        // What the Users and roles tab writes, as the server takes it.
+        use super::super::roles::{
+            NewRole, RoleEdit, create_role, edit_role, reset_password, set_login,
+        };
+        let created = create_role(&NewRole {
+            name: "dbdelve_probe_new".into(),
+            login: true,
+            password: Some("first".into()),
+            connection_limit: Some(2),
+            password_expires: Some("2030-01-01".into()),
+            member_of: vec!["dbdelve_probe_team".into()],
+        });
+        // Each through the gate the tab passes it through, as it would run.
+        let gated = |sql: &str| {
+            assert!(
+                crate::sql::is_generated_role_change(Engine::Postgres, sql),
+                "the gate refuses {sql}"
+            );
+        };
+        gated(&created);
+        plain
+            .query(&created, Fetch::default())
+            .expect("the role should be created");
+        let made = plain.roles().expect("roles should read");
+        let before = made
+            .role("dbdelve_probe_new")
+            .expect("it is listed")
+            .clone();
+        let edited = edit_role(
+            &before,
+            &RoleEdit {
+                name: before.name.clone(),
+                connection_limit: Some(3),
+                password_expires: None,
+            },
+        )
+        .expect("something changed");
+        for statement in [
+            edited,
+            reset_password("dbdelve_probe_new", "second"),
+            set_login("dbdelve_probe_new", false),
+        ] {
+            gated(&statement);
+            plain
+                .query(&statement, Fetch::default())
+                .expect("the change should run");
+        }
+        let after = plain.roles().expect("roles should read");
+
+        plain
+            .query(reset, Fetch::default())
+            .expect("the probe roles should drop");
+
+        assert_eq!(before.connection_limit, Some(2));
+        assert_eq!(made.member_of("dbdelve_probe_new"), ["dbdelve_probe_team"]);
+        let changed = after.role("dbdelve_probe_new").expect("it is listed");
+        assert_eq!(changed.connection_limit, Some(3));
+        assert_eq!(changed.password_expires, None);
+        assert!(
+            changed.deactivated(),
+            "a login turned off keeps its password"
+        );
+
+        let ana = roles.role("dbdelve_probe_ana").expect("ana is listed");
+        assert!(ana.login && ana.expired);
+        assert_eq!(ana.connection_limit, Some(5));
+        assert_eq!(ana.password_expires.as_deref(), Some("2000-01-01"));
+        assert_eq!(roles.member_of("dbdelve_probe_ana"), ["dbdelve_probe_team"]);
+        assert!(!roles.roles.iter().any(|role| role.name.starts_with("pg_")));
+
+        // Seven before Postgres 17, which adds MAINTAIN.
+        assert!(grants.privileges.len() >= 7);
+        let held_by = |grantee: Option<&str>| -> Vec<&str> {
+            (grants.grants.iter())
+                .filter(|grant| grant.grantee.as_deref() == grantee)
+                .map(|grant| grant.privilege.as_str())
+                .collect()
+        };
+        assert_eq!(held_by(Some("dbdelve_probe_team")), ["SELECT"]);
+        assert_eq!(held_by(None), ["INSERT"]);
+        assert!(!held_by(Some(grants.owner.as_str())).is_empty());
+
+        // SELECT through the team; INSERT through PUBLIC, which every role
+        // holds.
+        let probe: Vec<_> = (reach.entries.iter())
+            .filter(|entry| entry.schema == "dbdelve_roles_probe")
+            .map(|entry| {
+                (
+                    entry.privilege.as_str(),
+                    entry.relations,
+                    entry.through.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            probe,
+            [
+                ("INSERT", 1, vec!["PUBLIC".to_string()]),
+                ("SELECT", 1, vec!["dbdelve_probe_team".to_string()]),
+            ]
+        );
+        let held: Vec<_> = (held.held.iter())
+            .filter(|grant| grant.schema == "dbdelve_roles_probe")
+            .map(|grant| (grant.privilege.as_str(), grant.through.as_deref()))
+            .collect();
+        assert_eq!(
+            held,
+            [
+                ("INSERT", Some("PUBLIC")),
+                ("SELECT", Some("dbdelve_probe_team"))
+            ]
+        );
+
+        assert!(reports.expired.contains(&"dbdelve_probe_ana".to_string()));
+        assert!(
+            (reports.public_grants.as_ref())
+                .is_some_and(|grants| grants.contains(&"dbdelve_roles_probe.orders".to_string()))
+        );
+        assert_eq!(reports.idle, None, "Postgres records no logins");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
     fn live_a_sequence_is_listed_in_its_own_kind() {
         let plain = Connection::open(&live_config()).expect("connection should open");
         plain
@@ -3362,7 +4129,7 @@ mod tests {
             .expect("the probe sequence should be created");
 
         let second = super::super::Connection::Postgres(plain)
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas
@@ -3587,6 +4354,259 @@ mod tests {
             shown(&connection).as_deref(),
             Some(r#""Other","$user",public"#)
         );
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_reach_counts_columns_and_sequences_in_the_schemas_a_role_may_use() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let reset = "DROP SCHEMA IF EXISTS dbdelve_reach_probe CASCADE; \
+                     DROP SCHEMA IF EXISTS dbdelve_reach_hidden CASCADE; \
+                     DROP ROLE IF EXISTS dbdelve_probe_reach; \
+                     DROP ROLE IF EXISTS dbdelve_probe_owner; \
+                     DROP ROLE IF EXISTS dbdelve_probe_policy; \
+                     DROP ROLE IF EXISTS dbdelve_probe_idle";
+        plain
+            .query(reset, Fetch::default())
+            .expect("an earlier run's probe should drop");
+        plain
+            .query(
+                "CREATE ROLE dbdelve_probe_reach NOLOGIN; \
+                 CREATE ROLE dbdelve_probe_owner NOLOGIN; \
+                 CREATE SCHEMA dbdelve_reach_probe; \
+                 CREATE SCHEMA dbdelve_reach_hidden; \
+                 CREATE TABLE dbdelve_reach_probe.users (id int, email text); \
+                 CREATE SEQUENCE dbdelve_reach_probe.ids; \
+                 CREATE TABLE dbdelve_reach_hidden.secrets (id int); \
+                 ALTER TABLE dbdelve_reach_hidden.secrets OWNER TO dbdelve_probe_owner; \
+                 GRANT USAGE ON SCHEMA dbdelve_reach_probe TO dbdelve_probe_reach; \
+                 GRANT SELECT (email) ON dbdelve_reach_probe.users TO dbdelve_probe_reach; \
+                 GRANT USAGE ON SEQUENCE dbdelve_reach_probe.ids TO dbdelve_probe_reach; \
+                 GRANT SELECT ON dbdelve_reach_hidden.secrets TO dbdelve_probe_reach; \
+                 CREATE ROLE dbdelve_probe_policy NOLOGIN; \
+                 CREATE ROLE dbdelve_probe_idle NOLOGIN; \
+                 CREATE POLICY only_policy ON dbdelve_reach_probe.users \
+                     TO dbdelve_probe_policy USING (true)",
+                Fetch::default(),
+            )
+            .expect("the probe should be created");
+
+        let reach = plain.role_reach("dbdelve_probe_reach");
+        let owner = plain.role_grants("dbdelve_probe_owner");
+        let me = live_config().user;
+        let mine = plain.role_grants(&me);
+        let unused = plain
+            .roles()
+            .and_then(|roles| plain.role_reports(&roles))
+            .map(|reports| reports.unused_roles);
+        plain
+            .query(reset, Fetch::default())
+            .expect("the probe should drop");
+
+        // A role a policy names is used, though it holds no grant.
+        let unused = unused.expect("the reports should read");
+        assert!(unused.contains(&"dbdelve_probe_idle".to_string()));
+        assert!(!unused.contains(&"dbdelve_probe_policy".to_string()));
+
+        let reach = reach.expect("reach should read");
+        let entries: Vec<_> = (reach.entries.iter())
+            .filter(|entry| entry.schema.starts_with("dbdelve_reach_"))
+            .map(|entry| {
+                (
+                    entry.schema.as_str(),
+                    entry.privilege.as_str(),
+                    entry.relations,
+                )
+            })
+            .collect();
+        // The grant in a schema it may not use reaches nothing.
+        assert_eq!(
+            entries,
+            [
+                ("dbdelve_reach_probe", "SELECT (columns)", 1),
+                ("dbdelve_reach_probe", "USAGE", 1),
+            ]
+        );
+        let owner = owner.expect("an owner's grants should read");
+        // Its own relation is left out of what it holds, and counted.
+        assert!(
+            !(owner.held.iter()).any(|held| held.schema.starts_with("dbdelve_reach_")),
+            "{:?}",
+            owner.held
+        );
+        assert_eq!(owner.beyond.owns, 1);
+        assert!(!owner.beyond.superuser);
+        // The compose login is the server's superuser.
+        assert!(mine.expect("grants should read").beyond.superuser);
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_role_change_apart_is_not_held_by_the_users_open_transaction() {
+        let connection =
+            crate::db::Connection::open(crate::db::ConnectionConfig::Postgres(PostgresConfig {
+                server: live_config(),
+                service: None,
+            }))
+            .expect("connection should open");
+        let drop = "DROP ROLE IF EXISTS dbdelve_probe_apart";
+        connection
+            .query(drop, &CancelToken::default(), Fetch::default())
+            .expect("an earlier run's role should drop");
+        connection
+            .query("BEGIN", &CancelToken::default(), Fetch::default())
+            .expect("the user's transaction opens");
+
+        let made = connection.generated_apart(
+            "CREATE ROLE dbdelve_probe_apart NOLOGIN;",
+            &CancelToken::alongside(),
+        );
+        connection
+            .query("ROLLBACK", &CancelToken::default(), Fetch::default())
+            .expect("the user's transaction rolls back");
+        let listed = connection
+            .apart()
+            .and_then(|side| side.roles())
+            .map(|roles| roles.role("dbdelve_probe_apart").is_some());
+        connection
+            .query(drop, &CancelToken::default(), Fetch::default())
+            .expect("the probe role should drop");
+
+        made.expect("the change runs on a session of its own");
+        assert_eq!(listed, Ok(true), "the user's rollback did not undo it");
+    }
+
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_roles_access_is_read_in_every_database_with_public_roles_and_closed_schemas() {
+        use super::super::roles::Source;
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let reset = "DROP DATABASE IF EXISTS dbdelve_probe_gdb; \
+                     DROP ROLE IF EXISTS dbdelve_probe_gana; \
+                     DROP ROLE IF EXISTS dbdelve_probe_gteam";
+        let run = |connection: &Connection, sql: &str| {
+            connection
+                .query(sql, Fetch::default())
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message));
+        };
+        // One statement each: CREATE DATABASE refuses to run with others.
+        for statement in reset.split(';') {
+            run(&plain, statement);
+        }
+        run(&plain, "CREATE ROLE dbdelve_probe_gteam NOLOGIN");
+        run(
+            &plain,
+            "CREATE ROLE dbdelve_probe_gana LOGIN IN ROLE dbdelve_probe_gteam",
+        );
+        run(&plain, "CREATE DATABASE dbdelve_probe_gdb");
+        // CONNECT is taken from PUBLIC there and given to the team only.
+        run(
+            &plain,
+            "REVOKE CONNECT ON DATABASE dbdelve_probe_gdb FROM PUBLIC",
+        );
+        run(
+            &plain,
+            "GRANT CONNECT ON DATABASE dbdelve_probe_gdb TO dbdelve_probe_gteam",
+        );
+        let second = Connection::open(&ServerConfig {
+            database: "dbdelve_probe_gdb".into(),
+            ..live_config()
+        })
+        .expect("the second database should open");
+        run(
+            &second,
+            "CREATE SCHEMA s_open; CREATE SCHEMA s_closed; \
+             CREATE TABLE s_open.shared (id int); CREATE TABLE s_closed.hidden (id int); \
+             GRANT USAGE ON SCHEMA s_open TO PUBLIC; \
+             GRANT SELECT ON s_open.shared TO PUBLIC; \
+             GRANT SELECT ON s_open.shared TO dbdelve_probe_gteam; \
+             GRANT SELECT ON s_closed.hidden TO dbdelve_probe_gana",
+        );
+
+        let access = plain.role_access("dbdelve_probe_gana");
+        let held = second.role_grants("dbdelve_probe_gana");
+        drop(second);
+        for statement in reset.split(';') {
+            run(&plain, statement);
+        }
+
+        let access = access.expect("the access should read");
+        let found = |name: &str| access.databases.iter().find(|db| db.name == name);
+        let own = found(&live_config().database).expect("the connected database is listed");
+        assert!(
+            own.connects(),
+            "PUBLIC's default CONNECT reaches every role"
+        );
+        assert_eq!(own.rights[0].sources, [Source::Public]);
+        let gdb = found("dbdelve_probe_gdb").expect("the second database is listed");
+        let connect = (gdb.rights.iter())
+            .find(|right| right.privilege == "CONNECT")
+            .expect("it connects through its team");
+        assert_eq!(connect.sources, [Source::Via("dbdelve_probe_gteam".into())]);
+
+        let held = held.expect("the second database's grants should read");
+        assert_eq!(held.database, "dbdelve_probe_gdb");
+        let schema = |name: &str| held.schemas.iter().find(|schema| schema.name == name);
+        assert!(schema("s_open").is_some_and(|schema| schema.usable()));
+        assert!(schema("s_closed").is_some_and(|schema| !schema.usable()));
+        let grant = |relation: &str| {
+            (held.held.iter())
+                .filter(|grant| grant.relation == relation)
+                .map(|grant| (grant.through.as_deref(), grant.usable))
+                .collect::<Vec<_>>()
+        };
+        let mut shared = grant("shared");
+        shared.sort_unstable();
+        assert_eq!(
+            shared,
+            [(Some("PUBLIC"), true), (Some("dbdelve_probe_gteam"), true)],
+            "a grant to PUBLIC and one to the team, in a schema it can use"
+        );
+        assert_eq!(
+            grant("hidden"),
+            [(None, false)],
+            "a direct grant in a schema it holds no USAGE on"
+        );
+    }
+    #[test]
+    #[ignore = "requires the compose databases"]
+    fn live_a_name_with_a_backslash_reads_as_itself_with_standard_conforming_strings_off() {
+        let plain = Connection::open(&live_config()).expect("connection should open");
+        let role = r"dbdelve_probe_q\' OR pg_catalog.pg_sleep(0) IS NULL --";
+        let reset = format!(
+            "DROP SCHEMA IF EXISTS dbdelve_scs_probe CASCADE; DROP ROLE IF EXISTS {}",
+            Engine::Postgres.quote_identifier(role)
+        );
+        plain
+            .query(&reset, Fetch::default())
+            .expect("an earlier run's probe should drop");
+        plain
+            .query(
+                &format!(
+                    "CREATE SCHEMA dbdelve_scs_probe; \
+                     CREATE TABLE dbdelve_scs_probe.\"odd\\'t\" (id int); \
+                     CREATE ROLE {}; \
+                     SET standard_conforming_strings = off",
+                    Engine::Postgres.quote_identifier(role)
+                ),
+                Fetch::default(),
+            )
+            .expect("the probe should be created");
+
+        let reach = plain.role_reach(role);
+        let held = plain.role_grants(role);
+        let grants = plain.object_grants("dbdelve_scs_probe", r"odd\'t");
+
+        plain
+            .query(
+                &format!("SET standard_conforming_strings = on; {reset}"),
+                Fetch::default(),
+            )
+            .expect("the probe should drop");
+        reach.expect("the name is read whole, not run");
+        held.expect("the name is read whole, not run");
+        let grants = grants.expect("the relation is found by its own name");
+        assert!(!grants.privileges.is_empty());
     }
 
     #[test]
@@ -3847,6 +4867,8 @@ mod tests {
                     ssm: None,
                     ssh: None,
                     schema: None,
+                    time_zone: None,
+                    properties: Properties::default(),
                 },
                 service: None,
             }
@@ -4137,6 +5159,15 @@ mod tests {
             sql,
             "WHERE namespace.nspname = 'public' AND class.relname = 'odd''name'"
         );
+    }
+
+    #[test]
+    fn structure_sql_reads_alike_whatever_standard_conforming_strings_is() {
+        // With the setting off, a plain literal's backslash would escape the
+        // quote after it and end the name early.
+        let sql = structure_sql("x = {relation}", "public", r"x\' OR public.pwn() --");
+
+        assert_eq!(sql, r"x = E'x\\'' OR public.pwn() --'");
     }
 
     #[test]

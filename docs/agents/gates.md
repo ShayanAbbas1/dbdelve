@@ -161,6 +161,44 @@ mode, always where the user can read it before it runs:
   before any runs.
 - **Explain** puts the engine's `EXPLAIN` prefix on a copy of the
   statement, never into the buffer.
+- **Transaction control** appends its own statement to the buffer and runs it
+  from there (`Workspace::run_in_buffer`, `src/workspace/transactions.rs`).
+  Turning auto-commit off opens the transaction at once, because a switch
+  reading "off" over a session that is still autocommitting is wrong for as
+  long as it takes to lose a row; Commit and Roll Back send `COMMIT;` and the
+  next `BEGIN;` as one submission, because a gap between them is a statement
+  that commits itself under a switch saying "off". `Engine::begins_transaction`
+  spells the `BEGIN`, and is not `Engine::transaction_start`: that one answers
+  whether a *generated* batch needs brackets, and says `None` for Postgres,
+  where one submission is already one implicit transaction. Turning
+  auto-commit back on while a transaction is open is asked, not refused. A
+  dialog lists the statements the transaction has run on the connection's own
+  session and offers Commit, Roll Back or Cancel. On Commit or Roll Back it
+  appends a plain `COMMIT` or `ROLLBACK` to the buffer, runs it from there and
+  opens no next transaction, then the switch reads on once that statement has
+  succeeded (`Session::auto_after_end`); one that fails leaves auto-commit
+  off, and puts the transaction and its list back only where the engine keeps
+  a transaction whose end failed (`Engine::failed_end_keeps_transaction`:
+  SQLite, unless it says none was active), because a profile reading "open"
+  over a session that is not is a flag no `COMMIT` can clear. dbdelve still never
+  picks between committing the user's work and discarding it: the user does,
+  and Cancel leaves both alone. Manual's own Commit and Roll Back keep sending
+  the next `BEGIN` with them, for the reason above, so the dialog's end is the
+  only one that leaves manual-commit mode. The list is held in memory only
+  (`Profile::transaction_statements`) and is never written to disk. A
+  submission that ends the transaction and opens the next lists only what
+  follows its last end (`sql::after_last_end`), so Manual's `COMMIT;` and
+  `BEGIN;` leave the `BEGIN;` alone. A target that verifies an apply refuses
+  every edit while the user's transaction is open (`APPLY_IN_TRANSACTION`),
+  since the apply's own `BEGIN` and `COMMIT` would end it, so nothing of it is
+  recorded. On any other target, a generated multi-row edit batch would
+  bracket itself and its `COMMIT` would end the user's open transaction; so
+  while `Profile::in_transaction` is set, an edit on the connection's own
+  session is written without brackets (`sql::update_batch_joining`) and joins
+  the open transaction, committed or rolled back with it, as a
+  single-statement edit always has. A bracketed batch that still reaches the
+  run (written before the transaction opened) is not sent:
+  `Profile::own_write_refusal` says `Not sent: …`.
 - **Format Query** rewrites the buffer on command only, through
   `sqlformat`'s token-level reformatter (on MongoDB, `mql::format`'s
   bracket-depth layout over the tree-sitter tokens, refused unless the
@@ -340,6 +378,94 @@ engine) leaves the grid read-only and says why; it is never
 left out of the `WHERE`, and no unique key, rowid or subset of the columns
 names the row in its place.
 
+**Role changes have their own gate.** The Users and roles tab writes
+`CREATE ROLE` and `ALTER ROLE` (`db::roles`), and every one passes
+`sql::is_generated_role_change` before it is shown in the apply review. It
+reads the sqlparser tree, Postgres only, and admits exactly what `db::roles`
+writes: one new role, `LOGIN` or `NOLOGIN` said, `CONNECTION LIMIT` a bare
+non-negative number, `VALID UNTIL` a string, `IN ROLE` (never `postgres`
+nor a predefined role that reaches the server's files, programs or other
+sessions, `db::roles::PRIVILEGED_ROLES`), and a password only
+as a SCRAM-SHA-256 verifier the server takes as one (`'SCRAM-SHA-256$…'`,
+decoded: an iteration count above 0, a base64 salt, and two keys of 32
+bytes each; anything else Postgres would store as the password), so no
+statement carrying a password in the clear gets through whoever wrote it;
+or `ALTER ROLE … WITH`
+those same options. Never `SUPERUSER`, `CREATEDB`, `CREATEROLE`,
+`REPLICATION`, `BYPASSRLS`, a rename, a `SET`, a `DROP` or a grant on an
+object. "Never `SUPERUSER`" covers membership too: a member can `SET ROLE`
+to what it belongs to, so the gate refuses those names, and the role form,
+which has the roles read, also refuses a superuser of any other name and a
+role that belongs to a superuser or a privileged role, however far up
+(`Roles::refuses_membership`). The run is `execute_and_then` like any edit, so `sql::classify` reads
+it (Full, as every role statement is) and the mode decides.
+
+Two things are left out because sqlparser 0.63 cannot read them, which would
+make the mode check treat them as unreadable and run them on a confirmation
+instead of asking for Full: changing a role's membership (`GRANT role TO
+member`; membership is set only at creation, `IN ROLE`), and clearing a
+connection limit (`CONNECTION LIMIT -1`). Edit refuses the second by name.
+
+**Grant changes have their own gate.** The Show Grants editor writes `GRANT` and
+`REVOKE` (`db::roles::grant_statements`), and every batch passes
+`sql::is_generated_grant_change` before it is shown for review. It reads the
+sqlparser tree, Postgres only, and admits one shape per statement: named
+privileges on one database, schema, table or sequence (`DATABASE d`, `SCHEMA s`,
+`TABLE s.t`, `SEQUENCE s.q`) to or from one plain role. The privileges are the
+ones the object takes, asked of `db::roles::grant_applies`, the same function
+the builder uses, so the two cannot drift: `CONNECT`, `TEMPORARY`, `CREATE` on a
+database; `USAGE`, `CREATE` on a schema; `USAGE`, `SELECT`, `UPDATE` on a
+sequence (`USAGE` is refused through the `TABLE` form, so the statement says
+which); `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`,
+`TRIGGER` on a table or view. `MAINTAIN` is left out: sqlparser 0.63 cannot read it.
+
+Refused, and why:
+
+- `ALL` and `ALL PRIVILEGES`, and `ALL TABLES IN SCHEMA` or any other bulk
+  form: what they reach is not what the user ticked.
+- `PUBLIC`, by keyword or by the name `public`, and a grantee of any other
+  kind (`GROUP`, `user@host`): a grantee is a role's name, and PUBLIC is not
+  edited here.
+- `WITH GRANT OPTION`, `GRANT OPTION FOR`, `GRANTED BY`, `AS`: grant option is
+  out of scope. A revoke of a direct grant takes its grant option with it, as
+  Postgres does.
+- `CASCADE` and `RESTRICT`: a revoke never cascades, so a grant others
+  re-granted fails with the server's error, which is shown.
+- Column privileges (`SELECT (c)`): the matrix has no column to put them in.
+- `ALTER DEFAULT PRIVILEGES` and role membership (`GRANT role TO member`): not
+  edited here, and sqlparser reads the second as unreadable.
+- Anything else in the batch: a `DROP` after the `GRANT` fails the whole batch.
+
+A batch runs on the session of its database (`GrantBatch::database`; `None`
+is the connection's own, and a role view's sections that name it are mapped
+to `None` first, `grants::on_own_session`, so they share its batch), since a
+table's privileges live in its database's catalog. Each batch is gated on its
+own; the review shows them joined, under a `-- in database` comment line per
+batch when more than one database runs or the one that does is not the
+connection's own, and that comment is the only difference from what runs. At
+Run, `sql::classify` reads every `GRANT` and `REVOKE` as Full and `sql::gate`
+decides: below Full it raises the upgrade prompt (`Workspace::require`, with
+nothing to resume: Run is pressed again), and nothing is sent below Full.
+
+Each batch runs on a session of its own beside its database's session
+(`Connection::generated_apart`, through `route_in` and `run_routed`), never
+inside a transaction the user has open, which would hold it and whose
+rollback would undo it: the same reason a role change runs apart. On
+Postgres a batch is one simple-query submission, so it is one implicit
+transaction: a database's statements all apply or none do. The databases run
+in order and stop at the first failure; the review keeps the server's error,
+which databases applied and which were never sent (`grants::run_failure`), and
+the staged changes. A run that applied anything reads the grants again, and
+once every database's read has landed, `Staged::prune` drops what landed.
+
+Not edited, by decision: grant option (no `WITH GRANT OPTION`, no `GRANT
+OPTION FOR`); PUBLIC, neither granted to nor revoked from, since a click on
+it would change every role; column privileges and `ALTER DEFAULT
+PRIVILEGES`, which the matrix has no cell for.
+
+Show Grants and everything else the tab reads are catalog reads on a side
+connection (`Connection::apart`), never a statement of the user's.
+
 ## Connection modes, per engine
 
 The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
@@ -436,3 +562,30 @@ The core of the mode check is in `AGENTS.md`, "Connection modes". The detail:
   served. `Profile::held` is cleared as it goes and set only when the latest
   lands, or when a connect lands, which fails rather than open unheld; until
   then an unreadable statement in Read-only asks even with the opt-in on.
+
+## Startup script
+
+- **The script is user SQL, gated like any other.** `sql::startup_statements`
+  splits it with `queued_statements`, passes each unit through `classify` and
+  `gate`, and the whole through `leaves` and `transaction_uncertain`. It runs at
+  save, in Test connection and at every connect, under the profile's current
+  mode. A refusal or an error fails the connect; a script is never skipped.
+- **The live connection carries the gated statements** and its driver replays
+  them on every session it opens for the user, with no gate of its own, because
+  the statements passed one. That is why a script approved under a higher mode
+  cannot stay where the mode is lowered: `set_mode` re-gates it under the new
+  mode and reconnects the profile when it is refused, and the connect fails
+  saying so. Raising the mode, or lowering it to one the script passes, leaves
+  every session open.
+- **An import holds the mode instead.** `reconnect` will not interrupt a running
+  import, so lowering to a mode that refuses the script waits for it, with a
+  notice; the mode on screen is never below what the open sessions ran under.
+- **A connect re-checks as it lands.** A mode lowered while a connect is under
+  way finds no connection to re-gate, so the landing gates the script again
+  under the mode now picked and connects again when it is refused
+  (`begin_connect`). The same landing connects again when the script it ran is
+  no longer the profile's, which a save that edits the script and reconnects
+  would otherwise leave running the old one.
+- **An edit applies from the next connect.** A script saved while the profile is
+  connected leaves the live sessions with the statements they were given and
+  says so.

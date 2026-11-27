@@ -1,7 +1,10 @@
 //! What the mode prompt does when it is answered, and the one place a
 //! connection's mode changes.
 
-use super::*;
+use super::{
+    profiles::{script_refused, startup_refused},
+    *,
+};
 use crate::session::{PendingRun, Resume};
 use crate::sql::Stop;
 
@@ -10,6 +13,52 @@ impl Workspace {
     /// caller (the grid's own cache, the titlebar picker) is one more thing
     /// that would have to be told separately if this were not the one door.
     pub(crate) fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        // The drivers replay the connect-time startup statements on every
+        // later session, so a script the lowered mode refuses must not stay on
+        // the live connection: the profile reconnects, and that connect fails
+        // saying so. A connect under way has no connection to re-gate; its
+        // landing checks the script again (`begin_connect`).
+        // The live connection replays what it ran at its connect, which a
+        // script saved since (`set_behaviour`) has not replaced, so that is
+        // gated too.
+        let regate = mode < profile.mode
+            && profile.connection().is_some()
+            && (script_refused(profile, mode)
+                || startup_refused(profile, &profile.connected_script, mode));
+        let id = profile.id.clone();
+        if regate && profile.any_transaction_open() {
+            // The reconnect would drop the sessions, and the server would
+            // roll back work the user chose neither to commit nor to discard.
+            self.note(
+                "The mode was not changed: a transaction is open and the startup script needs the higher mode. Commit or roll it back first."
+                    .into(),
+                cx,
+            );
+            return;
+        }
+        if regate && profile.config.lives_with_its_connection() {
+            // The reconnect would open a new, empty database in its place.
+            self.note(
+                "The mode was not changed: the startup script needs the higher mode, and reconnecting would discard this in-memory database."
+                    .into(),
+                cx,
+            );
+            return;
+        }
+        if regate && let Some(running) = self.running_import_into(&id) {
+            // `reconnect` declines to interrupt an import, and a mode lowered
+            // without it would show less than the open sessions ran under.
+            self.note(
+                format!(
+                    "The mode was not changed: an import into {running} is running and the startup script needs the higher mode."
+                ),
+                cx,
+            );
+            return;
+        }
         let Some(profile) = self.profile_mut() else {
             return;
         };
@@ -99,6 +148,9 @@ impl Workspace {
                 }
             })
             .detach();
+        }
+        if regate && let Some(index) = self.active {
+            self.reconnect(index, cx);
         }
     }
 

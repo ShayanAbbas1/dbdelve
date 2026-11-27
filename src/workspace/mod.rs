@@ -11,10 +11,14 @@ mod e2e;
 mod editing;
 mod exports;
 use exports::ExportMenu;
+use transactions::Leaving;
 mod files;
+mod filter_picker;
 mod filters;
 mod folders;
 mod forms;
+mod grant_edits;
+mod grants_dialog;
 mod import_dialog;
 mod import_rows;
 mod modes;
@@ -26,6 +30,9 @@ mod query_move;
 mod sidebar;
 mod stable_import;
 mod tabs;
+mod timers;
+mod transactions;
+mod users;
 mod welcome;
 
 use std::collections::{HashMap, HashSet};
@@ -45,6 +52,8 @@ pub(crate) use import_dialog::PreviewGrid;
 pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
+pub(crate) use users::RolesSide;
+pub(crate) use users::{GrantsOf, GrantsView, RoleForm, RoleFormKind};
 
 use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};
@@ -289,6 +298,19 @@ pub(crate) struct Workspace {
     /// nothing can be counted.
     #[cfg(test)]
     pub(crate) size_reads: usize,
+    /// How many routine reads were started, counted as `size_reads` is.
+    #[cfg(test)]
+    pub(crate) routine_reads: usize,
+    /// The schemas whose relations were read one at a time, in order.
+    #[cfg(test)]
+    pub(crate) relation_reads: Vec<String>,
+    /// How many whole catalog reads were started, counted as `size_reads` is.
+    #[cfg(test)]
+    pub(crate) catalog_reads: usize,
+    /// How many keep-alive rounds pinged, which run on the blocking pool where
+    /// nothing can be counted.
+    #[cfg(test)]
+    pub(crate) pings: usize,
     /// Profiles on an engine this build cannot open, held as they were read
     /// and written back by `remember_profiles`; never restored.
     pub(crate) unavailable: Vec<store::UnavailableProfile>,
@@ -446,6 +468,18 @@ pub(crate) struct Workspace {
     /// Numbers each Show DDL read, so an answer that comes back after the
     /// dialog was closed, or put up for another object, is not drawn.
     pub(crate) last_ddl_request: u64,
+    /// The filter picker: one connection's include list being edited. Only a
+    /// connection node's Filter Databases and the palette's command open it,
+    /// and only its own Save Filter, Discard Changes and `escape` end it.
+    pub(crate) filter_picker: Option<filter_picker::FilterPicker>,
+    /// Numbers each picker open, so a listing that lands after the dialog
+    /// closed, or after another went up, is not applied.
+    pub(crate) last_filter_request: u64,
+    /// The New User, New Role, Edit or Reset Password dialog.
+    pub(crate) role_form: Option<RoleForm>,
+    /// The Show Grants dialog.
+    pub(crate) grants_view: Option<GrantsView>,
+    pub(crate) last_grants_request: u64,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -484,6 +518,11 @@ pub(crate) struct Workspace {
     /// Something `profiles.toml` holds changed and is waiting on
     /// [`Self::remember_profiles_soon`]'s timer, so quitting writes it.
     pub(crate) profiles_unsaved: bool,
+    /// Whether Quit is asking first, a transaction being open that quitting
+    /// would roll back.
+    pub(crate) quit_prompt: bool,
+    /// What the quit question's Quit does: quit, or the restart that asked.
+    pub(crate) leaving: Leaving,
     /// That timer; replaced, the one before it stops.
     profiles_save: Option<gpui::Task<()>>,
 }
@@ -635,6 +674,11 @@ impl Workspace {
             theme_before_preview: None,
             ddl_view: None,
             last_ddl_request: 0,
+            filter_picker: None,
+            last_filter_request: 0,
+            role_form: None,
+            grants_view: None,
+            last_grants_request: 0,
             opacity_input,
             #[cfg(test)]
             held: Vec::new(),
@@ -642,6 +686,14 @@ impl Workspace {
             opened: Vec::new(),
             #[cfg(test)]
             size_reads: 0,
+            #[cfg(test)]
+            routine_reads: 0,
+            #[cfg(test)]
+            relation_reads: Vec::new(),
+            #[cfg(test)]
+            catalog_reads: 0,
+            #[cfg(test)]
+            pings: 0,
             focus: cx.focus_handle(),
             explorer_focus: cx.focus_handle(),
             connections: sidebar::ConnectionsSidebar::new(window, cx),
@@ -656,6 +708,8 @@ impl Workspace {
             theme_reloads: None,
             themes_revision: 0,
             profiles_unsaved: false,
+            quit_prompt: false,
+            leaving: Leaving::Quit,
             profiles_save: None,
         };
 
@@ -919,6 +973,13 @@ impl Workspace {
         // would wait for background work to finish. The profiles only when a
         // write is pending: written unasked, they would put this session's
         // copy over one another instance saved since.
+        // Closing the one window quits, so it asks as Quit does.
+        let closing = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            closing
+                .update(cx, |workspace, cx| workspace.may_quit(cx))
+                .unwrap_or(true)
+        });
         cx.on_app_quit(|workspace: &mut Self, cx: &mut Context<Self>| {
             workspace.persist_buffers(cx);
             if workspace.profiles_unsaved {
@@ -1320,7 +1381,7 @@ impl Workspace {
             _ = workspace.update(cx, |workspace, cx| match installed {
                 Ok(installed) => {
                     tracing::info!("restarting into the update");
-                    restart_into(installed, cx);
+                    workspace.leave(Leaving::Restart(Some(installed)), cx);
                 }
                 Err(reason) => {
                     if let Some(update) = workspace.update.as_mut() {
@@ -1410,15 +1471,20 @@ impl Workspace {
             }
             update::State::Superseded(installed) => {
                 let installed = installed.clone();
+                let workspace = cx.weak_entity();
                 (
                     "Restart to update".into(),
                     Rc::new(move |menu| {
                         let installed = installed.clone();
+                        let workspace = workspace.clone();
                         menu.label(format!("{name} was updated since it started."))
-                            .item(
-                                PopupMenuItem::new(format!("Restart {name}"))
-                                    .on_click(move |_, _, cx| restart_into(installed.clone(), cx)),
-                            )
+                            .item(PopupMenuItem::new(format!("Restart {name}")).on_click(
+                                move |_, _, cx| {
+                                    let leaving = Leaving::Restart(Some(installed.clone()));
+                                    _ = workspace
+                                        .update(cx, |workspace, cx| workspace.leave(leaving, cx));
+                                },
+                            ))
                             .separator()
                             .link("Release notes", url.clone())
                     }),
@@ -1882,6 +1948,9 @@ impl Render for Workspace {
                     // keystroke. The window still has to hold focus, or the
                     // bindings that leave this tab go with it -- as it does
                     // for the last object tab of all, closed.
+                    Some(ObjectBody::Users { view, .. }) => {
+                        Focus::Users(view.read(cx).focus_handle().clone())
+                    }
                     Some(ObjectBody::Routine(_)) | None => Focus::Window,
                 },
             };
@@ -1918,7 +1987,7 @@ impl Render for Workspace {
             Some(Focus::Buffer(editor)) => editor.focus_handle(cx).focus(window, cx),
             Some(Focus::Grid(grid)) => grid.focus_handle(cx).focus(window, cx),
             Some(Focus::Structure(grid)) => grid.focus_handle(cx).focus(window, cx),
-            Some(Focus::Diagram(handle)) => handle.focus(window, cx),
+            Some(Focus::Diagram(handle) | Focus::Users(handle)) => handle.focus(window, cx),
             Some(Focus::Window) => self.focus.focus(window, cx),
             None => {}
         }
@@ -1980,6 +2049,9 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::previous_profile))
                 .on_action(cx.listener(Self::open_logs_folder))
                 .on_action(cx.listener(Self::copy_diagnostics))
+                // Every surface, or Quit reaches the app's own and quits
+                // unasked over an open transaction.
+                .on_action(cx.listener(Self::quit))
                 // Without a titlebar of its own the form has no drag handle at
                 // all, since the platform's is transparent.
                 .child(titlebar(t, None, Vec::new(), Vec::new(), Vec::new()))
@@ -1994,6 +2066,8 @@ impl Render for Workspace {
                     [
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
+                        // Closing the window asks from every surface.
+                        ("quit", self.render_quit(cx)),
                     ],
                     window,
                     cx,
@@ -2028,6 +2102,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(Self::zoom_editor_in))
                 .on_action(cx.listener(Self::zoom_editor_out))
                 .on_action(cx.listener(Self::reset_editor_zoom))
+                .on_action(cx.listener(Self::quit))
                 .child(titlebar(
                     t,
                     None,
@@ -2042,6 +2117,8 @@ impl Render for Workspace {
                     [
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
+                        // Closing the window asks from every surface.
+                        ("quit", self.render_quit(cx)),
                     ],
                     window,
                     cx,
@@ -2049,6 +2126,7 @@ impl Render for Workspace {
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
+        let idle = matches!(profile.state, ProfileState::Idle);
         let status = match &profile.state {
             ProfileState::Idle => "Connection is idle.".to_string(),
             ProfileState::Connecting { .. } => {
@@ -2119,6 +2197,7 @@ impl Render for Workspace {
         let view_sorting = views::render_view_sorting(profile, cx);
         let edit_mode = views::render_edit_mode(profile, cx);
         let apply_label = views::apply_label(views::view_edit_mode(profile));
+        let transaction = views::render_transaction(profile, cx);
         let hidden_columns = views::render_hidden_columns(profile, cx);
         let relation = profile
             .session
@@ -2319,10 +2398,11 @@ impl Render for Workspace {
                     .text_color(if failed { t.danger } else { t.text_muted })
                     .child(status),
             )
-            .when(failed, |group| {
+            .when(failed || idle, |group| {
                 group.child(
                     div()
                         .flex_shrink_0()
+                        .debug_selector(|| "reconnect-button".into())
                         .child(ui::reconnect_button("reconnect", t)),
                 )
             });
@@ -2389,6 +2469,7 @@ impl Render for Workspace {
             || paging.is_some()
             || view_sorting.is_some()
             || edit_mode.is_some()
+            || transaction.is_some()
             || hidden_columns.is_some()
             || query_status.is_some()
             || refreshable_snapshot
@@ -2443,6 +2524,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .gap(px(layout::SPACE_SM))
+                        .children(transaction)
                         .children(view_sorting)
                         .children(hidden_columns)
                         .children(left_stats.map(|stats| {
@@ -2796,6 +2878,10 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_mode))
+            .on_action(cx.listener(Self::toggle_auto_commit))
+            .on_action(cx.listener(Self::quit))
+            .on_action(cx.listener(Self::commit_transaction))
+            .on_action(cx.listener(Self::rollback_transaction))
             .on_action(cx.listener(Self::switch_connection))
             .on_action(cx.listener(Self::disconnect))
             .on_action(cx.listener(Self::toggle_sidebar))
@@ -2940,18 +3026,25 @@ impl Render for Workspace {
             .children(self.dialog_layer(
                 [
                     ("show-ddl", self.render_show_ddl(cx)),
+                    ("filter-picker", self.render_filter_picker(window, cx)),
+                    ("show-grants", self.render_show_grants(cx)),
+                    ("role-form", self.render_role_form(cx)),
                     ("apply-review", self.render_apply_review(cx)),
                     ("import-rows", self.render_import_rows(window, cx)),
                     ("delete", self.render_delete_confirmation(cx)),
                     ("discard", self.render_discard_confirmation(cx)),
                     ("forget-file", self.render_forget_file(cx)),
                     ("schema-export", self.render_schema_export(cx)),
+                    ("end-transaction", self.render_end_transaction(cx)),
+                    ("import-choice", self.render_import_choice(cx)),
+                    // Below the quit question, which its Restart can raise:
+                    // the question has to be the dialog in front then.
+                    ("stable-import", self.render_stable_import(cx)),
+                    ("quit", self.render_quit(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),
                     ("stale-edit", self.render_stale_edit(cx)),
-                    ("import-choice", self.render_import_choice(cx)),
-                    ("stable-import", self.render_stable_import(cx)),
                 ],
                 window,
                 cx,
@@ -3238,14 +3331,6 @@ pub(crate) fn opacity_from_percent_input(typed: &str, current: f32) -> f32 {
         return current;
     }
     (percent / 100.0).clamp(theme::OPACITY_MIN, theme::OPACITY_MAX)
-}
-
-/// Through the platform's quit, as Quit goes, so buffers and profiles are
-/// written on the way out exactly as they are then.
-fn restart_into(installed: std::path::PathBuf, cx: &mut App) {
-    update::before_restart();
-    cx.set_restart_path(installed);
-    cx.restart();
 }
 
 #[cfg(test)]

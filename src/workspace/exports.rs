@@ -84,9 +84,15 @@ impl Workspace {
     /// Every row of a relation the sidebar names, whether or not it is open.
     /// There is no page to ask about, so no dialog: the menu item
     /// said what it would do, and the save panel can still back out of it.
+    ///
+    /// `database` is the one the row was listed under. The export names no
+    /// database and reads the connection's own, so it is refused when that is
+    /// no longer the row's: a switch that landed while the menu was open would
+    /// otherwise write another database's table of the same name.
     pub(crate) fn export_relation(
         &mut self,
         format: FileAs,
+        database: Option<String>,
         schema: String,
         relation: String,
         cx: &mut Context<Self>,
@@ -94,6 +100,11 @@ impl Workspace {
         let Some(profile) = self.profile() else {
             return;
         };
+        if let Some(refusal) = export_moved_refusal(database.as_deref(), profile.active_database())
+        {
+            self.note(refusal, cx);
+            return;
+        }
         let engine = profile.config.engine();
         let refetch = relation_refetch(engine, &schema, &relation, "", &[], &[])
             .and_then(|refetch| self.cleared(refetch));
@@ -1249,6 +1260,18 @@ pub(crate) use schema_dialog::SchemaExportDialog;
 #[cfg(test)]
 mod round_trip;
 
+/// Why a relation listed under `listed` is not exported from a connection now
+/// on `active`: the connection moved to another database since the row was
+/// drawn. `None` when the row named no database or it is still the one.
+fn export_moved_refusal(listed: Option<&str>, active: Option<String>) -> Option<String> {
+    let listed = listed?;
+    (active.as_deref() != Some(listed)).then(|| {
+        format!(
+            "Nothing was exported: the row is in {listed}, and the connection is no longer on it."
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,6 +1289,19 @@ mod tests {
             exported(None, FileAs::Inserts, path),
             "Exported the structure as SQL to schema.sql."
         );
+    }
+
+    #[test]
+    fn a_relation_is_exported_only_while_the_connection_is_on_its_rows_database() {
+        assert_eq!(export_moved_refusal(None, Some("db_b".into())), None);
+        assert_eq!(
+            export_moved_refusal(Some("db_a"), Some("db_a".into())),
+            None
+        );
+        for active in [Some("db_b".to_string()), None] {
+            let refusal = export_moved_refusal(Some("db_a"), active).expect("refused");
+            assert!(refusal.contains("db_a"), "{refusal}");
+        }
     }
 
     #[test]

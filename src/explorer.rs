@@ -8,7 +8,7 @@ use gpui_component::tree::TreeItem;
 
 use crate::db::{
     Catalog, Engine, EngineSpec, ForeignTable, MaterializedViewDrop, RelationKind, Routine,
-    RoutineKind, Schema, SelectTop, Syntax, Target, Truncate,
+    RoutineKind, Schema, SelectTop, Shown, Syntax, Target, Truncate,
 };
 use crate::fuzzy::{Fuzzy, Query};
 use crate::{mql, redis_cmd};
@@ -67,6 +67,12 @@ const SCHEMA_ROW: &str = "schema-";
 /// The row id of a schema.
 pub fn schema_row(name: &str) -> String {
     format!("{SCHEMA_ROW}{name}")
+}
+
+/// The one row an unread schema holds ([`Catalog::unread`]). Its id starts
+/// where no other row's does, and names the schema after its length.
+fn unread_row(schema: &str) -> String {
+    format!("unread:{}:{schema}", schema.len())
 }
 
 /// Whether each top-level row of an unfiltered sidebar opens: as `saved`
@@ -281,6 +287,13 @@ pub struct ExplorerTree {
     pub highlights: HashMap<String, Vec<Range<usize>>>,
     /// What each row in a folder or the Pinned group stands for, by row id.
     pub shortcuts: HashMap<String, Shortcut>,
+    /// What the include filter dropped from the catalog this tree was built
+    /// from, so a count can say how many of how many it shows.
+    pub left_out: usize,
+    /// How many relations a schema's table list hid from each schema row
+    /// drawn, by row id: only the schemas it hid some of. A count draws
+    /// `N of M` for these, M being N's relations plus these.
+    pub tables_left_out: HashMap<String, usize>,
 }
 
 impl ExplorerTree {
@@ -290,6 +303,8 @@ impl ExplorerTree {
         self.leaves.extend(other.leaves);
         self.highlights.extend(other.highlights);
         self.shortcuts.extend(other.shortcuts);
+        self.left_out += other.left_out;
+        self.tables_left_out.extend(other.tables_left_out);
     }
 }
 
@@ -349,6 +364,7 @@ impl Builder {
 
 pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
     let mut builder = Builder::new(filter);
+    let mut tables_left_out = HashMap::new();
 
     let items = catalog
         .by_name()
@@ -357,6 +373,12 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
             let id = schema_row(&schema.name);
             let schema_matches = builder.name_matches(&id, &schema.name);
             let mut groups = Vec::new();
+            // Noted before the schema can be left out, which a search that
+            // matches nothing in it does; a count says it only unsearched.
+            let hidden = catalog.hidden_in(&schema.name);
+            if hidden > 0 {
+                tables_left_out.insert(id.clone(), hidden);
+            }
 
             let partitions = partitions_by_parent(schema);
             let nested: HashSet<usize> = partitions.values().flatten().copied().collect();
@@ -453,6 +475,15 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
             if !schema_matches && groups.is_empty() {
                 return None;
             }
+            // A schema whose relations are not read yet holds one row saying
+            // so until its row is opened and they are.
+            if let Some(failed) = catalog.unread.get(&schema.name) {
+                let text = failed.as_deref().unwrap_or(crate::sidebar::LOADING);
+                groups.insert(
+                    0,
+                    TreeItem::new(unread_row(&schema.name), text.to_string()).disabled(true),
+                );
+            }
 
             Some(
                 TreeItem::new(id, schema.name.clone())
@@ -467,6 +498,8 @@ pub fn tree(catalog: &Catalog, filter: &str) -> ExplorerTree {
         leaves: builder.leaves,
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
+        left_out: catalog.left_out,
+        tables_left_out,
     }
 }
 
@@ -558,6 +591,8 @@ pub fn files(
         leaves: HashMap::new(),
         highlights: builder.highlights,
         shortcuts: HashMap::new(),
+        left_out: 0,
+        tables_left_out: HashMap::new(),
     }
 }
 
@@ -1046,6 +1081,12 @@ pub enum Shortcut {
         /// out of the connecting role's sight. Kept, and drawn greyed, since
         /// it may well come back.
         missing: bool,
+        /// In a schema or database the connection's filter hides, so the
+        /// narrowed catalog does not list it, which says nothing about
+        /// whether it exists. A relation is not missing then and opens by its
+        /// name all the same; a routine, whose tab needs the catalog's body,
+        /// stays greyed as a missing one does, and both say why.
+        hidden: bool,
     },
 }
 
@@ -1083,6 +1124,22 @@ impl Shortcut {
         }
     }
 
+    /// The relation a member the filter hides names, which opens by its
+    /// name without the catalog listing it.
+    pub fn hidden_relation(&self) -> Option<(&ObjectRef, RelationKind)> {
+        match self {
+            Shortcut::Member {
+                member: Member::Object(object),
+                hidden: true,
+                ..
+            } => match object.kind {
+                ObjectKind::Relation(kind) => Some((object, kind)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The row in the schema tree or the Files group it repeats.
     fn repeats(&self) -> Option<String> {
         match self {
@@ -1108,11 +1165,15 @@ impl Shortcut {
 /// rather than greyed, since it is not missing, only elsewhere, and so is
 /// every member with a database while which one is open is not known. One
 /// without a database there is greyed: it cannot say which it was made in.
+///
+/// A member in a schema `shown` leaves out is hidden rather than missing:
+/// the narrowed catalog not listing it says nothing about whether it exists.
 pub fn shortcuts(
     shortcuts: &Shortcuts,
     catalog: Option<&Catalog>,
     queries: &[String],
     database: &ShortcutDatabase,
+    shown: &Shown,
     filter: &str,
 ) -> ExplorerTree {
     let mut build = ShortcutBuilder {
@@ -1121,6 +1182,7 @@ pub fn shortcuts(
         catalog,
         queries,
         database,
+        shown,
     };
     let pinned: Vec<TreeItem> = shortcuts
         .pins
@@ -1158,6 +1220,8 @@ pub fn shortcuts(
         leaves: build.builder.leaves,
         highlights: build.builder.highlights,
         shortcuts: build.rows,
+        left_out: 0,
+        tables_left_out: HashMap::new(),
     }
 }
 
@@ -1167,6 +1231,7 @@ struct ShortcutBuilder<'a> {
     catalog: Option<&'a Catalog>,
     queries: &'a [String],
     database: &'a ShortcutDatabase,
+    shown: &'a Shown,
 }
 
 impl ShortcutBuilder<'_> {
@@ -1201,8 +1266,13 @@ impl ShortcutBuilder<'_> {
         inherited: bool,
     ) -> Option<TreeItem> {
         let id = nested_row(parent, &member.id());
-        let (label, leaf, present) = match member {
-            Member::Query(name) => (query_file_name(name), None, self.queries.contains(name)),
+        let (label, leaf, present, hidden) = match member {
+            Member::Query(name) => (
+                query_file_name(name),
+                None,
+                self.queries.contains(name),
+                false,
+            ),
             Member::Object(object) => {
                 let here = match (self.database, object.database.as_deref()) {
                     (ShortcutDatabase::Unnamed, _) => true,
@@ -1213,7 +1283,16 @@ impl ShortcutBuilder<'_> {
                 let leaf = here
                     .then(|| self.catalog.and_then(|catalog| object.leaf(catalog)))
                     .flatten();
-                (object.name.clone(), leaf, leaf.is_some())
+                // Every member drawn here is of the own database, so its
+                // schema, and a relation's name in that schema's table list,
+                // are matched as the own catalog's are.
+                let relation =
+                    matches!(object.kind, ObjectKind::Relation(_)).then_some(object.name.as_str());
+                let hidden = here
+                    && leaf.is_none()
+                    && !self.shown.lists_object(None, &object.schema, relation);
+                let opens = hidden && matches!(object.kind, ObjectKind::Relation(_));
+                (object.name.clone(), leaf, leaf.is_some() || opens, hidden)
             }
         };
         // A routine's label carries its arguments; only its name is matched,
@@ -1237,6 +1316,7 @@ impl ShortcutBuilder<'_> {
                 member: member.clone(),
                 folder: folder.map(str::to_string),
                 missing: !present,
+                hidden,
             },
         );
         Some(TreeItem::new(id, label))
@@ -1708,7 +1788,37 @@ mod tests {
                 },
             ],
             database: None,
+            ..Default::default()
         }
+    }
+
+    /// An unread schema is a folder holding one row that says it is loading,
+    /// or why its read failed, ahead of the routines already read of it.
+    #[test]
+    fn an_unread_schema_holds_one_row_saying_it_is_loading_or_why_not() {
+        let mut catalog = catalog();
+        catalog.schemas[0].relations.clear();
+        catalog.unread.insert("analytics".into(), None);
+        let explorer = tree(&catalog, "");
+        let analytics = &explorer.items[0];
+        assert_eq!(analytics.children.len(), 1);
+        assert_eq!(
+            analytics.children[0].label.as_ref(),
+            crate::sidebar::LOADING
+        );
+        assert!(analytics.children[0].is_disabled());
+        assert!(
+            explorer.items[1]
+                .children
+                .iter()
+                .all(|row| !row.is_disabled())
+        );
+
+        catalog
+            .unread
+            .insert("analytics".into(), Some("denied".into()));
+        let explorer = tree(&catalog, "");
+        assert_eq!(explorer.items[0].children[0].label.as_ref(), "denied");
     }
 
     fn partitioned_catalog() -> Catalog {
@@ -1754,6 +1864,7 @@ mod tests {
                 sequences: Vec::new(),
             }],
             database: None,
+            ..Default::default()
         }
     }
 
@@ -2293,6 +2404,7 @@ mod tests {
             Some(&catalog()),
             &names,
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
         explorer.extend(files(&[], &names, "", FilesOrder::Name));
@@ -2344,6 +2456,7 @@ mod tests {
             Some(&catalog),
             &names,
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
         explorer.extend(files(&[], &names, "", FilesOrder::Name));
@@ -2412,6 +2525,7 @@ mod tests {
             Some(&catalog()),
             &["daily".into()],
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
 
@@ -2429,6 +2543,7 @@ mod tests {
             Some(&catalog()),
             &[],
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
         assert_eq!(labels(&explorer.items), ["Alpha", "beta", "gamma"]);
@@ -2461,6 +2576,7 @@ mod tests {
             Some(&catalog()),
             &[],
             &ShortcutDatabase::On("dev".into()),
+            &Shown::everything(),
             "",
         );
         let rows = &explorer.items[0].children;
@@ -2499,7 +2615,14 @@ mod tests {
             pins: Vec::new(),
         };
         let listed = |database: ShortcutDatabase| {
-            let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &[], &database, "");
+            let explorer = super::shortcuts(
+                &shortcuts,
+                Some(&catalog()),
+                &[],
+                &database,
+                &Shown::everything(),
+                "",
+            );
             explorer.items[0]
                 .children
                 .iter()
@@ -2541,7 +2664,14 @@ mod tests {
             pins: Vec::new(),
         };
         let database = ShortcutDatabase::On("dev".into());
-        let explorer = super::shortcuts(&shortcuts, Some(&catalog()), &[], &database, "");
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&catalog()),
+            &[],
+            &database,
+            &Shown::everything(),
+            "",
+        );
 
         let listed: Vec<_> = explorer.items[0]
             .children
@@ -2552,6 +2682,140 @@ mod tests {
             })
             .collect();
         assert_eq!(listed, members);
+    }
+
+    #[test]
+    fn a_pin_in_a_schema_the_filter_hides_is_hidden_not_missing() {
+        let routine = Member::Object(ObjectRef {
+            database: None,
+            schema: "audit".into(),
+            name: "purge()".into(),
+            kind: ObjectKind::Routine(RoutineKind::Function),
+        });
+        let shortcuts = Shortcuts {
+            folders: Vec::new(),
+            pins: vec![
+                Pin::Member(relation("audit", "events")),
+                Pin::Member(routine),
+                Pin::Member(relation("public", "dropped")),
+            ],
+        };
+        let shown = crate::db::Include::from_stored(Vec::new(), vec!["public".into()]).resolve(
+            crate::db::Levels::DatabaseThenSchema,
+            None,
+            None,
+        );
+        let mut narrowed = catalog();
+        narrowed.schemas.retain(|schema| schema.name == "public");
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&narrowed),
+            &[],
+            &ShortcutDatabase::Unnamed,
+            &shown,
+            "",
+        );
+
+        let states: Vec<_> = explorer.items[0]
+            .children
+            .iter()
+            .map(|row| {
+                let shortcut = &explorer.shortcuts[row.id.as_ref()];
+                let Shortcut::Member {
+                    missing, hidden, ..
+                } = shortcut
+                else {
+                    panic!("a pinned object is a member shortcut");
+                };
+                (*missing, *hidden, shortcut.hidden_relation().is_some())
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (false, true, true),
+                (true, true, false),
+                (true, false, false)
+            ],
+            "a hidden relation opens by name, a hidden routine cannot, a dropped one is missing"
+        );
+    }
+
+    #[test]
+    fn a_pin_on_a_relation_the_table_list_hides_is_hidden_not_missing() {
+        let shortcuts = Shortcuts {
+            folders: Vec::new(),
+            pins: vec![
+                // Hidden by the list, so absent from the narrowed catalog.
+                Pin::Member(relation("public", "active_accounts")),
+                // Shown by it and present.
+                Pin::Member(relation("public", "accounts")),
+                // In a schema with no list, present.
+                Pin::Member(relation("analytics", "events")),
+            ],
+        };
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["accounts".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let narrowed = shown.narrow_catalog(catalog());
+        assert_eq!(narrowed.hidden_in("public"), 1);
+        let explorer = super::shortcuts(
+            &shortcuts,
+            Some(&narrowed),
+            &[],
+            &ShortcutDatabase::Unnamed,
+            &shown,
+            "",
+        );
+
+        let states: Vec<_> = explorer.items[0]
+            .children
+            .iter()
+            .map(|row| {
+                let shortcut = &explorer.shortcuts[row.id.as_ref()];
+                let Shortcut::Member {
+                    missing, hidden, ..
+                } = shortcut
+                else {
+                    panic!("a pinned object is a member shortcut");
+                };
+                (*missing, *hidden, shortcut.hidden_relation().is_some())
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (false, true, true),
+                (false, false, false),
+                (false, false, false)
+            ],
+            "a hidden relation opens by name; the others are listed"
+        );
+    }
+
+    #[test]
+    fn the_tree_notes_how_many_relations_each_schema_row_lost_to_its_table_list() {
+        let shown = crate::db::Include::default()
+            .with_tables(vec![crate::db::TableFilter {
+                database: None,
+                schema: "public".into(),
+                tables: vec!["accounts".into()],
+            }])
+            .resolve(crate::db::Levels::Flat, None, None);
+        let built = tree(&shown.narrow_catalog(catalog()), "");
+        assert_eq!(
+            built.tables_left_out,
+            HashMap::from([(schema_row("public"), 1)])
+        );
+
+        let mut both = tree(&catalog(), "");
+        assert!(both.tables_left_out.is_empty());
+        both.extend(built);
+        assert_eq!(both.tables_left_out.len(), 1);
     }
 
     #[test]
@@ -2571,6 +2835,7 @@ mod tests {
             Some(&catalog()),
             &[],
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
 
@@ -2598,6 +2863,7 @@ mod tests {
                 Some(&catalog()),
                 &[],
                 &ShortcutDatabase::Unnamed,
+                &Shown::everything(),
                 filter,
             )
         };
@@ -2643,6 +2909,7 @@ mod tests {
             Some(&catalog()),
             &names,
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
         explorer.extend(files(&[], &names, "", FilesOrder::Name));
@@ -2769,8 +3036,12 @@ mod tests {
                 Fetch::default(),
             )
             .unwrap();
-        let mut catalog = connection.catalog().unwrap();
-        catalog.merge(connection.routines().unwrap());
+        let mut catalog = connection.catalog(&crate::db::Shown::everything()).unwrap();
+        catalog.merge(
+            connection
+                .routines(&crate::db::Shown::everything())
+                .unwrap(),
+        );
 
         let tree = tree(&catalog, "");
         let ids = row_ids(&tree.items);
@@ -2823,6 +3094,7 @@ mod tests {
                 Some(catalog),
                 &[],
                 &ShortcutDatabase::Unnamed,
+                &Shown::everything(),
                 "",
             )
         };
@@ -3231,6 +3503,7 @@ mod tests {
             None,
             &["a".into(), "b".into(), "c".into(), "d".into()],
             &ShortcutDatabase::Unnamed,
+            &Shown::everything(),
             "",
         );
         let hot = folder_row("Hot");
@@ -3277,6 +3550,31 @@ mod tests {
             })
         );
         assert_eq!(land(&hot_c, folder), None);
+    }
+
+    #[test]
+    fn extending_a_tree_carries_what_the_filter_left_out() {
+        let narrowed = Catalog {
+            left_out: 3,
+            ..catalog()
+        };
+        let built = super::tree(&narrowed, "");
+        assert_eq!(built.left_out, 3);
+
+        let mut after_queries = super::files(&[], &["q".to_string()], "", FilesOrder::Name);
+        after_queries.extend(built);
+        assert_eq!(after_queries.left_out, 3);
+
+        let mut after_shortcuts = super::shortcuts(
+            &Shortcuts::default(),
+            Some(&narrowed),
+            &[],
+            &ShortcutDatabase::On("dev".into()),
+            &Shown::everything(),
+            "",
+        );
+        after_shortcuts.extend(super::tree(&narrowed, ""));
+        assert_eq!(after_shortcuts.left_out, 3);
     }
 
     #[test]

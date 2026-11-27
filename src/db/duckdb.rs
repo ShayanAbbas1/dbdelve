@@ -85,6 +85,29 @@ pub fn path_from_url(url: &str) -> Result<String, String> {
     })
 }
 
+/// Whether `path` opens a database in memory, as [`Connection::open`] reads
+/// it: blank, or [`IN_MEMORY`], either with spaces around it.
+pub fn is_in_memory(path: &str) -> bool {
+    matches!(path.trim(), "" | IN_MEMORY)
+}
+
+/// A statement timeout armed on a connection's interrupt. Dropped, it is
+/// disarmed and waited out: a timer that ran out just as its statement ended
+/// has fired by then, so its interrupt cannot reach the next statement.
+struct Deadline {
+    disarm: Option<Sender<()>>,
+    timer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        drop(self.disarm.take());
+        if let Some(timer) = self.timer.take() {
+            let _ = timer.join();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Connection {
     connection: Arc<Mutex<duckdb::Connection>>,
@@ -108,6 +131,10 @@ pub struct Connection {
     /// held: there a `USE` of the user's is meant to stay, and the catalog
     /// follows it.
     held: bool,
+    /// The statements the profile's gated startup script came to, replayed on
+    /// every session opened from this instance for the user. Empty until
+    /// [`Self::with_startup`] sets it.
+    startup: Arc<[String]>,
 }
 
 /// The database and schema unqualified names resolve in, None for where the
@@ -121,7 +148,7 @@ struct Pick {
 impl Connection {
     pub fn open(path: &str, statement_timeout: u32) -> Result<Self, DbError> {
         let connection = match path.trim() {
-            "" | IN_MEMORY => duckdb::Connection::open_in_memory_with_flags(config()?)
+            path if is_in_memory(path) => duckdb::Connection::open_in_memory_with_flags(config()?)
                 .map_err(|error| plain_error(error.to_string()))?,
             path => {
                 let path = crate::store::home_expanded(path);
@@ -169,6 +196,7 @@ impl Connection {
             home: Arc::new(home),
             unpicked: None,
             held: false,
+            startup: Arc::default(),
         })
     }
 
@@ -224,6 +252,9 @@ impl Connection {
         if pick != Pick::default() {
             self.go(&connection, &pick)?;
         }
+        // After the pick, so the script runs last on a session that is already
+        // where it will work and the user's own text wins.
+        self.replay(&connection)?;
         Ok(Self {
             interrupt: connection.interrupt_handle(),
             connection: Arc::new(Mutex::new(connection)),
@@ -247,6 +278,7 @@ impl Connection {
             schema: None,
         };
         self.go(&connection, &pick)?;
+        self.replay(&connection)?;
         Ok(Self {
             interrupt: connection.interrupt_handle(),
             connection: Arc::new(Mutex::new(connection)),
@@ -254,6 +286,26 @@ impl Connection {
             unpicked: None,
             held: true,
             ..self.clone()
+        })
+    }
+
+    /// Runs `statements` now, in the order written, and keeps them for every
+    /// session [`Self::alongside`] and [`Self::on_database`] open. The first
+    /// error stops the rest.
+    pub fn with_startup(mut self, statements: Vec<String>) -> Result<Self, DbError> {
+        self.startup = statements.into();
+        self.replay(&*lock(&self.connection)?)?;
+        Ok(self)
+    }
+
+    /// The startup statements on `connection`, rows discarded, each under the
+    /// statement timeout armed on `connection`'s own interrupt: a session
+    /// opened beside this one is not the one this one's interrupt stops.
+    fn replay(&self, connection: &duckdb::Connection) -> Result<(), DbError> {
+        let interrupt = connection.interrupt_handle();
+        self.startup.iter().try_for_each(|statement| {
+            let _deadline = self.deadline_on(&interrupt, Instant::now());
+            connection.execute_batch(statement).map_err(query_error)
         })
     }
 
@@ -367,7 +419,11 @@ impl Connection {
             Some(row) => Some(required_cell(&listed, row, "current")?.to_string()),
             None => None,
         };
-        Ok(Databases { names, current })
+        Ok(Databases {
+            names,
+            current,
+            left_out: 0,
+        })
     }
 
     /// Local and immediate, as SQLite's is: an interrupt on an idle connection
@@ -379,22 +435,31 @@ impl Connection {
 
     /// The statement timeout, the way `sqlite.rs` arms its own: a thread that
     /// interrupts unless this is dropped first.
-    fn deadline(&self) -> Option<Sender<()>> {
+    fn deadline(&self) -> Option<Deadline> {
         self.deadline_from(Instant::now())
     }
 
     /// [`Self::deadline`] for a limit counted from `started`, firing when what
     /// is left of it runs out.
-    fn deadline_from(&self, started: Instant) -> Option<Sender<()>> {
+    fn deadline_from(&self, started: Instant) -> Option<Deadline> {
+        self.deadline_on(&self.interrupt, started)
+    }
+
+    /// [`Self::deadline_from`] firing `interrupt`, for a session other than
+    /// this one's.
+    fn deadline_on(&self, interrupt: &Arc<InterruptHandle>, started: Instant) -> Option<Deadline> {
         let left = self.statement_timeout?.saturating_sub(started.elapsed());
-        let interrupt = self.interrupt.clone();
+        let interrupt = Arc::clone(interrupt);
         let (sender, receiver) = channel::<()>();
-        std::thread::spawn(move || {
+        let timer = std::thread::spawn(move || {
             if receiver.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
                 interrupt.interrupt();
             }
         });
-        Some(sender)
+        Some(Deadline {
+            disarm: Some(sender),
+            timer: Some(timer),
+        })
     }
 
     /// Run the submission verbatim, keeping what `fetch` asks for of the last
@@ -1710,6 +1775,14 @@ mod tests {
     }
 
     #[test]
+    fn a_type_duckdb_names_no_other_way_reads_lowercase() {
+        let result = memory("")
+            .query("SELECT NULL AS nothing", Fetch::default())
+            .expect("the query runs");
+        assert_eq!(result.columns[0].data_type.as_deref(), Some("null"));
+    }
+
+    #[test]
     fn a_sequences_ddl_is_its_create_statement() {
         let connection = memory("CREATE SEQUENCE ticket START 5 INCREMENT 2;");
         let ddl = connection
@@ -1810,10 +1883,14 @@ mod tests {
         assert_eq!(sequences_by_schema(&read), wanted);
 
         let connection = crate::db::Connection::DuckDb(connection);
-        let second = connection.routines().expect("the second half is read");
+        let second = connection
+            .routines(&crate::db::Shown::everything())
+            .expect("the second half is read");
         assert_eq!(sequences_by_schema(&second), wanted);
 
-        let mut screen = connection.catalog().expect("the first half is read");
+        let mut screen = connection
+            .catalog(&crate::db::Shown::everything())
+            .expect("the first half is read");
         screen.merge(second);
         assert_eq!(sequences_by_schema(&screen), wanted);
         let main = &screen.schemas[0];
@@ -1846,7 +1923,7 @@ mod tests {
         let mut screen = connection.catalog().expect("the first half is read");
         connection.query("USE b", Fetch::default()).expect("moved");
         let second = crate::db::Connection::DuckDb(connection)
-            .routines()
+            .routines(&crate::db::Shown::everything())
             .expect("the second half is read");
         assert_eq!(second.database.as_deref(), Some("b"));
 
@@ -3572,6 +3649,162 @@ mod tests {
             Engine::DuckDb,
             "main",
         );
+    }
+
+    /// `progress_bar_time` is scoped to the connection (`LOCAL`), so a session that
+    /// never ran the script reads the default and one that did reads the
+    /// script's value.
+    fn progress_bar_time(connection: &Connection) -> String {
+        let result = connection
+            .query(
+                "SELECT current_setting('progress_bar_time')",
+                Fetch::default(),
+            )
+            .expect("the setting reads");
+        result.rows[0].get(0).unwrap_or_default().to_string()
+    }
+
+    const SCRIPT: &str = "SET progress_bar_time = 5000";
+
+    fn startup_file(name: &str) -> (std::path::PathBuf, String) {
+        let dir =
+            std::env::temp_dir().join(format!("dbdelve-duckdb-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("startup.duckdb");
+        drop(::duckdb::Connection::open(&path).expect("the scratch database is created"));
+        let text = path.to_string_lossy().into_owned();
+        (dir, text)
+    }
+
+    #[test]
+    fn a_startup_script_replays_on_every_session_of_the_instance() {
+        let (dir, path) = startup_file("replay");
+        let plain = Connection::open(&path, 0).unwrap();
+        let scope = plain
+            .query(
+                "SELECT scope FROM duckdb_settings() WHERE name = 'progress_bar_time'",
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(scope.rows[0].get(0), Some("LOCAL"));
+        let default = progress_bar_time(&plain);
+        assert_ne!(default, "5000");
+        drop(plain);
+
+        let scripted = Connection::open(&path, 0)
+            .unwrap()
+            .with_startup(vec![SCRIPT.into()])
+            .expect("the script runs");
+        assert_eq!(progress_bar_time(&scripted), "5000");
+        assert_eq!(progress_bar_time(&scripted.alongside().unwrap()), "5000");
+        let apart = crate::db::Connection::DuckDb(scripted.clone())
+            .apart()
+            .expect("a session beside it opens");
+        let crate::db::Connection::DuckDb(apart) = apart else {
+            unreachable!("apart keeps the engine")
+        };
+        assert_eq!(progress_bar_time(&apart), "5000");
+        let home = scripted.current_database().to_string();
+        let other = scripted.on_database(&home).unwrap();
+        assert_eq!(progress_bar_time(&other), "5000");
+        drop((scripted, apart, other));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A startup statement that never ends is stopped by the statement
+    /// timeout, on the connection it opens and on every session replaying it.
+    #[test]
+    fn a_statement_timeout_stops_a_runaway_startup_statement() {
+        // Each probe on a thread of its own, watched from here: one the
+        // deadline never stopped fails the test rather than hanging it.
+        fn within<T: Send + 'static>(probe: impl FnOnce() -> T + Send + 'static) -> T {
+            let (sender, receiver) = channel();
+            std::thread::spawn(move || sender.send(probe()));
+            receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the statement timeout stopped the startup statement")
+        }
+        let error = within(|| {
+            Connection::open(IN_MEMORY, 1)
+                .unwrap()
+                .with_startup(vec![RUNAWAY.into()])
+                .err()
+                .expect("the timeout stops it")
+        });
+        assert_eq!(error.message, INTERRUPTED);
+
+        let mut connection = Connection::open(IN_MEMORY, 1).unwrap();
+        connection.startup = vec![RUNAWAY.to_string()].into();
+        let beside = connection.clone();
+        let error = within(move || beside.alongside().err().expect("the timeout stops it"));
+        assert_eq!(error.message, INTERRUPTED);
+        let home = connection.current_database().to_string();
+        let error = within(move || {
+            connection
+                .on_database(&home)
+                .err()
+                .expect("the timeout stops it")
+        });
+        assert_eq!(error.message, INTERRUPTED);
+    }
+
+    #[test]
+    fn a_blank_or_spaced_path_is_a_database_in_memory() {
+        for path in ["", "  ", IN_MEMORY, " :memory: "] {
+            assert!(is_in_memory(path), "{path:?}");
+            let config = crate::db::ConnectionConfig::duckdb(path.to_string(), 0);
+            assert!(config.lives_with_its_connection(), "{path:?}");
+        }
+        assert!(!is_in_memory("data.duckdb"));
+        let file = crate::db::ConnectionConfig::duckdb("data.duckdb".into(), 0);
+        assert!(!file.lives_with_its_connection());
+    }
+
+    /// A deadline dropped as it runs out is waited out, so its interrupt has
+    /// landed before the next statement starts and stops nothing of it.
+    #[test]
+    fn a_dropped_deadline_has_fired_or_never_will() {
+        let connection = Connection::open(IN_MEMORY, 1).unwrap();
+        for _ in 0..20 {
+            let deadline = connection.deadline_from(Instant::now() - Duration::from_secs(1));
+            drop(deadline);
+            let answer = connection.query("SELECT 1", Fetch::default());
+            assert!(
+                answer.is_ok(),
+                "{:?}",
+                answer.err().map(|error| error.message)
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_tab_session_opened_by_its_caller_replays_the_startup_script() {
+        let (dir, path) = startup_file("bound");
+        let scripted = Connection::open(&path, 0)
+            .unwrap()
+            .with_startup(vec![SCRIPT.into()])
+            .unwrap();
+        let database = scripted.current_database().to_string();
+        let (session, _) = crate::session::Routed::Open {
+            from: crate::db::Connection::DuckDb(scripted),
+            database,
+            schema: None,
+            read_only: false,
+        }
+        .resolve()
+        .expect("the bound session opens");
+        let read = session
+            .query(
+                "SELECT current_setting('progress_bar_time')",
+                &crate::db::CancelToken::default(),
+                Fetch::default(),
+            )
+            .unwrap();
+        assert_eq!(read.rows[0].get(0).map(str::to_string), Some("5000".into()));
+        drop(session);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     struct ScratchDir(std::path::PathBuf);

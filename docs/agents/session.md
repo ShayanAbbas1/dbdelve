@@ -82,8 +82,77 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   takes the Read-only hold inside the open, before it is stored; a mode change
   reaches every one, each ordered on a hold line of its own
   (`Profile::sessions_to_hold`, `Bound::holds`, `set_mode`); all of them end
-  with the connection they were opened from (`Profile::drop_sessions`). The
-  agent keeps its own lanes and reaches none of them.
+  with the connection they were opened from (`Profile::drop_sessions`), and
+  so does the Users and roles tab's kept session (`RolesSide::release`, which
+  never waits on a read under way: the read lets it go as it ends), reopened
+  by the tab's next read. The agent keeps its own lanes and reaches none of
+  them.
+- **A profile keeps one include list per filtered level** (`Profile::include`,
+  `db::Include`; `include_databases` and `include_schemas` in `profiles.toml`,
+  each left out when empty, and `[[profiles.include_tables]]`, below). An entry is an exact name or a `*`/`?` glob,
+  matched in Rust ignoring case (`db::include::matches`) and never sent as
+  `LIKE`; empty means everything. `Target::levels` says which list a target
+  uses, and a list its level does not use is kept and ignored. The
+  connection's own database and active schema always show. The lists sit
+  outside `ConnectionConfig`, so changing them never reconnects. A list is
+  narrowed where each answer is read (`Connection::databases(.., &Shown)`),
+  so nothing stores an unnarrowed answer, and a database it hides is neither
+  drawn nor opened. Completion and Go to Object read that narrowed catalog,
+  so they offer nothing the filter hides, though a statement still reaches
+  it: an unnarrowed copy for them would cost the whole-server read the
+  filter exists to avoid on MySQL, MariaDB and ClickHouse, which push it
+  into the catalog SQL. A tab, a pin or a saved query on a hidden object
+  survives: a restored routine tab whose schema is hidden stays pending
+  (`Profile::filter_hides`), and so does one whose catalog, its own
+  database's or another's, was read under lists saved over since
+  (`Profile::catalog_under_saved_filter`, `catalog_include`,
+  `database_catalogs_shown`), until the read under the saved ones lands; a
+  pin there is drawn hidden, not missing
+  (`Shortcut::Member::hidden`), a relation's opening by its name. `Databases::left_out` carries how many it hid, which
+  `SidebarTree::totals` turns into the connection row's `1 of 2` while no
+  search text is typed.
+  Save and load both pass the lists through `Include::from_stored` (entries
+  trimmed, blanks dropped, at most `ENTRIES_CAP`, 500, per list), so what a
+  profile holds is what its file holds and the picker's preview counts only
+  what Save keeps. A table list is the exception: each tick is an entry, so
+  one past the cap is refused at Save, with the reason in the preview line,
+  rather than cut short.
+  Where the catalog lists databases as schemas (MySQL, MariaDB, ClickHouse),
+  the hidden count comes from the listing the picker reads
+  (`Connection::catalog_databases`: on MySQL and MariaDB every database but
+  the system ones, as the catalog draws them; on ClickHouse the databases
+  holding a relation), so shown plus hidden is the unfiltered count.
+  `include_tables` is one list per schema (`db::TableFilter`: `database`,
+  `schema`, `tables`, left out when none): the relations of that schema the
+  tree shows, matched like the other lists. Its key is the database that
+  holds the schema where the tree draws databases over schemas
+  (`DatabaseThenSchema`, `DatabaseHoldsObjects`: the real database name and
+  the schema's), and no database where it does not (`Flat`: the schema;
+  `DatabaseIsSchema`, MySQL, MariaDB and ClickHouse: the database's name as
+  the schema). On a keyed shape whose own database is unknown no list
+  applies. It covers every relation kind the tree lists under a schema,
+  because the sidebar lists them all there; routines and sequences are never
+  filtered, and a partition follows its parent. Narrowing drops the unlisted
+  relations and keeps their names in `Catalog::hidden_relations`, the
+  deliberate exception to "nothing stores an unnarrowed answer": a schema's
+  relations are read whole on every engine anyway, so the names cost no read,
+  and the filter picker lists them so a hidden table can be ticked again
+  without a second one. They live apart from `schemas`, so nothing that
+  offers objects can see them: the tree, completion, Go to Object and the
+  diagrams all read the narrowed catalog. A tab, a pin or a saved query on a
+  hidden table survives as for a hidden schema (`Shown::lists_object` takes
+  the relation).
+- **A profile's `introspection_depth` chooses which connect-time loads run**
+  (`Profile::behaviour.depth`, `session::Depth`; `relations`, `routines` or
+  `sizes`, left out at the default `sizes`, which is every load): relations
+  always, then routines and sequences, then sizes, which also need Show sizes.
+  It lives on `Profile::behaviour`, outside `ConnectionConfig`, so changing it
+  re-reads over the open session (`Workspace::set_behaviour`) and never
+  reconnects. The one rule governs the connection's own catalog, every other
+  database's and Refresh. A skipped routines read lands `Routines::Skipped`,
+  which is not an error: no notice is written, and a restored routine tab
+  stays pending as it does for `Failed`. A slug this build cannot read reads
+  as `sizes`, costing that one field.
 - **New Query Here opens a tab bound to a database** (`QueryTab::binding`,
   `session::Binding`), from the connections tree's menu. A database row binds
   that database; a schema row binds by its connection's levels
@@ -294,6 +363,61 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   a connection of its own, on threads the scheduler does not own, so a test
   that runs more than one statement calls `cx.executor().allow_parking()`
   first. Focus moves that wait for the next frame need `settle`.
+- **Per-profile timers are one-shot tasks on the profile**
+  (`src/workspace/timers.rs`). Keep-alive is the first: `Profile.keep_alive_task`
+  holds a `background_executor().timer`, replaced to re-arm and dropped to
+  cancel, and it is re-armed after each round lands rather than repeating. It
+  is off unless the profile sets `keep_alive_seconds` (10 to 3600; the form refuses
+  outside it and a stored value outside it restores as off), so a
+  profile that never asked arms nothing. A round pings every session in
+  `Profile::sessions_to_ping` (its own and each one open for another database)
+  through `spawn_blocking`, each by `try_lock`, so a session a statement holds
+  is skipped and never waited on; it is skipped whole while
+  `Profile::any_transaction_open` holds; and a failed
+  ping stops the keep-alive until the next connect without a word, the lost
+  session being found on its next use. Only engines with `EngineSpec.keeps_alive`
+  are pinged (Postgres, MySQL, MariaDB, SQL Server, Redis); each ping is
+  `try_lock`, leaves a session never logged in or dialled alone, and a Redis
+  session with a `MULTI` open too, where a `PING` would be queued. A Postgres
+  or Redis ping with no answer within `db::PING_WITHIN` closes its session
+  before letting go of it, so the next statement finds it lost instead of
+  waiting behind the ping. A MySQL or MariaDB `COM_PING` gets the same bound
+  and the same close by setting its socket's timeouts for the ping alone, on
+  Unix only: the driver exposes no socket on Windows, where the ping has no
+  bound. A ping writes no profile field: it is not
+  the user's activity. In the e2e harness `run_until_parked` does not jump to
+  timers but `advance_clock` fires them, and a test that then blocks on a
+  future must drop an armed timer first (`set_behaviour` with `keep_alive:
+  None`), because the scheduler jumps to the next timer when it would park.
+  `advance_clock` also runs every task that is ready, so a test that needs a
+  call still in flight when a timer fires holds it open on something that
+  only the clock or the test releases, never on the scheduler's order.
+  The idle close (`idle_timeout_minutes`, 1 to 1440 by the same rule,
+  `Profile.idle_task`) is the second:
+  it shares `disconnect`'s state change (`close_sessions`) but keeps the tabs,
+  the buffers and the profile's place in front. Idle time counts from `Profile.last_activity`, read from
+  `background_executor().now()` so `advance_clock` moves it, and only the user's
+  own work moves it (`mark_activity`: a statement's start and landing in
+  `execute_unchecked`, `run_routed`, the catalog reads, a connect landing);
+  keep-alive pings never do. The timer sleeps to the deadline
+  and checks it then, so use moves it with no re-arm per event, and the deadline
+  closes only a connected profile: one whose session was lost keeps its failure
+  and drops the timer, as `keep_alive_due` does. The deadline
+  passing does not close a profile that has work unfinished, front or not
+  (`idle_blocked`): a transaction, a bound session's transaction, a running
+  statement, a queue awaiting or holding statements, an import into it, an
+  export from it, a grid with unapplied edits (`unapplied_edits_of`, of that
+  profile, not the front-only helper). A
+  blocked profile waits a whole timeout more, counted from then: re-arming
+  from `last_activity` would be a wait already over and fire at once, for ever.
+  An idle-closed profile comes back by use: a plain Run in its query tab is
+  parked on `runs_on_connect` and `begin_connect` starts, the landing's
+  `run_waiting_files` then hands the statement to `execute_sql`, so the mode
+  gate judges it when it runs; a connect that fails drops it and the text stays
+  in its tab. A relation tab visited on it (`load_relation`) and a tree expand
+  connect it too, and the status bar offers Reconnect as it does for a failed
+  connection. An explain, a refresh or an edit's read-back is not parked: on an
+  idle profile it fails with `The connection is not open.`.
 - **A dialog's keyboard is its ring** (`Workspace::dialog_layer`): the layer
   holds focus, and `left`/`right`/`tab` step a ring across its buttons and
   then its one other control, the "Don't ask again" box (`enter` or `space`
@@ -430,7 +554,9 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   no `$out` or `$merge`. And only while `Profile::in_turn` is `None`: what the
   user's statements left on the session (`sql::leaves`) -- a transaction
   still open (`in_transaction`, opened by `BEGIN`, ended by `COMMIT` or
-  `ROLLBACK`, read off what was sent rather than asked of the server), or a
+  `ROLLBACK`, read off what was sent rather than asked of the server; an end
+  is marked only once it lands, and not at all when a Cancel dropped it
+  unsent, `Profile::end_landed`), or a
   `SET`, `USE`, temporary table or one of those session calls
   (`session_changed`, until the next connect)
   -- which a fresh connection would not see. A read, a `SHOW`, an `EXPLAIN`,
@@ -722,6 +848,19 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   Snowflake and Turso are out of the Row-mode set (no Draft or Row control on
   their tables) because their results are never editable: Snowflake's keys are
   not enforced, and Turso's driver names no column's table.
+- **A grant review is over the tab, not run by it.** Show Grants' Review
+  changes… (`Workspace::review_grant_changes`) puts an `ApplyReview` whose
+  `grants` is set over whatever tab is in front, since a Show Grants opened
+  from the explorer has no Users and roles tab, and through
+  `review_slot_free` like any other. Its Run (`run_grant_review`) never goes
+  through `execute_and_then` or the tab's `QueryState`: each database's
+  batch goes to that database's session (`route_in`, `run_routed`) and runs
+  on a session of its own (`generated_apart`), one after another, so the tab
+  shows no spinner, its own failure is never the review's, and the history
+  keeps none of it, as a role change's. `GrantRun::running` holds the run's
+  Cancel: a second Run waits for it, and Cancel or Esc while it is out sends
+  the cancel first (what was not sent is not sent) and closes on the second
+  press.
 - **A requery over a draft asks first.** An action that would replace a grid's
   rows over cell edits nobody has applied asks Discard / Cancel and does
   nothing until answered. `Workspace::held_for_edits` is the one guard,
