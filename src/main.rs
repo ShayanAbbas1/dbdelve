@@ -276,7 +276,7 @@ fn main() {
             // to discover the keystroke rather than a second path to the work. No
             // Edit menu -- dbdelve does not own cut, copy and paste, the focused
             // field does, and a menu claiming them would take them from it.
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            workspace::answer_quit_from_app(cx);
             cx.on_action(|_: &Minimize, cx: &mut App| {
                 cx.defer(|cx| {
                     if let Some(window) = cx.active_window() {

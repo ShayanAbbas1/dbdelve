@@ -37,6 +37,35 @@ impl Leaving {
     }
 }
 
+/// Answer a Quit no window takes, as the app menu sends it with the window
+/// minimized or another app in front: the workspace's window comes forward
+/// and asks as its own Quit does. Only an app with no workspace quits unasked.
+pub(crate) fn answer_quit_from_app(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx: &mut App| quit_from_app(cx));
+}
+
+/// Deferred: a window being dispatched to cannot be read until its dispatch
+/// ends, and would read as no workspace at all.
+fn quit_from_app(cx: &mut App) {
+    cx.defer(|cx| {
+        let found = cx.windows().into_iter().find_map(|handle| {
+            let root = handle.downcast::<gpui_component::Root>()?;
+            let view = root.read(cx).ok()?.view().clone();
+            Some((root, view.downcast::<Workspace>().ok()?))
+        });
+        let Some((root, workspace)) = found else {
+            return cx.quit();
+        };
+        let asked = root.update(cx, |_, window, cx| {
+            window.activate_window();
+            workspace.update(cx, |workspace, cx| workspace.leave(Leaving::Quit, cx));
+        });
+        if asked.is_err() {
+            cx.quit();
+        }
+    });
+}
+
 impl Workspace {
     /// Turn each statement committing on its own off or back on.
     ///

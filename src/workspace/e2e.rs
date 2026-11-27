@@ -29198,6 +29198,23 @@ fn the_quit_chord_over_the_welcome_surface_asks_first(cx: &mut TestAppContext) {
     });
 }
 
+/// A Quit no window takes, as the app menu sends it with the window
+/// minimized, reaches `main`'s own handler: it asks in the workspace's window.
+#[gpui::test]
+fn a_quit_with_no_window_to_take_it_asks_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        cx.update(|_, cx| super::answer_quit_from_app(cx));
+        cx.deactivate_window();
+        cx.update(|_, cx| cx.dispatch_action(&crate::actions::Quit));
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
+        quit(workspace, cx);
+    });
+}
+
 /// A restart ends every session as a quit does, so it asks the same question,
 /// and Cancel forgets it: a Quit after that quits rather than restarts.
 #[gpui::test]

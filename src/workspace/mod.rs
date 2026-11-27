@@ -12,6 +12,7 @@ mod editing;
 mod exports;
 use exports::ExportMenu;
 use transactions::Leaving;
+pub(crate) use transactions::answer_quit_from_app;
 mod files;
 mod filter_picker;
 mod filters;
