@@ -30,7 +30,7 @@ const PIN_FILLED_DATA: IconData = IconData {
     ..*icondata_lu::LuPin
 };
 
-const ICONS: [(&str, &IconData); 94] = [
+const ICONS: [(&str, &IconData); 97] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -134,6 +134,9 @@ const ICONS: [(&str, &IconData); 94] = [
     ("icons/plugin.svg", icondata_lu::LuPlug),
     ("icons/mcp.svg", &MCP),
     ("icons/unplug.svg", icondata_lu::LuUnplug),
+    ("icons/harness-claude.svg", icondata_si::SiClaude),
+    ("icons/harness-codex.svg", icondata_si::SiOpenai),
+    ("icons/harness-antigravity.svg", icondata_si::SiGooglegemini),
 ];
 
 /// The Model Context Protocol's mark, the three strokes of the protocol's own
@@ -294,6 +297,10 @@ pub mod icon {
     /// The titlebar's agent mark, the MCP logo: dim while DBDelve listens and
     /// lit once an agent is attached.
     pub const AGENT_MARK: &str = "icons/mcp.svg";
+    /// Brand icons for the MCP agent harnesses in Connect an agent.
+    pub const HARNESS_CLAUDE: &str = "icons/harness-claude.svg";
+    pub const HARNESS_CODEX: &str = "icons/harness-codex.svg";
+    pub const HARNESS_ANTIGRAVITY: &str = "icons/harness-antigravity.svg";
 }
 
 pub fn icon(path: &'static str) -> Icon {
@@ -459,6 +466,9 @@ mod tests {
             icon::NO_COLOR,
             icon::AGENT_VISIBLE,
             icon::AGENT_MARK,
+            icon::HARNESS_CLAUDE,
+            icon::HARNESS_CODEX,
+            icon::HARNESS_ANTIGRAVITY,
         ] {
             assert_draws(path);
         }

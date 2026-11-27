@@ -1325,6 +1325,56 @@ pub(crate) fn segmented_choice(
         )
 }
 
+/// Like [`segmented_choice`], with a leading icon inside the segment.
+pub(crate) fn segmented_icon_choice(
+    id: impl Into<gpui::ElementId>,
+    icon_path: &'static str,
+    label: &'static str,
+    selected: bool,
+    enabled: bool,
+    t: Theme,
+) -> Button {
+    let ink = if !enabled {
+        t.text_faint
+    } else if selected {
+        t.text
+    } else {
+        t.text_muted
+    };
+    control(id, Tone::Quiet, Control::Compact)
+        .p_0()
+        .rounded(px(layout::RADIUS_CONTROL))
+        .disabled(!enabled)
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(layout::SPACE_XS))
+                .px(px(layout::SPACE_SM))
+                .rounded(px(layout::RADIUS_CONTROL))
+                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                .whitespace_nowrap()
+                .map(|segment| {
+                    if selected {
+                        segment
+                            .bg(t.element_active)
+                            .text_color(ink)
+                            .font_weight(FontWeight::MEDIUM)
+                    } else {
+                        segment.text_color(ink)
+                    }
+                })
+                .when(!enabled, |segment| segment.opacity(DISABLED_OPACITY))
+                .child(
+                    icon(icon_path)
+                        .size(px(layout::chrome(layout::TEXT_SM)))
+                        .text_color(ink),
+                )
+                .child(label),
+        )
+}
+
 /// A connection colour as a dot to pick, or None as a struck-out ring; the
 /// one picked is ringed in the text colour. A button underneath, so Tab
 /// reaches it and Space or Enter picks it; the caller adds the click.

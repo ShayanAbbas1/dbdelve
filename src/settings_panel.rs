@@ -37,8 +37,8 @@ use crate::{
     },
     ui::{
         Control, Tone, button, button_label, chord_hint, highlighted, icon_button, keycap_text,
-        keycaps, option_row, picker, raised_card, segmented, segmented_choice, stacked_option_row,
-        switch, well,
+        keycaps, option_row, picker, raised_card, segmented, segmented_choice,
+        segmented_icon_choice, stacked_option_row, switch, well,
     },
     views::row_limit_menu,
     workspace::{FONT_SIZE_STEP, Settings, font_size_range, opacity_percent},
@@ -499,6 +499,8 @@ fn setting_rows() -> Vec<SettingRow> {
                 "agent",
                 "mcp",
                 "claude",
+                "codex",
+                "openai",
                 "antigravity",
                 "agy",
                 "command",
@@ -1401,24 +1403,30 @@ fn render_connect_claude_code(
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
-                .child(segmented(t).children(AgentClient::ALL.map(|choice| {
-                    let selector = format!("settings-connect-{}", choice.slug());
-                    div().debug_selector(move || selector.clone()).child(
-                        segmented_choice(
-                            ("settings-agent-client", choice as usize),
-                            choice.label(),
-                            choice == client,
-                            true,
-                            t,
-                        )
-                        .on_click(cx.listener(
-                            move |workspace, _: &ClickEvent, _, cx| {
-                                workspace.set_agent_client(choice, cx);
-                            },
-                        )),
-                    )
-                }))),
+                .child(
+                    segmented(t)
+                        .flex_wrap()
+                        .children(AgentClient::ALL.map(|choice| {
+                            let selector = format!("settings-connect-{}", choice.slug());
+                            div().debug_selector(move || selector.clone()).child(
+                                segmented_icon_choice(
+                                    ("settings-agent-client", choice as usize),
+                                    choice.icon(),
+                                    choice.label(),
+                                    choice == client,
+                                    true,
+                                    t,
+                                )
+                                .on_click(cx.listener(
+                                    move |workspace, _: &ClickEvent, _, cx| {
+                                        workspace.set_agent_client(choice, cx);
+                                    },
+                                )),
+                            )
+                        })),
+                ),
         )
         .child(
             div()

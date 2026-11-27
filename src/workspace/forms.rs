@@ -3030,14 +3030,15 @@ impl Workspace {
                                 .border_t_1()
                                 .border_color(t.border)
                                 .child(section_label(t, "Connect an agent"))
-                                .child(div().flex().items_center().child(
-                                    ui::segmented(t).children(
+                                .child(div().flex().flex_wrap().items_center().child(
+                                    ui::segmented(t).flex_wrap().children(
                                         crate::agent::shim::AgentClient::ALL.map(|choice| {
                                             let selector =
                                                 format!("popover-connect-{}", choice.slug());
                                             div().debug_selector(move || selector.clone()).child(
-                                                ui::segmented_choice(
+                                                ui::segmented_icon_choice(
                                                     ("popover-agent-client", choice as usize),
+                                                    choice.icon(),
                                                     choice.label(),
                                                     choice == self.agent_client,
                                                     true,

@@ -657,17 +657,23 @@ pub(crate) fn registration_line(
 pub(crate) enum AgentClient {
     #[default]
     ClaudeCode,
+    Codex,
     AntigravityCli,
     AntigravityApp,
 }
 
 impl AgentClient {
-    pub(crate) const ALL: [Self; 3] =
-        [Self::ClaudeCode, Self::AntigravityCli, Self::AntigravityApp];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::AntigravityCli,
+        Self::AntigravityApp,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
             Self::AntigravityCli => "Antigravity CLI",
             Self::AntigravityApp => "Antigravity App",
         }
@@ -676,8 +682,17 @@ impl AgentClient {
     pub(crate) fn slug(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
             Self::AntigravityCli => "antigravity-cli",
             Self::AntigravityApp => "antigravity-app",
+        }
+    }
+
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => crate::icons::icon::HARNESS_CLAUDE,
+            Self::Codex => crate::icons::icon::HARNESS_CODEX,
+            Self::AntigravityCli | Self::AntigravityApp => crate::icons::icon::HARNESS_ANTIGRAVITY,
         }
     }
 
@@ -685,6 +700,9 @@ impl AgentClient {
         match self {
             Self::ClaudeCode => {
                 "DBDelve cannot register an agent for you. Run this once in your terminal."
+            }
+            Self::Codex => {
+                "Registers DBDelve for Codex CLI, IDE and App (~/.codex/config.toml). Run this once in your terminal."
             }
             Self::AntigravityCli => {
                 "Registers DBDelve for both Antigravity CLI and App. Run this once in your terminal."
@@ -694,6 +712,40 @@ impl AgentClient {
             }
         }
     }
+}
+
+/// The `codex mcp add` line that registers this DBDelve with OpenAI Codex
+/// (`~/.codex/config.toml`).
+pub(crate) fn codex_line(
+    executable: &std::path::Path,
+    appimage: Option<&std::ffi::OsStr>,
+    variant: Option<&str>,
+) -> Option<String> {
+    let path = match appimage {
+        Some(file) if !file.is_empty() => file.to_str()?,
+        _ => executable.to_str()?,
+    };
+    let word = |text: String| {
+        if text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '='))
+        {
+            text
+        } else {
+            single_quoted(&text)
+        }
+    };
+    let (name, environment) = match variant.filter(|variant| !variant.is_empty()) {
+        Some(variant) => (
+            word(format!("dbdelve-{variant}")),
+            format!(" --env {}", word(format!("DBDELVE_VARIANT={variant}"))),
+        ),
+        None => ("dbdelve".to_string(), String::new()),
+    };
+    Some(format!(
+        "codex mcp add {name}{environment} -- {} mcp",
+        single_quoted(path)
+    ))
 }
 
 /// The `agy mcp add` line that registers this DBDelve with the Antigravity CLI
@@ -775,6 +827,7 @@ pub(crate) fn registration_snippet(
 ) -> Option<String> {
     match client {
         AgentClient::ClaudeCode => registration_line(executable, appimage, variant),
+        AgentClient::Codex => codex_line(executable, appimage, variant),
         AgentClient::AntigravityCli => antigravity_cli_line(executable, appimage, variant),
         AgentClient::AntigravityApp => antigravity_app_config(executable, appimage, variant),
     }
@@ -1982,6 +2035,7 @@ mod tests {
             let unreadable = OsStr::from_bytes(b"/tmp/db\xffdelve");
             assert_eq!(registration_line(Path::new(unreadable), None, None), None);
             assert_eq!(registration_line(release, Some(unreadable), None), None);
+            assert_eq!(codex_line(Path::new(unreadable), None, None), None);
             assert_eq!(
                 antigravity_cli_line(Path::new(unreadable), None, None),
                 None
@@ -1991,6 +2045,23 @@ mod tests {
                 None
             );
         }
+
+        // OpenAI Codex CLI.
+        assert_eq!(
+            codex_line(release, None, None),
+            Some(
+                "codex mcp add dbdelve -- '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            codex_line(release, None, Some("dev")),
+            Some(
+                "codex mcp add dbdelve-dev --env DBDELVE_VARIANT=dev -- \
+                 '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
+        );
 
         // Antigravity CLI: flags must precede `<name>`.
         assert_eq!(
