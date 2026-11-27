@@ -18,6 +18,7 @@
     )
 )]
 
+pub(crate) mod policy;
 pub(crate) mod result;
 pub(crate) mod shim;
 pub(crate) mod tools;
@@ -51,8 +52,10 @@ pub(crate) fn socket_is_live() -> bool {
 }
 
 /// What the agent is told: `executed` is the app's, for a call it carried out;
-/// `refused_by_gate` is the app's, for a name that resolves to nothing visible
-/// or a bridge that is full; `expired` is the app's, for an approval nobody answered;
+/// `refused_by_gate` is the app's, for a name that resolves to nothing visible,
+/// a statement the gate refused, or a bridge that is full; `refused_by_policy`
+/// is the app's, for a tool or statement class set to Deny in AI Features;
+/// `expired` is the app's, for an approval nobody answered;
 /// `cancelled` is the app's, logged only, because the caller has already gone;
 /// `rejected` is the human's no, from the dialog or the kill switch;
 /// `app_not_running` is the shim's, for a connection that failed or closed
@@ -64,6 +67,7 @@ pub(crate) enum Status {
     Executed,
     Rejected,
     RefusedByGate,
+    RefusedByPolicy,
     Cancelled,
     Expired,
     AppNotRunning,
@@ -78,6 +82,7 @@ impl Status {
             Status::Executed => "executed",
             Status::Rejected => "rejected",
             Status::RefusedByGate => "refused_by_gate",
+            Status::RefusedByPolicy => "refused_by_policy",
             Status::Cancelled => "cancelled",
             Status::Expired => "expired",
             Status::AppNotRunning => "app_not_running",
@@ -234,6 +239,7 @@ pub(crate) mod tests {
             Status::Executed,
             Status::Rejected,
             Status::RefusedByGate,
+            Status::RefusedByPolicy,
             Status::Cancelled,
             Status::Expired,
             Status::AppNotRunning,

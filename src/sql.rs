@@ -47,13 +47,6 @@ mod agent;
 
 #[cfg(test)]
 pub(crate) use agent::agent_gate;
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "the agent tools (Phase 4) are the first caller"
-    )
-)]
 pub(crate) use agent::{AgentVerdict, Expiry, Refusal, agent_gate_on};
 pub(crate) use agent::{ApprovalKind, approval_kind, counts_rows, creates_index_concurrently};
 

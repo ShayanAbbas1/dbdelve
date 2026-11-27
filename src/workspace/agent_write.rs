@@ -75,6 +75,9 @@ pub(crate) struct Writing {
     /// from zero again, so its `outcome` line must name the same session.
     pub(super) session: u64,
     verdict: Option<AuditVerdict>,
+    /// `Some(Decision::Approved)` when a person approved the write, or `None`
+    /// when Writes policy is Auto.
+    decision: Option<Decision>,
     /// The caller hung up while the window already knew, as a `Hangup` that
     /// found this write running said. It is not cancelled for that.
     pub(super) requester_gone: bool,
@@ -282,6 +285,7 @@ impl Workspace {
         config: ConnectionConfig,
         sql: String,
         verdict: Option<AuditVerdict>,
+        decision: Option<Decision>,
         reply: SyncSender<Reply>,
         arrived: Instant,
         gone: Arc<AtomicBool>,
@@ -310,6 +314,7 @@ impl Workspace {
             sql,
             session,
             verdict,
+            decision,
             requester_gone: false,
             gone,
             _work: work,
@@ -379,7 +384,7 @@ impl Workspace {
                 elapsed_ms: elapsed_ms(write.arrived),
                 error,
                 requester_gone,
-                decision: Some(Decision::Approved),
+                decision: write.decision,
                 engine: Some(write.engine),
                 session: Some(write.session),
                 ..CallFacts::default()

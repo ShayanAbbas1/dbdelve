@@ -69,6 +69,9 @@ pub(crate) struct Shim {
     /// as it comes: a path that cannot be derived is the answer to every call,
     /// not a reason for the shim not to speak.
     socket: Result<PathBuf, String>,
+    /// Where `profiles.toml` lives, read on `list_tools` to omit schema tools
+    /// denied by the owner's AI Features policy.
+    profiles: Option<PathBuf>,
     progress_every: Duration,
     presence_retry: Duration,
     /// Whether this shim's one presence connection is open. A lock rather than
@@ -80,12 +83,22 @@ pub(crate) struct Shim {
 #[cfg(unix)]
 impl Shim {
     pub(crate) fn new(socket: Result<PathBuf, String>) -> Self {
+        let profiles = crate::store::dbdelve_directory()
+            .ok()
+            .map(|dir| dir.join("profiles.toml"));
         Self {
             socket,
+            profiles,
             progress_every: PROGRESS_EVERY,
             presence_retry: PRESENCE_RETRY,
             presence: Arc::new(Mutex::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    fn with_profiles_path(mut self, path: PathBuf) -> Self {
+        self.profiles = Some(path);
+        self
     }
 
     #[cfg(test)]
@@ -231,9 +244,15 @@ impl ServerHandler for Shim {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        let policy = self
+            .profiles
+            .as_deref()
+            .map(super::policy::read_saved_policy)
+            .unwrap_or_default();
         Ok(ListToolsResult::with_all_items(
             Tool::ALL
                 .into_iter()
+                .filter(|tool| policy.tool_listed(*tool))
                 .map(|tool| McpTool::new(tool.name(), tool.description(), tool.input_schema()))
                 .collect(),
         ))
@@ -1866,6 +1885,38 @@ mod tests {
                 assert!(!text.to_lowercase().contains(advice), "{text}");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_tools_omits_schema_tools_denied_by_saved_policy() {
+        let dir = std::env::temp_dir().join(format!("dbdelve-shim-policy-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("profiles.toml");
+        std::fs::write(
+            &path,
+            "[settings.agent_policy]\nlist_tables = \"deny\"\nexplain_query = \"deny\"\ndescribe_table = \"ask\"\n",
+        )
+        .expect("profiles file writes");
+
+        testing::block_on(async {
+            let shim = Shim::new(Err("no socket".to_string())).with_profiles_path(path.clone());
+            let mut client = testing::Client::serve(shim);
+            client.initialize().await;
+            let response = client.request("tools/list", json!({})).await;
+            let names: Vec<&str> = response["result"]["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .map(|tool| tool["name"].as_str().expect("tool name"))
+                .collect();
+            assert!(!names.contains(&"list_tables"), "{names:?}");
+            assert!(!names.contains(&"explain_query"), "{names:?}");
+            assert!(names.contains(&"describe_table"), "{names:?}");
+            assert!(names.contains(&"execute_sql"), "{names:?}");
+            assert_eq!(names.len(), Tool::ALL.len() - 2);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

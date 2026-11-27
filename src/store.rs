@@ -844,6 +844,10 @@ pub struct StoredSettings {
     /// while it is name. A scalar, above the tables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_order: Option<String>,
+    /// Master switch for AI Features (MCP server, titlebar mark, policy).
+    /// Off by default; a saved `agent_access = true` alone never turns it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_features: Option<bool>,
     /// Whether agents may reach this variant's windows over the socket.
     /// Absent reads as off, including in a file written before the field
     /// existed. Only a window's own access actions write it, through
@@ -860,6 +864,11 @@ pub struct StoredSettings {
     /// below the scalars.
     #[serde(default)]
     pub theme_opacity: Option<HashMap<String, f32>>,
+    /// Per-tool and per-class AI Features policy overrides, keyed by
+    /// `PolicyRow::slug()` and valued by `PolicyLevel::slug()`. A table, so it
+    /// stays below the scalars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_policy: Option<BTreeMap<String, String>>,
 }
 
 impl StoredSettings {
@@ -5728,12 +5737,17 @@ open_objects = []
                 queries_move_dismissed: Some(true),
                 edit_mode: Some("row".into()),
                 files_order: Some("added".into()),
+                ai_features: Some(true),
                 agent_access: Some(true),
                 custom_keybindings: Some(HashMap::from([(
                     "apply_edits".to_string(),
                     "cmd-shift-s".to_string(),
                 )])),
                 theme_opacity: Some(HashMap::from([("Dark".to_string(), 0.6)])),
+                agent_policy: Some(BTreeMap::from([(
+                    "list_tables".to_string(),
+                    "deny".to_string(),
+                )])),
             }),
             projects: vec![
                 StoredProject {
@@ -6010,6 +6024,46 @@ open_objects = []
             let decoded: ProfileFile = toml::from_str(&text).expect("the file decodes");
             assert_eq!(decoded, file, "{text}");
         }
+    }
+
+    #[test]
+    fn ai_features_and_agent_policy_round_trip_and_default_off() {
+        let decode = |text: &str| {
+            decode_profiles(text, &[])
+                .expect("the file decodes")
+                .settings
+                .unwrap_or_default()
+        };
+        // Absent and `agent_access = true` alone both leave `ai_features` off.
+        assert_eq!(decode("").ai_features, None);
+        assert_eq!(
+            decode("[settings]\nagent_access = true\n").ai_features,
+            None
+        );
+        assert_eq!(
+            decode("[settings]\nai_features = true\n").ai_features,
+            Some(true)
+        );
+
+        let file = ProfileFile {
+            settings: Some(StoredSettings {
+                ai_features: Some(true),
+                agent_access: Some(true),
+                custom_keybindings: Some(HashMap::from([(
+                    "apply_edits".to_string(),
+                    "cmd-shift-s".to_string(),
+                )])),
+                agent_policy: Some(BTreeMap::from([
+                    ("list_tables".to_string(), "deny".to_string()),
+                    ("execute_sql_writes".to_string(), "auto".to_string()),
+                ])),
+                ..StoredSettings::default()
+            }),
+            ..ProfileFile::default()
+        };
+        let text = toml::to_string_pretty(&file).expect("the file encodes");
+        let decoded: ProfileFile = toml::from_str(&text).expect("the file decodes");
+        assert_eq!(decoded, file, "{text}");
     }
 
     #[test]

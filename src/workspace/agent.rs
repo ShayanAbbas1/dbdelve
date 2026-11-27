@@ -20,7 +20,15 @@ use super::agent_read::{self, AgentWork, Approved, Resolved, explain_statement};
 use super::agent_write;
 use super::*;
 use crate::{
-    agent::{CallId, EXPIRY, Inbound, Reply, Status, result::Total, tools::Tool},
+    agent::{
+        CallArgs, CallId, EXPIRY, Inbound, Reply, Status,
+        policy::{
+            PolicyLevel, PolicyRow, SqlPolicyDecision, resolve_sql, sql_class_denied_text,
+            tool_denied_text,
+        },
+        result::Total,
+        tools::Tool,
+    },
     db::ConnectionConfig,
     sql::{AgentVerdict, ApprovalKind, agent_gate_on, approval_kind, creates_index_concurrently},
     ui::size_fact,
@@ -480,27 +488,75 @@ pub(crate) fn audited_error(server_text: &str) -> String {
 /// replying closes the caller's connection with no answer.
 pub(crate) struct PendingCall {
     pub(crate) id: CallId,
-    /// The profile the call's connection name resolved to when it arrived. The
-    /// dialog and the sweeps read the profile by this id, so a rename or a
-    /// second profile of the same name cannot change which one a call is about.
-    pub(crate) profile_id: String,
+    pub(crate) tool: Tool,
+    /// The profile the call's connection name resolved to when it arrived.
+    /// `None` only for `list_connections`, which targets no single profile.
+    pub(crate) profile_id: Option<String>,
     /// The profile's own name when the call resolved, kept so the log can name
     /// it after the profile is gone.
-    profile_name: String,
+    profile_name: Option<String>,
     reply: std::sync::mpsc::SyncSender<Reply>,
     /// When the call reached [`Workspace::on_agent_message`].
     arrived: Instant,
-    /// What the person is asked to approve: the statement the gate held.
+    /// What the person is asked to approve: either a SQL statement or a schema
+    /// tool call held by an `Ask` policy row.
     pub(crate) approval: Approval,
     /// Ends the call as `expired` when it fires. Dropped with the call, which
     /// is what cancels it.
     _expiry: gpui::Task<()>,
 }
 
-/// The statement a held call asks to run, with what the gate and the profile
-/// said of it when it arrived. `sql` is exactly what the agent sent: what the
-/// dialog draws and what runs, never a copy that was cleaned for the screen.
-pub(crate) struct Approval {
+/// What a held call asks the human to approve.
+pub(crate) enum Approval {
+    Sql(SqlApproval),
+    Tool(ToolApproval),
+}
+
+impl Approval {
+    /// The statement as sent, for a SQL approval, or `None` for a non-SQL tool.
+    pub(crate) fn sql(&self) -> Option<&str> {
+        match self {
+            Self::Sql(sql) => Some(&sql.sql),
+            Self::Tool(tool) => tool.args.sql.as_deref(),
+        }
+    }
+
+    pub(crate) fn engine(&self) -> Option<Engine> {
+        match self {
+            Self::Sql(sql) => Some(sql.config.engine()),
+            Self::Tool(tool) => tool.config.as_ref().map(ConnectionConfig::engine),
+        }
+    }
+
+    pub(crate) fn audit_verdict(&self) -> Option<AuditVerdict> {
+        match self {
+            Self::Sql(sql) => AuditVerdict::held_by(sql.verdict.clone()),
+            Self::Tool(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gone(&self) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
+        match self {
+            Self::Sql(sql) => &sql.gone,
+            Self::Tool(tool) => &tool.gone,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sql_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Sql(sql) => Some(&mut sql.sql),
+            Self::Tool(tool) => tool.args.sql.as_mut(),
+        }
+    }
+}
+
+/// The statement a held `execute_sql` call asks to run, with what the gate and
+/// the profile said of it when it arrived. `sql` is exactly what the agent
+/// sent: what the dialog draws and what runs, never a copy that was cleaned
+/// for the screen.
+pub(crate) struct SqlApproval {
     pub(crate) sql: String,
     /// The gate's answer at arrival, which the re-gate at Approve must
     /// reproduce.
@@ -519,6 +575,79 @@ pub(crate) struct Approval {
     /// the window hears of it. Read at Approve, so a click that lands in that
     /// gap starts nothing.
     pub(crate) gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A non-`execute_sql` tool call held because its policy row is `Ask`.
+pub(crate) struct ToolApproval {
+    pub(crate) args: CallArgs,
+    pub(crate) config: Option<ConnectionConfig>,
+    pub(crate) server_version: Option<u32>,
+    pub(crate) gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The `(label, value)` argument rows shown in the approval dialog for a
+/// non-`execute_sql` tool.
+pub(crate) fn tool_approval_args(tool: Tool, args: &CallArgs) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if let Some(schema) = &args.schema {
+        rows.push(("schema", schema.clone()));
+    }
+    if let Some(table) = &args.table {
+        rows.push(("table", table.clone()));
+    }
+    if let Some(routine) = &args.routine {
+        rows.push(("routine", routine.clone()));
+    }
+    if let Some(query) = &args.query {
+        rows.push(("query", query.clone()));
+    }
+    if let Some(sql) = &args.sql {
+        rows.push(("sql", sql.clone()));
+    }
+    if tool == Tool::ExplainQuery {
+        rows.push(("analyze", args.analyze.unwrap_or(false).to_string()));
+    }
+    rows
+}
+
+/// Deterministic source key recorded when a tool approval dialog is drawn and
+/// compared byte-for-byte at Approve, matching `SqlApproval`'s check.
+pub(crate) fn tool_approval_source(tool: Tool, args: &CallArgs) -> String {
+    let mut out = format!("tool:{}", tool.name());
+    for (label, value) in tool_approval_args(tool, args) {
+        out.push('\0');
+        out.push_str(label);
+        out.push('=');
+        out.push_str(&value);
+    }
+    out
+}
+
+fn schema_tool_work(tool: Tool, args: CallArgs) -> AgentWork {
+    match tool {
+        Tool::DescribeTable => AgentWork::Structure {
+            schema: args.schema.unwrap_or_default(),
+            table: args.table.unwrap_or_default(),
+        },
+        Tool::ListTables => AgentWork::Catalog {
+            schema: Some(args.schema.unwrap_or_default()),
+        },
+        Tool::SearchSchema => AgentWork::Search {
+            query: args.query.unwrap_or_default(),
+        },
+        Tool::ListRelationships => AgentWork::Relationships {
+            schema: args.schema.unwrap_or_default(),
+        },
+        Tool::ListRoutines => AgentWork::Routines {
+            schema: args.schema.unwrap_or_default(),
+            routine: None,
+        },
+        Tool::DescribeRoutine => AgentWork::Routines {
+            schema: args.schema.unwrap_or_default(),
+            routine: Some(args.routine.unwrap_or_default()),
+        },
+        _ => AgentWork::Catalog { schema: None },
+    }
 }
 
 /// What a pending call is told when the kill switch ends it.
@@ -619,6 +748,14 @@ fn saved_agent_access(plugins: &[&'static crate::db::Plugin]) -> Option<bool> {
         .and_then(|settings| settings.agent_access)
 }
 
+/// What `ai_features` holds in the file right now; defaults to `false`.
+fn saved_ai_features(plugins: &[&'static crate::db::Plugin]) -> bool {
+    store::peek_profiles(plugins)
+        .and_then(|list| list.settings)
+        .and_then(|settings| settings.ai_features)
+        .unwrap_or(false)
+}
+
 /// What the visibility dialog tells the owner about this engine and mode, one
 /// entry per sentence. A pure function of the two, so opening the dialog asks
 /// no server anything: the hold is what the engine is built to do while the
@@ -699,44 +836,61 @@ pub(crate) fn approval_facts(
     locks_the_file: bool,
     reads_held: bool,
 ) -> Vec<String> {
-    // Only a held statement has an approval; nothing else is described.
-    let AgentVerdict::Approve(held, expiry) = verdict else {
-        return Vec::new();
-    };
-    let kind = approval_kind(engine, sql, held);
-    let mut facts = vec![
-        format!(
-            "This connection's access level is {}; the statement needs {}.",
-            mode.label(),
-            held.mode.label()
-        ),
-        match kind {
-            ApprovalKind::Write => "It changes data.",
-            ApprovalKind::EgressRead => "It reads a file, a URL or another server.",
-            ApprovalKind::UnlistedCall => "It calls a function DBDelve does not list.",
-        }
-        .to_string(),
-    ];
-    if kind != ApprovalKind::Write {
-        facts.push(
+    match verdict {
+        AgentVerdict::Run => vec![
+            format!(
+                "This connection's access level is {}; the statement needs {}.",
+                mode.label(),
+                Mode::ReadOnly.label()
+            ),
+            "It reads data.".to_string(),
             if reads_held {
                 HELD_TO_READS
             } else {
                 NOT_HELD_TO_READS
             }
             .to_string(),
-        );
+            OWN_CONNECTION.to_string(),
+            size_fact(sql),
+        ],
+        AgentVerdict::Approve(held, expiry) => {
+            let kind = approval_kind(engine, sql, held);
+            let mut facts = vec![
+                format!(
+                    "This connection's access level is {}; the statement needs {}.",
+                    mode.label(),
+                    held.mode.label()
+                ),
+                match kind {
+                    ApprovalKind::Write => "It changes data.",
+                    ApprovalKind::EgressRead => "It reads a file, a URL or another server.",
+                    ApprovalKind::UnlistedCall => "It calls a function DBDelve does not list.",
+                }
+                .to_string(),
+            ];
+            if kind != ApprovalKind::Write {
+                facts.push(
+                    if reads_held {
+                        HELD_TO_READS
+                    } else {
+                        NOT_HELD_TO_READS
+                    }
+                    .to_string(),
+                );
+            }
+            facts.extend(expiry.map(|expiry| expiry.to_string()));
+            if creates_index_concurrently(engine, sql) {
+                facts.push(INVALID_INDEX.to_string());
+            }
+            if locks_the_file && kind == ApprovalKind::Write {
+                facts.push(LOCKS_THE_FILE.to_string());
+            }
+            facts.push(OWN_CONNECTION.to_string());
+            facts.push(size_fact(sql));
+            facts
+        }
+        AgentVerdict::Refuse(_) => Vec::new(),
     }
-    facts.extend(expiry.map(|expiry| expiry.to_string()));
-    if creates_index_concurrently(engine, sql) {
-        facts.push(INVALID_INDEX.to_string());
-    }
-    if locks_the_file && kind == ApprovalKind::Write {
-        facts.push(LOCKS_THE_FILE.to_string());
-    }
-    facts.push(OWN_CONNECTION.to_string());
-    facts.push(size_fact(sql));
-    facts
 }
 
 impl Workspace {
@@ -856,7 +1010,7 @@ impl Workspace {
             .agent
             .calls
             .iter()
-            .filter(|call| call.profile_id == profile_id)
+            .filter(|call| call.profile_id.as_deref() == Some(profile_id))
             .map(|call| call.id)
             .collect();
         for id in waiting {
@@ -866,13 +1020,11 @@ impl Workspace {
     }
 
     /// The call the approval dialog is about: the oldest one whose profile is still
-    /// in the list. A call whose profile has gone is swept with it, so the
-    /// filter only guards the moment between the two.
+    /// in the list (or `list_connections`, which targets no single profile).
     pub(crate) fn front_approval(&self) -> Option<&PendingCall> {
-        self.agent.calls.iter().find(|call| {
-            self.profiles
-                .iter()
-                .any(|profile| profile.id == call.profile_id)
+        self.agent.calls.iter().find(|call| match &call.profile_id {
+            None => true,
+            Some(id) => self.profiles.iter().any(|profile| profile.id == *id),
         })
     }
 
@@ -935,6 +1087,7 @@ impl Workspace {
                 if workspace.front_approval_id() == Some(id)
                     && workspace.dialog_in_front.get() == Some("agent-approval")
                     && workspace.palette.is_none()
+                    && !workspace.agent_popover_open
                 {
                     workspace.agent.armed = Some(id);
                     cx.notify();
@@ -970,6 +1123,7 @@ impl Workspace {
         // Dropping the call's expiry with the rest of it.
         let call = self.agent.calls.remove(index);
         let PendingCall {
+            tool,
             profile_id,
             profile_name,
             reply,
@@ -977,162 +1131,384 @@ impl Workspace {
             approval,
             ..
         } = call;
-        let engine = approval.config.engine();
-        // Before anything is started. The caller may have left in the moment
-        // before the window heard of it; its call then ends as cancelled, with
-        // nothing recorded as started and nothing opened. A write that has
-        // started is never stopped (see [`agent_write`]), so this is the last
-        // point where the caller leaving changes what runs.
-        if approval.gone.load(std::sync::atomic::Ordering::Acquire) {
-            self.agent.record(
-                id,
-                Tool::ExecuteSql,
-                Some(profile_name),
-                None,
-                Status::Cancelled,
-                CallFacts {
-                    verdict: AuditVerdict::held_by(approval.verdict),
-                    sql: Some(approval.sql),
-                    elapsed_ms: elapsed_ms(arrived),
-                    requester_gone: true,
-                    // The person did click Approve; the call is what ended.
-                    decision: Some(Decision::Approved),
-                    engine: Some(engine),
-                    ..CallFacts::default()
-                },
-            );
-            // Nobody would read a reply, and dropping the sender unsent is how
-            // a cancelled call ends.
-            drop(reply);
-            self.finish_approval(was_in_front, cx);
-            return;
-        }
-        let profile = self
-            .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id && profile.agent_visible);
-        let held = AuditVerdict::held_by(approval.verdict.clone());
-        let (status, text, error) = match profile {
-            None => (Status::Rejected, NO_LONGER_AVAILABLE, None),
-            // Byte for byte the source the dialog was drawn from for this
-            // call: no normalising, folding or trimming (GATE-10).
-            Some(_)
+        match approval {
+            Approval::Sql(approval) => {
+                let engine = approval.config.engine();
+                let profile_id = profile_id.unwrap_or_default();
+                let profile_name = profile_name.unwrap_or_default();
+                if approval.gone.load(std::sync::atomic::Ordering::Acquire) {
+                    self.agent.record(
+                        id,
+                        Tool::ExecuteSql,
+                        Some(profile_name),
+                        None,
+                        Status::Cancelled,
+                        CallFacts {
+                            verdict: AuditVerdict::held_by(approval.verdict),
+                            sql: Some(approval.sql),
+                            elapsed_ms: elapsed_ms(arrived),
+                            requester_gone: true,
+                            decision: Some(Decision::Approved),
+                            engine: Some(engine),
+                            ..CallFacts::default()
+                        },
+                    );
+                    drop(reply);
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                }
+                let profile = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id && profile.agent_visible);
+                let held = AuditVerdict::held_by(approval.verdict.clone());
+                let policy_decision = resolve_sql(&self.settings.agent_policy, &approval.verdict);
+                let (status, text, error) = match profile {
+                    None => (Status::Rejected, NO_LONGER_AVAILABLE.to_string(), None),
+                    Some(_)
+                        if !self
+                            .approval_shown
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|(shown, sql)| *shown == id && *sql == approval.sql) =>
+                    {
+                        (Status::RefusedByGate, CHANGED_SINCE_SHOWN.to_string(), None)
+                    }
+                    Some(profile)
+                        if agent_gate_on(
+                            profile.config.engine(),
+                            approval.server_version,
+                            &approval.sql,
+                            profile.mode,
+                        ) != approval.verdict
+                            || profile.config != approval.config =>
+                    {
+                        (Status::RefusedByGate, CHANGED_SINCE_SHOWN.to_string(), None)
+                    }
+                    Some(_) if matches!(policy_decision, SqlPolicyDecision::RefuseByPolicy(_)) => {
+                        let SqlPolicyDecision::RefuseByPolicy(row) = policy_decision else {
+                            unreachable!()
+                        };
+                        (Status::RefusedByPolicy, sql_class_denied_text(row), None)
+                    }
+                    Some(_) => {
+                        let started = AuditLine {
+                            v: 1,
+                            session: self.agent.session,
+                            id: id.0,
+                            at: unix_millis(),
+                            phase: "started",
+                            tool: Tool::ExecuteSql,
+                            profile: Some(&profile_name),
+                            engine: Some(engine.as_str()),
+                            verdict: held
+                                .as_ref()
+                                .map(AuditVerdict::line)
+                                .or_else(|| Some(AuditVerdict::Run.line())),
+                            decision: Some(Decision::Approved),
+                            status: None,
+                            requester_gone: false,
+                            shown: None,
+                            elapsed_ms: elapsed_ms(arrived),
+                            error: None,
+                            sql: Some(&approval.sql),
+                        };
+                        match self.agent.persist(&started) {
+                            Err(error) => (Status::Failed, NOT_RECORDED.to_string(), Some(error)),
+                            Ok(()) => {
+                                match held {
+                                    None => self.run_agent_work(
+                                        id,
+                                        Resolved {
+                                            id: profile_id,
+                                            name: profile_name,
+                                            config: approval.config,
+                                        },
+                                        AgentWork::Query {
+                                            sql: approval.sql,
+                                            approved: Some(Approved {
+                                                verdict: AuditVerdict::Run,
+                                                engine,
+                                                server_version: approval.server_version,
+                                            }),
+                                        },
+                                        reply,
+                                        arrived,
+                                        cx,
+                                    ),
+                                    Some(
+                                        verdict @ AuditVerdict::Approve {
+                                            mode: Mode::ReadOnly,
+                                            ..
+                                        },
+                                    ) => self.run_agent_work(
+                                        id,
+                                        Resolved {
+                                            id: profile_id,
+                                            name: profile_name,
+                                            config: approval.config,
+                                        },
+                                        AgentWork::Query {
+                                            sql: approval.sql,
+                                            approved: Some(Approved {
+                                                verdict,
+                                                engine,
+                                                server_version: approval.server_version,
+                                            }),
+                                        },
+                                        reply,
+                                        arrived,
+                                        cx,
+                                    ),
+                                    held => self.start_write(
+                                        id,
+                                        profile_id,
+                                        profile_name,
+                                        approval.config,
+                                        approval.sql,
+                                        held,
+                                        Some(Decision::Approved),
+                                        reply,
+                                        arrived,
+                                        approval.gone,
+                                        cx,
+                                    ),
+                                }
+                                self.finish_approval(was_in_front, cx);
+                                return;
+                            }
+                        }
+                    }
+                };
+                let decision = (status != Status::Failed).then_some(Decision::Approved);
+                self.agent_answered(
+                    id,
+                    Tool::ExecuteSql,
+                    Some(profile_name),
+                    None,
+                    &reply,
+                    Reply { status, text },
+                    CallFacts {
+                        verdict: held,
+                        sql: Some(approval.sql),
+                        elapsed_ms: elapsed_ms(arrived),
+                        error,
+                        decision,
+                        engine: Some(engine),
+                        ..CallFacts::default()
+                    },
+                );
+                self.finish_approval(was_in_front, cx);
+            }
+            Approval::Tool(approval) => {
+                let engine = approval.config.as_ref().map(ConnectionConfig::engine);
+                if approval.gone.load(std::sync::atomic::Ordering::Acquire) {
+                    self.agent.record(
+                        id,
+                        tool,
+                        profile_name,
+                        None,
+                        Status::Cancelled,
+                        CallFacts {
+                            sql: approval.args.sql,
+                            elapsed_ms: elapsed_ms(arrived),
+                            requester_gone: true,
+                            decision: Some(Decision::Approved),
+                            engine,
+                            ..CallFacts::default()
+                        },
+                    );
+                    drop(reply);
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                }
+                let expected_source = tool_approval_source(tool, &approval.args);
                 if !self
                     .approval_shown
                     .borrow()
                     .as_ref()
-                    .is_some_and(|(shown, sql)| *shown == id && *sql == approval.sql) =>
-            {
-                (Status::RefusedByGate, CHANGED_SINCE_SHOWN, None)
-            }
-            Some(profile)
-                if agent_gate_on(
-                    profile.config.engine(),
-                    approval.server_version,
-                    &approval.sql,
-                    profile.mode,
-                ) != approval.verdict
-                    || profile.config != approval.config =>
-            {
-                (Status::RefusedByGate, CHANGED_SINCE_SHOWN, None)
-            }
-            Some(_) => {
-                // Before anything is opened: a write that cannot be recorded
-                // is not run, so the file never lacks a statement the server
-                // may have received.
-                let started = AuditLine {
-                    v: 1,
-                    session: self.agent.session,
-                    id: id.0,
-                    at: unix_millis(),
-                    phase: "started",
-                    tool: Tool::ExecuteSql,
-                    profile: Some(&profile_name),
-                    engine: Some(engine.as_str()),
-                    verdict: held.as_ref().map(AuditVerdict::line),
-                    decision: Some(Decision::Approved),
-                    status: None,
-                    requester_gone: false,
-                    shown: None,
-                    elapsed_ms: elapsed_ms(arrived),
-                    error: None,
-                    sql: Some(&approval.sql),
-                };
-                match self.agent.persist(&started) {
-                    // No decision on the failure: the statement was never
-                    // started, and its outcome line meets the same file.
-                    Err(error) => (Status::Failed, NOT_RECORDED, Some(error)),
-                    Ok(()) => {
-                        match held {
-                            // What the person read runs on the profile's
-                            // read-only lane, which a write fails against.
-                            Some(
-                                verdict @ AuditVerdict::Approve {
-                                    mode: Mode::ReadOnly,
-                                    ..
-                                },
-                            ) => self.run_agent_work(
-                                id,
-                                Resolved {
-                                    id: profile_id,
-                                    name: profile_name,
-                                    config: approval.config,
-                                },
-                                AgentWork::Query {
-                                    sql: approval.sql,
-                                    approved: Some(Approved {
-                                        verdict,
-                                        engine,
-                                        server_version: approval.server_version,
-                                    }),
-                                },
-                                reply,
-                                arrived,
-                                cx,
-                            ),
-                            held => self.start_write(
-                                id,
-                                profile_id,
-                                profile_name,
-                                approval.config,
-                                approval.sql,
-                                held,
-                                reply,
-                                arrived,
-                                approval.gone,
-                                cx,
-                            ),
-                        }
-                        self.finish_approval(was_in_front, cx);
-                        return;
-                    }
+                    .is_some_and(|(shown, src)| *shown == id && *src == expected_source)
+                {
+                    self.agent_answered(
+                        id,
+                        tool,
+                        profile_name,
+                        None,
+                        &reply,
+                        Reply {
+                            status: Status::RefusedByGate,
+                            text: CHANGED_SINCE_SHOWN.to_string(),
+                        },
+                        CallFacts {
+                            sql: approval.args.sql,
+                            elapsed_ms: elapsed_ms(arrived),
+                            decision: Some(Decision::Approved),
+                            engine,
+                            ..CallFacts::default()
+                        },
+                    );
+                    self.finish_approval(was_in_front, cx);
+                    return;
                 }
+                if self.settings.agent_policy.tool_level(tool) == Some(PolicyLevel::Deny) {
+                    self.agent_answered(
+                        id,
+                        tool,
+                        profile_name,
+                        None,
+                        &reply,
+                        Reply {
+                            status: Status::RefusedByPolicy,
+                            text: tool_denied_text(tool),
+                        },
+                        CallFacts {
+                            sql: approval.args.sql,
+                            elapsed_ms: elapsed_ms(arrived),
+                            decision: Some(Decision::Approved),
+                            engine,
+                            ..CallFacts::default()
+                        },
+                    );
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                }
+                if tool == Tool::ListConnections {
+                    let visible: Vec<Listed> = self
+                        .agent_reachable_profiles()
+                        .map(|profile| Listed {
+                            name: &profile.name,
+                            engine: profile.config.engine().as_str(),
+                        })
+                        .collect();
+                    let text = listed_text(&visible);
+                    self.agent_answered(
+                        id,
+                        Tool::ListConnections,
+                        None,
+                        None,
+                        &reply,
+                        Reply {
+                            status: Status::Executed,
+                            text,
+                        },
+                        CallFacts {
+                            elapsed_ms: elapsed_ms(arrived),
+                            decision: Some(Decision::Approved),
+                            ..CallFacts::default()
+                        },
+                    );
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                }
+                let Some(profile_id) = profile_id else {
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                };
+                let profile_name = profile_name.unwrap_or_default();
+                let profile = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id && profile.agent_visible);
+                let Some(profile) = profile else {
+                    self.agent_answered(
+                        id,
+                        tool,
+                        Some(profile_name),
+                        None,
+                        &reply,
+                        Reply {
+                            status: Status::Rejected,
+                            text: NO_LONGER_AVAILABLE.to_string(),
+                        },
+                        CallFacts {
+                            sql: approval.args.sql,
+                            elapsed_ms: elapsed_ms(arrived),
+                            decision: Some(Decision::Approved),
+                            engine,
+                            ..CallFacts::default()
+                        },
+                    );
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                };
+                let Some(config) = approval.config else {
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                };
+                if profile.config != config {
+                    self.agent_answered(
+                        id,
+                        tool,
+                        Some(profile_name),
+                        None,
+                        &reply,
+                        Reply {
+                            status: Status::RefusedByGate,
+                            text: CHANGED_SINCE_SHOWN.to_string(),
+                        },
+                        CallFacts {
+                            sql: approval.args.sql,
+                            elapsed_ms: elapsed_ms(arrived),
+                            decision: Some(Decision::Approved),
+                            engine,
+                            ..CallFacts::default()
+                        },
+                    );
+                    self.finish_approval(was_in_front, cx);
+                    return;
+                }
+                let work = if tool == Tool::ExplainQuery {
+                    let sql = approval.args.sql.unwrap_or_default();
+                    match explain_statement(
+                        config.engine(),
+                        approval.server_version,
+                        &sql,
+                        approval.args.analyze.unwrap_or(false),
+                        profile.mode,
+                    ) {
+                        Ok(statement) => AgentWork::Explain { statement },
+                        Err(declined) => {
+                            self.agent_answered(
+                                id,
+                                Tool::ExplainQuery,
+                                Some(profile_name),
+                                None,
+                                &reply,
+                                Reply {
+                                    status: declined.status,
+                                    text: declined.text,
+                                },
+                                CallFacts {
+                                    verdict: declined.verdict.and_then(AuditVerdict::held_by),
+                                    sql: declined.sql,
+                                    elapsed_ms: elapsed_ms(arrived),
+                                    decision: Some(Decision::Approved),
+                                    engine,
+                                    ..CallFacts::default()
+                                },
+                            );
+                            self.finish_approval(was_in_front, cx);
+                            return;
+                        }
+                    }
+                } else {
+                    schema_tool_work(tool, approval.args)
+                };
+                self.run_agent_work(
+                    id,
+                    Resolved {
+                        id: profile_id,
+                        name: profile_name,
+                        config,
+                    },
+                    work,
+                    reply,
+                    arrived,
+                    cx,
+                );
+                self.finish_approval(was_in_front, cx);
             }
-        };
-        // The person did click Approve; what the answer says is that it did not
-        // run. A failure to record has no decision (see above).
-        let decision = (status != Status::Failed).then_some(Decision::Approved);
-        self.agent_answered(
-            id,
-            Tool::ExecuteSql,
-            Some(profile_name),
-            None,
-            &reply,
-            Reply {
-                status,
-                text: text.to_string(),
-            },
-            CallFacts {
-                verdict: held,
-                sql: Some(approval.sql),
-                elapsed_ms: elapsed_ms(arrived),
-                error,
-                decision,
-                engine: Some(engine),
-                ..CallFacts::default()
-            },
-        );
-        self.finish_approval(was_in_front, cx);
+        }
     }
 
     /// What every end of an approval does after the call left the list: the
@@ -1225,7 +1601,7 @@ impl Workspace {
         let plugins = self.plugins.clone();
         self.start_bridge_if(
             crate::agent::socket_path()?,
-            move || saved_agent_access(&plugins) == Some(true),
+            move || saved_ai_features(&plugins) && saved_agent_access(&plugins) == Some(true),
             cx,
         )
     }
@@ -1334,15 +1710,135 @@ impl Workspace {
     /// found another one serving can be asked again later.
     pub(crate) fn turn_on_agent_access(&mut self, cx: &mut Context<Self>) {
         if self.agent.bridge.is_some() {
+            if !self.settings.ai_features {
+                self.settings.ai_features = true;
+                self.remember_profiles(cx);
+                cx.notify();
+            }
             return;
         }
         match self.listen_for_agents(cx) {
             Ok(()) => {
+                self.settings.ai_features = true;
                 self.agent.access_choice = Some(true);
                 self.remember_profiles(cx);
                 cx.notify();
             }
             Err(text) => self.note(text, cx),
+        }
+    }
+
+    /// Turn the AI Features master switch on or off. Turning it off stops the
+    /// MCP server exactly like the kill switch and closes the popover.
+    pub(crate) fn set_ai_features(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.ai_features == on {
+            return;
+        }
+        self.settings.ai_features = on;
+        if on {
+            self.remember_profiles(cx);
+            cx.notify();
+            return;
+        }
+        self.agent_popover_open = false;
+        self.agent_writes_auto_prompt = false;
+        let had_access = self.agent.bridge.is_some() || self.saved_agent_access() == Some(true);
+        self.disconnect_agents(cx);
+        if !had_access {
+            self.remember_profiles(cx);
+            cx.notify();
+        }
+    }
+
+    /// Change one row of the AI Features policy. Setting `execute_sql` writes
+    /// to Auto opens a confirmation dialog first; every other valid change
+    /// applies and saves at once.
+    pub(crate) fn set_agent_policy(
+        &mut self,
+        row: PolicyRow,
+        level: PolicyLevel,
+        cx: &mut Context<Self>,
+    ) {
+        if !row.allows(level) || self.settings.agent_policy.get(row) == level {
+            return;
+        }
+        if row == PolicyRow::ExecuteSqlWrites && level == PolicyLevel::Auto {
+            self.agent_popover_open = false;
+            self.agent_writes_auto_prompt = true;
+            cx.notify();
+            return;
+        }
+        self.settings.agent_policy.set(row, level);
+        self.remember_profiles(cx);
+        cx.notify();
+    }
+
+    /// Confirm setting `execute_sql` writes to Auto from its dialog.
+    pub(crate) fn confirm_agent_writes_auto(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.agent_writes_auto_prompt) {
+            return;
+        }
+        self.settings
+            .agent_policy
+            .set(PolicyRow::ExecuteSqlWrites, PolicyLevel::Auto);
+        self.remember_profiles(cx);
+        self.refocus_front();
+        cx.notify();
+    }
+
+    /// Close the Writes-Auto confirmation dialog without changing the policy.
+    pub(crate) fn cancel_agent_writes_auto(&mut self, cx: &mut Context<Self>) -> bool {
+        if !std::mem::take(&mut self.agent_writes_auto_prompt) {
+            return false;
+        }
+        self.refocus_front();
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn toggle_agent_popover(&mut self, cx: &mut Context<Self>) {
+        if self.agent_popover_open {
+            self.close_agent_popover(cx);
+        } else if self.agent_mark_state().is_some() {
+            self.agent_popover_open = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn close_agent_popover(&mut self, cx: &mut Context<Self>) -> bool {
+        if !std::mem::take(&mut self.agent_popover_open) {
+            return false;
+        }
+        self.refocus_front();
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn open_ai_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.agent_popover_open = false;
+        self.settings_tab = crate::settings_panel::SettingsTab::AiFeatures;
+        self.open_settings(&crate::actions::OpenSettings, window, cx);
+    }
+
+    /// The `claude mcp add` command for this build's executable and variant.
+    pub(crate) fn agent_registration_command(&self) -> Option<String> {
+        let executable = std::env::current_exe().ok()?;
+        let appimage = std::env::var_os("APPIMAGE");
+        let variant = std::env::var("DBDELVE_VARIANT").ok();
+        crate::agent::shim::registration_line(&executable, appimage.as_deref(), variant.as_deref())
+    }
+
+    /// Copy the Claude Code MCP registration command to the clipboard.
+    pub(crate) fn copy_agent_registration(&mut self, cx: &mut Context<Self>) {
+        match self.agent_registration_command() {
+            Some(line) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(line));
+                self.note("Copied MCP command.".to_string(), cx);
+            }
+            None => self.note(
+                "Could not build the registration command for this executable path.".to_string(),
+                cx,
+            ),
         }
     }
 
@@ -1417,10 +1913,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// What the titlebar's agent mark shows: nothing while no bridge runs, the
-    /// dim mark while one listens alone, and the lit mark, with the count of
-    /// calls waiting, while an agent is attached or a call waits.
+    /// What the titlebar's agent mark shows: nothing while AI Features is off
+    /// or no bridge runs, the dim mark while one listens alone, and the lit
+    /// mark, with the count of calls waiting, while an agent is attached or a
+    /// call waits.
     pub(crate) fn agent_mark_state(&self) -> Option<ui::AgentMark> {
+        if !self.settings.ai_features {
+            return None;
+        }
         self.agent.bridge.as_ref()?;
         // A read or an approved write in flight is an agent attached, though
         // nobody is asked.
@@ -1478,8 +1978,50 @@ impl Workspace {
                 tool: Tool::ListConnections,
                 id,
                 reply,
+                gone,
                 ..
             } => {
+                match self.settings.agent_policy.get(PolicyRow::ListConnections) {
+                    PolicyLevel::Deny => {
+                        self.agent_answered(
+                            id,
+                            Tool::ListConnections,
+                            None,
+                            None,
+                            &reply,
+                            Reply {
+                                status: Status::RefusedByPolicy,
+                                text: tool_denied_text(Tool::ListConnections),
+                            },
+                            CallFacts {
+                                elapsed_ms: elapsed_ms(arrived),
+                                ..CallFacts::default()
+                            },
+                        );
+                        return;
+                    }
+                    PolicyLevel::Ask => {
+                        let expiry = self.expiry_of(id, cx);
+                        self.agent.calls.push(PendingCall {
+                            id,
+                            tool: Tool::ListConnections,
+                            profile_id: None,
+                            profile_name: None,
+                            reply,
+                            arrived,
+                            approval: Approval::Tool(ToolApproval {
+                                args: CallArgs::default(),
+                                config: None,
+                                server_version: None,
+                                gone,
+                            }),
+                            _expiry: expiry,
+                        });
+                        cx.notify();
+                        return;
+                    }
+                    PolicyLevel::Auto => {}
+                }
                 self.adopt_saved_visibility(cx);
                 let visible: Vec<Listed> = self
                     .agent_reachable_profiles()
@@ -1548,27 +2090,30 @@ impl Workspace {
                 let engine = resolved.config.engine();
                 let server_version = self.known_server_version(&resolved.id, &resolved.config);
                 let verdict = agent_gate_on(engine, server_version, &sql, mode);
-                // The verdict's contents are what an approval will show,
-                // which agents do not get.
-                let (refused, audited) = match &verdict {
-                    AgentVerdict::Run => {
+                let decision = resolve_sql(&self.settings.agent_policy, &verdict);
+                let (status, refused, audited) = match decision {
+                    SqlPolicyDecision::RunRead => {
                         self.run_agent_sql(id, resolved, sql, reply, arrived, cx);
                         return;
                     }
-                    // Everything the gate approves is held for a person, a
-                    // read of a file or a call it does not list included. A
-                    // statement is refused here, before there is a pending call
-                    // or a dialog to be shown, when nothing can run it for an
-                    // agent on this profile: no read on an in-memory DuckDB,
-                    // and no write on DuckDB at all.
-                    AgentVerdict::Approve(held, _) => {
-                        let write = held.mode == Mode::ReadWrite;
+                    SqlPolicyDecision::RefuseByGate(reason) => (
+                        Status::RefusedByGate,
+                        reason.to_string(),
+                        AuditVerdict::held_by(verdict),
+                    ),
+                    SqlPolicyDecision::RefuseByPolicy(row) => (
+                        Status::RefusedByPolicy,
+                        sql_class_denied_text(row),
+                        AuditVerdict::held_by(verdict),
+                    ),
+                    SqlPolicyDecision::Ask { is_write, .. } => {
                         let refusal = resolved
                             .config
                             .agent_refusal()
-                            .or_else(|| resolved.config.agent_write_refusal().filter(|_| write));
+                            .or_else(|| resolved.config.agent_write_refusal().filter(|_| is_write));
                         match refusal {
                             Some(refusal) => (
+                                Status::RefusedByGate,
                                 refusal.to_string(),
                                 Some(AuditVerdict::Refuse(refusal.to_string())),
                             ),
@@ -1576,11 +2121,12 @@ impl Workspace {
                                 let expiry = self.expiry_of(id, cx);
                                 self.agent.calls.push(PendingCall {
                                     id,
-                                    profile_id: resolved.id,
-                                    profile_name: resolved.name,
+                                    tool: Tool::ExecuteSql,
+                                    profile_id: Some(resolved.id),
+                                    profile_name: Some(resolved.name),
                                     reply,
                                     arrived,
-                                    approval: Approval {
+                                    approval: Approval::Sql(SqlApproval {
                                         sql,
                                         verdict,
                                         locks_the_file: resolved
@@ -1589,7 +2135,7 @@ impl Workspace {
                                         config: resolved.config,
                                         server_version,
                                         gone,
-                                    },
+                                    }),
                                     _expiry: expiry,
                                 });
                                 cx.notify();
@@ -1597,8 +2143,97 @@ impl Workspace {
                             }
                         }
                     }
-                    AgentVerdict::Refuse(reason) => {
-                        (reason.to_string(), AuditVerdict::held_by(verdict))
+                    SqlPolicyDecision::RunWrite => {
+                        let refusal = resolved
+                            .config
+                            .agent_refusal()
+                            .or_else(|| resolved.config.agent_write_refusal());
+                        if let Some(refusal) = refusal {
+                            (
+                                Status::RefusedByGate,
+                                refusal.to_string(),
+                                Some(AuditVerdict::Refuse(refusal.to_string())),
+                            )
+                        } else {
+                            // Re-check against the profile's current mode and
+                            // config, matching the check an approved write gets.
+                            let held = AuditVerdict::held_by(verdict.clone());
+                            let current_ok = self
+                                .profiles
+                                .iter()
+                                .find(|profile| profile.id == resolved.id && profile.agent_visible)
+                                .is_some_and(|profile| {
+                                    profile.config == resolved.config
+                                        && agent_gate_on(
+                                            profile.config.engine(),
+                                            server_version,
+                                            &sql,
+                                            profile.mode,
+                                        ) == verdict
+                                });
+                            if !current_ok {
+                                (Status::RefusedByGate, CHANGED_SINCE_SHOWN.to_string(), held)
+                            } else {
+                                let started = AuditLine {
+                                    v: 1,
+                                    session: self.agent.session,
+                                    id: id.0,
+                                    at: unix_millis(),
+                                    phase: "started",
+                                    tool: Tool::ExecuteSql,
+                                    profile: Some(&resolved.name),
+                                    engine: Some(engine.as_str()),
+                                    verdict: held.as_ref().map(AuditVerdict::line),
+                                    decision: None,
+                                    status: None,
+                                    requester_gone: false,
+                                    shown: None,
+                                    elapsed_ms: elapsed_ms(arrived),
+                                    error: None,
+                                    sql: Some(&sql),
+                                };
+                                match self.agent.persist(&started) {
+                                    Err(error) => {
+                                        self.agent_answered(
+                                            id,
+                                            Tool::ExecuteSql,
+                                            Some(resolved.name),
+                                            None,
+                                            &reply,
+                                            Reply {
+                                                status: Status::Failed,
+                                                text: NOT_RECORDED.to_string(),
+                                            },
+                                            CallFacts {
+                                                verdict: held,
+                                                sql: Some(sql),
+                                                elapsed_ms: elapsed_ms(arrived),
+                                                error: Some(error),
+                                                engine: Some(engine),
+                                                ..CallFacts::default()
+                                            },
+                                        );
+                                        return;
+                                    }
+                                    Ok(()) => {
+                                        self.start_write(
+                                            id,
+                                            resolved.id,
+                                            resolved.name,
+                                            resolved.config,
+                                            sql,
+                                            held,
+                                            None,
+                                            reply,
+                                            arrived,
+                                            gone,
+                                            cx,
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                        }
                     }
                 };
                 self.agent_answered(
@@ -1608,13 +2243,14 @@ impl Workspace {
                     None,
                     &reply,
                     Reply {
-                        status: Status::RefusedByGate,
+                        status,
                         text: refused,
                     },
                     CallFacts {
                         verdict: audited,
                         sql: Some(sql),
                         elapsed_ms: elapsed_ms(arrived),
+                        engine: Some(engine),
                         ..CallFacts::default()
                     },
                 );
@@ -1625,8 +2261,28 @@ impl Workspace {
                 connection,
                 args,
                 reply,
-                ..
+                gone,
             } => {
+                let policy = self.settings.agent_policy.get(PolicyRow::ExplainQuery);
+                if policy == PolicyLevel::Deny {
+                    self.agent_answered(
+                        id,
+                        Tool::ExplainQuery,
+                        None,
+                        connection.as_deref(),
+                        &reply,
+                        Reply {
+                            status: Status::RefusedByPolicy,
+                            text: tool_denied_text(Tool::ExplainQuery),
+                        },
+                        CallFacts {
+                            sql: args.sql,
+                            elapsed_ms: elapsed_ms(arrived),
+                            ..CallFacts::default()
+                        },
+                    );
+                    return;
+                }
                 self.adopt_saved_visibility_for_read(cx);
                 let found = match connection.as_deref() {
                     Some(name) => self
@@ -1657,7 +2313,7 @@ impl Workspace {
                 };
                 // The schema requires a statement, so only an injected call
                 // has none; it is the empty statement.
-                let sql = args.sql.unwrap_or_default();
+                let sql = args.sql.clone().unwrap_or_default();
                 let engine = resolved.config.engine();
                 let server_version = self.known_server_version(&resolved.id, &resolved.config);
                 match explain_statement(
@@ -1667,14 +2323,36 @@ impl Workspace {
                     args.analyze.unwrap_or(false),
                     mode,
                 ) {
-                    Ok(statement) => self.run_agent_work(
-                        id,
-                        resolved,
-                        AgentWork::Explain { statement },
-                        reply,
-                        arrived,
-                        cx,
-                    ),
+                    Ok(statement) => {
+                        if policy == PolicyLevel::Ask {
+                            let expiry = self.expiry_of(id, cx);
+                            self.agent.calls.push(PendingCall {
+                                id,
+                                tool: Tool::ExplainQuery,
+                                profile_id: Some(resolved.id),
+                                profile_name: Some(resolved.name),
+                                reply,
+                                arrived,
+                                approval: Approval::Tool(ToolApproval {
+                                    args,
+                                    config: Some(resolved.config),
+                                    server_version,
+                                    gone,
+                                }),
+                                _expiry: expiry,
+                            });
+                            cx.notify();
+                        } else {
+                            self.run_agent_work(
+                                id,
+                                resolved,
+                                AgentWork::Explain { statement },
+                                reply,
+                                arrived,
+                                cx,
+                            );
+                        }
+                    }
                     Err(declined) => self.agent_answered(
                         id,
                         Tool::ExplainQuery,
@@ -1707,8 +2385,31 @@ impl Workspace {
                 connection,
                 args,
                 reply,
-                ..
+                gone,
             } => {
+                let policy = self
+                    .settings
+                    .agent_policy
+                    .tool_level(tool)
+                    .unwrap_or(PolicyLevel::Auto);
+                if policy == PolicyLevel::Deny {
+                    self.agent_answered(
+                        id,
+                        tool,
+                        None,
+                        connection.as_deref(),
+                        &reply,
+                        Reply {
+                            status: Status::RefusedByPolicy,
+                            text: tool_denied_text(tool),
+                        },
+                        CallFacts {
+                            elapsed_ms: elapsed_ms(arrived),
+                            ..CallFacts::default()
+                        },
+                    );
+                    return;
+                }
                 self.adopt_saved_visibility_for_read(cx);
                 let resolved = match connection.as_deref() {
                     Some(name) => self.agent_profile(name).map(Resolved::of),
@@ -1735,32 +2436,27 @@ impl Workspace {
                         return;
                     }
                 };
-                // The names are required by the tools that take them, so only
-                // an injected call lacks one; it names nothing the catalog holds.
-                let work = match tool {
-                    Tool::DescribeTable => AgentWork::Structure {
-                        schema: args.schema.unwrap_or_default(),
-                        table: args.table.unwrap_or_default(),
-                    },
-                    Tool::ListTables => AgentWork::Catalog {
-                        schema: Some(args.schema.unwrap_or_default()),
-                    },
-                    Tool::SearchSchema => AgentWork::Search {
-                        query: args.query.unwrap_or_default(),
-                    },
-                    Tool::ListRelationships => AgentWork::Relationships {
-                        schema: args.schema.unwrap_or_default(),
-                    },
-                    Tool::ListRoutines => AgentWork::Routines {
-                        schema: args.schema.unwrap_or_default(),
-                        routine: None,
-                    },
-                    Tool::DescribeRoutine => AgentWork::Routines {
-                        schema: args.schema.unwrap_or_default(),
-                        routine: Some(args.routine.unwrap_or_default()),
-                    },
-                    _ => AgentWork::Catalog { schema: None },
-                };
+                if policy == PolicyLevel::Ask {
+                    let expiry = self.expiry_of(id, cx);
+                    self.agent.calls.push(PendingCall {
+                        id,
+                        tool,
+                        profile_id: Some(resolved.id),
+                        profile_name: Some(resolved.name),
+                        reply,
+                        arrived,
+                        approval: Approval::Tool(ToolApproval {
+                            args,
+                            config: Some(resolved.config),
+                            server_version: None,
+                            gone,
+                        }),
+                        _expiry: expiry,
+                    });
+                    cx.notify();
+                    return;
+                }
+                let work = schema_tool_work(tool, args);
                 self.run_agent_work(id, resolved, work, reply, arrived, cx);
             }
             Inbound::Hangup { id } => {
@@ -1886,26 +2582,26 @@ impl Workspace {
             // The caller may have hung up, and then nobody reads this.
             let _ = call.reply.send(Reply { status, text });
         }
-        // A held statement is audited with what it asked, so a denied, expired
-        // or hung-up approval says which statement it was.
         let approval = call.approval;
-        let engine = approval.config.engine();
+        let engine = approval.engine();
+        let verdict = approval.audit_verdict();
+        let sql = approval.sql().map(str::to_string);
         // Past the early return above, so a hangup that arrives after the call
         // ended adds nothing: one entry per call, written here.
         self.agent.record(
             id,
-            Tool::ExecuteSql,
-            Some(call.profile_name),
+            call.tool,
+            call.profile_name,
             None,
             status,
             CallFacts {
-                verdict: AuditVerdict::held_by(approval.verdict),
-                sql: Some(approval.sql),
+                verdict,
+                sql,
                 elapsed_ms: elapsed_ms(call.arrived),
                 // Only a hangup ends a call `Cancelled`.
                 requester_gone: status == Status::Cancelled,
                 decision,
-                engine: Some(engine),
+                engine,
                 ..CallFacts::default()
             },
         );

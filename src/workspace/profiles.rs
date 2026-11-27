@@ -315,9 +315,11 @@ impl Workspace {
                 .then(|| self.settings.edit_mode.slug().into()),
             files_order: (self.settings.files_order != explorer::FilesOrder::default())
                 .then(|| self.settings.files_order.slug().into()),
+            ai_features: Some(self.settings.ai_features).filter(|on| *on),
             agent_access,
             custom_keybindings: Some(self.settings.custom_keybindings.clone()),
             theme_opacity: Some(self.settings.theme_opacity.clone()),
+            agent_policy: self.settings.agent_policy.to_stored(),
         };
         store::save_profiles(&store::ProfileList {
             profiles,

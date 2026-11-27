@@ -382,6 +382,7 @@ fn no_longer_admitted(
     let approved = waiting.work.approved().map(|approved| approved.verdict);
     let now = AuditVerdict::held_by(agent_gate_on(config.engine(), version, sql, mode));
     match (approved, now) {
+        (Some(AuditVerdict::Run), None) => None,
         (was, now) if was == now => None,
         (Some(_), _) => Some((Status::RefusedByGate, super::agent::CHANGED_SINCE_SHOWN)),
         (None, _) => Some((Status::RefusedByGate, ACCESS_CHANGED)),
