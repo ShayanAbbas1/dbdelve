@@ -1465,6 +1465,7 @@ impl Workspace {
             Some("unsaved") => 3,
             // Forms with fields and a list of their own, which Tab moves the
             // keyboard through and whose buttons act through their own handlers.
+            // The role form's Tab reaches its buttons (`step_role_form`).
             Some("import-rows" | "schema-export" | "filter-picker" | "role-form") | None => 0,
             Some("show-grants") => 1,
             // Commit is not offered over a failed transaction.
@@ -1504,6 +1505,10 @@ impl Workspace {
     }
 
     fn step_dialog_button(&mut self, leftward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_in_front.get() == Some("role-form") {
+            self.step_role_form(leftward, window, cx);
+            return;
+        }
         let buttons = self.dialog_buttons();
         if buttons == 0 {
             self.step_dialog_focus(leftward, window, cx);

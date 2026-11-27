@@ -12,6 +12,7 @@ mod editing;
 mod exports;
 use exports::ExportMenu;
 use transactions::Leaving;
+pub(crate) use transactions::answer_quit_from_app;
 mod files;
 mod filter_picker;
 mod filters;
@@ -53,7 +54,7 @@ pub(crate) use profiles::unavailable_reason;
 pub(crate) use projects::project_name_refusal;
 pub(crate) use queries::error_in_buffer;
 pub(crate) use users::RolesSide;
-pub(crate) use users::{GrantsOf, GrantsView, RoleForm, RoleFormKind};
+pub(crate) use users::{GrantsOf, GrantsView, RoleForm};
 
 use crate::channel::Channel;
 use crate::connection_form::{Origin, passphrase_to_persist, password_to_persist};

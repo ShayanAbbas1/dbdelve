@@ -22,10 +22,10 @@ const MOVED_SINCE_REVIEW: &str = "Not sent: the connection was opened again or m
      database since these changes were reviewed. Close this and review them again.";
 
 /// Why a grant run stopped at a batch.
-struct RunFailure {
-    message: String,
+pub(super) struct RunFailure {
+    pub(super) message: String,
     /// The session was lost with the batch out: it may have committed.
-    unknown: bool,
+    pub(super) unknown: bool,
 }
 
 impl Workspace {
@@ -307,7 +307,7 @@ impl Workspace {
     /// left. Once anything may have applied, the dialog reads the grants
     /// again and the changes that landed leave what is staged.
     #[allow(clippy::too_many_arguments)]
-    fn land_grant_run(
+    pub(super) fn land_grant_run(
         &mut self,
         id: &str,
         request: u64,
@@ -365,25 +365,32 @@ impl Workspace {
             (false, Some(said)) => self.note(said, cx),
             (false, None) => {}
         }
-        if applied > 0 || unknown {
-            self.reread_grants(id, request, cx);
+        // The review kept open follows the dialog to its new request, or the
+        // next Run's read would find no dialog to read again.
+        if (applied > 0 || unknown)
+            && let Some(next) = self.reread_grants(id, request, cx)
+            && let Some(run) = (self.profiles.iter_mut())
+                .find(|profile| profile.id == id)
+                .and_then(|profile| profile.session.apply_review.as_mut())
+                .and_then(|review| review.grants.as_mut())
+                .filter(|run| run.request == request)
+        {
+            run.request = next;
         }
         cx.notify();
     }
 
     /// Read the dialog's grants again, as a new request, so a read still out
-    /// from before the run cannot land over it.
-    fn reread_grants(&mut self, id: &str, request: u64, cx: &mut Context<Self>) {
+    /// from before the run cannot land over it. The new request's number, if
+    /// the dialog was read again.
+    fn reread_grants(&mut self, id: &str, request: u64, cx: &mut Context<Self>) -> Option<u64> {
         let next = self.last_grants_request + 1;
-        let Some(view) = (self.grants_view.as_mut())
-            .filter(|view| view.request == request && view.profile == id)
-        else {
-            return;
-        };
+        let view = (self.grants_view.as_mut())
+            .filter(|view| view.request == request && view.profile == id)?;
         let object = match (&view.data, &view.object) {
             (Loaded::Ready(GrantsOf::Object(_)), Some(object)) => Ok(object.clone()),
             (Loaded::Ready(GrantsOf::Role(roles)), _) => Err(roles.role.clone()),
-            _ => return,
+            _ => return None,
         };
         view.request = next;
         self.last_grants_request = next;
@@ -391,6 +398,7 @@ impl Workspace {
             Ok(object) => self.read_object_grants(id, object, next, cx),
             Err(role) => self.read_role_access(id, role, next, cx),
         }
+        Some(next)
     }
 
     /// Cancel or Esc on a grant review: while its run is out, stop it first

@@ -807,12 +807,6 @@ impl Workspace {
                             .child(note)
                     }))
             };
-        let (new, login, password) = match &form.kind {
-            RoleFormKind::New { login } => (true, *login, *login),
-            RoleFormKind::Edit(_) => (false, false, false),
-            RoleFormKind::Password(_) => (false, false, true),
-        };
-        let editing = matches!(form.kind, RoleFormKind::Edit(_));
         let close_workspace = cx.entity().downgrade();
         let submit_workspace = close_workspace.clone();
         Some(
@@ -827,26 +821,10 @@ impl Workspace {
                     dialog(t)
                         .debug_selector(|| "role-form".into())
                         .child(section_label(t, &form.title()))
-                        .when(new, |card| card.child(field("Name", &form.name, None)))
-                        .when(password, |card| {
-                            card.child(field(
-                                "Password",
-                                &form.password,
-                                Some("Sent as its SCRAM-SHA-256 hash, never as typed."),
-                            ))
-                            .child(field(
-                                "Confirm password",
-                                &form.confirm,
-                                None,
-                            ))
-                        })
-                        .when(login || editing, |card| {
-                            card.child(field("Connection limit", &form.limit, None))
-                                .child(field("Password expires", &form.expires, None))
-                        })
-                        .when(new, |card| {
-                            card.child(field("Member of", &form.member_of, None))
-                        })
+                        .children(
+                            (form.fields().into_iter())
+                                .map(|(label, input, note)| field(label, input, note)),
+                        )
                         .children(form.error.clone().map(|error| {
                             div()
                                 .debug_selector(|| "role-form-error".into())

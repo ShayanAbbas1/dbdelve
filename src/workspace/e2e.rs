@@ -7261,6 +7261,48 @@ fn show_grants_stages_grants_and_revokes_in_edit_mode_and_discards_them(cx: &mut
 }
 
 #[gpui::test]
+fn a_grant_run_again_after_one_failed_part_way_reads_the_grants_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        click_selector(cx, "show-grants-edit");
+        click_grant_cell(cx, "watchers", "SELECT");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.review_grant_changes(window, cx)
+        });
+        // A run over two databases whose second failed after the first
+        // applied, landed as a run that went out would land.
+        let land_one_of_two = |workspace: &mut Workspace, cx: &mut gpui::Context<Workspace>| {
+            let cancel = crate::db::CancelToken::alongside();
+            let profile = workspace.profile_mut().expect("a connection is in front");
+            let id = profile.id.clone();
+            let review = profile.session.apply_review.as_mut().expect("under review");
+            let run = review.grants.as_mut().expect("a grant review");
+            let first = run.batches[0].clone();
+            run.batches = vec![first.clone(), first];
+            run.running = Some(cancel.clone());
+            let (batches, request) = (run.batches.clone(), run.request);
+            let failure = super::grant_edits::RunFailure {
+                message: "permission denied".into(),
+                unknown: false,
+            };
+            workspace.land_grant_run(&id, request, &cancel, &batches, 1, Some(failure), cx);
+            workspace.grants_view.as_ref().expect("still open").request
+        };
+        let before = workspace.read_with(cx, |workspace, _| {
+            workspace.grants_view.as_ref().unwrap().request
+        });
+        let first = workspace.update(cx, land_one_of_two);
+        assert_ne!(first, before, "what applied is read again");
+        let second = workspace.update(cx, land_one_of_two);
+        assert_ne!(second, first, "and again after the second run");
+        settle(cx);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn show_grants_of_a_role_lists_every_privilege_in_edit_mode(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
@@ -7570,7 +7612,7 @@ fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_role_form(
                 &profile,
-                super::RoleFormKind::New { login: true },
+                super::users::RoleFormKind::New { login: true },
                 window,
                 cx,
             )
@@ -7579,6 +7621,55 @@ fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
         settle(cx);
         press(cx, "down");
         assert_eq!(picked(cx).as_deref(), Some("ana"));
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn the_keys_stay_live_on_a_users_tab_with_no_list_to_show(cx: &mut TestAppContext) {
+    use crate::users_view::Loaded;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let palette_opens = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-shift-p");
+            settle(cx);
+            assert!(
+                workspace.read_with(cx, |workspace, _| workspace.palette.is_some()),
+                "the palette is up"
+            );
+            cx.simulate_keystrokes("escape");
+            settle(cx);
+        };
+        // Still reading the roles.
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            workspace.activate_tab(Tab::Object(tab), window, cx);
+            match &workspace
+                .profile()
+                .unwrap()
+                .session
+                .objects
+                .last()
+                .unwrap()
+                .body
+            {
+                ObjectBody::Users { view, .. } => view.clone(),
+                _ => unreachable!(),
+            }
+        });
+        settle(cx);
+        palette_opens(cx);
+        // Refused the list, as a login without the privilege is.
+        view.update(cx, |view, cx| {
+            let denied = crate::db::roles::Roles {
+                denied: Some("This login has no privilege to list users.".into()),
+                ..Default::default()
+            };
+            view.set_roles(Loaded::Ready(std::sync::Arc::new(denied)), cx)
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("users-denied").is_some());
+        palette_opens(cx);
         quit(workspace, cx);
     });
 }
@@ -7664,7 +7755,7 @@ fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_
                 .expect("New User… opened its form");
             assert!(matches!(
                 form.kind,
-                super::RoleFormKind::New { login: true }
+                super::users::RoleFormKind::New { login: true }
             ));
         });
         // Bringing the connection forward forgets what it had read of its
@@ -7678,7 +7769,9 @@ fn a_sidebar_role_row_brings_its_connection_and_tab_forward_and_asks_as_the_tab_
                 }));
             workspace.run_role_action("far", RoleAction::Edit, Some("ana"), window, cx);
             let form = workspace.role_form.as_ref().expect("Edit… opened its form");
-            assert!(matches!(&form.kind, super::RoleFormKind::Edit(role) if role.name == "ana"));
+            assert!(
+                matches!(&form.kind, super::users::RoleFormKind::Edit(role) if role.name == "ana")
+            );
             // Copy DROP ROLE puts text on the clipboard and sends nothing:
             // the connection's user, `u`, is offered to take over.
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".into()));
@@ -7969,7 +8062,12 @@ fn a_refused_role_form_stays_up_with_what_was_typed_and_says_why(cx: &mut TestAp
                 ..Roles::default()
             }));
             let id = profile.id.clone();
-            workspace.open_role_form(&id, super::RoleFormKind::New { login: true }, window, cx);
+            workspace.open_role_form(
+                &id,
+                super::users::RoleFormKind::New { login: true },
+                window,
+                cx,
+            );
             let form = workspace.role_form.as_ref().unwrap();
             let (name, member_of) = (form.name.clone(), form.member_of.clone());
             name.update(cx, |input, cx| input.set_value("ana", window, cx));
@@ -8003,7 +8101,7 @@ fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestA
             let profile = workspace.profile().unwrap().id.clone();
             workspace.open_role_form(
                 &profile,
-                super::RoleFormKind::New { login: true },
+                super::users::RoleFormKind::New { login: true },
                 window,
                 cx,
             );
@@ -8040,6 +8138,63 @@ fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestA
         assert_eq!(front_dialog(&workspace, cx), None);
         assert!(workspace.read_with(cx, |workspace, _| workspace.role_form.is_none()));
         assert!(editor_has_keyboard(&workspace, cx));
+        quit(workspace, cx);
+    });
+}
+
+/// Tab goes through the role form's fields and on to Review… and Cancel,
+/// as through any dialog's buttons, and `enter` presses the one it is on.
+#[gpui::test]
+fn tab_reaches_the_role_forms_buttons_after_its_fields(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            users_tab_on(workspace, window, cx);
+            let profile = workspace.profile().unwrap().id.clone();
+            workspace.open_role_form(
+                &profile,
+                super::users::RoleFormKind::New { login: false },
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        settle(cx);
+        let field = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let form = workspace.read(cx).role_form.as_ref().unwrap();
+                [&form.name, &form.member_of]
+                    .iter()
+                    .position(|input| input.focus_handle(cx).is_focused(window))
+            })
+        };
+        assert_eq!(field(&workspace, cx), Some(0), "Name");
+
+        press(cx, "tab");
+        assert_eq!(field(&workspace, cx), Some(1), "Member of");
+        press(cx, "tab");
+        assert!(dialog_has_keyboard(&workspace, cx));
+        assert_eq!(ringed_button(&workspace, cx), 0, "Review…");
+        press(cx, "tab");
+        assert_eq!(ringed_button(&workspace, cx), 1, "Cancel");
+        press(cx, "tab");
+        assert_eq!(field(&workspace, cx), Some(0), "round to Name");
+        press(cx, "shift-tab");
+        assert_eq!(ringed_button(&workspace, cx), 1, "back to Cancel");
+        press(cx, "shift-tab");
+        assert_eq!(ringed_button(&workspace, cx), 0);
+
+        // Review… on the ring, with no name typed: refused, said on the form.
+        press(cx, "enter");
+        let error = workspace.read_with(cx, |workspace, _| {
+            (workspace.role_form.as_ref()).and_then(|form| form.error.clone())
+        });
+        assert_eq!(error.as_deref(), Some("A role needs a name."));
+
+        press(cx, "tab");
+        press(cx, "enter");
+        assert!(workspace.read_with(cx, |workspace, _| workspace.role_form.is_none()));
+        assert_eq!(front_dialog(&workspace, cx), None);
         quit(workspace, cx);
     });
 }
@@ -28553,11 +28708,21 @@ fn a_refused_edit_is_not_recorded_in_the_open_transaction_and_a_reconnect_emptie
             "the edit was not sent"
         );
 
+        // As MySQL's `SET autocommit = 0` leaves it.
+        workspace.update(cx, |workspace, _| {
+            workspace.profiles[0].autocommit_off = true;
+        });
         workspace.update(cx, |workspace, cx| workspace.begin_connect(0, cx));
         assert!(
             recorded_statements(&workspace, cx).is_empty(),
             "a connect leaves nothing of the transaction it replaces"
         );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace.profiles[0].autocommit_off,
+                "a new session opens autocommitting"
+            );
+        });
         settle(cx);
         assert!(!transaction_state(&workspace, cx).1);
 
@@ -29029,6 +29194,23 @@ fn the_quit_chord_over_the_welcome_surface_asks_first(cx: &mut TestAppContext) {
         settle(cx);
         assert!(!app_quit.get(), "the app did not quit");
         assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        quit(workspace, cx);
+    });
+}
+
+/// A Quit no window takes, as the app menu sends it with the window
+/// minimized, reaches `main`'s own handler: it asks in the workspace's window.
+#[gpui::test]
+fn a_quit_with_no_window_to_take_it_asks_first(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_a_writable_t(cx);
+        manual_with_open_transaction(&workspace, cx, "INSERT INTO t VALUES (1)");
+        cx.update(|_, cx| super::answer_quit_from_app(cx));
+        cx.deactivate_window();
+        cx.update(|_, cx| cx.dispatch_action(&crate::actions::Quit));
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("quit"));
+        assert!(in_transaction(&workspace, cx), "nothing was ended");
         quit(workspace, cx);
     });
 }
