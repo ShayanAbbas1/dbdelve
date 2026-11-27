@@ -3030,29 +3030,45 @@ impl Workspace {
                                 .border_t_1()
                                 .border_color(t.border)
                                 .child(section_label(t, "Connect an agent"))
-                                .child(div().flex().flex_wrap().items_center().child(
-                                    ui::segmented(t).flex_wrap().children(
-                                        crate::agent::shim::AgentClient::ALL.map(|choice| {
-                                            let selector =
-                                                format!("popover-connect-{}", choice.slug());
-                                            div().debug_selector(move || selector.clone()).child(
-                                                ui::segmented_icon_choice(
-                                                    ("popover-agent-client", choice as usize),
-                                                    choice.icon(),
-                                                    choice.label(),
-                                                    choice == self.agent_client,
-                                                    true,
-                                                    t,
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |workspace, _, _, cx| {
-                                                        workspace.set_agent_client(choice, cx);
-                                                    },
-                                                )),
-                                            )
-                                        }),
-                                    ),
-                                ))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap(px(layout::SPACE_XS))
+                                        .p(px(layout::SEGMENT_INSET))
+                                        .rounded(px(layout::RADIUS_CONTROL + layout::SEGMENT_INSET))
+                                        .bg(t.element_hover)
+                                        .children(crate::agent::shim::AgentClient::ALL.map(
+                                            |choice| {
+                                                let selector =
+                                                    format!("popover-connect-{}", choice.slug());
+                                                div()
+                                                    .debug_selector(move || selector.clone())
+                                                    .child(
+                                                        ui::segmented_icon_choice(
+                                                            (
+                                                                "popover-agent-client",
+                                                                choice as usize,
+                                                            ),
+                                                            choice.icon(),
+                                                            choice.label(),
+                                                            choice == self.agent_client,
+                                                            true,
+                                                            t,
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |workspace, _, _, cx| {
+                                                                workspace
+                                                                    .set_agent_client(choice, cx);
+                                                            },
+                                                        )),
+                                                    )
+                                            },
+                                        )),
+                                )
                                 .child(
                                     div()
                                         .flex()

@@ -1402,31 +1402,33 @@ fn render_connect_claude_code(
         .p(px(layout::SPACE_MD))
         .child(
             div()
+                .w_full()
+                .min_w_0()
                 .flex()
                 .flex_wrap()
                 .items_center()
-                .child(
-                    segmented(t)
-                        .flex_wrap()
-                        .children(AgentClient::ALL.map(|choice| {
-                            let selector = format!("settings-connect-{}", choice.slug());
-                            div().debug_selector(move || selector.clone()).child(
-                                segmented_icon_choice(
-                                    ("settings-agent-client", choice as usize),
-                                    choice.icon(),
-                                    choice.label(),
-                                    choice == client,
-                                    true,
-                                    t,
-                                )
-                                .on_click(cx.listener(
-                                    move |workspace, _: &ClickEvent, _, cx| {
-                                        workspace.set_agent_client(choice, cx);
-                                    },
-                                )),
-                            )
-                        })),
-                ),
+                .gap(px(layout::SPACE_XS))
+                .p(px(layout::SEGMENT_INSET))
+                .rounded(px(layout::RADIUS_CONTROL + layout::SEGMENT_INSET))
+                .bg(t.element_hover)
+                .children(AgentClient::ALL.map(|choice| {
+                    let selector = format!("settings-connect-{}", choice.slug());
+                    div().debug_selector(move || selector.clone()).child(
+                        segmented_icon_choice(
+                            ("settings-agent-client", choice as usize),
+                            choice.icon(),
+                            choice.label(),
+                            choice == client,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace, _: &ClickEvent, _, cx| {
+                                workspace.set_agent_client(choice, cx);
+                            },
+                        )),
+                    )
+                })),
         )
         .child(
             div()
