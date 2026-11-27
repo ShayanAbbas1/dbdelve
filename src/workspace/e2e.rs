@@ -12,7 +12,7 @@ use gpui_component::{Root, input::InputState, tree::TreeEvent};
 use super::Workspace;
 use crate::{
     actions::{CancelQuery, Disconnect, ImportRowsFromClipboard, SubmitConnection},
-    connection_form::ConnectionForm,
+    connection_form::{ConnectionForm, ConnectionTest},
     db::{CancelToken, ConnectionConfig, Engine, ExternalConfig, Fetch, RelationKind, SshTunnel},
     explorer::{self, ObjectKind},
     keybindings,
@@ -23301,6 +23301,160 @@ fn a_tab_switch_over_typed_panel_text_is_not_asked_about(cx: &mut TestAppContext
             assert!(session.pending_discard.is_none(), "nothing is asked");
             assert_eq!(session.active, other, "the switch went ahead");
         });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn editing_connection_fields_clears_completed_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                workspace.form.as_mut().unwrap().test = Some(ConnectionTest::Passed(None));
+            });
+        });
+        settle(cx);
+
+        let host = cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().host.clone());
+        cx.update(|window, cx| host.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("db.example.com");
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.form.as_ref().unwrap().test.is_none()
+        }));
+
+        type Field = fn(&ConnectionForm) -> &Entity<InputState>;
+        let fields: [(&str, Field); 4] = [
+            ("password", |f| &f.password),
+            ("root_certificate", |f| &f.root_certificate),
+            ("statement_timeout", |f| &f.statement_timeout),
+            ("ssh_host", |f| &f.ssh_host),
+        ];
+        for (label, pick) in fields {
+            for result in [
+                ConnectionTest::Passed(None),
+                ConnectionTest::Failed("timed out".into()),
+            ] {
+                let input = cx.update(|_, cx| {
+                    workspace.update(cx, |workspace, _| {
+                        workspace.form.as_mut().unwrap().test = Some(result);
+                    });
+                    pick(workspace.read(cx).form.as_ref().unwrap()).clone()
+                });
+                cx.update(|window, cx| {
+                    input.update(cx, |input, cx| input.insert("1", window, cx));
+                });
+                settle(cx);
+                assert!(
+                    workspace.read_with(cx, |workspace, _| {
+                        workspace.form.as_ref().unwrap().test.is_none()
+                    }),
+                    "editing {label} must clear the test result"
+                );
+            }
+        }
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn changing_sslmode_invalidates_connection_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let form = workspace.form.as_mut().unwrap();
+                form.test = Some(ConnectionTest::Passed(None));
+                let current = form.sslmode;
+                form.set_sslmode(current);
+                assert!(form.test.is_some());
+
+                form.set_sslmode(crate::db::SslMode::VerifyFull);
+                assert!(form.test.is_none());
+
+                form.test = Some(ConnectionTest::Failed("certificate verify failed".into()));
+                form.set_sslmode(crate::db::SslMode::Require);
+                assert!(form.test.is_none());
+                assert_eq!(form.needs_focus.as_ref(), Some(&form.password));
+            });
+        });
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn editing_form_cancels_in_flight_connection_test(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        let attempt = crate::db::ConnectAttempt::default();
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                let executor = cx.background_executor().clone();
+                let task = cx.spawn(async move |workspace, cx| {
+                    executor.timer(std::time::Duration::from_millis(50)).await;
+                    _ = workspace.update(cx, |workspace, cx| {
+                        if let Some(form) = &mut workspace.form {
+                            form.test = Some(ConnectionTest::Passed(None));
+                            cx.notify();
+                        }
+                    });
+                });
+                workspace.form.as_mut().unwrap().test =
+                    Some(ConnectionTest::Running(task, attempt.guard()));
+            });
+        });
+        settle(cx);
+        assert!(!attempt.is_cancelled());
+
+        let host = cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().host.clone());
+        cx.update(|window, cx| host.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("edited.example.com");
+        settle(cx);
+        assert!(attempt.is_cancelled());
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        settle(cx);
+        assert!(
+            workspace.read_with(cx, |workspace, _| {
+                workspace.form.as_ref().unwrap().test.is_none()
+            }),
+            "cancelled in-flight test must not restore a stale result"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
+fn editing_display_name_preserves_connection_test_results(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch(cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.new_connection_in(None, window, cx);
+                workspace.form.as_mut().unwrap().test = Some(ConnectionTest::Passed(None));
+            });
+        });
+        settle(cx);
+
+        let name = cx.update(|_, cx| workspace.read(cx).form.as_ref().unwrap().name.clone());
+        cx.update(|window, cx| name.focus_handle(cx).focus(window, cx));
+        settle(cx);
+        cx.simulate_input("Production Primary");
+        settle(cx);
+
+        assert!(workspace.read_with(cx, |workspace, _| {
+            matches!(
+                workspace.form.as_ref().unwrap().test,
+                Some(ConnectionTest::Passed(None))
+            )
+        }));
         quit(workspace, cx);
     });
 }

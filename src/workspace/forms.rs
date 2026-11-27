@@ -898,14 +898,7 @@ impl Workspace {
             vec![SslMode::ALL.to_vec()],
             |mode| mode.label().into(),
             |_| None,
-            |form, mode| {
-                // Stepping down from a verifying mode unmounts the
-                // certificate field, which may be the one holding focus.
-                if form.sslmode.checks_certificate() && !mode.checks_certificate() {
-                    form.needs_focus = Some(form.password.clone());
-                }
-                form.sslmode = mode;
-            },
+            |form, mode| form.set_sslmode(mode),
             cx,
         )
     }
