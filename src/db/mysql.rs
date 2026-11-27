@@ -1382,7 +1382,7 @@ impl Connection {
             let mut builder = RowBuilder::default();
             let mut sets = connection
                 .query_iter(sql)
-                .map_err(|error| query_error(&error))?;
+                .map_err(|error| first_failed(self.engine, sql, &error))?;
 
             while let Some(mut set) = sets.iter() {
                 earlier += u32::from(warned);
@@ -2519,6 +2519,54 @@ fn query_error(error: &::mysql::Error) -> DbError {
         // point the editor at. Absent rather than guessed.
         position: None,
     }
+}
+
+/// Errors MySQL and MariaDB raise while parsing a statement, before the
+/// implicit commit at its start: a syntax error, an identifier too long or a
+/// character set unknown, and a stored program's body that cannot compile.
+/// Each was seen to leave the transaction open on both servers.
+const BEFORE_IMPLICIT_COMMIT: [u16; 10] =
+    [1059, 1064, 1103, 1115, 1193, 1308, 1313, 1327, 1331, 1415];
+
+/// A deadlock, which rolls back the whole transaction and not the statement.
+const ER_LOCK_DEADLOCK: u16 = 1213;
+
+/// `error` from the first statement of `sql`, at which the server stops the
+/// submission: nothing after it ran. Where the submission reads as ending the
+/// transaction, it says the transaction is still open where the failure is
+/// known to have come short of ending it ([`kept_open`]).
+fn first_failed(engine: Engine, sql: &str, error: &::mysql::Error) -> DbError {
+    let failed = query_error(error);
+    match error {
+        ::mysql::Error::MySqlError(server) if kept_open(engine, sql, server.code) => DbError {
+            message: format!("{}\n\n{}", failed.message, super::TRANSACTION_KEPT_OPEN),
+            position: failed.position,
+        },
+        _ => failed,
+    }
+}
+
+/// Whether a failure with `code` of the first statement of `sql`, which reads
+/// as ending the transaction, left it open. A first statement that would not
+/// end it stops the submission short of the one that would. One that would
+/// is believed to have committed unless its error is one
+/// [`BEFORE_IMPLICIT_COMMIT`] lists: most of its failures (the object is
+/// already there, a column is not, the privilege is missing) come after the
+/// commit, and reading those as open would offer to roll back committed work.
+/// A failed `COMMIT` or `ROLLBACK` ends the transaction anyway.
+fn kept_open(engine: Engine, sql: &str, code: u16) -> bool {
+    if code == ER_LOCK_DEADLOCK || crate::sql::leaves(engine, sql).transaction != Some(false) {
+        return false;
+    }
+    let first = crate::sql::Buffer::for_engine(engine, sql)
+        .statements()
+        .first()
+        .map_or(sql, |first| &sql[first.clone()]);
+    if crate::sql::ends_transaction(engine, first) {
+        return false;
+    }
+    crate::sql::leaves(engine, first).transaction != Some(false)
+        || BEFORE_IMPLICIT_COMMIT.contains(&code)
 }
 
 /// A failure lists nothing: the statement already succeeded, and a refused
@@ -4142,6 +4190,25 @@ ORDER BY 1, 2
     }
 
     #[test]
+    fn a_failure_ahead_of_the_implicit_commit_keeps_the_transaction_open() {
+        let procedure = "CREATE PROCEDURE p() BEGIN SELEC 1; END";
+        for engine in [Engine::MySql, Engine::MariaDb] {
+            assert!(kept_open(engine, procedure, 1064), "{engine:?}");
+            assert!(!kept_open(engine, procedure, 1304), "{engine:?}");
+            assert!(!kept_open(engine, "CREATE TABLE t (a INT)", 1050));
+            assert!(!kept_open(engine, "ALTER TABLE t ADD COLUMN a INT", 1060));
+            assert!(!kept_open(engine, "CREATE TABLE t (a INT)", 1142));
+            // A first statement that commits nothing stops the submission
+            // before the one that would.
+            let ahead = "UPDATE t SET a = 1; CREATE TABLE u (a INT)";
+            assert!(kept_open(engine, ahead, 1146), "{engine:?}");
+            assert!(!kept_open(engine, ahead, ER_LOCK_DEADLOCK), "{engine:?}");
+            assert!(!kept_open(engine, "COMMIT", 1180), "{engine:?}");
+            assert!(!kept_open(engine, "SELEC 1", 1064), "{engine:?}");
+        }
+    }
+
+    #[test]
     fn a_failed_probe_is_asked_again_and_an_answer_is_kept() {
         let cell = OnceLock::new();
         assert!(!cached_probe(&cell, || None));
@@ -4447,6 +4514,62 @@ ORDER BY 1, 2
             engine,
             LIVE_SLOW_SELECT,
         );
+    }
+
+    fn live_a_procedure_the_server_cannot_parse_leaves_the_transaction_open(engine: Engine) {
+        let connection = live(engine);
+        connection
+            .query("CREATE TEMPORARY TABLE unparsed (n INT)", Fetch::default())
+            .unwrap();
+        connection.query("BEGIN", Fetch::default()).unwrap();
+        connection
+            .query("INSERT INTO unparsed VALUES (1)", Fetch::default())
+            .unwrap();
+        let error = connection
+            .query(
+                "CREATE PROCEDURE unparsed_p() BEGIN SELEC 1; END",
+                Fetch::default(),
+            )
+            .unwrap_err();
+        assert!(crate::db::transaction_kept_open(&error), "{error}");
+
+        // Committed, the row would outlive the rollback.
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+        let left = connection
+            .query("SELECT COUNT(*) FROM unparsed", Fetch::default())
+            .unwrap();
+        assert_eq!(left.rows, vec![vec![Some("0".to_string())]]);
+    }
+
+    fn live_a_ddl_statement_failing_after_its_implicit_commit_ends_the_transaction(engine: Engine) {
+        let connection = live(engine);
+        for statement in [
+            "DROP TABLE IF EXISTS dbdelve_test_committed",
+            "CREATE TABLE dbdelve_test_committed (n INT) ENGINE = InnoDB",
+            "BEGIN",
+            "INSERT INTO dbdelve_test_committed VALUES (1)",
+        ] {
+            connection.query(statement, Fetch::default()).unwrap();
+        }
+        let error = connection
+            .query(
+                "ALTER TABLE dbdelve_test_committed ADD COLUMN n INT",
+                Fetch::default(),
+            )
+            .unwrap_err();
+        assert!(!crate::db::transaction_kept_open(&error), "{error}");
+
+        connection.query("ROLLBACK", Fetch::default()).unwrap();
+        let left = connection
+            .query(
+                "SELECT COUNT(*) FROM dbdelve_test_committed",
+                Fetch::default(),
+            )
+            .unwrap();
+        connection
+            .query("DROP TABLE dbdelve_test_committed", Fetch::default())
+            .unwrap();
+        assert_eq!(left.rows, vec![vec![Some("1".to_string())]]);
     }
 
     fn live_a_killed_session_is_lost_and_a_failed_statement_is_not(engine: Engine) {
@@ -6176,6 +6299,8 @@ ORDER BY 1, 2
         live_a_read_past_the_limit_is_stopped_rather_than_drained,
         live_a_read_inside_the_users_transaction_is_stopped_and_the_transaction_kept,
         live_a_killed_session_is_lost_and_a_failed_statement_is_not,
+        live_a_procedure_the_server_cannot_parse_leaves_the_transaction_open,
+        live_a_ddl_statement_failing_after_its_implicit_commit_ends_the_transaction,
         live_a_cancel_stops_a_running_statement_without_closing_the_session,
         live_a_statement_timeout_bounds_a_select_and_a_write_only_on_mariadb,
         live_only_the_modes_that_tolerate_an_unchecked_certificate_connect,

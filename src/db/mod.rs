@@ -227,9 +227,11 @@ pub(crate) const TRANSACTION_ENDED: &str = "The transaction that was open before
 
 /// What a driver adds to an error when a statement that would have ended the
 /// open transaction failed short of it (SQL Server's compile error, which
-/// stops the batch before its `COMMIT`): the transaction is still open.
+/// stops the batch before its `COMMIT`; MySQL's refusal ahead of an implicit
+/// commit): the transaction is still open. Worded to hold where none was,
+/// since MySQL's driver cannot ask.
 pub(crate) const TRANSACTION_KEPT_OPEN: &str =
-    "The transaction that was open before this statement is still open.";
+    "Any transaction open before this statement is still open.";
 
 /// Whether the driver says `error` ended the open transaction
 /// ([`TRANSACTION_ROLLED_BACK`]).
