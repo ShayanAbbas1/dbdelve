@@ -2751,7 +2751,8 @@ impl Workspace {
         let feed = (!keep_rows && !kept && streams && explaining.is_none()).then(Feed::default);
         if let Some(feed) = feed.clone() {
             let (id, results, lane) = (id.clone(), results.clone(), lane.clone());
-            let (names, widths, column_view) = (shown.0.clone(), shown.1.clone(), shown.4.clone());
+            let (names, widths, horizontal, column_view) =
+                (shown.0.clone(), shown.1.clone(), shown.3, shown.4.clone());
             cx.spawn(async move |workspace, cx| {
                 loop {
                     cx.background_executor()
@@ -2769,7 +2770,7 @@ impl Workspace {
                         // draw, not the grid's. Only when something arrived:
                         // the clock has a tick of its own.
                         let began = results.read(cx).delegate().streamed_set();
-                        if running && pour(&feed, &results, mode, engine, (&names, &widths, &column_view), cx) {
+                        if running && pour(&feed, &results, mode, engine, (&names, &widths, &column_view), horizontal, cx) {
                             // The first arrival reveals the stream; a later
                             // explicit hide lasts until the run completes.
                             if began.is_none()
@@ -3523,6 +3524,7 @@ impl Workspace {
                                         mode,
                                         engine,
                                         (names, widths, column_view),
+                                        shown.3,
                                         cx,
                                     );
                                     let (mut rows, streamed_columns) =
@@ -4571,6 +4573,7 @@ fn pour(
     mode: Mode,
     engine: Engine,
     (names, widths, column_view): (&[String], &[ColumnWidth], &ColumnView),
+    horizontal: gpui::Point<gpui::Pixels>,
     cx: &mut App,
 ) -> bool {
     let fed = feed.take();
@@ -4597,6 +4600,10 @@ fn pour(
                 .with_column_view(&column_view)
                 .streaming(fed.set);
             table.refresh(cx);
+            // Later batches keep any scroll the user has made while fetching.
+            if fed.set == 1 && table.delegate().layout().0 == names {
+                table.horizontal_scroll_handle.set_offset(horizontal);
+            }
         } else if table.delegate().result().columns != fed.columns {
             table.delegate_mut().set_column_types(fed.columns);
             typed = true;
@@ -5004,6 +5011,48 @@ pub(super) fn answered(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn the_first_streamed_set_restores_horizontal_scroll(cx: &mut gpui::TestAppContext) {
+        cx.add_empty_window().update(|window, cx| {
+            let results = cx.new(|cx| TableState::new(ResultGrid::empty(), window, cx));
+            let names = ["metric".to_owned()];
+            let column_view = ColumnView::default();
+            let layout = (&names[..], &[][..], &column_view);
+            let previous = gpui::point(gpui::px(-240.), gpui::px(0.));
+            let scrolled = gpui::point(gpui::px(-120.), gpui::px(0.));
+            let feed = Feed::default();
+            let column = db::Column {
+                name: names[0].clone(),
+                data_type: None,
+            };
+            let pour_batch = |cx: &mut App| {
+                pour(
+                    &feed,
+                    &results,
+                    Mode::ReadOnly,
+                    Engine::Postgres,
+                    layout,
+                    previous,
+                    cx,
+                );
+            };
+            feed.begin(vec![column.clone()]);
+
+            pour_batch(cx);
+            let handle = results.read(cx).horizontal_scroll_handle.clone();
+            assert_eq!(handle.offset(), previous);
+
+            handle.set_offset(scrolled);
+            feed.push(Row::new([Some("1")]).unwrap());
+            pour_batch(cx);
+            assert_eq!(handle.offset(), scrolled);
+
+            feed.begin(vec![column]);
+            pour_batch(cx);
+            assert_eq!(handle.offset(), scrolled);
+        });
+    }
 
     fn verification() -> Verification {
         let step = |kind| db::VerifiedStep {
