@@ -195,7 +195,11 @@ Decided, and not to be re-litigated:
   off the depth (`outlived_end`): still open when `@@TRANCOUNT` is past the
   levels the batch opened after its last end, so Manual's reopening `COMMIT;
   BEGIN TRANSACTION` pair at depth two keeps the record and the switch as they
-  were, rather than starting a new transaction or turning Auto.
+  were, rather than starting a new transaction or turning Auto. A batch whose
+  only end is a `COMMIT` is read off the depth before it and the levels
+  opened ahead of it instead: under `IMPLICIT_TRANSACTIONS` the statements
+  behind a `COMMIT` that ended the old transaction can open new levels, and
+  the depth after cannot tell those from the old one.
 - **A MySQL or MariaDB statement that fails before its implicit commit leaves
   the transaction open**, and the error says so (`TRANSACTION_KEPT_OPEN`,
   `mysql::kept_open`). The server stops a submission at its first failure, so

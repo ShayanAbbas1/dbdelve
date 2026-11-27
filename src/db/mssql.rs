@@ -3230,18 +3230,21 @@ fn ends(sql: &str) -> bool {
 /// `@@TRANCOUNT` read as the batch started and `depth` what it reads once
 /// it ran, with `implicit` transactions on or not.
 ///
-/// A batch that opens with a lone `COMMIT`, as Manual's Commit does, is
-/// told by `before`: the `COMMIT` takes one level off it, so what is left
-/// of the old transaction is that, whatever the statements behind it open.
-/// The final depth cannot say it with `IMPLICIT_TRANSACTIONS` on: the
-/// `BEGIN TRANSACTION` behind a `COMMIT` that ended the old one opens two
-/// levels, the implicit one and its own, which reads as the old one left.
+/// A batch whose only end is a `COMMIT` is told by `before` and the levels
+/// opened ahead of it: the `COMMIT` takes one level off, so the old
+/// transaction is left when more than one was open as it ran. The final depth
+/// cannot say it with `IMPLICIT_TRANSACTIONS` on, where the statements behind
+/// a `COMMIT` that ended the old one may open a new level, and a `BEGIN
+/// TRANSACTION` two. Ahead of it the depth leaves zero only where the batch
+/// starts at zero, and the `COMMIT` that then ran whole found the one level
+/// implicit transactions opened, beside the ones `BEGIN TRANSACTION` did.
 ///
 /// Any other batch is read off `depth`: one that ended the outermost level
 /// is left with only the levels it opened after its last end, so any deeper
 /// is the old transaction still there. With implicit transactions on, the
-/// statements after the end may also have opened one more implicitly, and
-/// only a depth beyond that says the old one is left.
+/// statements after a bare `ROLLBACK`, which leaves no level at all, may also
+/// have opened one more implicitly, and only a depth beyond that says the old
+/// one is left.
 fn outlived_end(sql: &str, before: u64, depth: u64, implicit: bool) -> bool {
     if !ends(sql) {
         return false;
@@ -3252,38 +3255,60 @@ fn outlived_end(sql: &str, before: u64, depth: u64, implicit: bool) -> bool {
         crate::sql::Buffer::for_engine(Engine::SqlServer, after),
     );
     let (statements, behind) = (whole.statements(), rest.statements());
-    let lone_commit = statements.len() == behind.len() + 1
-        && (statements.first()).is_some_and(|first| is_commit(&sql[first.clone()]));
-    if lone_commit {
-        return before > 1;
+    let opens = |text: &str| crate::sql::leaves(Engine::SqlServer, text).transaction == Some(true);
+    let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let last_end = (statements.len().checked_sub(behind.len()))
+        .and_then(|upto| statements[..upto].split_last());
+    if let Some((end, ahead)) = last_end
+        && is_commit(&sql[end.clone()])
+        && !(ahead.iter())
+            .any(|range| crate::sql::ends_transaction(Engine::SqlServer, &sql[range.clone()]))
+    {
+        let opened = count(
+            ahead
+                .iter()
+                .filter(|range| opens(&sql[(*range).clone()]))
+                .count(),
+        );
+        return before
+            .saturating_add(opened)
+            .saturating_add(u64::from(implicit && before == 0))
+            > 1;
     }
-    let opened = behind
-        .iter()
-        .filter(|range| {
-            crate::sql::leaves(Engine::SqlServer, &after[(*range).clone()]).transaction
-                == Some(true)
-        })
-        .count();
-    let opened = u64::try_from(opened).unwrap_or(u64::MAX);
-    let implicitly = u64::from(implicit && !behind.is_empty());
+    let opened = count(
+        behind
+            .iter()
+            .filter(|range| opens(&after[(*range).clone()]))
+            .count(),
+    );
+    let rolled_back = last_end.is_some_and(|(end, _)| is_bare(&sql[end.clone()], "ROLLBACK"));
+    let implicitly = u64::from(implicit && rolled_back && !behind.is_empty());
     depth > opened.saturating_add(implicitly)
 }
 
 /// Whether `statement` is a plain `COMMIT`, which takes one level off
 /// `@@TRANCOUNT` at any depth.
 fn is_commit(statement: &str) -> bool {
+    is_bare(statement, "COMMIT")
+}
+
+/// Whether `statement` is `keyword` alone or with `TRAN`, `TRANSACTION` or
+/// `WORK`, naming no transaction or savepoint.
+fn is_bare(statement: &str, keyword: &str) -> bool {
     let words: Vec<String> = (statement.split_whitespace())
         .map(|word| word.trim_end_matches(';').to_ascii_uppercase())
         .filter(|word| !word.is_empty())
         .collect();
-    matches!(
-        words
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        ["COMMIT"] | ["COMMIT", "TRAN" | "TRANSACTION" | "WORK"]
-    )
+    match words
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [first] => *first == keyword,
+        [first, "TRAN" | "TRANSACTION" | "WORK"] => *first == keyword,
+        _ => false,
+    }
 }
 
 fn transaction_outcome(
@@ -3443,6 +3468,27 @@ mod tests {
         );
         assert!(!outlived_end("ROLLBACK; UPDATE t SET a = 1", 3, 1, true));
         assert!(outlived_end("ROLLBACK; UPDATE t SET a = 1", 3, 2, true));
+        // The BEGIN at depth 0 opened two levels, so the COMMIT left one.
+        assert!(outlived_end(
+            "BEGIN TRAN; UPDATE t SET a = 1; COMMIT; SELECT @@TRANCOUNT",
+            0,
+            1,
+            true
+        ));
+        // Each ends at the same depth from one level as from two: only the
+        // depth before says whether the COMMIT ended the old transaction.
+        for (batch, depth) in [
+            ("COMMIT; BEGIN TRAN; UPDATE t SET a = 1", 2),
+            (
+                "UPDATE t SET a = 1; COMMIT; BEGIN TRAN; UPDATE t SET a = 1",
+                2,
+            ),
+            ("UPDATE t SET a = 1; COMMIT; UPDATE t SET a = 1", 1),
+        ] {
+            assert!(!outlived_end(batch, 1, depth, true), "{batch}");
+            assert!(outlived_end(batch, 2, depth, true), "{batch}");
+        }
+        assert!(is_bare("rollback tran", "ROLLBACK") && !is_bare("ROLLBACK TRAN sp", "ROLLBACK"));
         assert!(is_commit("COMMIT") && is_commit("commit tran;") && is_commit("COMMIT WORK"));
         assert!(!is_commit("COMMIT TRAN named") && !is_commit("ROLLBACK"));
     }
@@ -3615,6 +3661,20 @@ mod tests {
         run("BEGIN TRANSACTION");
         assert!(!crate::db::transaction_still_open(&run(manual_commit)));
         run("ROLLBACK");
+        // Under implicit transactions the BEGIN opens two levels, so the
+        // COMMIT behind it leaves one.
+        run("SET IMPLICIT_TRANSACTIONS ON");
+        assert!(crate::db::transaction_still_open(&run(
+            "BEGIN TRAN; SELECT 1; COMMIT; SELECT @@TRANCOUNT"
+        )));
+        run("ROLLBACK");
+        // From one level the COMMIT ends it, and the two behind are new.
+        run("CREATE TABLE #implicit (a INT)");
+        assert!(!crate::db::transaction_still_open(&run(
+            "INSERT INTO #implicit VALUES (0); COMMIT; BEGIN TRAN; INSERT INTO #implicit VALUES (1)"
+        )));
+        run("ROLLBACK");
+        run("SET IMPLICIT_TRANSACTIONS OFF");
     }
 
     #[test]
