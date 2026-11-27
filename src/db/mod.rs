@@ -730,6 +730,15 @@ impl Engine {
         matches!(self, Self::MySql | Self::MariaDb)
     }
 
+    /// Whether text dbdelve cannot read opens a transaction at a `BEGIN
+    /// TRAN` anywhere in it, and never at a bare `BEGIN`. SQL Server only: a
+    /// T-SQL batch needs no `;` between statements, so one starting `SET
+    /// XACT_ABORT ON` can open a transaction mid-batch, while `BEGIN TRY` and
+    /// `IF … BEGIN … END` open blocks.
+    pub fn opens_transactions_mid_batch(self) -> bool {
+        self == Self::SqlServer
+    }
+
     /// Whether a statement that fails inside a transaction leaves it able
     /// only to roll back: Postgres refuses every later statement but its end,
     /// and answers a `COMMIT` by rolling it back, without an error.

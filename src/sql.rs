@@ -31,7 +31,7 @@ use sqlparser::dialect::{
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser as SqlParser;
-use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
+use sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace, Word};
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::db::{
@@ -5342,9 +5342,10 @@ pub(crate) fn ends_by_autocommit_alone(engine: Engine, sql: &str) -> bool {
 
 /// Whether `sql` may leave a transaction open where [`leaves`] cannot say:
 /// text sqlparser cannot read with a statement that starts `BEGIN` or
-/// `START TRANSACTION`, which the server may well read, or transaction control among other statements,
-/// which an error part way through stops short of a `COMMIT` that would end
-/// it.
+/// `START TRANSACTION` (or, where [`Engine::opens_transactions_mid_batch`],
+/// with a `BEGIN TRAN` anywhere), which the server may well read, or
+/// transaction control among other statements, which an error part way
+/// through stops short of a `COMMIT` that would end it.
 pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
     let Some(dialect) = dialect(engine).filter(|_| !engine.spec().sql.stateless_requests) else {
         return false;
@@ -5371,12 +5372,39 @@ pub(crate) fn transaction_uncertain(engine: Engine, sql: &str) -> bool {
     if defines_stored_program(engine, &tokens) {
         return false;
     }
+    if engine.opens_transactions_mid_batch() {
+        return opens_transaction_anywhere(&tokens);
+    }
     // Only where a statement starts: a `BEGIN` inside one is a compound
     // block's, which opens no transaction.
     statement_heads(&tokens).any(|keywords| match keywords.first() {
         Some(Keyword::BEGIN) => true,
         Some(Keyword::START) => keywords.get(1) == Some(&Keyword::TRANSACTION),
         _ => false,
+    })
+}
+
+/// Whether `tokens` hold a `BEGIN TRAN`, `BEGIN TRANSACTION` or `BEGIN
+/// DISTRIBUTED TRAN[SACTION]` anywhere, the only `BEGIN`s that open one where
+/// [`Engine::opens_transactions_mid_batch`].
+fn opens_transaction_anywhere(tokens: &[Token]) -> bool {
+    let words: Vec<&Word> = tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Word(word) => Some(word),
+            _ => None,
+        })
+        .collect();
+    let is_tran = |word: Option<&&Word>| {
+        word.is_some_and(|word| matches!(word.keyword, Keyword::TRAN | Keyword::TRANSACTION))
+    };
+    (0..words.len()).any(|at| {
+        words[at].keyword == Keyword::BEGIN
+            && (is_tran(words.get(at + 1))
+                || words
+                    .get(at + 1)
+                    .is_some_and(|word| word.value.eq_ignore_ascii_case("DISTRIBUTED"))
+                    && is_tran(words.get(at + 2)))
     })
 }
 
@@ -12498,6 +12526,27 @@ mod tests {
             );
         }
         assert!(!transaction_uncertain(Engine::MySql, "selec begin"));
+    }
+
+    #[test]
+    fn a_begin_tran_mid_batch_unread_on_sql_server_may_open_a_transaction() {
+        for batch in [
+            "SET XACT_ABORT ON BEGIN TRY BEGIN TRAN UPDATE t SET a = 1 END TRY \
+             BEGIN CATCH END CATCH",
+            "SET XACT_ABORT ON\nbegin distributed transaction\nUPDATE t SET a = 1",
+        ] {
+            assert!(transaction_uncertain(Engine::SqlServer, batch), "{batch}");
+        }
+        for batch in [
+            "BEGIN TRY UPDATE t SET a = 1 END TRY BEGIN CATCH SELECT 1 END CATCH",
+            "SET NOCOUNT ON IF 1 = 1 BEGIN UPDATE t SET a = 1 END",
+        ] {
+            assert!(!transaction_uncertain(Engine::SqlServer, batch), "{batch}");
+        }
+        assert!(!transaction_uncertain(
+            Engine::Postgres,
+            "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC selec 1; END"
+        ));
     }
 
     #[test]
