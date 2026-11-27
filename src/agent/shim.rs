@@ -652,6 +652,134 @@ pub(crate) fn registration_line(
     ))
 }
 
+/// Which agent client the Connect snippet is formatted for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AgentClient {
+    #[default]
+    ClaudeCode,
+    AntigravityCli,
+    AntigravityApp,
+}
+
+impl AgentClient {
+    pub(crate) const ALL: [Self; 3] =
+        [Self::ClaudeCode, Self::AntigravityCli, Self::AntigravityApp];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::AntigravityCli => "Antigravity CLI",
+            Self::AntigravityApp => "Antigravity App",
+        }
+    }
+
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::AntigravityCli => "antigravity-cli",
+            Self::AntigravityApp => "antigravity-app",
+        }
+    }
+
+    pub(crate) fn note(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => {
+                "DBDelve cannot register an agent for you. Run this once in your terminal."
+            }
+            Self::AntigravityCli => {
+                "Registers DBDelve for both Antigravity CLI and App. Run this once in your terminal."
+            }
+            Self::AntigravityApp => {
+                "Add this to ~/.gemini/config/mcp_config.json (or Skills & Customizations → MCP Servers)."
+            }
+        }
+    }
+}
+
+/// The `agy mcp add` line that registers this DBDelve with the Antigravity CLI
+/// (and Antigravity App, which shares `~/.gemini/config/mcp_config.json`).
+/// Flags precede `<name>`, as `agy mcp add` requires.
+pub(crate) fn antigravity_cli_line(
+    executable: &std::path::Path,
+    appimage: Option<&std::ffi::OsStr>,
+    variant: Option<&str>,
+) -> Option<String> {
+    let path = match appimage {
+        Some(file) if !file.is_empty() => file.to_str()?,
+        _ => executable.to_str()?,
+    };
+    let word = |text: String| {
+        if text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '='))
+        {
+            text
+        } else {
+            single_quoted(&text)
+        }
+    };
+    let (flags, name) = match variant.filter(|variant| !variant.is_empty()) {
+        Some(variant) => (
+            format!("-e {} ", word(format!("DBDELVE_VARIANT={variant}"))),
+            word(format!("dbdelve-{variant}")),
+        ),
+        None => (String::new(), "dbdelve".to_string()),
+    };
+    Some(format!(
+        "agy mcp add {flags}{name} {} mcp",
+        single_quoted(path)
+    ))
+}
+
+/// The `mcp_config.json` snippet for the Antigravity App.
+pub(crate) fn antigravity_app_config(
+    executable: &std::path::Path,
+    appimage: Option<&std::ffi::OsStr>,
+    variant: Option<&str>,
+) -> Option<String> {
+    let path = match appimage {
+        Some(file) if !file.is_empty() => file.to_str()?,
+        _ => executable.to_str()?,
+    };
+    let (name, entry) = match variant.filter(|variant| !variant.is_empty()) {
+        Some(variant) => (
+            format!("dbdelve-{variant}"),
+            serde_json::json!({
+                "command": path,
+                "args": ["mcp"],
+                "env": {
+                    "DBDELVE_VARIANT": variant,
+                }
+            }),
+        ),
+        None => (
+            "dbdelve".to_string(),
+            serde_json::json!({
+                "command": path,
+                "args": ["mcp"],
+            }),
+        ),
+    };
+    let mut servers = serde_json::Map::new();
+    servers.insert(name, entry);
+    let config = serde_json::json!({ "mcpServers": servers });
+    serde_json::to_string_pretty(&config).ok()
+}
+
+/// The registration command or JSON snippet for `client`.
+pub(crate) fn registration_snippet(
+    client: AgentClient,
+    executable: &std::path::Path,
+    appimage: Option<&std::ffi::OsStr>,
+    variant: Option<&str>,
+) -> Option<String> {
+    match client {
+        AgentClient::ClaudeCode => registration_line(executable, appimage, variant),
+        AgentClient::AntigravityCli => antigravity_cli_line(executable, appimage, variant),
+        AgentClient::AntigravityApp => antigravity_app_config(executable, appimage, variant),
+    }
+}
+
 /// `text` as one shell word whose every character is literal: a single quote
 /// cannot be written inside single quotes, so it closes them, is escaped, and
 /// opens them again.
@@ -1854,7 +1982,61 @@ mod tests {
             let unreadable = OsStr::from_bytes(b"/tmp/db\xffdelve");
             assert_eq!(registration_line(Path::new(unreadable), None, None), None);
             assert_eq!(registration_line(release, Some(unreadable), None), None);
+            assert_eq!(
+                antigravity_cli_line(Path::new(unreadable), None, None),
+                None
+            );
+            assert_eq!(
+                antigravity_app_config(Path::new(unreadable), None, None),
+                None
+            );
         }
+
+        // Antigravity CLI: flags must precede `<name>`.
+        assert_eq!(
+            antigravity_cli_line(release, None, None),
+            Some(
+                "agy mcp add dbdelve '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            antigravity_cli_line(release, None, Some("dev")),
+            Some(
+                "agy mcp add -e DBDELVE_VARIANT=dev dbdelve-dev \
+                 '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            antigravity_cli_line(release, None, Some("my build")),
+            Some(
+                "agy mcp add -e 'DBDELVE_VARIANT=my build' 'dbdelve-my build' \
+                 '/Applications/DBDelve.app/Contents/MacOS/DBDelve' mcp"
+                    .to_string()
+            )
+        );
+
+        // Antigravity App: valid JSON with `mcpServers`, `command`, `args`, and optional `env`.
+        let app_json: Value = serde_json::from_str(
+            &antigravity_app_config(release, None, None).expect("release json"),
+        )
+        .expect("valid json");
+        assert_eq!(
+            app_json["mcpServers"]["dbdelve"]["command"],
+            "/Applications/DBDelve.app/Contents/MacOS/DBDelve"
+        );
+        assert_eq!(app_json["mcpServers"]["dbdelve"]["args"], json!(["mcp"]));
+        assert!(app_json["mcpServers"]["dbdelve"].get("env").is_none());
+
+        let dev_json: Value = serde_json::from_str(
+            &antigravity_app_config(release, None, Some("dev")).expect("dev json"),
+        )
+        .expect("valid json");
+        assert_eq!(
+            dev_json["mcpServers"]["dbdelve-dev"]["env"]["DBDELVE_VARIANT"],
+            "dev"
+        );
     }
 
     #[test]

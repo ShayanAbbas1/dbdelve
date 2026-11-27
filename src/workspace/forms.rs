@@ -3029,11 +3029,33 @@ impl Workspace {
                                 .pt(px(layout::SPACE_XS))
                                 .border_t_1()
                                 .border_color(t.border)
-                                .child(section_label(t, "Connect Claude Code"))
+                                .child(section_label(t, "Connect an agent"))
+                                .child(div().flex().items_center().child(
+                                    ui::segmented(t).children(
+                                        crate::agent::shim::AgentClient::ALL.map(|choice| {
+                                            let selector =
+                                                format!("popover-connect-{}", choice.slug());
+                                            div().debug_selector(move || selector.clone()).child(
+                                                ui::segmented_choice(
+                                                    ("popover-agent-client", choice as usize),
+                                                    choice.label(),
+                                                    choice == self.agent_client,
+                                                    true,
+                                                    t,
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |workspace, _, _, cx| {
+                                                        workspace.set_agent_client(choice, cx);
+                                                    },
+                                                )),
+                                            )
+                                        }),
+                                    ),
+                                ))
                                 .child(
                                     div()
                                         .flex()
-                                        .items_center()
+                                        .items_start()
                                         .gap(px(layout::SPACE_SM))
                                         .child(
                                             div()
@@ -3069,10 +3091,7 @@ impl Workspace {
                                     div()
                                         .text_size(px(layout::chrome(layout::TEXT_XS)))
                                         .text_color(t.text_faint)
-                                        .child(
-                                            "DBDelve cannot register an agent for you. Run this \
-                                             once in your terminal.",
-                                        ),
+                                        .child(self.agent_client.note()),
                                 ),
                         )
                         .child(

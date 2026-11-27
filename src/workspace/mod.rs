@@ -517,6 +517,9 @@ pub(crate) struct Workspace {
     /// off during this session, so the user can toggle them back on or remove
     /// them with `×`.
     pub(crate) ai_listed_profiles: HashSet<String>,
+    /// Which agent client's registration snippet is shown in Settings and the
+    /// MCP popover.
+    pub(crate) agent_client: crate::agent::shim::AgentClient,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -730,6 +733,7 @@ impl Workspace {
             agent_popover_open: false,
             agent_writes_auto_prompt: false,
             ai_listed_profiles: HashSet::new(),
+            agent_client: crate::agent::shim::AgentClient::default(),
             agent: agent::AgentState::default(),
             opacity_input,
             #[cfg(test)]

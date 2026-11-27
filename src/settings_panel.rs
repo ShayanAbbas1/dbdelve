@@ -491,11 +491,19 @@ fn setting_rows() -> Vec<SettingRow> {
         row(
             SettingId::ConnectClaudeCode,
             SettingsTab::AiFeatures,
-            "Connect Claude Code",
-            "Connect Claude Code",
+            "Connect an agent",
+            "Connect an agent",
             "DBDelve cannot register an agent for you. Run this once in your terminal.",
             &[
-                "ai", "agent", "mcp", "claude", "command", "copy", "register",
+                "ai",
+                "agent",
+                "mcp",
+                "claude",
+                "antigravity",
+                "agy",
+                "command",
+                "copy",
+                "register",
             ],
         ),
     ]);
@@ -1378,7 +1386,10 @@ fn render_connect_claude_code(
     t: Theme,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
+    use crate::agent::shim::AgentClient;
+
     let mono = fonts(cx).family(FontSlot::Editor).clone();
+    let client = workspace.agent_client;
     let command = workspace
         .agent_registration_command()
         .unwrap_or_else(|| "claude mcp add dbdelve -- dbdelve mcp".to_string());
@@ -1391,6 +1402,28 @@ fn render_connect_claude_code(
             div()
                 .flex()
                 .items_center()
+                .child(segmented(t).children(AgentClient::ALL.map(|choice| {
+                    let selector = format!("settings-connect-{}", choice.slug());
+                    div().debug_selector(move || selector.clone()).child(
+                        segmented_choice(
+                            ("settings-agent-client", choice as usize),
+                            choice.label(),
+                            choice == client,
+                            true,
+                            t,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace, _: &ClickEvent, _, cx| {
+                                workspace.set_agent_client(choice, cx);
+                            },
+                        )),
+                    )
+                }))),
+        )
+        .child(
+            div()
+                .flex()
+                .items_start()
                 .gap(px(layout::SPACE_SM))
                 .child(
                     div()
@@ -1426,11 +1459,11 @@ fn render_connect_claude_code(
             div()
                 .text_size(px(layout::chrome(layout::TEXT_XS)))
                 .text_color(t.text_muted)
-                .child(
-                    "DBDelve cannot register an agent for you. Run this once in your terminal. \
-                     Which tools an agent may call, and which wait for your click, is set from \
+                .child(format!(
+                    "{} Which tools an agent may call, and which wait for your click, is set from \
                      the MCP mark in the titlebar.",
-                ),
+                    client.note()
+                )),
         )
         .into_any_element();
     well(t, vec![row]).into_any_element()

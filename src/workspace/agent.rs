@@ -1820,20 +1820,40 @@ impl Workspace {
         self.open_settings(&crate::actions::OpenSettings, window, cx);
     }
 
-    /// The `claude mcp add` command for this build's executable and variant.
+    /// The registration command or config snippet for the selected agent client.
     pub(crate) fn agent_registration_command(&self) -> Option<String> {
         let executable = std::env::current_exe().ok()?;
         let appimage = std::env::var_os("APPIMAGE");
         let variant = std::env::var("DBDELVE_VARIANT").ok();
-        crate::agent::shim::registration_line(&executable, appimage.as_deref(), variant.as_deref())
+        crate::agent::shim::registration_snippet(
+            self.agent_client,
+            &executable,
+            appimage.as_deref(),
+            variant.as_deref(),
+        )
     }
 
-    /// Copy the Claude Code MCP registration command to the clipboard.
+    pub(crate) fn set_agent_client(
+        &mut self,
+        client: crate::agent::shim::AgentClient,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_client != client {
+            self.agent_client = client;
+            cx.notify();
+        }
+    }
+
+    /// Copy the selected agent client's registration snippet to the clipboard.
     pub(crate) fn copy_agent_registration(&mut self, cx: &mut Context<Self>) {
         match self.agent_registration_command() {
             Some(line) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(line));
-                self.note("Copied MCP command.".to_string(), cx);
+                let label = match self.agent_client {
+                    crate::agent::shim::AgentClient::AntigravityApp => "Copied MCP config.",
+                    _ => "Copied MCP command.",
+                };
+                self.note(label.to_string(), cx);
             }
             None => self.note(
                 "Could not build the registration command for this executable path.".to_string(),
