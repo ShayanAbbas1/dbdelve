@@ -8051,6 +8051,63 @@ fn the_role_form_opens_on_its_first_field_and_escape_puts_it_away(cx: &mut TestA
     });
 }
 
+/// Tab goes through the role form's fields and on to Review… and Cancel,
+/// as through any dialog's buttons, and `enter` presses the one it is on.
+#[gpui::test]
+fn tab_reaches_the_role_forms_buttons_after_its_fields(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        workspace.update_in(cx, |workspace, window, cx| {
+            users_tab_on(workspace, window, cx);
+            let profile = workspace.profile().unwrap().id.clone();
+            workspace.open_role_form(
+                &profile,
+                super::users::RoleFormKind::New { login: false },
+                window,
+                cx,
+            );
+        });
+        settle(cx);
+        settle(cx);
+        let field = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let form = workspace.read(cx).role_form.as_ref().unwrap();
+                [&form.name, &form.member_of]
+                    .iter()
+                    .position(|input| input.focus_handle(cx).is_focused(window))
+            })
+        };
+        assert_eq!(field(&workspace, cx), Some(0), "Name");
+
+        press(cx, "tab");
+        assert_eq!(field(&workspace, cx), Some(1), "Member of");
+        press(cx, "tab");
+        assert!(dialog_has_keyboard(&workspace, cx));
+        assert_eq!(ringed_button(&workspace, cx), 0, "Review…");
+        press(cx, "tab");
+        assert_eq!(ringed_button(&workspace, cx), 1, "Cancel");
+        press(cx, "tab");
+        assert_eq!(field(&workspace, cx), Some(0), "round to Name");
+        press(cx, "shift-tab");
+        assert_eq!(ringed_button(&workspace, cx), 1, "back to Cancel");
+        press(cx, "shift-tab");
+        assert_eq!(ringed_button(&workspace, cx), 0);
+
+        // Review… on the ring, with no name typed: refused, said on the form.
+        press(cx, "enter");
+        let error = workspace.read_with(cx, |workspace, _| {
+            (workspace.role_form.as_ref()).and_then(|form| form.error.clone())
+        });
+        assert_eq!(error.as_deref(), Some("A role needs a name."));
+
+        press(cx, "tab");
+        press(cx, "enter");
+        assert!(workspace.read_with(cx, |workspace, _| workspace.role_form.is_none()));
+        assert_eq!(front_dialog(&workspace, cx), None);
+        quit(workspace, cx);
+    });
+}
+
 #[gpui::test]
 fn the_relation_menu_offers_show_ddl_where_the_target_copies_ddl(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
