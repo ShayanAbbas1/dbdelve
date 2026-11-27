@@ -28617,11 +28617,21 @@ fn a_refused_edit_is_not_recorded_in_the_open_transaction_and_a_reconnect_emptie
             "the edit was not sent"
         );
 
+        // As MySQL's `SET autocommit = 0` leaves it.
+        workspace.update(cx, |workspace, _| {
+            workspace.profiles[0].autocommit_off = true;
+        });
         workspace.update(cx, |workspace, cx| workspace.begin_connect(0, cx));
         assert!(
             recorded_statements(&workspace, cx).is_empty(),
             "a connect leaves nothing of the transaction it replaces"
         );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                !workspace.profiles[0].autocommit_off,
+                "a new session opens autocommitting"
+            );
+        });
         settle(cx);
         assert!(!transaction_state(&workspace, cx).1);
 

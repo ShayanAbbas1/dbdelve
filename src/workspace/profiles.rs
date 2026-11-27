@@ -2483,6 +2483,7 @@ impl Workspace {
             _attempt: attempt.guard(),
         };
         profile.in_transaction = false;
+        profile.autocommit_off = false;
         profile.transaction_statements.clear();
         profile.transaction_in_flight = None;
         profile.session.auto_after_end = None;
