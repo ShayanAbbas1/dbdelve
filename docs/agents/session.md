@@ -393,14 +393,31 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   whose gate verdict changed with the mode are answered and never sent; a
   running read is left to finish. The wire speaks version 3; a shim already running from an
   older build keeps speaking version 2 until its agent restarts it, and is
-  refused. The titlebar mark has three states and is the same in all three
-  titlebars: nothing while no bridge runs, the MCP logo dim while one listens
+  refused. AI Features is gated by `Settings::ai_features` (default false, with
+  no migration from `agent_access`) and configured in Settings tab "05 · AI
+  FEATURES" (master switch, MCP server On/Off button pair mapping to
+  `agent_access`, reachable connections with per-connection switch/remove/add,
+  and the `claude mcp add` command with Copy). Per-tool and per-class policy
+  lives in `Settings::agent_policy` (`agent::policy::AgentPolicy`): the 9 schema
+  tools and `execute_sql` reads default to `Auto`, `execute_sql` writes default
+  to `Ask` (switching to `Auto` asks in `agent-writes-auto` with Cancel default),
+  and `execute_sql` sensitive reads default to `Deny` (offering `Deny` and `Ask`
+  only); missing or unknown entries fall back to each row's default, never more
+  permissive. A denied tool or class is answered `refused_by_policy` and audited
+  before anything is sent, `list_tools` in the shim reads `[settings.agent_policy]`
+  from `profiles.toml` to omit denied schema tools, and an `Ask` schema tool
+  waits in `agent-approval` showing the tool name and its arguments. The titlebar
+  mark has three states and is the same in all three titlebars: nothing while
+  `ai_features` is off or no bridge runs, the MCP logo dim while one listens
   alone, and lit with the count of waiting calls once a shim is attached or a
-  call waits. It carries the kill switch and the log in a popover, and the
-  popover exists only while the mark does: turning access on is the palette's.
-  Nothing in it animates. The approval dialog starts below the titlebar, so
-  while one waits the mark and its kill switch can still be clicked; the
-  keyboard stays with the dialog, where every key denies.
+  call waits. Hovering the mark shows a compact preview; clicking toggles the MCP
+  popover (`render_agent_popover`, dismissed by Escape in `tabs.rs` returning
+  focus) with status, waiting calls and Review, the policy rows, the registration
+  command, Activity log, AI settings and Disconnect agents. Nothing in it
+  animates. The approval dialog starts below the titlebar, so while one waits the
+  mark and its popover can still be clicked; the popover pauses Approve arming
+  while covering the dialog, and the keyboard stays with the dialog, where every
+  key denies.
 - **One window serves agents, and the lock beside the socket says which.** The
   window that binds holds an exclusive `flock` on `agent/s.lock` for as long as
   it serves, and the kernel lets go of it if the process dies. A window that

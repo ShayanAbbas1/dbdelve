@@ -11851,6 +11851,7 @@ fn an_agent_lists_the_visible_connections_by_name_and_engine_over_the_socket(
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -11899,6 +11900,7 @@ fn the_window_holds_a_presence_for_as_long_as_the_connection_is_open(cx: &mut Te
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -12224,6 +12226,7 @@ fn an_approval_after_its_caller_hung_up_starts_nothing(cx: &mut TestAppContext) 
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -12247,7 +12250,7 @@ fn an_approval_after_its_caller_hung_up_starts_nothing(cx: &mut TestAppContext) 
         // watcher marks the call's flag on its own thread; it is polled
         // without driving the window, so the click comes only once it is set.
         let gone = workspace.read_with(cx, |workspace, _| {
-            workspace.agent.calls[0].approval.gone.clone()
+            workspace.agent.calls[0].approval.gone().clone()
         });
         drop(client);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -12304,6 +12307,7 @@ fn hanging_up_withdraws_the_approval(cx: &mut TestAppContext) {
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -12615,9 +12619,18 @@ fn a_saved_agent_access_listens_at_launch_and_quit_removes_the_socket(cx: &mut T
         // untouched; the last two are a file that says off and one that says
         // nothing.
         for (setting, saved, listens) in [
-            (Some("agent_access = true"), Some(true), true),
+            (
+                Some("ai_features = true\nagent_access = true"),
+                Some(true),
+                true,
+            ),
             (None, Some(true), true),
-            (Some("agent_access = false"), Some(false), false),
+            (Some("agent_access = true"), Some(true), false),
+            (
+                Some("ai_features = true\nagent_access = false"),
+                Some(false),
+                false,
+            ),
             (Some(""), None, false),
         ] {
             let (workspace, cx) = match setting {
@@ -12656,7 +12669,7 @@ fn a_second_window_leaves_a_live_socket_alone_and_says_so(cx: &mut TestAppContex
         let (first_window, _received) = another_window();
         let (workspace, cx) = launch_with_settings(
             cx,
-            "agent_access = true",
+            "ai_features = true\nagent_access = true",
             &sqlite_profile("orders", "Orders", "agent_visible = true"),
         );
         cx.executor().allow_parking();
@@ -12702,7 +12715,7 @@ fn the_kill_switch_holds_across_two_windows_of_the_same_variant(cx: &mut TestApp
         let (first_window, mut received) = another_window();
         let (workspace, cx) = launch_with_settings(
             cx,
-            "agent_access = true",
+            "ai_features = true\nagent_access = true",
             &sqlite_profile("orders", "Orders", "agent_visible = true"),
         );
         cx.executor().allow_parking();
@@ -12853,7 +12866,8 @@ fn the_kill_switch_answers_its_chord_on_every_surface(cx: &mut TestAppContext) {
         // No profile: the welcome surface. A runner whose `PG*` variables make
         // a profile in front of it drives the main pane instead, which has
         // the same binding; the form is driven below either way.
-        let (workspace, cx) = launch_with_settings(cx, "agent_access = true", "");
+        let (workspace, cx) =
+            launch_with_settings(cx, "ai_features = true\nagent_access = true", "");
         cx.executor().allow_parking();
         assert!(listening(&workspace, cx));
         workspace.update_in(cx, |workspace, window, cx| {
@@ -12870,7 +12884,7 @@ fn the_kill_switch_answers_its_chord_on_every_surface(cx: &mut TestAppContext) {
         // The connection form, opened over a profile.
         let (workspace, cx) = launch_with_settings(
             cx,
-            "agent_access = true",
+            "ai_features = true\nagent_access = true",
             &sqlite_profile("orders", "Orders", "agent_visible = true"),
         );
         cx.executor().allow_parking();
@@ -15313,7 +15327,8 @@ fn the_agent_mark_is_in_every_titlebar(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         // No saved profile: the welcome surface, unless the runner's `PG*`
         // variables put a profile in front, which has the main titlebar.
-        let (workspace, cx) = launch_with_settings(cx, "agent_access = true", "");
+        let (workspace, cx) =
+            launch_with_settings(cx, "ai_features = true\nagent_access = true", "");
         cx.executor().allow_parking();
         assert!(cx.debug_bounds("agent-mark-listening").is_some());
         quit(workspace, cx);
@@ -15321,7 +15336,7 @@ fn the_agent_mark_is_in_every_titlebar(cx: &mut TestAppContext) {
         // A profile in front, then the connection form over it.
         let (workspace, cx) = launch_with_settings(
             cx,
-            "agent_access = true",
+            "ai_features = true\nagent_access = true",
             &sqlite_profile("orders", "Orders", "agent_visible = true"),
         );
         cx.executor().allow_parking();
@@ -15875,32 +15890,22 @@ fn the_agent_popover_turns_access_off(cx: &mut TestAppContext) {
             workspace.on_agent_message(Inbound::PresenceOpened { conn: ConnId(1) }, cx)
         });
         settle(cx);
-        let in_menu = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                window
-                    .context_stack()
-                    .iter()
-                    .any(|context| context.contains("PopupMenu"))
-            })
-        };
-        assert!(!in_menu(cx));
+        let popover_open = |cx: &mut VisualTestContext| cx.debug_bounds("agent-popover").is_some();
+        assert!(!popover_open(cx));
 
         let mark = cx
             .debug_bounds("agent-mark-connected")
             .expect("an attached agent lights the mark");
         cx.simulate_click(mark.center(), gpui::Modifiers::default());
         settle(cx);
-        assert!(in_menu(cx), "clicking the mark opened no menu");
+        assert!(popover_open(cx), "clicking the mark opened no popover");
 
-        // The kill switch is the only item that can be chosen. The menu's
-        // first step down always lands on its first row, a label, so the
-        // second is the one that reaches the item.
-        cx.simulate_keystrokes("down");
+        let disconnect = cx
+            .debug_bounds("agent-popover-disconnect")
+            .expect("popover shows Disconnect agents");
+        cx.simulate_click(disconnect.center(), gpui::Modifiers::default());
         settle(cx);
-        assert!(listening(&workspace, cx), "a label was chosen");
-        cx.simulate_keystrokes("down enter");
-        settle(cx);
-        assert!(!in_menu(cx));
+        assert!(!popover_open(cx));
         assert!(!listening(&workspace, cx));
         assert!(workspace.read_with(cx, |workspace, _| workspace.agent.presence.is_empty()));
         assert!(!agent_mark_drawn(cx));
@@ -15931,44 +15936,21 @@ fn turning_access_off_from_the_mark_while_an_approval_waits_rejects_it_and_close
             .expect("a waiting call lights the mark");
         cx.simulate_click(mark.center(), gpui::Modifiers::default());
         settle(cx);
-        let menu_open = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                window
-                    .context_stack()
-                    .iter()
-                    .any(|context| context.contains("PopupMenu"))
-            })
-        };
         assert!(
-            menu_open(cx),
+            cx.debug_bounds("agent-popover").is_some(),
             "the dialog took the click meant for the mark"
         );
         assert_eq!(
             answers.try_recv().err(),
             Some(std::sync::mpsc::TryRecvError::Empty),
-            "opening the menu answered the approval"
+            "opening the popover answered the approval"
         );
 
-        // By the pointer: the dialog holds the keyboard while it is up, so a
-        // key meant for the menu is the dialog's, and `enter` there denies.
-        // The rows have no selector, so each try reopens the menu and clicks
-        // one row lower until the one item that acts is under the pointer; a
-        // click on a label or outside the menu only closes it.
-        for step in 0..12 {
-            if pending_calls(&workspace, cx).is_empty() {
-                break;
-            }
-            if !menu_open(cx) {
-                cx.simulate_click(mark.center(), gpui::Modifiers::default());
-                settle(cx);
-            }
-            let at = gpui::point(
-                mark.center().x,
-                mark.bottom() + gpui::px(14. + 8. * step as f32),
-            );
-            cx.simulate_click(at, gpui::Modifiers::default());
-            settle(cx);
-        }
+        let disconnect = cx
+            .debug_bounds("agent-popover-disconnect")
+            .expect("popover shows Disconnect agents");
+        cx.simulate_click(disconnect.center(), gpui::Modifiers::default());
+        settle(cx);
         assert_eq!(
             answers.try_recv().ok(),
             Some(crate::agent::Reply {
@@ -16044,6 +16026,7 @@ fn another_windows_visibility_is_answered_and_kept_and_only_this_windows_own_cho
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -16990,6 +16973,12 @@ fn an_approved_read_of_a_file_runs_read_only_and_answers_rows(cx: &mut TestAppCo
 
     store::tests::with_home(|| {
         let (workspace, cx, user, csv) = agent_duckdb_with_csv(cx);
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.agent_policy.set(
+                crate::agent::policy::PolicyRow::ExecuteSqlSensitiveReads,
+                crate::agent::policy::PolicyLevel::Ask,
+            );
+        });
         let (id, answers) = inject_approval(
             &workspace,
             cx,
@@ -17054,6 +17043,12 @@ fn an_approved_read_that_cannot_be_recorded_does_not_run(cx: &mut TestAppContext
 
     store::tests::with_home(|| {
         let (workspace, cx, user, csv) = agent_duckdb_with_csv(cx);
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.agent_policy.set(
+                crate::agent::policy::PolicyRow::ExecuteSqlSensitiveReads,
+                crate::agent::policy::PolicyLevel::Ask,
+            );
+        });
         // A directory where the file belongs: nothing can be appended to it.
         let log = store::dbdelve_directory()
             .expect("the test home has a data directory")
@@ -17102,6 +17097,12 @@ fn a_read_shown_at_read_write_and_lowered_to_read_only_is_not_run(cx: &mut TestA
 
     store::tests::with_home(|| {
         let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.agent_policy.set(
+                crate::agent::policy::PolicyRow::ExecuteSqlSensitiveReads,
+                crate::agent::policy::PolicyLevel::Ask,
+            );
+        });
         // An unlisted function asks at Read-write and runs at Read-only, so
         // the lowered profile would give this statement another verdict.
         let (id, answers) = inject_approval(&workspace, cx, "Orders", "SELECT my_udf(1)");
@@ -17149,6 +17150,12 @@ fn an_approved_read_waiting_its_turn_is_not_run_once_the_mode_changes(cx: &mut T
     store::tests::with_home(|| {
         let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
         cx.executor().allow_parking();
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.agent_policy.set(
+                crate::agent::policy::PolicyRow::ExecuteSqlSensitiveReads,
+                crate::agent::policy::PolicyLevel::Ask,
+            );
+        });
         // A read that holds the lane, so the approved one waits behind it.
         workspace.update(cx, |workspace, _| {
             workspace.agent.opener = Some(|executor, _, _| executor.spawn(std::future::pending()));
@@ -17280,7 +17287,7 @@ fn approve_with_pending(
             .iter_mut()
             .find(|call| call.id == id)
             .expect("the call is pending");
-        call.approval.sql = pending.to_string();
+        *call.approval.sql_mut().expect("the call carries SQL") = pending.to_string();
         workspace.approve_call(id, cx);
     });
     settle(cx);
@@ -17547,6 +17554,12 @@ fn an_in_memory_duckdb_profile_refuses_a_read_it_would_hold_before_asking_anyone
     store::tests::with_home(|| {
         let (workspace, cx) = agent_duckdb(cx, "");
         cx.executor().allow_parking();
+        workspace.update(cx, |workspace, _| {
+            workspace.settings.agent_policy.set(
+                crate::agent::policy::PolicyRow::ExecuteSqlSensitiveReads,
+                crate::agent::policy::PolicyLevel::Ask,
+            );
+        });
         let sql = "SELECT * FROM 'data.csv'";
         assert!(
             matches!(
@@ -17949,6 +17962,7 @@ fn a_running_read_is_not_a_waiting_approval(cx: &mut TestAppContext) {
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -39799,7 +39813,7 @@ fn a_hangup_the_window_has_not_heard_still_marks_a_running_write_as_gone(cx: &mu
         // The socket's own flag, as its watcher sets it, and no `Hangup` for
         // the window to hear.
         let gone = workspace.read_with(cx, |workspace, _| {
-            workspace.agent.calls[0].approval.gone.clone()
+            workspace.agent.calls[0].approval.gone().clone()
         });
         approve_front(cx);
         assert_eq!(writes_running(&workspace, cx), [id]);
@@ -40120,6 +40134,7 @@ fn a_running_write_keeps_the_agent_mark_lit(cx: &mut TestAppContext) {
         let path = crate::agent::tests::short_socket_path();
         workspace
             .update(cx, |workspace, cx| {
+                workspace.settings.ai_features = true;
                 workspace.start_bridge_at(path.clone(), cx)
             })
             .expect("the socket binds");
@@ -40136,5 +40151,266 @@ fn a_running_write_keeps_the_agent_mark_lit(cx: &mut TestAppContext) {
         assert_eq!(agent_mark_state(&workspace, cx), Some(AgentMark::Listening));
         quit(workspace, cx);
         let _ = std::fs::remove_dir_all(path.parent().expect("the socket has a directory"));
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn ai_features_settings_tab_renders_and_switches_act(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &sqlite_profile("orders", "Orders", "agent_visible = true"),
+        );
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, cx| workspace.activate(0, cx));
+        settle(cx);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_ai_settings(window, cx);
+        });
+        settle(cx);
+
+        // AI Features is off by default: MCP server buttons and mark are absent.
+        assert!(!workspace.read_with(cx, |w, _| w.settings.ai_features));
+        assert!(cx.debug_bounds("settings-ai-features").is_some());
+        assert!(cx.debug_bounds("settings-mcp-on").is_none());
+        assert!(!agent_mark_drawn(cx));
+
+        // Flip AI Features on: MCP server controls appear, mark stays absent
+        // until the server is turned on.
+        let toggle = cx
+            .debug_bounds("settings-ai-features")
+            .expect("master switch");
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(workspace.read_with(cx, |w, _| w.settings.ai_features));
+        assert!(cx.debug_bounds("settings-mcp-on").is_some());
+        assert!(!agent_mark_drawn(cx));
+
+        // Turn MCP server On -> bridge listens and titlebar mark appears.
+        let on_btn = cx.debug_bounds("settings-mcp-on").expect("MCP On button");
+        cx.simulate_click(on_btn.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(listening(&workspace, cx));
+        assert!(agent_mark_drawn(cx));
+
+        // Turn MCP server Off -> bridge stops and titlebar mark disappears.
+        let off_btn = cx.debug_bounds("settings-mcp-off").expect("MCP Off button");
+        cx.simulate_click(off_btn.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(!listening(&workspace, cx));
+        assert!(!agent_mark_drawn(cx));
+
+        // Turn MCP server back On, then flip AI Features Off -> stops server
+        // and hides mark.
+        let on_btn = cx.debug_bounds("settings-mcp-on").expect("MCP On button");
+        cx.simulate_click(on_btn.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(agent_mark_drawn(cx));
+        let toggle = cx
+            .debug_bounds("settings-ai-features")
+            .expect("master switch");
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(!workspace.read_with(cx, |w, _| w.settings.ai_features));
+        assert!(!listening(&workspace, cx));
+        assert!(!agent_mark_drawn(cx));
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn escape_closes_the_agent_popover_and_returns_focus(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_with_profiles(
+            cx,
+            &sqlite_profile("orders", "Orders", "agent_visible = true"),
+        );
+        cx.executor().allow_parking();
+        workspace.update(cx, |workspace, cx| workspace.activate(0, cx));
+        settle(cx);
+        run_command(&workspace, cx, Command::TurnOnAgentAccess);
+        settle(cx);
+
+        let mark = cx
+            .debug_bounds("agent-mark-listening")
+            .expect("mark is drawn");
+        cx.simulate_click(mark.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.debug_bounds("agent-popover").is_some());
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(cx.debug_bounds("agent-popover").is_none());
+        assert!(
+            editor_has_keyboard(&workspace, cx),
+            "Escape must hand focus back to the editor"
+        );
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn policy_deny_refuses_and_audits_and_ask_read_runs_on_approve(cx: &mut TestAppContext) {
+    use crate::agent::{
+        CallArgs, Status,
+        policy::{PolicyLevel, PolicyRow},
+        tools::Tool,
+    };
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
+        cx.executor().allow_parking();
+
+        // 1. Denied schema tool is refused with `refused_by_policy` and audited.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_agent_policy(PolicyRow::ListTables, PolicyLevel::Deny, cx);
+        });
+        let (id, answers) = inject_call_with(
+            &workspace,
+            cx,
+            Tool::ListTables,
+            Some("Orders"),
+            CallArgs {
+                schema: Some("main".to_string()),
+                ..Default::default()
+            },
+        );
+        let reply = answer_of(cx, &answers);
+        assert_eq!(reply.status, Status::RefusedByPolicy, "{}", reply.text);
+        let lines = audit_of(id);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["status"], "refused_by_policy");
+
+        // 2. Default Sensitive reads = Deny refuses unlisted function calls.
+        let (id, answers) = inject_call_with(
+            &workspace,
+            cx,
+            Tool::ExecuteSql,
+            Some("Orders"),
+            CallArgs {
+                sql: Some("SELECT my_udf(1)".to_string()),
+                ..Default::default()
+            },
+        );
+        let reply = answer_of(cx, &answers);
+        assert_eq!(reply.status, Status::RefusedByPolicy, "{}", reply.text);
+        assert_eq!(audit_of(id)[0]["status"], "refused_by_policy");
+
+        // 3. Schema tool set to Ask opens the approval dialog naming the tool
+        //    and runs on Approve.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_agent_policy(PolicyRow::ListConnections, PolicyLevel::Ask, cx);
+        });
+        let (_, answers) = inject_call_with(
+            &workspace,
+            cx,
+            Tool::ListConnections,
+            None,
+            CallArgs::default(),
+        );
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("agent-approval"));
+        assert!(cx.debug_bounds("agent-approval-tool-args").is_some());
+        approve_front(cx);
+        let reply = answer_of(cx, &answers);
+        assert_eq!(reply.status, Status::Executed, "{}", reply.text);
+        assert!(reply.text.contains("Orders"), "{}", reply.text);
+
+        // 4. execute_sql Reads set to Ask waits for Approve and runs on Approve.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_agent_policy(PolicyRow::ExecuteSqlReads, PolicyLevel::Ask, cx);
+        });
+        let (_, answers) = inject_call_with(
+            &workspace,
+            cx,
+            Tool::ExecuteSql,
+            Some("Orders"),
+            CallArgs {
+                sql: Some("SELECT 1".to_string()),
+                ..Default::default()
+            },
+        );
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("agent-approval"));
+        approve_front(cx);
+        let reply = answer_of(cx, &answers);
+        assert_eq!(reply.status, Status::Executed, "{}", reply.text);
+        quit(workspace, cx);
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+fn setting_writes_to_auto_asks_confirmation_and_cancel_keeps_ask(cx: &mut TestAppContext) {
+    use crate::agent::{
+        Status,
+        policy::{PolicyLevel, PolicyRow},
+    };
+
+    store::tests::with_home(|| {
+        let (workspace, cx) = agent_sqlite(cx, ORDERS_SCHEMA, "mode = \"read-write\"");
+        cx.executor().allow_parking();
+        run_command(&workspace, cx, Command::TurnOnAgentAccess);
+        settle(cx);
+
+        // Open popover and click Writes -> Auto.
+        let mark = cx
+            .debug_bounds("agent-mark-listening")
+            .expect("mark is drawn");
+        cx.simulate_click(mark.center(), gpui::Modifiers::default());
+        settle(cx);
+        let auto_btn = cx
+            .debug_bounds("policy-execute_sql_writes-auto")
+            .expect("Writes Auto button");
+        cx.simulate_click(auto_btn.center(), gpui::Modifiers::default());
+        settle(cx);
+
+        // Confirmation dialog appears with Cancel as the default ring choice.
+        assert_eq!(front_dialog(&workspace, cx), Some("agent-writes-auto"));
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w
+                .settings
+                .agent_policy
+                .get(PolicyRow::ExecuteSqlWrites)),
+            PolicyLevel::Ask,
+            "Cancel must leave Writes on Ask"
+        );
+
+        // Now confirm setting Writes to Auto, and verify an UPDATE runs without
+        // waiting for approval.
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_agent_policy(PolicyRow::ExecuteSqlWrites, PolicyLevel::Auto, cx);
+        });
+        settle(cx);
+        assert_eq!(front_dialog(&workspace, cx), Some("agent-writes-auto"));
+        workspace.update(cx, |workspace, cx| {
+            workspace.confirm_agent_writes_auto(cx);
+        });
+        settle(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w
+                .settings
+                .agent_policy
+                .get(PolicyRow::ExecuteSqlWrites)),
+            PolicyLevel::Auto
+        );
+
+        let answers = inject_sql(
+            &workspace,
+            cx,
+            "Orders",
+            "CREATE TABLE auto_write_check (id integer)",
+        );
+        let reply = answer_of(cx, &answers);
+        assert_eq!(reply.status, Status::Executed, "{}", reply.text);
+        assert_eq!(front_dialog(&workspace, cx), None);
+        quit(workspace, cx);
     });
 }

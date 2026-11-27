@@ -511,23 +511,39 @@ session state, calls nothing on the engine's `denied_functions` or
 `egress_functions` and, at Read-write and Full, calls only functions on its
 engine's built-in list.
 
-**An `Approve` waits for the human, and runs the statement the dialog was
-drawn from.** The call is held until the person approves, denies or lets it
+**Policy sits around `agent_gate`, never inside it, and an `Approve` follows
+the policy for its class.** `agent::policy::resolve_sql` classifies each
+`execute_sql` call from the gate's verdict: `Run` is Reads (default `Auto`),
+`Approve` with a Read-only verdict is Sensitive reads (default `Deny`, offering
+`Deny` and `Ask` only), and `Approve` with a Read-write verdict is Writes
+(default `Ask`, offering `Deny`, `Ask`, and `Auto` after confirmation). A gate
+`Refuse` is never changed by policy, and a class set to `Deny` is answered
+`refused_by_policy` before anything is sent.
+
+Under `Ask`, the call is held until the person approves, denies or lets it
 expire, and nothing stands in for that act. At Approve the gate runs again, on
 the exact string the dialog was drawn from, against the profile's current mode:
 a different verdict, a profile whose connection has changed since, a dialog
 never drawn for this call, or a byte of difference between the statement and
 the source the dialog was last drawn from cancels the call as `refused_by_gate`
-and sends nothing. The check compares source strings: what the dialog draws is
-the marked text `ui::visible` makes of that source, which is display only. An approved statement whose verdict is Read-only runs on the profile's
-agent read lane, which the database holds to reads only where the engine has a
-hold (`ConnectionConfig::agent_reads_are_held`: a file opened read-only, or a
-session setting); on SQL Server, Snowflake, MongoDB and Redis nothing on the
-server does, and the approval says so. A Read-write one runs on a connection
-opened for that call and closed with it, so a session change the statement
-makes dies with the connection. A write aimed at a DuckDB database is refused (`DUCKDB_WRITE_REFUSED`), because a write
-from a second connection to the file is lost. `explain_query` still refuses a
-statement that needs approval and never waits for one.
+and sends nothing; a class changed to `Deny` meanwhile cancels as
+`refused_by_policy`. The check compares source strings: what the dialog draws is
+the marked text `ui::visible` makes of that source, which is display only. Under
+`Auto` for Writes, a gate-approved write runs without waiting for a click: it
+still runs the exact statement the gate read, under the profile's current mode,
+with the same re-check, fail-closed `started` audit line, named refusals
+(`DROP`, `TRUNCATE`, any `DELETE`, `ALTER` beyond `ADD COLUMN`, scripts, session
+changes, disclosure, multiple statements), and DuckDB write refusal. An approved
+statement whose verdict is Read-only (including a plain read held by `Ask`) runs
+on the profile's agent read lane, which the database holds to reads only where
+the engine has a hold (`ConnectionConfig::agent_reads_are_held`: a file opened
+read-only, or a session setting); on SQL Server, Snowflake, MongoDB and Redis
+nothing on the server does, and the approval says so. A Read-write one runs on a
+connection opened for that call and closed with it, so a session change the
+statement makes dies with the connection. A write aimed at a DuckDB database is
+refused (`DUCKDB_WRITE_REFUSED`), because a write from a second connection to
+the file is lost. `explain_query` still refuses a statement that needs approval
+and never waits for one.
 
 **The disclosure line is drawn per engine.** On Redis it is `CONFIG GET`,
 `CLIENT LIST`, `ACL LIST` and `ACL GETUSER`: plaintext secrets, every client's
