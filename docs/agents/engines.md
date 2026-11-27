@@ -196,6 +196,20 @@ Decided, and not to be re-litigated:
   levels the batch opened after its last end, so Manual's reopening `COMMIT;
   BEGIN TRANSACTION` pair at depth two keeps the record and the switch as they
   were, rather than starting a new transaction or turning Auto.
+- **A MySQL or MariaDB statement that fails before its implicit commit leaves
+  the transaction open**, and the error says so (`TRANSACTION_KEPT_OPEN`,
+  `mysql::kept_open`). The server stops a submission at its first failure, so
+  one `sql::leaves` reads as ending the transaction ended nothing when its
+  first statement, failing, would not have ended it (unless that failure is a
+  deadlock). When the first statement is the one that commits, only an error
+  raised while parsing it reads as open (`BEFORE_IMPLICIT_COMMIT`: a syntax
+  error, an identifier too long, an unknown character set, a stored
+  program's body that cannot compile), each seen to leave the transaction
+  open on both servers. Every other DDL failure (the table exists, the column
+  does not, the privilege is missing) comes after the commit, and reading it
+  as open would offer a Roll Back for committed work. The driver cannot ask
+  the server whether a transaction is open, so the marker is worded to hold
+  where none was, and a parse error on DDL in Auto shows it too.
 - **`sql_variant` and every CLR type (`geography`, `geometry`, `hierarchyid`,
   system type id 240) panic tiberius part way through a result it cannot
   decode**, which would otherwise close the session and the transaction in it.
