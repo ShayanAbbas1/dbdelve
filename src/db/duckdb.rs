@@ -164,8 +164,10 @@ impl Connection {
                     "A database in memory cannot be opened read-only.".into(),
                 ));
             }
-            path if is_in_memory(path) => duckdb::Connection::open_in_memory_with_flags(config(false)?)
-                .map_err(|error| plain_error(error.to_string()))?,
+            path if is_in_memory(path) => {
+                duckdb::Connection::open_in_memory_with_flags(config(false)?)
+                    .map_err(|error| plain_error(error.to_string()))?
+            }
             path => {
                 let path = crate::store::home_expanded(path);
                 // Not created when missing, for the reason `sqlite.rs` gives:

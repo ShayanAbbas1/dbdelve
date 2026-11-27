@@ -4572,7 +4572,7 @@ ORDER BY 1, 2
                 engine,
             )
             .expect("a held connection should open");
-            let side = held.side_session().expect("the side session should open");
+            let side = held.sizes_session().expect("the side session should open");
             // MySQL 8.4 dropped `tx_read_only`, which MariaDB still spells so.
             let variable = match engine {
                 Engine::MariaDb => "@@SESSION.tx_read_only",
@@ -4594,7 +4594,7 @@ ORDER BY 1, 2
                 refusal.message
             );
             let sizes = held
-                .sizes()
+                .sizes(&Shown::everything())
                 .expect("sizes should load on a held connection");
             assert!(
                 sizes["dbdelve_dev"].contains_key("dbdelve_side_probe"),
@@ -5718,7 +5718,7 @@ ORDER BY 1, 2
             .expect("the probe sequence should be created");
 
         let second = super::super::Connection::MySql(live(Engine::MariaDb))
-            .routines(&crate::db::Shown::everything())
+            .routines(&Shown::everything())
             .expect("the second half should read");
         let listed: Vec<_> = second
             .schemas
@@ -5782,7 +5782,7 @@ ORDER BY 1, 2
     fn live_mysql_lists_no_sequence_and_sends_no_sequence_statement() {
         let connection = live(Engine::MySql);
         let second = super::super::Connection::MySql(live(Engine::MySql))
-            .routines(&crate::db::Shown::everything())
+            .routines(&Shown::everything())
             .expect("the second half should read");
         assert!(
             second

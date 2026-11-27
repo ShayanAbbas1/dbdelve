@@ -1332,7 +1332,7 @@ fn list(
     schema: Option<&str>,
     note: Option<&str>,
 ) -> Result<Option<Listing>, DbError> {
-    let mut catalog = connection.catalog()?;
+    let mut catalog = connection.catalog(&crate::db::Shown::everything())?;
     let Some(schema) = schema else {
         let rows = catalog.schemas.len();
         let (text, shown) = schemas_text(&catalog, note);
@@ -1349,7 +1349,7 @@ fn list(
     };
     // The estimate is optional, and the query behind it can need privileges
     // the catalog does not, so a failure here leaves the rows `null`.
-    if let Ok(sizes) = connection.sizes() {
+    if let Ok(sizes) = connection.sizes(&crate::db::Shown::everything()) {
         catalog.set_sizes(&sizes);
     }
     Ok(tables_text(&catalog, schema, note).map(|(text, shown)| Listing::shown(text, shown, rows)))
@@ -1363,11 +1363,13 @@ fn describe_on(
     table: &str,
     note: Option<&str>,
 ) -> Ran {
-    let listed = connection.catalog().and_then(|catalog| {
-        describe(&catalog, schema, table, note, |s, t| {
-            connection.structure(s, t)
-        })
-    });
+    let listed = connection
+        .catalog(&crate::db::Shown::everything())
+        .and_then(|catalog| {
+            describe(&catalog, schema, table, note, |s, t| {
+                connection.structure(s, t)
+            })
+        });
     Ran::Listed {
         connection,
         hidden,
@@ -1422,10 +1424,10 @@ fn search(
     query: &str,
     note: Option<&str>,
 ) -> Result<Option<Listing>, DbError> {
-    let mut catalog = connection.catalog()?;
+    let mut catalog = connection.catalog(&crate::db::Shown::everything())?;
     // The routines can need privileges the catalog does not, and a server that
     // refuses them still has its relations to search.
-    if let Ok(routines) = connection.routines() {
+    if let Ok(routines) = connection.routines(&crate::db::Shown::everything()) {
         catalog.merge(routines);
     }
     let found = catalog.by_name().into_iter().flat_map(|(_, schema)| {
@@ -1491,7 +1493,7 @@ fn relationships(
     engine: Engine,
 ) -> Result<Option<Listing>, DbError> {
     if !connection
-        .catalog()?
+        .catalog(&crate::db::Shown::everything())?
         .schemas
         .iter()
         .any(|held| held.name == schema)
@@ -1572,13 +1574,13 @@ fn routines(
     schema: &str,
     routine: Option<&str>,
 ) -> Result<Option<Listing>, DbError> {
-    let catalog = connection.routines()?;
+    let catalog = connection.routines(&crate::db::Shown::everything())?;
     // The routines catalog holds only the schemas that have some, so one with
     // none is told apart from one that is not there by the relations catalog.
     let held = match catalog.schemas.iter().find(|held| held.name == schema) {
         Some(held) => held.routines.iter().collect::<Vec<_>>(),
         None if connection
-            .catalog()?
+            .catalog(&crate::db::Shown::everything())?
             .schemas
             .iter()
             .any(|held| held.name == schema) =>
@@ -2200,6 +2202,8 @@ mod tests {
             password_command: None,
             schema: None,
             read_only: false,
+            time_zone: None,
+            properties: crate::db::Properties::default(),
         });
         Connection::open_for_agent(config).expect("the compose Postgres opens for the agent")
     }
@@ -2242,6 +2246,7 @@ mod tests {
                 ],
             )],
             database: None,
+            ..Catalog::default()
         };
         let (text, _) = tables_text(&catalog, "public", None).expect("the schema is there");
         assert_eq!(
@@ -2372,6 +2377,7 @@ mod tests {
                 vec![relation("t", RelationKind::Table, None, None)],
             )],
             database: None,
+            ..Catalog::default()
         };
         let refuse = |_: &str, _: &str| -> Result<Structure, DbError> {
             panic!("the loader was handed a name the catalog does not hold")
@@ -2401,6 +2407,7 @@ mod tests {
         let catalog = Catalog {
             schemas: vec![schema("empty", Vec::new())],
             database: None,
+            ..Catalog::default()
         };
         let (text, _) = tables_text(&catalog, "empty", None).expect("the schema is there");
         let mut lines = text.lines();
@@ -2421,6 +2428,7 @@ mod tests {
                 vec![relation("keys", RelationKind::Table, None, Some(7))],
             )],
             database: None,
+            ..Catalog::default()
         };
         let note = Engine::Redis.agent_catalog_note();
         let note_line = format!("note: {}\n", note.expect("Redis has a note"));
@@ -2451,6 +2459,7 @@ mod tests {
         let catalog = Catalog {
             schemas: vec![schema("b", Vec::new()), schema("a", Vec::new())],
             database: None,
+            ..Catalog::default()
         };
         assert_eq!(
             schemas_text(&catalog, None).0,

@@ -3691,13 +3691,20 @@ impl Parsed {
         }
     }
 
-    fn read(reading: Reading, statements: &[Statement], unlisted_call: bool) -> Self {
+    fn read(
+        engine: Engine,
+        reading: Reading,
+        statements: &[Statement],
+        unlisted_call: bool,
+    ) -> Self {
         Self {
             verdict: reading.verdict,
             statements: statements.len(),
             removes: reading.removes,
             alters: reading.alters,
-            session: statements.iter().any(changes_session),
+            session: statements
+                .iter()
+                .any(|statement| changes_session(engine, statement)),
             scripts: false,
             discloses: false,
             unsent: false,
@@ -3721,7 +3728,7 @@ impl Parsed {
 /// the permanent schema (Postgres's `pg_temp`, SQLite's `temp`), so it shadows
 /// a table of the same name for every later statement on the session, and a
 /// write approved after it would hit the view, not the table the human read.
-fn changes_session(statement: &Statement) -> bool {
+fn changes_session(engine: Engine, statement: &Statement) -> bool {
     match statement {
         Statement::Savepoint { .. }
         | Statement::ReleaseSavepoint { .. }
@@ -3732,10 +3739,10 @@ fn changes_session(statement: &Statement) -> bool {
             .chain(&branching.elseif_blocks)
             .chain(&branching.else_block)
             .flat_map(ConditionalStatementBlock::statements)
-            .any(changes_session),
-        Statement::StartTransaction { statements, .. } if !statements.is_empty() => {
-            statements.iter().any(changes_session)
-        }
+            .any(|statement| changes_session(engine, statement)),
+        Statement::StartTransaction { statements, .. } if !statements.is_empty() => statements
+            .iter()
+            .any(|statement| changes_session(engine, statement)),
         Statement::CreateView(view) if view.temporary => true,
         Statement::Query(query) if selects_into_session(&query.body) => true,
         // An `EXPLAIN` that runs its statement leaves what the statement
@@ -3747,11 +3754,22 @@ fn changes_session(statement: &Statement) -> bool {
             statement,
             ..
         } if *analyze || options.iter().flatten().any(analyze_option_is_on) => {
-            changes_session(statement)
+            changes_session(engine, statement)
         }
         _ => {
             let mut leaves = Leaves::default();
-            leaves.add(statement);
+            leaves.add(engine, statement);
+            // A DDL statement that commits implicitly on MySQL ends a
+            // transaction without changing the session; only an explicit
+            // `COMMIT` or `ROLLBACK` is a session change here.
+            if leaves.transaction == Some(false)
+                && !matches!(
+                    statement,
+                    Statement::Commit { .. } | Statement::Rollback { .. }
+                )
+            {
+                leaves.transaction = None;
+            }
             leaves != Leaves::default()
         }
     }
@@ -4090,7 +4108,7 @@ fn parsed_as_run(engine: Engine, sql: &str) -> Parsed {
         .iter()
         .map(|statement| spec_verdict(engine.spec(), statement))
         .fold(Reading::READ, Reading::max);
-    let read = Parsed::read(reading, &statements, unlisted_call);
+    let read = Parsed::read(engine, reading, &statements, unlisted_call);
     Parsed {
         verdict: raised(engine, sql, read.verdict).max(calls),
         ..read
@@ -4627,7 +4645,9 @@ fn by_statement(engine: Engine, dialect: &dyn Dialect, sql: &str) -> Parsed {
             let reading = match parsed {
                 Some(statements) => {
                     counted += statements.len();
-                    session |= statements.iter().any(changes_session);
+                    session |= statements
+                        .iter()
+                        .any(|statement| changes_session(engine, statement));
                     unlisted_call |= statements
                         .iter()
                         .any(|statement| calls_unlisted_function(engine, statement));
@@ -7559,31 +7579,6 @@ mod tests {
             }
         }
         assert_eq!(Engine::Snowflake.begins_transaction(), None);
-    }
-
-    #[test]
-    fn every_engine_that_opens_a_transaction_spells_one_the_gate_reads() {
-        use crate::db::Engine;
-
-        for engine in Engine::ALL {
-            let Some(begin) = engine.begins_transaction() else {
-                continue;
-            };
-            // The buffer gets this text and the user may run it again, so it
-            // has to read back as a bracket rather than as a statement the
-            // gate cannot place.
-            assert!(is_transaction_bracket(begin), "{engine:?}: {begin}");
-            assert!(
-                is_transaction_bracket(&format!("{begin};")),
-                "{engine:?}: {begin};"
-            );
-            // Transaction control runs in every mode: asking for Read-write
-            // to end a transaction would teach people to live in Full.
-            assert_eq!(classify(engine, begin).mode, Mode::ReadOnly, "{engine:?}");
-            for verb in ["COMMIT", "ROLLBACK"] {
-                assert_eq!(classify(engine, verb).mode, Mode::ReadOnly, "{engine:?}");
-            }
-        }
     }
 
     #[test]

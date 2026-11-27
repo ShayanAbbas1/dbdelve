@@ -582,6 +582,8 @@ mod tests {
             password_command: None,
             schema: None,
             read_only: false,
+            time_zone: None,
+            properties: crate::db::Properties::default(),
         })
     }
 
@@ -796,6 +798,8 @@ mod tests {
             password_command: None,
             schema: None,
             read_only: false,
+            time_zone: None,
+            properties: crate::db::Properties::default(),
         });
         const SQL: &str = "BLPOP dbdelve:never 0";
         let Wrote::Done {

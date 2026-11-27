@@ -1501,6 +1501,11 @@ pub struct ServerConfig {
     /// onto the one driver field it names. Config, so every connection opened
     /// from it carries them.
     pub properties: Properties,
+    /// Hold every session opened from this config to reads from its first
+    /// statement. A flag for an agent's connection, set only by
+    /// [`ConnectionConfig::with_read_only_hold`]: it is never stored, and a
+    /// user's own connection never carries it.
+    pub read_only: bool,
 }
 
 /// The longest a session time zone may be.
@@ -1529,11 +1534,6 @@ pub fn check_time_zone(zone: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-    /// Hold every session opened from this config to reads from its first
-    /// statement. A flag for an agent's connection, set only by
-    /// [`ConnectionConfig::with_read_only_hold`]: it is never stored, and a
-    /// user's own connection never carries it.
-    pub read_only: bool,
 }
 
 impl ServerConfig {
@@ -5870,6 +5870,9 @@ fn time_zone_statement(engine: Engine, zone: &str) -> Option<String> {
         SessionTimeZone::SetTimeZone => Some(format!("SET TIME ZONE {literal}")),
         SessionTimeZone::TimeZoneVariable => Some(format!("SET time_zone = {literal}")),
         SessionTimeZone::None | SessionTimeZone::RequestSetting => None,
+    }
+}
+
 /// The statement that bounds how long this session waits for a lock, or
 /// `None` where the engine has no session setting for it. On MySQL and
 /// MariaDB that is two settings: `lock_wait_timeout` bounds a metadata lock

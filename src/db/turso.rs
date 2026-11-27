@@ -815,6 +815,9 @@ mod tests {
             "the script is the session's own"
         );
         drop((scripted, beside, plain));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn an_agent_open_reads_committed_rows_and_refuses_a_write() {
         let dir = std::env::temp_dir().join(format!("dbdelve-turso-agent-{}", std::process::id()));
