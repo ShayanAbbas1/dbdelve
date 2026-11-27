@@ -1370,9 +1370,9 @@ impl Workspace {
         if behind.is_none() && !self.dialog_focus.contains_focused(window, cx) {
             self.focus_before_dialog.replace(window.focused(cx));
         }
-        // The palette is drawn over every dialog without changing which one is
-        // in front, so an approval under it is not being shown either.
-        let covered = self.palette.is_some();
+        // The palette and MCP popover draw over dialogs without changing which
+        // one is in front, so an approval under either is not being shown.
+        let covered = self.palette.is_some() || self.agent_popover_open;
         // An approval's Approve counts its wait from when the person can see the
         // dialog: raised to the front, a different call come to the front, or
         // the palette over it gone.
@@ -1408,6 +1408,7 @@ impl Workspace {
         {
             cx.on_next_frame(window, |workspace, _, cx| {
                 if workspace.palette.is_some()
+                    || workspace.agent_popover_open
                     || workspace.dialog_in_front.get() != Some("agent-approval")
                     || workspace.front_approval_id() != workspace.agent.armed
                 {
@@ -1665,6 +1666,8 @@ impl Workspace {
             ("pending-run", _) => self.cancel_pending_run(cx),
             ("agent-visibility", 0) => self.confirm_agent_visibility(cx),
             ("agent-visibility", _) => _ = self.cancel_agent_visibility(cx),
+            ("agent-writes-auto", 0) => self.confirm_agent_writes_auto(cx),
+            ("agent-writes-auto", _) => _ = self.cancel_agent_writes_auto(cx),
             // Every index denies: no key approves an agent's call.
             ("agent-approval", _) => _ = self.deny_front_approval(cx),
             ("agent-audit", _) => _ = self.close_agent_audit(cx),
@@ -2642,6 +2645,505 @@ impl Workspace {
         )
     }
 
+    /// Confirmation before switching `execute_sql` writes to Auto. Cancel is
+    /// the default choice so a held Enter never grants automatic writes.
+    pub(crate) fn render_agent_writes_auto(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.agent_writes_auto_prompt {
+            return None;
+        }
+        let t = popup_theme(cx);
+        let cancel_workspace = cx.entity().downgrade();
+        let confirm_workspace = cancel_workspace.clone();
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    dialog(t)
+                        .child(section_label(t, "AI Features"))
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text)
+                                .child("Allow automatic writes?"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(
+                                    "Agents will be able to change data without asking for your \
+                                     approval first.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                .text_color(t.text_muted)
+                                .child(
+                                    "Read-only connections still refuse writes, and DROP, \
+                                     TRUNCATE, and any DELETE remain refused.",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    self.choice(
+                                        "agent-writes-auto",
+                                        1,
+                                        button(
+                                            "cancel-agent-writes-auto",
+                                            "Cancel",
+                                            Tone::Quiet,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = cancel_workspace.update(cx, |workspace, cx| {
+                                                    workspace.cancel_agent_writes_auto(cx);
+                                                });
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                )
+                                .child(
+                                    self.choice(
+                                        "agent-writes-auto",
+                                        0,
+                                        button(
+                                            "confirm-agent-writes-auto",
+                                            "Allow automatic writes",
+                                            Tone::Danger,
+                                            Control::Standard,
+                                            t,
+                                        )
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                _ = confirm_workspace.update(
+                                                    cx,
+                                                    |workspace, cx| {
+                                                        workspace.confirm_agent_writes_auto(cx);
+                                                    },
+                                                );
+                                            },
+                                        ),
+                                        t,
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The titlebar MCP popover: status, waiting calls with Review, per-tool
+    /// and per-class policy rows, registration command, Activity log, AI
+    /// settings and Disconnect agents.
+    pub(crate) fn render_agent_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::agent::policy::PolicyRow;
+
+        if !self.agent_popover_open {
+            return None;
+        }
+        let mark = self.agent_mark_state()?;
+        let t = popup_theme(cx);
+        let mono = fonts(cx).editor.clone();
+        let waiting = self.agent.calls.len();
+        let status_label = match mark {
+            ui::AgentMark::Listening => "MCP server listening",
+            ui::AgentMark::Connected { .. } => "MCP server connected",
+        };
+        let reachable: Vec<String> = self
+            .agent_reachable_profiles()
+            .map(|profile| profile.name.clone())
+            .collect();
+        let reachable_text = if reachable.is_empty() {
+            "Reachable: none".to_string()
+        } else {
+            format!("Reachable: {}", reachable.join(", "))
+        };
+        let command = self
+            .agent_registration_command()
+            .unwrap_or_else(|| "claude mcp add dbdelve -- dbdelve mcp".to_string());
+
+        let policy_row_el = |row: PolicyRow, indented: bool, cx: &mut Context<Self>| {
+            let current = self.settings.agent_policy.get(row);
+            let choices = row.choices();
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(layout::SPACE_SM))
+                .when(indented, |el| el.pl(px(layout::SPACE_MD)))
+                .child(
+                    div()
+                        .font_family(if indented {
+                            fonts(cx).chrome.clone()
+                        } else {
+                            mono.clone()
+                        })
+                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                        .text_color(if indented { t.text_muted } else { t.text })
+                        .child(row.label()),
+                )
+                .child(
+                    ui::segmented(t).children(choices.iter().copied().map(|level| {
+                        let selected = level == current;
+                        let selector = format!("policy-{}-{}", row.slug(), level.slug());
+                        div().debug_selector(move || selector.clone()).child(
+                            ui::segmented_choice(
+                                ("agent-policy", row as usize * 3 + level as usize),
+                                level.label(),
+                                selected,
+                                true,
+                                t,
+                            )
+                            .on_click(cx.listener(
+                                move |workspace, _: &gpui::ClickEvent, _, cx| {
+                                    workspace.set_agent_policy(row, level, cx);
+                                },
+                            )),
+                        )
+                    })),
+                )
+        };
+
+        let schema_rows: Vec<_> = PolicyRow::SCHEMA_TOOLS
+            .into_iter()
+            .map(|row| policy_row_el(row, false, cx))
+            .collect();
+        let sql_rows: Vec<_> = PolicyRow::SQL_CLASSES
+            .into_iter()
+            .map(|row| policy_row_el(row, true, cx))
+            .collect();
+
+        Some(
+            div()
+                .id("agent-popover-backdrop")
+                .absolute()
+                .top(px(layout::TITLEBAR_HEIGHT))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|workspace, _, _, cx| {
+                        workspace.close_agent_popover(cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .id("agent-popover")
+                        .debug_selector(|| "agent-popover".into())
+                        .absolute()
+                        .top(px(layout::SPACE_XS))
+                        .right(px(layout::SPACE_MD))
+                        .w(px(380.))
+                        .max_h(gpui::relative(0.92))
+                        .overflow_y_scroll()
+                        .border_1()
+                        .border_color(t.border_strong)
+                        .rounded(px(layout::RADIUS_CARD))
+                        .map(|card| ui::raised_card(card, t))
+                        .p(px(layout::SPACE_MD))
+                        .flex()
+                        .flex_col()
+                        .gap(px(layout::SPACE_MD))
+                        // Stop clicks inside the card from dismissing it via
+                        // the backdrop handler.
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(layout::SPACE_SM))
+                                        .child(
+                                            icon(icon::AGENT_MARK)
+                                                .size(px(layout::chrome(layout::ICON_SIZE)))
+                                                .text_color(t.accent),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(layout::chrome(layout::TEXT_MD)))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(t.text)
+                                                .child("AI Features"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(layout::SPACE_SM))
+                                        .py(px(2.))
+                                        .rounded_full()
+                                        .bg(t.surface)
+                                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                        .text_color(t.accent)
+                                        .child(format!("\u{2022} {status_label}")),
+                                ),
+                        )
+                        .when(waiting > 0, |card| {
+                            let label = if waiting == 1 {
+                                "Claude Code is attached \u{b7} 1 call waiting for you".to_string()
+                            } else {
+                                format!(
+                                    "Claude Code is attached \u{b7} {waiting} calls waiting for you"
+                                )
+                            };
+                            card.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(layout::SPACE_SM))
+                                    .px(px(layout::SPACE_SM))
+                                    .py(px(layout::SPACE_SM))
+                                    .rounded(px(layout::RADIUS_CONTROL))
+                                    .bg(t.surface)
+                                    .border_1()
+                                    .border_color(t.accent)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                            .text_color(t.text)
+                                            .child(label),
+                                    )
+                                    .child(
+                                        button(
+                                            "agent-popover-review",
+                                            "Review",
+                                            Tone::Primary,
+                                            Control::Compact,
+                                            t,
+                                        )
+                                        .on_click(
+                                            cx.listener(|workspace, _, _, cx| {
+                                                workspace.close_agent_popover(cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(layout::SPACE_SM))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                        .text_color(t.text_muted)
+                                        .child(reachable_text),
+                                )
+                                .child(
+                                    button(
+                                        "agent-popover-manage",
+                                        "Manage in Settings",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, window, cx| {
+                                            workspace.open_ai_settings(window, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_XS))
+                                .pt(px(layout::SPACE_XS))
+                                .border_t_1()
+                                .border_color(t.border)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(section_label(t, "Tools"))
+                                        .child(
+                                            div()
+                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                                .text_color(t.text_faint)
+                                                .child("Deny \u{b7} Ask first \u{b7} Auto"),
+                                        ),
+                                )
+                                .children(schema_rows)
+                                .child(
+                                    div()
+                                        .pt(px(layout::SPACE_XS))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        .child(
+                                            div()
+                                                .font_family(mono.clone())
+                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                                .text_color(t.text)
+                                                .child("execute_sql"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                                .text_color(t.text_faint)
+                                                .child(
+                                                    "Sorted by what each statement does. Writes \
+                                                     ask by default; Auto needs your confirmation.",
+                                                ),
+                                        ),
+                                )
+                                .children(sql_rows),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(layout::SPACE_XS))
+                                .pt(px(layout::SPACE_XS))
+                                .border_t_1()
+                                .border_color(t.border)
+                                .child(section_label(t, "Connect Claude Code"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(layout::SPACE_SM))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .px(px(layout::SPACE_SM))
+                                                .py(px(layout::SPACE_XS))
+                                                .rounded(px(layout::RADIUS_CONTROL))
+                                                .bg(t.surface)
+                                                .border_1()
+                                                .border_color(t.border)
+                                                .font_family(mono)
+                                                .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                                .text_color(t.text)
+                                                .child(command),
+                                        )
+                                        .child(
+                                            button(
+                                                "agent-popover-copy",
+                                                "Copy",
+                                                Tone::Quiet,
+                                                Control::Compact,
+                                                t,
+                                            )
+                                            .on_click(
+                                                cx.listener(|workspace, _, _, cx| {
+                                                    workspace.copy_agent_registration(cx);
+                                                }),
+                                            ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(layout::chrome(layout::TEXT_XS)))
+                                        .text_color(t.text_faint)
+                                        .child(
+                                            "DBDelve cannot register an agent for you. Run this \
+                                             once in your terminal.",
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(layout::SPACE_SM))
+                                .pt(px(layout::SPACE_XS))
+                                .border_t_1()
+                                .border_color(t.border)
+                                .child(
+                                    button(
+                                        "agent-popover-activity",
+                                        "Activity log",
+                                        Tone::Quiet,
+                                        Control::Compact,
+                                        t,
+                                    )
+                                    .on_click(cx.listener(
+                                        |workspace, _, _, cx| {
+                                            workspace.agent_popover_open = false;
+                                            workspace.show_agent_activity(cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(layout::SPACE_SM))
+                                        .child(
+                                            button(
+                                                "agent-popover-settings",
+                                                "AI settings",
+                                                Tone::Quiet,
+                                                Control::Compact,
+                                                t,
+                                            )
+                                            .on_click(
+                                                cx.listener(|workspace, _, window, cx| {
+                                                    workspace.open_ai_settings(window, cx);
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            div()
+                                                .debug_selector(|| {
+                                                    "agent-popover-disconnect".into()
+                                                })
+                                                .child(
+                                                    button(
+                                                        "agent-popover-disconnect",
+                                                        "Disconnect agents",
+                                                        Tone::Danger,
+                                                        Control::Compact,
+                                                        t,
+                                                    )
+                                                    .on_click(cx.listener(|workspace, _, _, cx| {
+                                                        workspace.agent_popover_open = false;
+                                                        workspace.disconnect_agents(cx);
+                                                    })),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// What agents did this session, newest first: one block per call with its
     /// tool, connection, verdict, row counts, time and statement, and the full
     /// error of a call that failed. Never a row. Drawn below the titlebar, as
@@ -2780,22 +3282,29 @@ impl Workspace {
         let t = popup_theme(cx);
         let call = self.front_approval()?;
         let id = call.id;
-        let approval = &call.approval;
-        let profile = self
-            .profiles
-            .iter()
-            .find(|profile| profile.id == call.profile_id)?;
-        let engine = profile.config.engine();
-        // What Approve will compare the pending statement with: the source
-        // string, never the marked text drawn from it. Written only on a
-        // change, so a frame costs one comparison.
+        let tool = call.tool;
+        let profile = call.profile_id.as_deref().and_then(|profile_id| {
+            self.profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+        });
+        if call.profile_id.is_some() && profile.is_none() {
+            return None;
+        }
+        let source_key = match &call.approval {
+            agent::Approval::Sql(approval) => approval.sql.clone(),
+            agent::Approval::Tool(approval) => agent::tool_approval_source(tool, &approval.args),
+        };
+        // What Approve will compare the pending call with: the source string,
+        // never the marked text drawn from it. Written only on a change, so a
+        // frame costs one comparison.
         {
             let mut shown = self.approval_shown.borrow_mut();
             if shown
                 .as_ref()
-                .is_none_or(|(shown_id, sql)| *shown_id != id || *sql != approval.sql)
+                .is_none_or(|(shown_id, src)| *shown_id != id || *src != source_key)
             {
-                *shown = Some((id, approval.sql.clone()));
+                *shown = Some((id, source_key));
             }
         }
         // The block's scroll offset, fresh for each call.
@@ -2812,33 +3321,143 @@ impl Workspace {
         };
         let code = fonts(cx).editor.clone();
         let marker = approval_marker(t);
-        let lines = code_lines_visible(
-            &approval.sql,
-            engine.syntax(),
-            &cx.theme().highlight_theme,
-            marker,
-        );
-        let size = size_fact(&approval.sql);
-        // The size sits under the statement it counts, so it is not said twice.
-        let facts = approval_facts(
-            engine,
-            profile.mode,
-            &approval.verdict,
-            &approval.sql,
-            approval.locks_the_file,
-            approval.config.agent_reads_are_held(),
-        )
-        .into_iter()
-        .filter(|fact| *fact != size)
-        .map(|fact| div().child(fact));
-        // Everything on the card keeps its height but the statement block,
-        // which gives up its own down to nothing before the buttons leave a
-        // short window: they are the only way to answer.
         let fixed = || div().flex_shrink_0();
         let waiting = self.agent.calls.len().saturating_sub(1);
         let deny_workspace = cx.entity().downgrade();
         let approve_workspace = deny_workspace.clone();
         let armed = self.agent.armed == Some(id);
+
+        let (header_row, facts_el, body_label, body_block, footer_size): (
+            gpui::Div,
+            gpui::Div,
+            &'static str,
+            AnyElement,
+            Option<String>,
+        ) = match &call.approval {
+            agent::Approval::Sql(approval) => {
+                let profile = profile?;
+                let engine = profile.config.engine();
+                let lines = code_lines_visible(
+                    &approval.sql,
+                    engine.syntax(),
+                    &cx.theme().highlight_theme,
+                    marker,
+                );
+                let size = size_fact(&approval.sql);
+                let facts = approval_facts(
+                    engine,
+                    profile.mode,
+                    &approval.verdict,
+                    &approval.sql,
+                    approval.locks_the_file,
+                    approval.config.agent_reads_are_held(),
+                )
+                .into_iter()
+                .filter(|fact| *fact != size)
+                .map(|fact| div().child(fact));
+                let header = fixed()
+                    .flex()
+                    .gap(px(layout::SPACE_SM))
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .child(div().text_color(t.text).child(profile.name.clone()))
+                    .child(div().text_color(t.text_muted).child(engine.label()));
+                let facts_div = fixed()
+                    .debug_selector(|| "agent-approval-facts".into())
+                    .flex()
+                    .flex_col()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .children(facts);
+                let block = div()
+                    .id("agent-approval-sql")
+                    .debug_selector(|| "agent-approval-sql".into())
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .min_h(px(0.))
+                    .p(px(layout::SPACE_SM))
+                    .rounded(px(layout::RADIUS_CONTROL))
+                    .bg(t.surface)
+                    .font_family(code)
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text)
+                    .children(lines.into_iter().enumerate().map(|(index, line)| {
+                        div()
+                            .debug_selector(move || format!("agent-approval-line-{index}"))
+                            .child(line)
+                    }));
+                (
+                    header,
+                    facts_div,
+                    "Statement from the agent, exactly as sent",
+                    block.into_any_element(),
+                    Some(size),
+                )
+            }
+            agent::Approval::Tool(approval) => {
+                let header = match profile {
+                    Some(profile) => fixed()
+                        .flex()
+                        .gap(px(layout::SPACE_SM))
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
+                        .child(div().text_color(t.text).child(profile.name.clone()))
+                        .child(
+                            div()
+                                .text_color(t.text_muted)
+                                .child(profile.config.engine().label()),
+                        ),
+                    None => fixed()
+                        .text_size(px(layout::chrome(layout::TEXT_SM)))
+                        .text_color(t.text)
+                        .child("Visible connections"),
+                };
+                let facts_div = fixed()
+                    .debug_selector(|| "agent-approval-facts".into())
+                    .flex()
+                    .flex_col()
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text_muted)
+                    .child(format!("Tool: {}", tool.name()))
+                    .child("Held because this tool's AI Features policy is set to Ask.");
+                let arg_rows = agent::tool_approval_args(tool, &approval.args);
+                let block = div()
+                    .id("agent-approval-sql")
+                    .debug_selector(|| "agent-approval-tool-args".into())
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .min_h(px(0.))
+                    .p(px(layout::SPACE_SM))
+                    .rounded(px(layout::RADIUS_CONTROL))
+                    .bg(t.surface)
+                    .font_family(code)
+                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                    .text_color(t.text)
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::SPACE_XS))
+                    .when(arg_rows.is_empty(), |box_el| {
+                        box_el.child(div().text_color(t.text_muted).child("(no arguments)"))
+                    })
+                    .children(arg_rows.into_iter().map(|(label, value)| {
+                        div()
+                            .flex()
+                            .gap(px(layout::SPACE_SM))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(t.text_muted)
+                                    .child(format!("{label}:")),
+                            )
+                            .child(div().min_w_0().child(ui::visible(&value).display))
+                    }));
+                (
+                    header,
+                    facts_div,
+                    "Tool arguments from the agent",
+                    block.into_any_element(),
+                    None,
+                )
+            }
+        };
 
         Some(
             div()
@@ -2862,29 +3481,14 @@ impl Workspace {
                         .max_w(gpui::relative(0.9))
                         .max_h_full()
                         .child(fixed().child(section_label(t, "Agent")))
-                        .child(
-                            fixed()
-                                .flex()
-                                .gap(px(layout::SPACE_SM))
-                                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                .child(div().text_color(t.text).child(profile.name.clone()))
-                                .child(div().text_color(t.text_muted).child(engine.label())),
-                        )
-                        .child(
-                            fixed()
-                                .debug_selector(|| "agent-approval-facts".into())
-                                .flex()
-                                .flex_col()
-                                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                .text_color(t.text_muted)
-                                .children(facts),
-                        )
+                        .child(header_row)
+                        .child(facts_el)
                         .child(
                             fixed()
                                 .debug_selector(|| "agent-approval-label".into())
                                 .text_size(px(layout::chrome(layout::TEXT_SM)))
                                 .text_color(t.text_muted)
-                                .child("Statement from the agent, exactly as sent"),
+                                .child(body_label),
                         )
                         // Nothing on this surface moves on its own, so the block
                         // has no smooth-scroll modifier and its scrollbar is
@@ -2899,33 +3503,7 @@ impl Workspace {
                                 .flex_col()
                                 .min_h(px(0.))
                                 .max_h(px(layout::APPROVAL_TEXT_MAX_HEIGHT))
-                                .child(
-                                    div()
-                                        .id("agent-approval-sql")
-                                        .debug_selector(|| "agent-approval-sql".into())
-                                        .track_scroll(&scroll)
-                                        .overflow_y_scroll()
-                                        .min_h(px(0.))
-                                        // Framed as every other statement on
-                                        // a modal is, so the agent's text is
-                                        // set apart from DBDelve's facts by
-                                        // more than its font.
-                                        .p(px(layout::SPACE_SM))
-                                        .rounded(px(layout::RADIUS_CONTROL))
-                                        .bg(t.surface)
-                                        .font_family(code)
-                                        .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                        .text_color(t.text)
-                                        .children(lines.into_iter().enumerate().map(
-                                            |(index, line)| {
-                                                div()
-                                                    .debug_selector(move || {
-                                                        format!("agent-approval-line-{index}")
-                                                    })
-                                                    .child(line)
-                                            },
-                                        )),
-                                )
+                                .child(body_block)
                                 .child(
                                     div()
                                         .absolute()
@@ -2938,13 +3516,15 @@ impl Workspace {
                                         ),
                                 ),
                         )
-                        .child(
-                            fixed()
-                                .debug_selector(|| "agent-approval-size".into())
-                                .text_size(px(layout::chrome(layout::TEXT_SM)))
-                                .text_color(t.text_muted)
-                                .child(size),
-                        )
+                        .when_some(footer_size, |card, size| {
+                            card.child(
+                                fixed()
+                                    .debug_selector(|| "agent-approval-size".into())
+                                    .text_size(px(layout::chrome(layout::TEXT_SM)))
+                                    .text_color(t.text_muted)
+                                    .child(size),
+                            )
+                        })
                         .when(waiting > 0, |card| {
                             card.child(
                                 fixed()
@@ -5685,9 +6265,9 @@ type DialogAnswer = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
 /// what an agent may reach, the primary for every other.
 fn first_choice(dialog: Option<&str>) -> usize {
     match dialog {
-        // Cancel, so an `enter` held or repeated from the palette row that
-        // raised it cancels rather than grants.
-        Some("agent-visibility") => 1,
+        // Cancel, so an `enter` held or repeated from the palette row or click
+        // that raised it cancels rather than grants.
+        Some("agent-visibility" | "agent-writes-auto") => 1,
         // Commit and Roll back cannot be undone, so an `enter` held or
         // repeated from the click that raised it opens nothing it should not.
         Some("end-transaction") => 2,

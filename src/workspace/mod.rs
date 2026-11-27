@@ -139,6 +139,11 @@ pub(crate) struct Settings {
     /// Whether either tree shows sizes, and whether any is read.
     pub(crate) show_sizes: bool,
     pub(crate) files_order: crate::explorer::FilesOrder,
+    /// Master switch for AI Features (MCP server, titlebar mark, policy).
+    /// Off by default; `agent_access` alone never turns it on.
+    pub(crate) ai_features: bool,
+    /// Per-tool and per-class policy for agent calls.
+    pub(crate) agent_policy: crate::agent::policy::AgentPolicy,
 }
 
 impl Settings {
@@ -184,6 +189,8 @@ impl Default for Settings {
             show_host: true,
             show_sizes: true,
             files_order: crate::explorer::FilesOrder::default(),
+            ai_features: false,
+            agent_policy: crate::agent::policy::AgentPolicy::default(),
         }
     }
 }
@@ -501,6 +508,15 @@ pub(crate) struct Workspace {
     /// Whether the `Agent activity` dialog is up. Only the popover's item
     /// opens it and only its own close and `escape` end it.
     pub(crate) agent_audit_open: bool,
+    /// Whether the titlebar MCP popover is open.
+    pub(crate) agent_popover_open: bool,
+    /// Whether the confirmation dialog for setting `execute_sql` writes to Auto
+    /// is open.
+    pub(crate) agent_writes_auto_prompt: bool,
+    /// Profiles kept listed in Settings -> AI Features after being switched
+    /// off during this session, so the user can toggle them back on or remove
+    /// them with `×`.
+    pub(crate) ai_listed_profiles: HashSet<String>,
     /// The opacity field in the settings panel. Kept here rather than built
     /// with the card, because an input is state the user is part-way through
     /// typing into and a fresh one every frame would swallow the keystroke.
@@ -711,6 +727,9 @@ impl Workspace {
             agent_visibility_prompt: None,
             agent_visibility_blocks_commits: None,
             agent_audit_open: false,
+            agent_popover_open: false,
+            agent_writes_auto_prompt: false,
+            ai_listed_profiles: HashSet::new(),
             agent: agent::AgentState::default(),
             opacity_input,
             #[cfg(test)]
@@ -765,7 +784,12 @@ impl Workspace {
                 // Before the first frame, so the window is drawn in the faces
                 // the user picked rather than repainted into them.
                 let stored_settings = stored_settings.unwrap_or_default();
-                listen_at_launch = stored_settings.agent_access.unwrap_or(false);
+                workspace.settings.ai_features = stored_settings.ai_features.unwrap_or(false);
+                workspace.settings.agent_policy = crate::agent::policy::AgentPolicy::from_stored(
+                    stored_settings.agent_policy.as_ref(),
+                );
+                listen_at_launch =
+                    workspace.settings.ai_features && stored_settings.agent_access.unwrap_or(false);
                 // Ahead of the fonts and the theme, which size gpui-component's
                 // widgets off the chrome size as they install.
                 let chrome_font_size =
@@ -1774,36 +1798,41 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The agent mark for a titlebar, or nothing while no bridge runs, so a
-    /// window with agent access off draws exactly what it always did. Every
-    /// titlebar asks for it, so no surface hides an agent that is attached.
+    /// The agent mark for a titlebar, or nothing while AI Features is off or no
+    /// bridge runs. Hover shows a compact status preview; click toggles the
+    /// full MCP popover.
     fn render_agent_mark(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = *theme(cx);
         let mark = self.agent_mark_state()?;
-        // Snapshotted before the closure, as the mode pill's `silenced` is:
-        // the menu is built when it opens, from what was drawn.
-        let waiting = self.agent.calls.len();
-        // On a wrapper: `dropdown_menu` wraps the button, so a margin on the
-        // button never reaches the titlebar's row.
+        let shared = self.agent_reachable_profiles().count();
+        let tools = self.settings.agent_policy.listed_tool_count();
+        let summary = self.settings.agent_policy.summary();
+        let status = match mark {
+            ui::AgentMark::Listening => "MCP server listening".to_string(),
+            ui::AgentMark::Connected { waiting: 0 } => "Claude Code attached".to_string(),
+            ui::AgentMark::Connected { waiting: 1 } => {
+                "Claude Code attached \u{b7} 1 call waiting".to_string()
+            }
+            ui::AgentMark::Connected { waiting } => {
+                format!("Claude Code attached \u{b7} {waiting} calls waiting")
+            }
+        };
+        let shared_label = if shared == 1 {
+            "1 connection shared".to_string()
+        } else {
+            format!("{shared} connections shared")
+        };
+        let preview =
+            format!("{status}\n{shared_label} \u{b7} {tools} tools\n{summary} Click to change.");
         Some(
             div()
-                .child(ui::agent_mark(t, mark).dropdown_menu(move |menu, _, _| {
-                    // The kill switch is the first item that can be selected, so
-                    // the keyboard reaches it with one step. The mark is drawn
-                    // only while access is on, so turning access on is the
-                    // palette's; the item after it reads what agents did.
-                    menu.label(match waiting {
-                        0 => "No calls waiting".to_string(),
-                        1 => "1 call waiting for you".to_string(),
-                        n => format!("{n} calls waiting for you"),
-                    })
-                    .label("Agent access is on")
-                    .menu(
-                        "Disconnect agents and turn access off",
-                        Box::new(DisconnectAgents),
-                    )
-                    .menu("Agent activity", Box::new(ShowAgentActivity))
-                }))
+                .child(
+                    ui::agent_mark(t, mark)
+                        .tooltip(preview)
+                        .on_click(cx.listener(|workspace, _, _, cx| {
+                            workspace.toggle_agent_popover(cx);
+                        })),
+                )
                 .into_any_element(),
         )
     }
@@ -2210,6 +2239,7 @@ impl Render for Workspace {
                         // is already answering.
                         ("agent-approval", self.render_agent_approval(cx)),
                         ("agent-audit", self.render_agent_audit(cx)),
+                        ("agent-writes-auto", self.render_agent_writes_auto(cx)),
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
                         // Closing the window asks from every surface.
@@ -2218,6 +2248,7 @@ impl Render for Workspace {
                     window,
                     cx,
                 ))
+                .children(self.render_agent_popover(cx))
                 .children(self.palette.clone());
         }
         let Some(profile) = self.profile() else {
@@ -2272,6 +2303,7 @@ impl Render for Workspace {
                         ("agent-approval", self.render_agent_approval(cx)),
                         ("agent-audit", self.render_agent_audit(cx)),
                         ("agent-visibility", self.render_agent_visibility(cx)),
+                        ("agent-writes-auto", self.render_agent_writes_auto(cx)),
                         ("import-choice", self.render_import_choice(cx)),
                         ("stable-import", self.render_stable_import(cx)),
                         // Closing the window asks from every surface.
@@ -2280,6 +2312,7 @@ impl Render for Workspace {
                     window,
                     cx,
                 ))
+                .children(self.render_agent_popover(cx))
                 .children(self.palette.clone());
         };
         let failed = matches!(profile.state, ProfileState::Failed(_));
@@ -3207,6 +3240,7 @@ impl Render for Workspace {
                     ("stable-import", self.render_stable_import(cx)),
                     ("quit", self.render_quit(cx)),
                     ("agent-visibility", self.render_agent_visibility(cx)),
+                    ("agent-writes-auto", self.render_agent_writes_auto(cx)),
                     ("pending-export", self.render_pending_export(cx)),
                     ("pending-run", self.render_pending_run(cx)),
                     ("queue-failure", self.render_queue_failure(cx)),
@@ -3215,6 +3249,7 @@ impl Render for Workspace {
                 window,
                 cx,
             ))
+            .children(self.render_agent_popover(cx))
             .children(self.palette.clone())
             .children(self.render_reference_popup(cx))
     }

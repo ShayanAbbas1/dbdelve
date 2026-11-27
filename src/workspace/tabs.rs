@@ -1019,6 +1019,9 @@ impl Workspace {
         if self.close_palette(window, cx) {
             return;
         }
+        if self.close_agent_popover(cx) {
+            return;
+        }
         if self.reference_popup.take().is_some() {
             cx.notify();
             return;
@@ -1119,6 +1122,9 @@ impl Workspace {
             return;
         }
         if self.cancel_agent_visibility(cx) {
+            return;
+        }
+        if self.cancel_agent_writes_auto(cx) {
             return;
         }
         if self.cancel_delete_query(cx) {
