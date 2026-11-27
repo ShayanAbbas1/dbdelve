@@ -1224,6 +1224,7 @@ impl Render for UsersView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = *theme(cx);
         let mono = fonts(cx).editor.clone();
+        let mut listed = false;
         let body = match (&self.roles, self.reports_shown) {
             // Nothing to list, and nothing to retry until asked: Refresh
             // reads again.
@@ -1245,6 +1246,7 @@ impl Render for UsersView {
                 .child(format!("Could not read the roles: {message}"))
                 .into_any_element(),
             (Loaded::Ready(roles), false) => {
+                listed = true;
                 let roles = roles.clone();
                 div()
                     .flex_1()
@@ -1257,7 +1259,11 @@ impl Render for UsersView {
         };
         // The planes are glass tints, the list and the Reports the content
         // plane's and the detail panel the editor's, as the other views'.
+        // The workspace focuses this view by the list's handle: with no list
+        // drawn, the plane holds it, or nothing would be focused and every
+        // binding would be dead.
         let body = div()
+            .when(!listed, |body| body.track_focus(&self.focus))
             .flex_1()
             .min_h_0()
             .flex()

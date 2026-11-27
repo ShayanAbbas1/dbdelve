@@ -7626,6 +7626,55 @@ fn the_arrow_keys_move_the_users_list_like_a_click_and_only_while_it_has_focus(
 }
 
 #[gpui::test]
+fn the_keys_stay_live_on_a_users_tab_with_no_list_to_show(cx: &mut TestAppContext) {
+    use crate::users_view::Loaded;
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let palette_opens = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-shift-p");
+            settle(cx);
+            assert!(
+                workspace.read_with(cx, |workspace, _| workspace.palette.is_some()),
+                "the palette is up"
+            );
+            cx.simulate_keystrokes("escape");
+            settle(cx);
+        };
+        // Still reading the roles.
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let tab = users_tab_on(workspace, window, cx);
+            workspace.activate_tab(Tab::Object(tab), window, cx);
+            match &workspace
+                .profile()
+                .unwrap()
+                .session
+                .objects
+                .last()
+                .unwrap()
+                .body
+            {
+                ObjectBody::Users { view, .. } => view.clone(),
+                _ => unreachable!(),
+            }
+        });
+        settle(cx);
+        palette_opens(cx);
+        // Refused the list, as a login without the privilege is.
+        view.update(cx, |view, cx| {
+            let denied = crate::db::roles::Roles {
+                denied: Some("This login has no privilege to list users.".into()),
+                ..Default::default()
+            };
+            view.set_roles(Loaded::Ready(std::sync::Arc::new(denied)), cx)
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("users-denied").is_some());
+        palette_opens(cx);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn a_right_click_on_a_users_row_offers_the_detail_panels_actions_for_that_row(
     cx: &mut TestAppContext,
 ) {
