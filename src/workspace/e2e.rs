@@ -7261,6 +7261,48 @@ fn show_grants_stages_grants_and_revokes_in_edit_mode_and_discards_them(cx: &mut
 }
 
 #[gpui::test]
+fn a_grant_run_again_after_one_failed_part_way_reads_the_grants_again(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        as_postgres(&workspace, cx);
+        open_birds_grants(&workspace, cx);
+        click_selector(cx, "show-grants-edit");
+        click_grant_cell(cx, "watchers", "SELECT");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.review_grant_changes(window, cx)
+        });
+        // A run over two databases whose second failed after the first
+        // applied, landed as a run that went out would land.
+        let land_one_of_two = |workspace: &mut Workspace, cx: &mut gpui::Context<Workspace>| {
+            let cancel = crate::db::CancelToken::alongside();
+            let profile = workspace.profile_mut().expect("a connection is in front");
+            let id = profile.id.clone();
+            let review = profile.session.apply_review.as_mut().expect("under review");
+            let run = review.grants.as_mut().expect("a grant review");
+            let first = run.batches[0].clone();
+            run.batches = vec![first.clone(), first];
+            run.running = Some(cancel.clone());
+            let (batches, request) = (run.batches.clone(), run.request);
+            let failure = super::grant_edits::RunFailure {
+                message: "permission denied".into(),
+                unknown: false,
+            };
+            workspace.land_grant_run(&id, request, &cancel, &batches, 1, Some(failure), cx);
+            workspace.grants_view.as_ref().expect("still open").request
+        };
+        let before = workspace.read_with(cx, |workspace, _| {
+            workspace.grants_view.as_ref().unwrap().request
+        });
+        let first = workspace.update(cx, land_one_of_two);
+        assert_ne!(first, before, "what applied is read again");
+        let second = workspace.update(cx, land_one_of_two);
+        assert_ne!(second, first, "and again after the second run");
+        settle(cx);
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn show_grants_of_a_role_lists_every_privilege_in_edit_mode(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         use crate::db::roles::{DatabaseAccess, Right, RoleAccess, Source};
