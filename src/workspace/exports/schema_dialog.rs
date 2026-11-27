@@ -3,8 +3,9 @@
 
 use std::collections::HashMap;
 
-use gpui::{ElementId, SharedString};
+use gpui::{ElementId, ScrollHandle, SharedString};
 use gpui_component::checkbox::Checkbox;
+use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 
 use super::schema::{Ordered, SchemaRequest, cycle_refusal, export_order};
 use super::*;
@@ -22,6 +23,7 @@ pub(crate) struct SchemaExportDialog {
     pub(crate) keys: Loading<HashMap<String, Vec<ForeignKey>>>,
     /// Which read `keys` waits for, so a closed dialog's read is dropped.
     pub(crate) generation: u64,
+    tables_scroll: ScrollHandle,
 }
 
 pub(crate) enum Loading<T> {
@@ -40,6 +42,7 @@ impl SchemaExportDialog {
             rows: true,
             keys: Loading::Reading,
             generation,
+            tables_scroll: ScrollHandle::default(),
         }
     }
 
@@ -395,31 +398,42 @@ impl Workspace {
                                 .child(select_all)
                                 .child(select_none),
                         )
+                        // The bar shows at rest, not only while scrolling: a
+                        // list cut off at a row boundary reads as complete.
                         .child(
                             div()
-                                .id("schema-export-tables")
-                                .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
-                                .overflow_y_scroll()
-                                .flex()
-                                .flex_col()
-                                .gap(px(layout::SPACE_XS))
-                                .children(open.tables.iter().enumerate().map(
-                                    |(index, (name, ticked))| {
-                                        checkbox(
-                                            ("schema-export-table", index),
-                                            name.clone(),
-                                            *ticked,
-                                            move |dialog, on| {
-                                                if let Some((_, ticked)) =
-                                                    dialog.tables.get_mut(index)
-                                                {
-                                                    *ticked = on;
-                                                }
+                                .relative()
+                                .child(
+                                    div()
+                                        .id("schema-export-tables")
+                                        .max_h(px(layout::DIALOG_TEXT_MAX_HEIGHT))
+                                        .overflow_y_scroll()
+                                        .track_scroll(&open.tables_scroll)
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(layout::SPACE_XS))
+                                        .children(open.tables.iter().enumerate().map(
+                                            |(index, (name, ticked))| {
+                                                checkbox(
+                                                    ("schema-export-table", index),
+                                                    name.clone(),
+                                                    *ticked,
+                                                    move |dialog, on| {
+                                                        if let Some((_, ticked)) =
+                                                            dialog.tables.get_mut(index)
+                                                        {
+                                                            *ticked = on;
+                                                        }
+                                                    },
+                                                    cx,
+                                                )
                                             },
-                                            cx,
-                                        )
-                                    },
-                                )),
+                                        )),
+                                )
+                                .child(
+                                    Scrollbar::vertical(&open.tables_scroll)
+                                        .mode(ScrollbarMode::Always),
+                                ),
                         )
                         .children(
                             notes
